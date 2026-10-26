@@ -23,7 +23,7 @@ const back = (why: string): never => {
 	throw redirect(303, `${base}/signin?refused=${why}`);
 };
 
-export const GET: RequestHandler = async ({ cookies, url, request }) => {
+export const GET: RequestHandler = async ({ cookies, url, request, locals }) => {
 	const s = oauthSettings(env);
 	if (!s) back('not_configured');
 	const state = url.searchParams.get('state');
@@ -71,8 +71,8 @@ export const GET: RequestHandler = async ({ cookies, url, request }) => {
 		back(who ? 'cannot_read' : 'token');
 	}
 	// A sign-in over a live session replaces it, as a key's does; it, and any the store ends for room, have their tokens revoked (session.ts onTokensEnded).
-	closeSession(cookies.get(SESSION_COOKIE));
-	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought') });
+	closeSession(locals.session?.id);
+	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought'), breakglass: false });
 	cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 	throw redirect(303, HOME);
 };

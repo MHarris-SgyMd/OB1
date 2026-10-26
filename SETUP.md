@@ -564,7 +564,9 @@ not at `127.0.0.1`, where the form is refused the same way. A stack configured
 with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
 sign-in: it signs the operator in through the authorization server, with the
 password `provision.ts --init` wrote, `OB1_AUTH_OPERATOR_PASSWORD` in
-`deploy/.env` (`dashboard/README.md`).
+`deploy/.env` (`dashboard/README.md`). On the brain's machine, its break-glass
+port, `http://127.0.0.1:8001/dashboard/` (`BREAKGLASS_PORT`), takes an access key
+whatever the authorization server's state, for when it is down.
 
 ### 6. Optional: workflows beside the brain (n8n)
 

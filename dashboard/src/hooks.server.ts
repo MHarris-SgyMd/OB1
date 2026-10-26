@@ -1,5 +1,7 @@
 import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
+import { env } from '$env/dynamic/private';
+import { breakGlassPort, onBreakGlass, originAllowed } from '$lib/server/listener';
 import { revocations } from '$lib/server/rest';
 import { closeSession, cookieOptions, onTokensEnded, readSession, SESSION_COOKIE } from '$lib/server/session';
 
@@ -9,18 +11,28 @@ onTokensEnded((t) => void revocations.add(t));
 /** The paths a visitor reaches signed out: the sign-in page, a sign-in through the authorization server (its start and its answer, SMD-3307), and the liveness probe. */
 const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/callback`, `${base}/health`]);
 
-// Every request: the session the cookie names, if any, becomes locals.session.
-// A cookie that names none (ended, expired, or from before a restart) is
-// dropped, and an expired session's tokens revoked at the AS (SMD-3307).
-// Signed out, every path but OPEN redirects to /signin — here, not in a
-// layout's load, so a form action or an endpoint is behind it too.
+// Every request: first its origin, if it changes anything — SvelteKit's own
+// check is off for the break-glass port's sake (svelte.config.js), so this one
+// takes the origin and, on the break-glass listener alone, that port's loopback
+// origin (listener.ts originAllowed). Then the session the cookie names, if
+// any, becomes locals.session — only on the listener it was signed in on, so a
+// break-glass session, a key's while the stack is configured, opens nothing on
+// the origin, and an origin's nothing on the break-glass port, where the two
+// share a host (an origin of http://127.0.0.1:…). A cookie that names none
+// (ended, expired, or from before a restart) is dropped, and an expired
+// session's tokens revoked at the AS (SMD-3307). Signed out, every path but
+// OPEN redirects to /signin — here, not in a layout's load, so a form action
+// or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
+	if (!originAllowed(event.request, event.url, breakGlassPort(env.BREAKGLASS_PORT))) return new Response('This request must come from the dashboard itself.', { status: 403 });
+	const breakglass = onBreakGlass(event.request);
 	const id = event.cookies.get(SESSION_COOKIE);
-	const session = readSession(id);
+	const held = readSession(id);
+	const session = held && held.breakglass === breakglass ? held : null;
 	event.locals.session = session;
-	if (id && !session) {
+	if (id && !held) {
 		closeSession(id);
-		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
+		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url, breakglass));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);
 	const response = await resolve(event);

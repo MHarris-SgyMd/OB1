@@ -19,8 +19,17 @@ import { createHash } from 'node:crypto';
 import { authorizeUrl, createRenewer, createRevoker, exchangeCode, MAX_REVOKE_PENDING, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, REVOKE_KEEP_MS, REVOKE_RETRY_MS, revokeRefresh, type Revoked, signedInSince, SIGNIN_MS, signInFrom, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
 
 // session.ts reads SvelteKit's `$app/paths` (its cookies' path): a stand-in, so the store loads here.
-Bun.plugin({ name: 'app-paths', setup: (build) => void build.module('$app/paths', () => ({ exports: { base: '/dashboard' }, loader: 'object' })) });
+// …and signin.ts reads SvelteKit's `$env/dynamic/private`: an empty one, its env handed in by each call here.
+Bun.plugin({
+	name: 'sveltekit-stand-ins',
+	setup: (build) => {
+		build.module('$app/paths', () => ({ exports: { base: '/dashboard' }, loader: 'object' }));
+		build.module('$env/dynamic/private', () => ({ exports: { env: {} }, loader: 'object' }));
+	},
+});
 const session = await import('./src/lib/server/session.ts');
+const { keySignInOffered } = await import('./src/lib/server/signin.ts');
+const { breakGlassPort, onBreakGlass, originAllowed } = await import('./src/lib/server/listener.ts');
 
 let pass = 0;
 let fail = 0;
@@ -181,13 +190,13 @@ console.log('▸ the session store: every ending of a token session revokes');
 {
 	const ended: string[] = [];
 	session.onTokensEnded((t) => void ended.push(t.refresh));
-	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true });
+	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, breakglass: false });
 	function tok(refresh: string): Tokens {
 		return { access: 'a', refresh, expiresAt: NOW };
 	}
 	const s1 = tokenSession('closed');
 	assert(session.closeSession(s1) !== null && ended.join() === 'closed', 'a token session closed (sign-out, a refusal) has its refresh token revoked');
-	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false });
+	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false, breakglass: false });
 	session.closeSession(k);
 	assert(ended.join() === 'closed', '…a key session nothing');
 	ended.length = 0;
@@ -250,6 +259,25 @@ console.log('▸ renewal');
 	const d = over(async (t) => (after++ === 0 ? { ok: false, unreachable: true } : newPair(t)), { s5: due });
 	try { await d.accessFor('s5'); } catch { /* the first fails */ }
 	assert((await d.accessFor('s5')) === 'a-new(r-old)', '…and the next call tries again: a failed renewal is not held');
+}
+
+console.log('▸ the break-glass listener (SMD-3307)');
+{
+	const ORIGIN_URL = new URL('https://brain.example.test/dashboard/signin');
+	const req = (method: string, headers: Record<string, string>) => new Request('http://app.ob1.internal:8000/dashboard/signin', { method, headers });
+	const bg = { 'x-ob1-listener': 'breakglass' };
+	assert(onBreakGlass(req('GET', bg)) && !onBreakGlass(req('GET', {})) && !onBreakGlass(req('GET', { 'x-ob1-listener': 'web' })), 'the listener is break-glass only when the proxy marks it so');
+	assert(breakGlassPort(undefined) === 8001 && breakGlassPort('') === 8001 && breakGlassPort('18397') === 18397 && breakGlassPort('0') === null && breakGlassPort('70000') === null && breakGlassPort('8001x') === null, 'the break-glass port: 8001 unless set, and a value that is no port none');
+	assert(originAllowed(req('GET', {}), ORIGIN_URL, 8001) && originAllowed(req('HEAD', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001), 'a safe method is taken from anywhere');
+	assert(originAllowed(req('POST', { origin: 'https://brain.example.test' }), ORIGIN_URL, 8001) && originAllowed(req('POST', { origin: 'https://brain.example.test', ...bg }), ORIGIN_URL, 8001), 'a post from the origin is taken, on either listener');
+	assert(!originAllowed(req('POST', {}), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001) && !originAllowed(req('DELETE', { origin: 'null' }), ORIGIN_URL, 8001), '…and none from another origin, from "null", or with no origin at all (a body-less post included)');
+	assert(originAllowed(req('POST', { origin: 'http://127.0.0.1:8001', ...bg }), ORIGIN_URL, 8001) && originAllowed(req('POST', { origin: 'http://localhost:8001', ...bg }), ORIGIN_URL, 8001), 'on the break-glass listener, a post from its own loopback origin is taken');
+	assert(!originAllowed(req('POST', { origin: 'http://127.0.0.1:8001' }), ORIGIN_URL, 8001), '…but not on the origin: a page at http://127.0.0.1:8001 signs nothing in there');
+	assert(!originAllowed(req('POST', { origin: 'http://127.0.0.1:3000', ...bg }), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'https://127.0.0.1:8001', ...bg }), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'http://127.0.0.1:8001', ...bg }), ORIGIN_URL, null), '…nor another loopback port, https, or any when the port is no port: another local page is the same site, its cookies the same host\'s');
+	const configured = { COMPOSE_PROFILES: 'auth' };
+	assert(keySignInOffered(req('GET', {}), {}) && keySignInOffered(req('GET', bg), {}), 'not configured, key sign-in on either listener');
+	assert(!keySignInOffered(req('GET', {}), configured) && !keySignInOffered(req('GET', { 'x-ob1-listener': 'web' }), configured), 'configured, none on the origin');
+	assert(keySignInOffered(req('GET', bg), configured) && keySignInOffered(req('GET', bg), { COMPOSE_PROFILES: 'observability,auth' }), '…and key sign-in on the break-glass listener, whatever the authorization server\'s state');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

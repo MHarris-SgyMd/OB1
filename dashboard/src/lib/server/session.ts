@@ -43,6 +43,8 @@ export type Session = {
 	scope: string;
 	/** Whether whoami named capture_thought among the holder's operations — false for a read key. */
 	canCapture: boolean;
+	/** Whether it was signed in on the break-glass listener (SMD-3307): it opens pages there alone (hooks.server.ts). */
+	breakglass: boolean;
 };
 
 type Held = Omit<Session, 'id'> & { exp: number };
@@ -59,10 +61,11 @@ const sessions = new Map<string, Held>();
  * shared origin (/mcp, /auth, /grafana); httpOnly; Secure where the origin is
  * https — a browser refuses a Secure cookie from a plain-HTTP origin, and a
  * delete with the wrong attributes never lands (the SvelteKit dashboard's
- * first review pass).
+ * first review pass). Never Secure on the break-glass listener, plain HTTP on
+ * 127.0.0.1 whatever origin the GUI is configured with (SMD-3307).
  */
-export function cookieOptions(url: URL) {
-	return { path: base || '/', httpOnly: true, sameSite: 'lax' as const, secure: url.protocol === 'https:' };
+export function cookieOptions(url: URL, breakglass = false) {
+	return { path: base || '/', httpOnly: true, sameSite: 'lax' as const, secure: !breakglass && url.protocol === 'https:' };
 }
 
 function newId(): string {
@@ -125,7 +128,7 @@ export function readSession(id: string | undefined): Session | null {
 	if (!held) return null;
 	// An expired session is left for the caller to close (hooks.server.ts), which revokes its tokens (review pass 2).
 	if (held.exp <= Date.now()) return null;
-	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture };
+	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture, breakglass: held.breakglass };
 }
 
 /** A renewal's new tokens, written back to the session that holds them; false, and the tokens revoked, when the session has ended meanwhile. */

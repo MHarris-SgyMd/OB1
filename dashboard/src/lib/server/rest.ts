@@ -15,6 +15,7 @@ import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation
 import { createRenewer, createRevoker, oauthSettings, refreshTokens, RenewalFailed, revokeRefresh } from './oauth';
 import { closeSession, cookieOptions, liveTokens, SESSION_COOKIE, storeTokens, type Session } from './session';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
+import { onBreakGlass } from './listener';
 
 /** The longest one call may take: a page waits on it, so well under a minute. */
 export const REST_TIMEOUT_MS = 30_000;
@@ -109,8 +110,8 @@ export async function credentialOf(event: RequestEvent, session: Session): Promi
 /** Ends this request's session and sends the visitor to /signin. */
 function signOutHere(event: RequestEvent): never {
 	// Its tokens are revoked as it ends (session.ts onTokensEnded): a 401 from the REST core leaves a refresh token no session holds (review pass 2).
-	closeSession(event.cookies.get(SESSION_COOKIE));
-	event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
+	closeSession(event.locals.session?.id);
+	event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url, onBreakGlass(event.request)));
 	throw redirect(303, `${base}/signin`);
 }
 

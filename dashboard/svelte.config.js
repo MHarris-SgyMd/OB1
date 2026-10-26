@@ -13,6 +13,12 @@ const config = {
 		// Absolute, not relative: every link and asset names /dashboard/…, as the
 		// proxy routes it, whatever page it is on.
 		paths: { base: '/dashboard', relative: false },
+		// SvelteKit's origin check compares a form's post with the configured
+		// public origin, which a browser on the break-glass port
+		// (http://127.0.0.1:<port>, SMD-3307) never sends: the GUI checks every
+		// unsafe request's origin itself instead (hooks.server.ts,
+		// lib/server/listener.ts originAllowed), a body-less one too.
+		csrf: { trustedOrigins: ['*'] },
 		// Everything the page loads is this server's: SvelteKit marks its own
 		// inline script with a per-response nonce, so no other script runs, and
 		// no page may frame it.
