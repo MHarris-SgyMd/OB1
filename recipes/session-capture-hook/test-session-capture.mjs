@@ -2666,7 +2666,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   // takes no client_key (a server from before 112).
   const calls = [];
   const thoughts = new Map(); // id → { key, content }
-  let nextId = 7000, away = false, canaryOld = false, busy = false;
+  let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0;
   const byName = (name) => { const n = String(name).toLowerCase(); if (thoughts.has(n)) return n; for (const [id, t] of thoughts) if (t.key === n) return id; return null; };
   const canary = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     if (away) return new Response("Bad Gateway", { status: 502 });
@@ -2682,6 +2682,8 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     const { name, arguments: args } = body.params;
     if (!surface.includes(name)) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } }));
     calls.push({ name, args: structuredClone(args) });
+    if (slowMs) await sleep(slowMs);
+    if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
     if (name === "capture_thought") {
       if (busy && /\[\[busy\]\]/.test(args.content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
       if (args.client_key !== undefined && scope !== "write") return err("Refused: `client_key` needs a key that can read", { code: "REFUSED_CLIENT_KEY_SCOPE" });
@@ -2744,6 +2746,11 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   for (const [i, shape] of [[2, `Captured as idea — id ${S(2)} — x`], [3, JSON.stringify(captured(S(3)))], [4, { content: captured(S(4)) }], [5, { result: { content: captured(S(5)) } }]]) {
     await post("capture_thought", { content: `shape ${i}` }, shape);
   }
+  // The structured id where the result carries one; and the id after the type, never one a model's type spells (review pass 1).
+  await post("capture_thought", { content: "structured id" }, { content: [{ type: "text", text: "Saved." }], structuredContent: { id: S(15) } });
+  await post("capture_thought", { content: "a type spelling an id" }, [{ type: "text", text: `Captured as id ${S(16)} — id ${S(17)} — x` }]);
+  assert(calls.at(-2).args.client_key === S(15) && calls.at(-1).args.client_key === S(17), `the structured id is taken, and the id after the type, not one the type spells (${calls.at(-2).args.client_key?.slice(0, 8)}, ${calls.at(-1).args.client_key?.slice(0, 8)})`);
+  calls.splice(-2, 2);
   // A reply with notes after its first line: the id is the first line's — a note naming another thought's id is not it.
   await post("capture_thought", { content: "shape with notes" }, [{ type: "text", text: `Captured as idea — id ${S(11)} — release\n\nNote: this text was already captured as ${S(11)}. To record that it supersedes ${S(12)}, call update_thought with id ${S(13)} and \`supersedes\` ${S(12)}.` }]);
   assert(calls.at(-1).args.client_key === S(11), `a reply's notes naming other ids do not move the key: the first line's id is it (${calls.at(-1).args.client_key?.slice(0, 8)})`);
@@ -2791,6 +2798,77 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   calls.length = 0;
   await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
   assert(calls.map((c) => c.name).join() === "capture_thought,update_thought" && !queueIn().length, `…and once the store answers, both land, the capture first (${calls.map((c) => c.name).join()})`);
+
+  // Two drains started at once over one queue (review pass 1): each copy posted once, in the order made.
+  away = true;
+  for (let i = 0; i < 4; i++) await post("capture_thought", { content: `queued while away ${i}` }, captured(S(30 + i)));
+  away = false;
+  slowMs = 150;
+  calls.length = 0;
+  const [dA, dB] = await Promise.all([0, 1].map(() => spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } })));
+  slowMs = 0;
+  const posted = calls.map((c) => c.args.client_key);
+  assert(dA.code === 0 && dB.code === 0 && posted.join() === [S(30), S(31), S(32), S(33)].join() && !queueIn().length,
+    `two drains at once post each copy once, in order (${posted.map((k) => k?.slice(4, 8)).join()})`);
+
+  // The lock: a dead holder's taken back; a live holder's left alone; one silent past fifteen minutes taken back.
+  const LOCK = join(CANARY_ROOT, "writes", "drain.lock");
+  away = true;
+  await post("capture_thought", { content: "behind a lock" }, captured(S(34)));
+  away = false;
+  calls.length = 0;
+  writeFileSync(LOCK, String(process.pid));
+  const heldLive = await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(heldLive.code === 0 && calls.length === 0 && queueIn().length === 1, "a live holder's fresh lock: the drain leaves the queue to it");
+  const old = new Date(Date.now() - 20 * 60_000);
+  utimesSync(LOCK, old, old);
+  const heldStale = await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(heldStale.code === 0 && calls[0]?.args.client_key === S(34) && !queueIn().length && !existsSync(LOCK), "…one silent past fifteen minutes is taken back, the copy lands, the lock let go");
+  away = true;
+  await post("capture_thought", { content: "behind a dead holder" }, captured(S(35)));
+  away = false;
+  writeFileSync(LOCK, "2147483646");
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(calls.at(-1)?.args.client_key === S(35) && !queueIn().length, "…a dead holder's is taken back at once");
+
+  // A drain whose lock another took back mid-drain stops before its next copy, leaving the rest to the new holder:
+  // every copy posted once (review pass 1).
+  away = true;
+  for (let i = 0; i < 3; i++) await post("capture_thought", { content: `taken mid-drain ${i}` }, captured(S(40 + i)));
+  away = false;
+  slowMs = 400;
+  calls.length = 0;
+  const first = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  for (let i = 0; i < 100 && !calls.length; i++) await sleep(20);
+  const stalled = new Date(Date.now() - 20 * 60_000);
+  utimesSync(LOCK, stalled, stalled);
+  const second = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  await Promise.all([first, second]);
+  slowMs = 0;
+  const once = calls.map((c) => c.args.client_key);
+  // The copy the old holder had in flight is the one both may post (its key lands it as one thought); every later copy
+  // is posted once, by the new holder, and none is left.
+  assert(once.filter((x) => x === S(40)).length <= 2 && [S(41), S(42)].every((k) => once.filter((x) => x === k).length === 1) && !queueIn().length,
+    `a drain whose lock was taken back stops after its copy in flight: the rest posted once, none left (${once.map((k) => k?.slice(4, 8)).join()})`);
+
+  // A copy the canary cannot validate is given up, not kept for ever behind a key's remedy (review pass 1).
+  calls.length = 0;
+  const inval = await post("capture_thought", { content: "[[invalid]] a copy the canary's schema refuses" }, captured(S(36)));
+  const DEAD = join(CANARY_ROOT, "writes", "dead");
+  assert(inval.code === 1 && !queueIn().length && existsSync(DEAD) && readdirSync(DEAD).length === 1 && /not copied \(given up\): capture_thought .* Input validation error/.test(logOf(CANARY_ROOT)),
+    "a copy refused as invalid input goes to writes/dead, the queue moving on");
+  rmSync(DEAD, { recursive: true, force: true });
+
+  // A copy kept for a week is given up, so a brain that never answers does not hold the queue for ever.
+  away = true;
+  await post("capture_thought", { content: "a week-old copy" }, captured(S(37)));
+  const [stale] = queueIn();
+  const staleOp = JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", stale), "utf8"));
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", stale), JSON.stringify({ ...staleOp, at: new Date(Date.now() - 8 * 86_400_000).toISOString() }), { mode: 0o600 });
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  away = false;
+  assert(!queueIn().length && readdirSync(DEAD).length === 1 && /not copied \(given up after a week\): capture_thought/.test(logOf(CANARY_ROOT)), "a copy kept past a week is given up");
+  rmSync(DEAD, { recursive: true, force: true });
 
   // A copy whose thought never reached the canary: skipped, not retried for ever; a pointer it does not know: dropped, the write kept.
   calls.length = 0;
@@ -2850,8 +2928,13 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   await post("capture_thought", { content: "Left in the queue" }, captured(S(10)));
   away = false;
   calls.length = 0;
+  // Tried within five minutes: a session event leaves the held queue for the next write (review pass 1: every Stop turn retried it).
+  await runHook({ session_id: "s-fan-soon", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
+  assert(!calls.some((c) => c.args.client_key === S(10)) && queueIn().length === 1, "a queue held within five minutes is not retried at every session event");
+  const longAgo = new Date(Date.now() - 6 * 60_000);
+  utimesSync(join(CANARY_ROOT, "writes", "held"), longAgo, longAgo);
   await runHook({ session_id: "s-fan-end", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
-  assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length, "a session's next event drains the copies a drain left");
+  assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length && !existsSync(join(CANARY_ROOT, "writes", "held")), "…past them, a session's next event drains the copies a drain left, and the stamp goes");
   canary.stop(true);
 }
 

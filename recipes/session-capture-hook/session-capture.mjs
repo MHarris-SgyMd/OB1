@@ -2464,10 +2464,16 @@ export function fanOutPlan(hook, brains) {
   if (resultIsError(hook.tool_response, text)) return { skip: `${tool} did not land on ${source.name}, so it is not copied: ${oneLine(text).slice(0, 120)}` };
   let args;
   if (tool === "capture_thought") {
-    // The id the first brain gave it, from the reply's first line: `Captured
-    // as … — id <uuid>`, or `Already captured — id <uuid>` for a key that
-    // named a thought already.
-    const id = new RegExp(`\\bid (${UUID})\\b`, "i").exec(text.split("\n")[0])?.[1];
+    // The id the first brain gave it: the result's structured id where the
+    // shape carries one, else the reply's first line — `Captured as <type> —
+    // id <uuid>` (the type is the model's, up to 40 characters, so the id is
+    // the one after it, never one a type spells) or `Already captured — id
+    // <uuid>` (review pass 1).
+    const sc = hook.tool_response && typeof hook.tool_response === "object" && !Array.isArray(hook.tool_response) ? (hook.tool_response.structuredContent ?? hook.tool_response.result?.structuredContent) : undefined;
+    const first = text.split("\n")[0];
+    const id = (typeof sc?.id === "string" && new RegExp(`^${UUID}$`, "i").test(sc.id) ? sc.id : undefined)
+      ?? new RegExp(`^(?:Captured as .*? — id|Already captured — id) (${UUID})\\b`, "i").exec(first)?.[1]
+      ?? new RegExp(`^(?:Captured as|Already captured)\\b.*\\bid (${UUID})\\b`, "i").exec(first)?.[1];
     if (!id) return { skip: `${source.name}'s reply to capture_thought named no id, so it is not copied (its shape: ${shapeOf(hook.tool_response)})` };
     if (typeof input.content !== "string") return { skip: "capture_thought's input carried no content, so it is not copied" };
     args = { ...pick(input, ["content", "derived_from", "supersedes", "source", "trust", "metadata"]), client_key: id.toLowerCase() };
@@ -2496,7 +2502,14 @@ export function enqueueWrite(op) {
 /** The current brain's queued copies, oldest first. */
 export const pendingWrites = () => (existsSync(WRITES_PENDING()) ? readdirSync(WRITES_PENDING()).filter((f) => f.endsWith(".json") && !f.startsWith(".")).sort() : []);
 
-/** One drain per brain at a time: the lock, or false when a live drain holds it (a dead or stalled one's is taken back). */
+/**
+ * One drain per brain at a time: the lock, or false when a live drain holds
+ * it. Its age is the time since its holder last began a copy (drainWrites
+ * touches it before each), so a long drain is never mistaken for a stalled
+ * one; a dead holder's, or one silent past DRAIN_LOCK_MAX_AGE_MS, is taken
+ * back by renaming it aside — one process's rename wins, so two never both
+ * take it and each make a lock of its own (review pass 1).
+ */
 function takeDrainLock() {
   mkdirSync(WRITES_DIR(), { recursive: true, mode: 0o700 });
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -2510,12 +2523,20 @@ function takeDrainLock() {
       let pid = NaN, age = 0;
       try { pid = Number(readFileSync(DRAIN_LOCK(), "utf8").trim()); age = Date.now() - statSync(DRAIN_LOCK()).mtimeMs; } catch { continue; } // gone between the two: try again
       if (Number.isInteger(pid) && pid !== process.pid && isAlive(pid) && age < DRAIN_LOCK_MAX_AGE_MS) return false;
-      try { unlinkSync(DRAIN_LOCK()); } catch { /* another took it back first */ }
+      const aside = `${DRAIN_LOCK()}.${process.pid}`;
+      try { renameSync(DRAIN_LOCK(), aside); } catch { continue; } // another took it back first: try for the new one
+      // Taken back only if it is still the lock judged above: one made in the gap is put back, its holder's.
+      let now = NaN;
+      try { now = Number(readFileSync(aside, "utf8").trim()); } catch { /* unreadable: judged as read */ }
+      if (now !== pid) { try { renameSync(aside, DRAIN_LOCK()); } catch { /* a third made one: theirs stands */ } return false; }
+      try { unlinkSync(aside); } catch { /* gone */ }
     }
   }
   return false;
 }
 const releaseDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) === process.pid) unlinkSync(DRAIN_LOCK()); } catch { /* not ours, or gone */ } };
+/** Whether this process still holds the lock, its age reset: false once another has taken it back — the drain stops, the copy left to it. */
+const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) !== process.pid) return false; const t = new Date(); utimesSync(DRAIN_LOCK(), t, t); return true; } catch { return false; } };
 
 /** A copy as the log names it: the tool and the id or key it names, never its text. */
 const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${op.args.client_key})` : ` of ${op.args.id}`}`;
@@ -2546,7 +2567,10 @@ export async function postWrite(cfg, op) {
     const v = verdictOf(result, text);
     // A key that cannot call the tool (a capture key in write_key): the
     // operator's to fix, and every later copy would meet it — kept, in order.
-    if (SDK_ERROR_RE.test(text) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
+    // Only "Tool … not found" (or disabled): the SDK answers an input it
+    // cannot validate with the same -32602, and that copy is refused for good
+    // — kept, it would hold the queue for ever behind the wrong advice (review pass 1).
+    if ((SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
     if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${note}` };
     if (v.mend === "derived" && args.derived_from) {
       const at = v.positions.filter((i) => i < args.derived_from.length);
@@ -2576,29 +2600,62 @@ export async function postWrite(cfg, op) {
  */
 export async function drainWrites(cfg) {
   const outcomes = [];
+  pruneWrites();
   for (;;) {
     if (!takeDrainLock()) return outcomes;
     let stopped = false;
     try {
       for (const name of pendingWrites()) {
+        // Still this drain's, its age reset before each copy: a lock another
+        // took back means the rest is theirs now (review pass 1). Only a holder
+        // silent past DRAIN_LOCK_MAX_AGE_MS loses it — a copy's longest is five
+        // attempts at POST_TIMEOUT_MS, well inside — so the one copy such a
+        // holder had in flight is the only one two drains can both post, and
+        // its key makes the second land as the same thought.
+        if (!holdDrainLock()) { stopped = true; break; }
         const path = join(WRITES_PENDING(), name);
         let op;
         try { op = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
-          if (e?.code === "ENOENT") continue;
-          mkdirSync(WRITES_DEAD(), { recursive: true, mode: 0o700 });
-          renameSync(path, join(WRITES_DEAD(), name));
+          if (e?.code === "ENOENT") continue; // the holder before this drain finished it as the lock passed: done
+          moveWrite(path, WRITES_DEAD(), name);
           const o = { dead: true, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
         }
-        const o = await postWrite(cfg, op);
+        let o = await postWrite(cfg, op);
+        // Kept for a week: given up, as the capture queue gives a payload up
+        // (PENDING_MAX_AGE_MS) — what it named is skipped there afterwards.
+        if (o.keep && Date.now() - Date.parse(op.at) > PENDING_MAX_AGE_MS) o = { dead: true, line: `not copied (given up after a week): ${o.line.replace(/^kept: /, "")}` };
         log(o.line);
         outcomes.push(o);
-        if (o.keep) { stopped = true; break; }
-        if (o.dead) { mkdirSync(WRITES_DEAD(), { recursive: true, mode: 0o700 }); renameSync(path, join(WRITES_DEAD(), name)); }
-        else unlinkSync(path);
+        if (o.keep) { stopped = true; markHeld(name); break; }
+        if (o.dead) moveWrite(path, WRITES_DEAD(), name); else removeWrite(path); // already gone: the holder before finished it too
       }
     } finally { releaseDrainLock(); }
+    if (!pendingWrites().length) clearHeld();
     if (stopped || !pendingWrites().length) return outcomes;
+  }
+}
+
+/** A copy's file moved aside, or removed: false when it is already gone (another drain's). */
+function moveWrite(path, dir, name) { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); renameSync(path, join(dir, name)); return true; } catch (e) { if (e?.code === "ENOENT") return false; throw e; } }
+function removeWrite(path) { try { unlinkSync(path); return true; } catch (e) { if (e?.code === "ENOENT") return false; throw e; } }
+
+/** The queue held on a copy: stamped, so session events try it again at most every HELD_RETRY_MS rather than at every turn (review pass 1). */
+const HELD_PATH = () => join(WRITES_DIR(), "held");
+const HELD_RETRY_MS = 5 * 60_000;
+function markHeld(name) { try { writeFileSync(HELD_PATH(), name, { mode: 0o600 }); } catch { /* a stamp failure only means an earlier retry */ } }
+function clearHeld() { try { unlinkSync(HELD_PATH()); } catch { /* none */ } }
+const heldRecently = () => { try { return Date.now() - statSync(HELD_PATH()).mtimeMs < HELD_RETRY_MS; } catch { return false; } };
+
+/** writes/dead/ pruned at thirty days and a temp file a writer left under writes/pending/, as pruneDead prunes the capture queue's. */
+function pruneWrites() {
+  for (const [dir, maxAge, only] of [[WRITES_DEAD(), DEAD_MAX_AGE_MS, null], [WRITES_PENDING(), CLAIM_MAX_AGE_MS, ".tmp"]]) {
+    let names = [];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const f of names) {
+      if (only && !f.endsWith(only)) continue;
+      try { if (Date.now() - statSync(join(dir, f)).mtimeMs > maxAge) unlinkSync(join(dir, f)); } catch { /* gone */ }
+    }
   }
 }
 
@@ -2618,17 +2675,29 @@ async function startDrain(brain, tag) {
   return 0;
 }
 
-/** The hook on PostToolUse: queue the copy on each target, then drain each. Exit 0 whatever happens: a copy's fate is the log's, never the session's. */
+/**
+ * The hook on PostToolUse: queue the copy on each target, then drain each.
+ * Exits 0 — a copy's fate is the log's, never the session's — save under
+ * OB1_SESSION_CAPTURE_SYNC=1, where a copy not landed is exit 1, as a capture
+ * not landed is there. A queue or drain that throws is logged, not thrown.
+ */
 async function fanOutHook(hook, brains) {
-  const plan = fanOutPlan(hook, brains);
-  if (!plan.op) {
-    if (plan.skip) { useStateRoot(brains[0].root); log(`fan-out: ${plan.skip}`); }
-    return 0;
+  const sync = process.env.OB1_SESSION_CAPTURE_SYNC === "1";
+  try {
+    const plan = fanOutPlan(hook, brains);
+    if (!plan.op) {
+      if (plan.skip) { useStateRoot(brains[0].root); log(`fan-out: ${plan.skip}`); }
+      return 0;
+    }
+    for (const t of plan.targets) { useStateRoot(t.root); enqueueWrite(plan.op); log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`); }
+    let code = 0;
+    for (const t of plan.targets) code = Math.max(code, await startDrain(t, `[${t.name}] `));
+    return sync ? code : 0;
+  } catch (e) {
+    log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`);
+    if (sync) console.error(`session-capture: fan-out: ${e?.message ?? e}`);
+    return sync ? 1 : 0;
   }
-  for (const t of plan.targets) { useStateRoot(t.root); enqueueWrite(plan.op); log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`); }
-  let code = 0;
-  for (const t of plan.targets) code = Math.max(code, await startDrain(t, `[${t.name}] `));
-  return process.env.OB1_SESSION_CAPTURE_SYNC === "1" ? code : 0;
 }
 
 /**
@@ -2653,9 +2722,12 @@ async function checkWrites(brain, brains, tag) {
   const capture = tools.find((t) => t.name === "capture_thought");
   if (!capture?.inputSchema?.properties?.client_key) { console.error(`session-capture: ${tag}this brain's capture_thought takes no client_key — its server is from before migration 112 (SMD-3314): upgrade it before copying writes to it`); return 1; }
   useStateRoot(brain.root);
-  const pending = pendingWrites().length;
+  const queued = pendingWrites();
   const dead = existsSync(WRITES_DEAD()) ? readdirSync(WRITES_DEAD()).filter((f) => f.endsWith(".json")).length : 0;
-  console.log(`${tag}write key: ok — it can capture, edit and delete, and the brain keeps a client_key. Copies queued: ${pending}${dead ? `; given up: ${dead} (in ${WRITES_DEAD()})` : ""}`);
+  // The oldest copy's age: a queue held on it for long is the one thing an operator needs to see (review pass 1).
+  let oldest = "";
+  if (queued.length) { try { const at = Date.parse(JSON.parse(readFileSync(join(WRITES_PENDING(), queued[0]), "utf8")).at); if (Number.isFinite(at)) oldest = `, the oldest ${Math.max(0, Math.round((Date.now() - at) / 60_000))} min old`; } catch { /* unreadable: the drain says so */ } }
+  console.log(`${tag}write key: ok — it can capture, edit and delete, and the brain keeps a client_key. Copies queued: ${queued.length}${oldest}${dead ? `; given up: ${dead} (in ${WRITES_DEAD()})` : ""}`);
   return 0;
 }
 
@@ -2664,7 +2736,8 @@ async function kickWriteDrains(brains) {
   for (const b of brains) {
     if (!b.cfg.writeKey) continue;
     useStateRoot(b.root);
-    if (pendingWrites().length) await startDrain(b, `[${b.name}] `);
+    // A queue held on a copy tried within HELD_RETRY_MS waits for the next write or the next window (review pass 1).
+    if (pendingWrites().length && !heldRecently()) await startDrain(b, `[${b.name}] `);
   }
 }
 
