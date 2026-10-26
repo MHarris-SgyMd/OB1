@@ -2641,6 +2641,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     // Review pass 2: a date, a decimal, an ordinal or a count after one PR is that PR's.
     ["PR 727, 2026-10-20", "pr:727"], ["PR 727 — 2026-10-20 merge", "pr:727"], ["PR 502 — 3 review passes", "pr:502"], ["PR #12, 2 commits", "pr:12"], ["PR 12 - 2nd attempt", "pr:12"],
     ["PR 727 to 2.0.0", "pr:727"], ["PR #12 - the fix", "pr:12"], ["PR 5 to main", "pr:5"], ["PR 727: 2 fixes", "pr:727"], ["PR 727, then v2.0.0", "pr:727"], ["PR 12 and 2 commits", "pr:12"],
+    ["PR 12-2nd try", "pr:12"], ["PR 727/2.1 notes", "pr:727"], ["PR 727-2026-10-20", "pr:727"], ["the PRs behind #727", "phrase:the prs behind #727"],
     ["", null], ["   ", null], ["ϒ", null],
   ];
   for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);

@@ -45,17 +45,14 @@ const PR_NUMBERS = /(?:\bPR\s*[#-]?\s*|\bpull request\s*#?\s*|\/pull\/|(?<![\w&#
 /** An answer naming pull requests outright, in the plural. */
 const SEVERAL_PRS = /\b(?:PRs|pull requests)\b/i;
 /**
- * What follows a PR's number when another goes with it, a range or a list:
- *   - another marked number after any separator (`PR 10, #12`, `#10–#97`, `PR 10 to #12`);
- *   - `PR N` after a list word (`PR 10 and PR 12`, `PR 10, PR 12`);
+ * What follows a PR's number when an unmarked one goes with it, a range or a list (a second marked number, `#12` or
+ * `PR 12`, is a second match of PR_NUMBERS already):
  *   - a bare number right after a range mark (`PR 10–12`, `PR 12/13`, `PR 10…12`), or after an arrow (`PR 10 → 12`);
  *   - a bare number that ends a list after `and`, `or` or `plus` (`PR 502 and 503`, `PR 10 (and 12)`).
  * Not a date, a decimal or an ordinal, nor a count of something (review pass 2: `PR 727, 2026-10-20`,
  * `PR 727 to 2.0.0`, `PR 12 - 2nd attempt` and `PR #12, 2 commits` are each one PR).
  */
 const ANOTHER_NUMBER = new RegExp([
-  String.raw`^\s*(?:[-–—/,&+…→]|\.\.\.?|\b(?:and|or|to|through|plus)\b)\s*(?:PR\s*)?#\s*[0-9]`,
-  String.raw`^\s*(?:,|&|\+|\b(?:and|or|plus)\b)\s*PR\s*[0-9]`,
   String.raw`^(?:[-–/…]|\.\.\.?)[0-9]+(?![0-9]*[-.][0-9]|st\b|nd\b|rd\b|th\b)`,
   String.raw`^\s*→\s*[0-9]+(?![0-9]*[-.][0-9])`,
   String.raw`^\s*\(?\s*\b(?:and|or|plus)\s+[0-9]+(?![0-9]*[-.][0-9])(?!\s*[A-Za-z])`,
