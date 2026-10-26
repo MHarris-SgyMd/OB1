@@ -3983,18 +3983,24 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
     // A keyed capture keeps the key, lower-cased, and says so.
     const first = await result("capture_thought", { content: "[24] the release plan, as stable wrote it", client_key: K1.toUpperCase() });
     const a = first.sc?.id as string;
-    assert(!first.isError && first.sc?.clientKey === "recorded" && (await keyOf(a)) === K1, `a keyed capture keeps its key, lower-cased (${first.sc?.clientKey}, ${await keyOf(a)})`);
+    assert(!first.isError && first.sc?.keyed === "recorded" && (await keyOf(a)) === K1, `a keyed capture keeps its key, lower-cased (${first.sc?.keyed}, ${await keyOf(a)})`);
 
     // The same key again, another text: that thought, nothing written, no model call.
     const before = await rows24();
     const again = await result("capture_thought", { content: "[24] a retried copy whose text moved on", client_key: K1 });
-    assert(!again.isError && again.sc?.id === a && again.sc?.clientKey === "matched" && again.sc?.embeddingCall === false && /^Already captured — id /.test(again.text) && (await rows24()) === before,
+    assert(!again.isError && again.sc?.id === a && again.sc?.keyed === "matched" && again.sc?.embeddingCall === false && /^Already captured — id /.test(again.text) && (await rows24()) === before,
       `the same key returns its thought and writes nothing (${again.text.slice(0, 100)}, rows ${before} → ${await rows24()})`);
+
+    // The same key and the same text: a re-capture of that thought, merged as the first brain's was — not dropped.
+    const recap = await result("capture_thought", { content: "[24] the release plan, as stable wrote it", client_key: K1, metadata: { reviewed: "yes" } });
+    const [recapRow] = await sql`SELECT metadata->>'reviewed' AS r FROM thoughts WHERE id = ${a}::uuid`;
+    assert(!recap.isError && recap.sc?.id === a && recap.sc?.keyed === "recaptured" && recapRow?.r === "yes" && (await keyOf(a)) === K1 && (await rows24()) === before,
+      `the same key and text: a re-capture, its metadata merged, the key kept, no new row (${recap.sc?.keyed}, ${recapRow?.r})`);
 
     // A key equal to a thought's id (a copy a refresh made) names that thought.
     const plainId = (await result("capture_thought", { content: "[24] a thought a refresh copied, same id on both brains" })).sc?.id as string;
     const byId = await result("capture_thought", { content: "[24] its copy sent again under its id", client_key: plainId });
-    assert(!byId.isError && byId.sc?.id === plainId && byId.sc?.clientKey === "matched" && (await keyOf(plainId)) === null, `a key equal to a thought's id names that thought, and keys nothing (${byId.sc?.id === plainId}, ${await keyOf(plainId)})`);
+    assert(!byId.isError && byId.sc?.id === plainId && byId.sc?.keyed === "matched" && (await keyOf(plainId)) === null, `a key equal to a thought's id names that thought, and keys nothing (${byId.sc?.id === plainId}, ${await keyOf(plainId)})`);
 
     // supersedes and derived_from by key.
     const next = await result("capture_thought", { content: "[24] the release plan, revised", supersedes: K1, derived_from: [K1, plainId] });
@@ -4034,11 +4040,11 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
     const t = "[24] one text, two brains' ids";
     const r0 = (await result("capture_thought", { content: t })).sc?.id as string;
     const k2 = await result("capture_thought", { content: t, client_key: K2 });
-    assert(!k2.isError && k2.sc?.id === r0 && k2.sc?.clientKey === "recorded" && (await keyOf(r0)) === K2, `a re-capture onto a row with no key records it (${k2.sc?.clientKey}, ${await keyOf(r0)})`);
+    assert(!k2.isError && k2.sc?.id === r0 && k2.sc?.keyed === "recorded" && (await keyOf(r0)) === K2, `a re-capture onto a row with no key records it (${k2.sc?.keyed}, ${await keyOf(r0)})`);
     const k3 = await result("capture_thought", { content: t, client_key: K3 });
     const k3Missing = await result("update_thought", { id: K3, metadata_patch: { note: "x" } });
-    assert(!k3.isError && k3.sc?.id === r0 && k3.sc?.clientKey === "held" && k3.sc?.heldKey === K2 && (await keyOf(r0)) === K2 && /keeping a `client_key` of its own/.test(k3.text) && k3Missing.sc?.code === "NOT_FOUND",
-      `a row keeping another key keeps it, and the new key names nothing (${k3.sc?.clientKey}, ${k3.sc?.heldKey}, ${await keyOf(r0)}, ${k3Missing.sc?.code})`);
+    assert(!k3.isError && k3.sc?.id === r0 && k3.sc?.keyed === "held" && k3.sc?.heldKey === K2 && (await keyOf(r0)) === K2 && /keeping a `client_key` of its own/.test(k3.text) && k3Missing.sc?.code === "NOT_FOUND",
+      `a row keeping another key keeps it, and the new key names nothing (${k3.sc?.keyed}, ${k3.sc?.heldKey}, ${await keyOf(r0)}, ${k3Missing.sc?.code})`);
 
     // One thought per key, whatever the writer.
     let dup = "";
@@ -4051,15 +4057,15 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
     assert(!del.isError && del.sc?.id === a && del.sc?.byClientKey === K1 && /^Deleted [0-9a-f-]{36}, named by its client_key /.test(del.text) && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${a}::uuid`)[0].c === 0,
       `delete_thought takes the key (${del.text.slice(0, 100)})`);
     const reborn = await result("capture_thought", { content: "[24] the key free again after its thought went", client_key: K1 });
-    assert(!reborn.isError && reborn.sc?.clientKey === "recorded" && reborn.sc?.id !== a, `a deleted thought's key is free again (${reborn.sc?.clientKey})`);
+    assert(!reborn.isError && reborn.sc?.keyed === "recorded" && reborn.sc?.id !== a, `a deleted thought's key is free again (${reborn.sc?.keyed})`);
     const nothing = await result("delete_thought", { id: K4 });
     assert(nothing.isError && nothing.sc?.code === "NOT_FOUND", `a key no thought keeps is NOT_FOUND (${nothing.sc?.code})`);
     // Copies racing under one key (a retry while the first is in flight): one thought, every reply naming it, none an
     // error — a loser of the race between the key's read and the write meets 112's index and is answered as a match.
     const raced = await Promise.all(Array.from({ length: 6 }, (_, i) => result("capture_thought", { content: `[24] a raced copy ${i}`, client_key: K4 })));
     const racedIds = new Set(raced.map((r) => r.sc?.id));
-    assert(raced.every((r) => !r.isError) && racedIds.size === 1 && raced.filter((r) => r.sc?.clientKey === "recorded").length === 1 && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'client_key' = ${K4}`)[0].c) === 1,
-      `copies racing under one key make one thought (${raced.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.clientKey).join(", ")})`);
+    assert(raced.every((r) => !r.isError) && racedIds.size === 1 && raced.filter((r) => r.sc?.keyed === "recorded").length === 1 && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'client_key' = ${K4}`)[0].c) === 1,
+      `copies racing under one key make one thought (${raced.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE content LIKE '[24]%'`;
     await sql.close();

@@ -831,13 +831,16 @@ second brain the same ids it sent the first. A thought a refresh copied has the 
 on both brains, and a key equal to it names that thought.
 
 - **A key that names a thought already** (as its id or its key) returns that thought
-  and writes nothing, with no model call: `Already captured — id …`, `clientKey:
-  "matched"` beside it. A retried copy, or copies racing under one key, make one
+  and writes nothing, with no model call: `Already captured — id …`, `keyed:
+  "matched"` beside it (REST and MCP alike). A retried copy, or copies racing under one key, make one
   thought; the loser of a race is answered the same way.
-- **A key that names nothing** is kept on the new row (`clientKey: "recorded"`), and on
+- **A key naming the thought that holds this very text** is a re-capture of it
+  (`keyed: "recaptured"`): merged as any write key's re-capture is (080), the key not
+  sent again, so the copy takes what the first brain's re-capture merged.
+- **A key that names nothing** is kept on the new row (`keyed: "recorded"`), and on
   a re-capture of text already a thought it is merged onto that row, as 080's merge
   takes a write key's metadata. A row already keeping another key keeps it
-  (`clientKey: "held"`, with `heldKey` when it is a key's shape): the reply says the
+  (`keyed: "held"`, with `heldKey` when it is a key's shape): the reply says the
   key given was not recorded and names nothing here.
 - **Only a key that can read** sends one. A capture-only key is refused
   (`REFUSED_CLIENT_KEY_SCOPE`, 403 over REST), as the match would tell it whether an id
@@ -845,7 +848,8 @@ on both brains, and a key equal to it names that thought.
   `REFUSED_CLIENT_KEY_SHAPE` (400).
 - **The key is set once.** `metadata.client_key` in a capture's `metadata`, or a
   `metadata_patch` naming it, is `REFUSED_METADATA_SHAPE` (`reserved_key`). A deleted
-  thought's key goes with it, and is free again.
+  thought's key goes with it, and is free again. Keys are kept and compared in lower
+  case: a `client_key` a caller's metadata set in upper case before 112 names nothing.
 - An edit or a delete that reached its thought by a key says so (`, named by its
   client_key …`, `byClientKey` beside it); one by the thought's own id says nothing.
 

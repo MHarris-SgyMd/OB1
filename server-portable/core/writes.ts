@@ -128,10 +128,12 @@ export type Captured = {
   /**
    * What became of a `client_key` (SMD-3314): `matched` — a thought already
    * had it as its id or its key, and is returned with nothing written;
+   * `recaptured` — that thought holds this very text, so this was a
+   * re-capture of it, merged as any is (080), the key not sent again;
    * `recorded` — the row keeps it; `held` — the text's row keeps another key
    * (`heldKey`) and keeps it, so this one names nothing. Absent without a key.
    */
-  keyed?: "matched" | "recorded" | "held";
+  keyed?: "matched" | "recaptured" | "recorded" | "held";
   heldKey?: string;
 };
 
@@ -198,10 +200,18 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // from another brain names its thoughts as that brain did. One read for
     // the key and every pointer, before the model calls are paid for; a name
     // that resolves to nothing goes on as given, to be refused as before.
+    // A key naming a thought that holds this very text is a re-capture of it:
+    // it goes on as one, without the key, so the copy takes what the first
+    // brain's re-capture merged (080) rather than nothing (review pass 1).
+    let recaptureOfKeyed = false;
     if (reader && (clientKey !== undefined || supersedes !== undefined || derived_from?.length)) {
-      const named = await (await ctx.store()).thoughtsNamed([...(clientKey ? [clientKey] : []), ...(supersedes !== undefined ? [supersedes] : []), ...(derived_from ?? [])]);
+      const store = await ctx.store();
+      const named = await store.thoughtsNamed([...(clientKey ? [clientKey] : []), ...(supersedes !== undefined ? [supersedes] : []), ...(derived_from ?? [])]);
       const matched = clientKey !== undefined ? named.get(clientKey) : undefined;
-      if (matched) return ok(keyMatched(matched, ctx.embedConfig().chat.base));
+      if (matched) {
+        if ((await store.keyAtText(content))?.id !== matched) return ok(keyMatched(matched, ctx.embedConfig().chat.base));
+        recaptureOfKeyed = true;
+      }
       if (supersedes !== undefined) supersedes = named.get(supersedes.toLowerCase()) ?? supersedes;
       if (derived_from) derived_from = derived_from.map((d) => named.get(d.toLowerCase()) ?? d);
     }
@@ -359,9 +369,10 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // captured is merged into its row (080), and a row keeping another key
     // keeps it — two brains' ids for one text cannot both name it, and the
     // first stands — so this one is not sent, and the reply says so.
-    let keyed: "recorded" | "held" | undefined;
+    let keyed: "recorded" | "held" | "recaptured" | undefined;
     let heldKey: string | undefined;
-    if (clientKey !== undefined) {
+    if (recaptureOfKeyed) keyed = "recaptured";
+    else if (clientKey !== undefined) {
       const row = await (await ctx.store()).keyAtText(content);
       // A key a caller's metadata set before 112 reserved it may be any text:
       // said only when it is a key's shape.

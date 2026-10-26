@@ -1248,7 +1248,7 @@ const safeCapture: Safe<Captured> = (v) => ({
   // caller's — "settled" alone cannot say (review pass 1).
   ...(v.label ? { label: v.label.outcome, ...(v.label.outcome === "settled" && v.label.by === "restamp" ? { labelMine: v.label.mine } : {}) } : {}),
   // What became of a client_key (SMD-3314): a reader's alone, as only a reader may send one.
-  ...(v.keyed ? { clientKey: v.keyed, ...(v.heldKey ? { heldKey: v.heldKey } : {}) } : {}),
+  ...(v.keyed ? { keyed: v.keyed, ...(v.heldKey ? { heldKey: v.heldKey } : {}) } : {}),
 });
 
 export function renderCapture(o: Outcome<Captured>): Reply {

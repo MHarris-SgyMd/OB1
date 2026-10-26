@@ -15895,9 +15895,13 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   assert(/thoughts_client_key_unique/.test(dup), `a second thought with the key is refused (${dup.slice(0, 80) || "accepted"})`);
   // A table this small is read whole by choice: sequential scans off, the plan says whether the index can serve.
   await db.exec(`SET enable_seqscan = off`);
-  const plans = (await db.query<Record<string, string>>(`EXPLAIN SELECT id FROM thoughts WHERE metadata->>'client_key' = '${k}'`)).rows.map((r) => Object.values(r)[0]).join(" ");
+  // The servers' read itself (store-sql.ts's thoughtsNamed): the key's arm a correlated subquery over the name.
+  const plans = (await db.query<Record<string, string>>(`EXPLAIN SELECT n.name, COALESCE(
+        (SELECT t.id::text FROM thoughts t WHERE t.id = n.name::uuid),
+        (SELECT t.id::text FROM thoughts t WHERE t.metadata->>'client_key' = n.name)) AS id
+      FROM unnest(ARRAY['${k}']::text[]) AS n(name)`)).rows.map((r) => Object.values(r)[0]).join(" ");
   await db.exec(`RESET enable_seqscan`);
-  assert(/thoughts_client_key_unique/.test(plans), `the servers' read of a key can walk the index — an equality implies its predicate (${plans.slice(0, 120)})`);
+  assert(/thoughts_client_key_unique/.test(plans), `the servers' read of a key walks the index — an equality implies its predicate (${plans.slice(0, 160)})`);
 
   // Re-applied, nothing moves.
   let again: string;
