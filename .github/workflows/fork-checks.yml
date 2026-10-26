@@ -1635,8 +1635,8 @@ jobs:
               compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
-              # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
-              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
+              # The release's: an image and its pull policy, on any service but the proxy, its forwarder (SMD-2583) and the break-glass listener, the forwarder's image too (SMD-3307).
+              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ] && [ "$s" != breakglass ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
             esac
           }

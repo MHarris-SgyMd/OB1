@@ -32,9 +32,11 @@ import net from "node:net";
 const HERE = import.meta.dir;
 const USAGE = "usage: bun --no-env-file deploy/instance.ts check [--env-file PATH …] [-f FILE …] [--profile NAME …] [-p NAME] [--runtime docker|podman]\n       bun deploy/instance.ts --self-check";
 
-/** A published port's setting, as a compose file's house-form mapping names it. */
-export type Knob = { service: string; target: number; port: string; bind: string };
+/** A published port's setting, as a compose file's house-form mapping names it; `bind` null for a literal loopback one. */
+export type Knob = { service: string; target: number; port: string; bind: string | null };
 const HOUSE = /^\$\{([A-Z][A-Z0-9_]*):-[^}]*\}:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
+/** Check 13's named exception: a literal 127.0.0.1 with the port's setting alone (the break-glass listener, SMD-3307). */
+const LOOPBACK = /^127\.0\.0\.1:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
 
 /** Each house-form mapping in a compose file's text, by service and container port. */
 export function knobsIn(text: string): Knob[] {
@@ -46,7 +48,9 @@ export function knobsIn(text: string): Knob[] {
     const ports = Array.isArray(def?.ports) ? def.ports : [];
     for (const p of ports) {
       const m = typeof p === "string" ? HOUSE.exec(p.trim()) : null;
+      const l = typeof p === "string" ? LOOPBACK.exec(p.trim()) : null;
       if (m) out.push({ service, target: Number(m[3]), bind: m[1], port: m[2] });
+      else if (l) out.push({ service, target: Number(l[2]), bind: null, port: l[1] });
     }
   }
   return out;
@@ -135,7 +139,7 @@ export function sameEnvFiles(c: Pick<Container, "envFile" | "workingDir">, envFi
 export function portWords(p: Published, knobs: Knob[], shown: string): { setting: string; fix: string; where: string } {
   const k = knobs.filter((x) => x.service === p.service && x.target === p.target).at(-1);
   return {
-    setting: k ? `${k.port} (${p.service}'s port; ${k.bind} its address)` : `${p.service}'s port ${p.target}, a mapping in the compose files`,
+    setting: k ? `${k.port} (${p.service}'s port; ${k.bind ? `${k.bind} its address` : "on 127.0.0.1 alone"})` : `${p.service}'s port ${p.target}, a mapping in the compose files`,
     fix: k ? `set ${k.port} in ${shown} to a free port` : `change ${p.service}'s mapping`,
     where: `${p.hostIp.includes(":") ? `[${p.hostIp}]` : p.hostIp || "0.0.0.0"}:${p.port}${p.protocol === "tcp" ? "" : "/" + p.protocol}`,
   };
@@ -472,6 +476,9 @@ async function selfCheck() {
   n8n:
     ports:
       - "\${N8N_BIND:-127.0.0.1}:\${N8N_PORT:-5678}:5678"
+  breakglass:
+    ports:
+      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"
   odd:
     ports:
       - "9000:9000"
@@ -607,7 +614,8 @@ echo "stub $rt: $*" >&2; exit 1
   const keysOf = (x: string) => settingsIn(x).map((s) => s.key).join();
   const cases: [string, boolean][] = [
     ["a house-form mapping names its port and address settings", knobs.some((k) => k.service === "forwarder" && k.target === 8000 && k.port === "SERVER_PORT" && k.bind === "SERVER_BIND")],
-    ["a mapping not in the house form names no setting", knobs.length === 2 && !knobs.some((k) => k.service === "odd")],
+    ["the break-glass listener's literal loopback mapping names its port setting (SMD-3307)", knobs.some((k) => k.service === "breakglass" && k.target === 8001 && k.port === "BREAKGLASS_PORT" && k.bind === null)],
+    ["a mapping in neither form names no setting", knobs.length === 3 && !knobs.some((k) => k.service === "odd")],
     ["every port mapping in deploy/'s compose files is in the house form, so names its setting", realMappings.length > 0 && realMappings.length === realKnobs.length],
     ["compose's render: each published port, a range as each of its ports, protocol kept", JSON.stringify(publishedIn({ services: { f: { ports: [{ target: 8000, published: "8040", host_ip: "127.0.0.1" }, { target: 80, published: "9100-9101", protocol: "udp" }] }, api: { ports: [{ target: 8000 }] } } }).map((p) => `${p.service}:${p.port}/${p.protocol}`)) === JSON.stringify(["f:8040/tcp", "f:9100/udp", "f:9101/udp"])],
     ["ps lists stopped containers too, and each one's id, state, env-file label and project directory", PS_ARGS.includes("-a") && containersIn("abcdef0123456789|a|p|ob1b|forwarder|Exited|/e|/w").map((x) => x.id + x.state + x.envFile + x.workingDir).join() === "abcdef012345exited/e/w"],
