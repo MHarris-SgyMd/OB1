@@ -2054,15 +2054,15 @@ before that migration (070 from v1.9.0): upgrade the server, never run the
 the migration fails each listing on a connection that had already listed
 ("cached plan must not change result type", the result type changed) until
 it restarts: its reads asked for `*`. Since SMD-3302 the brain's own code
-names the columns it reads from a function, table or view (check 41), so one a
-later migration adds is re-planned to the same result type;
-compat/supabase-sql's `rpc()` still reads `*`. DDL alone; no row moves; no
-grant is carried. Refuses by name without 016, 025 or 029; a re-apply is a
-no-op. test-schema [98] (230 rows walked in pages of 200 and of 7, ties across
-page edges, a stale row re-judged under the cursor, the partial cursor, 109
-re-applied beside it), test-upgrade
-[20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,
-the store, e2e and REST suites.
+names the columns it reads from a function, table or view (check 41), so a
+statement re-plans to the same result type when a later migration adds a
+column; compat/supabase-sql's `rpc()` still reads `*` (SMD-3329). DDL alone;
+no row moves; no grant is carried. Refuses by name without 016, 025 or 029; a
+re-apply is a no-op. test-schema [98] (230 rows walked in pages of 200 and of
+7, ties across page edges, a stale row re-judged under the cursor, the partial
+cursor, 109 re-applied beside it), test-upgrade [20bb], test-live [16]
+(`--after` over 51 rows), `server-portable/test-preflight.ts`, the store, e2e
+and REST suites.
 
 ## What changed relative to the guide
 

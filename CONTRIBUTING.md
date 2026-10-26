@@ -141,6 +141,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - A README saying how to turn it on (`OB1_PLUGINS`) and what each operation answers
 - Tests over the REST core with the plugin enabled, as `server-portable/test-plugins.ts` and `test-plugins-sql.ts` drive the example
 - Check 31 of `scripts/check-fork-consistency.ts` passing (an accident guard, not a sandbox: review is the control): no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no global past `ctx` (`fetch`, `process`, `Bun` and their kin)
+- Check 41 passing: its SQL names the columns it reads from its own tables and functions, never `*` or `RETURNING *`, so a server left running across a migration that adds a column keeps working (SMD-3302)
 
 **Primitives** additionally require:
 - **"Extensions That Use This"** section listing which extensions reference this primitive

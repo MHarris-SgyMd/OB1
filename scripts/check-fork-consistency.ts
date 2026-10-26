@@ -6832,20 +6832,22 @@ checkHealthcheckStarts();
  *
  * Only the code's strings are read, as SQL: each JS string and template, a `${…}` in it an opaque value and a
  * template nested in one a string of its own. SQL comments, literals and dollar quotes are masked by one
- * left-to-right pass. Each SELECT is then read alone: its list to the FROM at its own depth, its FROM clause split
- * into items with their aliases (a join's, a LATERAL's, ROWS FROM's, a parenthesised join's), ON and USING
- * conditions dropped, a subquery read in turn as its own SELECT. A qualified star reads the item it names; a bare
- * one every item; a CTE's name and a function no migration defines (unnest) pass. The rule is stricter than 0A000
- * needs — a star whose columns never reach the result (`EXISTS (SELECT * …)`, a subquery's under a named list) is
- * read too, and so is a call Bun does not prepare (`.unsafe(text)` with no parameters): name the columns anyway.
- * Not seen: SQL built by concatenation or at run time (compat/supabase-sql's rpc, Bun's `${sql(name)}`), and a row
- * value expanded through a subquery or a column (`(SELECT t FROM thoughts t).*`, `(s.r).*`); a CTE's name passes
- * anywhere in its string, not only in its own statement. Tests and benches are not
- * read: test-store-sql's control prepares `*` to show the failure, and a bench times `SELECT *` so every column is
- * computed.
+ * left-to-right pass. Each SELECT is then read alone: its list to the FROM at its own depth (a stop word after AS
+ * is a column label), PL/pgSQL's INTO targets aside; its FROM clause split into items — a join's, a LATERAL's, ROWS
+ * FROM's, a parenthesised join's — each read for its leading name and alias alone (no keyword is an alias, so an
+ * ON or USING condition is passed over); a subquery read in turn as its own SELECT. A qualified star reads the item
+ * it names, a bare one every item; a CTE's name and a function no migration defines (unnest) pass. The rule is
+ * stricter than 0A000 needs — a star whose columns never reach the result (`EXISTS (SELECT * …)`, a subquery's
+ * under a named list) is read too, and so is a call Bun does not prepare (`.unsafe(text)` with no parameters):
+ * name the columns anyway. Not seen: SQL built by concatenation or at run time (compat/supabase-sql's rpc, Bun's
+ * `${sql(name)}`), and a row value expanded through a subquery or a column (`(SELECT t FROM thoughts t).*`,
+ * `(s.r).*`); a CTE's name passes anywhere in its string, not only in its own statement. Tests and benches are
+ * not read: test-store-sql's control prepares `*` to show the failure, and a bench times `SELECT *` so every
+ * column is computed.
  */
 const STAR_READ_DIRS = ["server-portable", "mcp-server", "dashboard", "plugins", "db", "deploy"];
 type SchemaNames = { functions: ReadonlySet<string>; relations: ReadonlySet<string> };
+const SQL_SPECIAL = /[-\/'"$]/g;
 /** `s` with each SQL comment, string literal (plain, E'…') and dollar-quoted body blanked — a literal left as `''` — in one left-to-right pass; quoted identifiers kept. Length and newlines kept. */
 function sqlMasked(s: string): string {
   const blank = (x: string) => x.replace(/[^\n]/g, " ");
@@ -6874,7 +6876,12 @@ function sqlMasked(s: string): string {
       const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(s.slice(i, i + 64))?.[0];
       if (tag) { const e = s.indexOf(tag, i + tag.length); stop = e < 0 ? s.length : e + tag.length; literal = true; }
     }
-    if (stop < 0) { out += c; i++; continue; }
+    if (stop < 0) {
+      // Up to the next character that can open a comment, literal or quote, in one copy.
+      SQL_SPECIAL.lastIndex = i + 1;
+      const next = SQL_SPECIAL.exec(s)?.index ?? s.length;
+      out += s.slice(i, next); i = next; continue;
+    }
     const body = blank(s.slice(i, stop));
     out += literal && body.length >= 2 ? "''" + body.slice(2) : body;
     i = stop;
@@ -6886,8 +6893,8 @@ function schemaNamesIn(files: [string, string][]): SchemaNames {
   const functions = new Set<string>(), relations = new Set<string>();
   for (const [, text] of files) {
     const sql = sqlMasked(text);
-    for (const m of sql.matchAll(/^\s*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gim)) functions.add(m[1].toLowerCase());
-    for (const m of sql.matchAll(/^\s*CREATE(?:\s+OR\s+REPLACE)?(?:\s+UNLOGGED|\s+FOREIGN|\s+RECURSIVE)?\s+(?:MATERIALIZED\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gim)) relations.add(m[1].toLowerCase());
+    for (const m of sql.matchAll(/^[ \t]*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gim)) functions.add(m[1].toLowerCase());
+    for (const m of sql.matchAll(/^[ \t]*CREATE(?:\s+OR\s+REPLACE)?(?:\s+UNLOGGED|\s+FOREIGN|\s+RECURSIVE)?\s+(?:MATERIALIZED\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gim)) relations.add(m[1].toLowerCase());
   }
   return { functions, relations };
 }
@@ -6932,12 +6939,17 @@ function closeParen(m: string, open: number): number {
   for (let j = open; j < m.length; j++) { if (m[j] === "(") d++; else if (m[j] === ")" && --d === 0) return j + 1; }
   return m.length;
 }
+/** Where a FROM clause ends: the next clause, a set operator, or a bare SELECT (a subquery's is in parens). */
 const FROM_STOPS = /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WINDOW|FOR|RETURNING|FETCH|SELECT)$/i;
-/** Where a FROM-less select list ends, and a RETURNING list: a clause or statement word. */
+/** Where a select list with no FROM ends: the next clause or statement. */
 const LIST_STOPS = /^(?:SELECT|UNION|INTERSECT|EXCEPT|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|WINDOW|FETCH|RETURNING)$/i;
+/** Where a RETURNING list ends: the next statement or set operator. */
 const RETURNING_STOPS = /^(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|VALUES|TABLE|UNION|INTERSECT|EXCEPT|RETURNING)$/i;
-/** Words never an alias: what may follow a FROM item. */
-const SQL_KEYWORDS = /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WINDOW|FOR|RETURNING|FETCH|SELECT|ON|USING|JOIN|NATURAL|LEFT|RIGHT|FULL|INNER|OUTER|CROSS|TABLESAMPLE|LATERAL)$/i;
+/** A list's stop word is a column label after AS (`1 AS offset`), and GROUP after WITHIN (`mode() WITHIN GROUP (…)`): neither ends it. */
+const listStop = (stops: RegExp) => (w: string, before: string) => stops.test(w) && !/\bAS\s*$/i.test(before) && !(/^GROUP$/i.test(w) && /\bWITHIN\s*$/i.test(before));
+/** Words never a FROM item's alias — what may follow one — so only an item's own name and alias are read, never its condition. */
+const SQL_KEYWORDS = /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WINDOW|FOR|RETURNING|FETCH|SELECT|ON|USING|JOIN|NATURAL|LEFT|RIGHT|FULL|INNER|OUTER|CROSS|TABLESAMPLE|LATERAL|WITH|ORDINALITY)$/i;
+/** A paren that opens a subquery, tried at the paren itself (sticky), whatever whitespace or comment follows it. */
 const SUBQUERY = /\(\s*(?:SELECT|WITH|VALUES)\b/iy;
 /**
  * From `from` in masked SQL, the text up to `;`, a `)` closing a paren opened before `from`, or a word `stop`
@@ -6963,13 +6975,13 @@ function sqlSpan(m: string, from: number, stop: (word: string, before: string) =
   }
   return { text: out, end: i, word: "" };
 }
-/** `list` split where `at` matches at depth 0 (a word only at a word's start). */
+/** `list` split where `at` matches at depth 0 of parens and brackets (a word only at a word's start). */
 function splitTop(list: string, at: RegExp): string[] {
   const parts: string[] = [];
   let depth = 0, cur = "";
   for (let i = 0; i < list.length;) {
     const c = list[i];
-    if (c === "(") depth++; else if (c === ")") depth--;
+    if (c === "(" || c === "[") depth++; else if (c === ")" || c === "]") depth--;
     const hit = depth === 0 && (!/[A-Za-z_]/.test(c) || !/[\w$."]/.test(list[i - 1] ?? "")) ? at.exec(list.slice(i)) : null;
     if (hit) { parts.push(cur); cur = ""; i += hit[0].length; continue; }
     cur += c; i++;
@@ -6977,9 +6989,11 @@ function splitTop(list: string, at: RegExp): string[] {
   parts.push(cur);
   return parts;
 }
-/** A select-list item's star: `{ qual }` for `*` (null) or `q.*`, `{ expr }` for `(x).*` (its redundant parens off); null for any other item. */
+/** A select-list item's star: `{ qual }` for `*` (null) or `q.*`, `{ expr }` for `(x).*` (redundant parens off, around the item or `x`); null for any other item. */
 function starOf(item: string): { qual?: string | null; expr?: string } | null {
   let it = item.trim();
+  // `(t.*)` is `t.*`: Postgres expands a star in parens too.
+  if (it.startsWith("(") && closeParen(it, 0) === it.length) return starOf(it.slice(1, -1));
   if (!it.endsWith("*")) return null;
   it = it.slice(0, -1).trimEnd();
   if (it === "") return { qual: null };
@@ -6997,15 +7011,15 @@ function starOf(item: string): { qual?: string | null; expr?: string } | null {
   return { qual: sqlName(parts[parts.length - 1]) };
 }
 type FromItem = { name: string; fn: boolean; alias: string | null; qualified?: boolean };
-/** A FROM clause's items: name, whether it is a call, alias, whether schema-qualified; conditions dropped, a parenthesised join's read through (its alias, if it has one, each item's), ROWS FROM's each a call. */
+/** A FROM clause's items: name, whether it is a call, alias, whether schema-qualified. Only each item's leading name and alias are read (no keyword is an alias), so its ON or USING condition is passed over; a parenthesised join is read through (its alias, if it has one, each item's); ROWS FROM's calls are each an item. */
 function fromItems(clause: string): FromItem[] {
   const items: FromItem[] = [];
   for (let piece of splitTop(clause, /^(?:,|JOIN\b)/i)) {
-    piece = splitTop(piece, /^(?:ON|USING)\b/i)[0].replace(/(?:\b(?:NATURAL|LEFT|RIGHT|FULL|INNER|OUTER|CROSS)\b\s*)+$/i, "").trim();
+    piece = piece.trim();
     while (/^(?:LATERAL|ONLY)\b/i.test(piece)) piece = piece.replace(/^\w+\s*/, "");
     const aliasAfter = (rest: string) => {
-      const a = /^\s*(?:WITH\s+ORDINALITY\s+)?(?:AS\s+)?("[^"]*"|[A-Za-z_]\w*)/i.exec(rest);
-      return a && (a[1].startsWith('"') || !SQL_KEYWORDS.test(a[1])) ? sqlName(a[1]) : null;
+      const a = /^\s*(?:WITH\s+ORDINALITY\b\s*)?(?:AS\s+)?("[^"]*"|[A-Za-z_]\w*)/i.exec(rest);
+      return a && !SQL_KEYWORDS.test(a[1]) ? sqlName(a[1]) : null;
     };
     const rows = /^ROWS\s+FROM\s*\(/i.exec(piece);
     if (rows) {
@@ -7033,8 +7047,10 @@ function starReadsInSql(sql: string, names: SchemaNames): { what: string; at: nu
     if (it.fn ? names.functions.has(it.name) : names.relations.has(it.name) && (it.qualified || !ctes.has(it.name))) hits.push({ what: it.fn ? `${it.name}(…)` : it.name, at });
   };
   for (const s of m.matchAll(/\bSELECT\b/gi)) {
-    const list = sqlSpan(m, s.index! + 6, (w, before) => (/^FROM$/i.test(w) && !/\bIS\s+(?:NOT\s+)?DISTINCT\s*$/i.test(before)) || LIST_STOPS.test(w));
-    const items = splitTop(list.text, /^,/);
+    const listEnds = listStop(LIST_STOPS);
+    const list = sqlSpan(m, s.index! + 6, (w, before) => (/^FROM$/i.test(w) && !/\bIS\s+(?:NOT\s+)?DISTINCT\s*$/i.test(before)) || listEnds(w, before));
+    // PL/pgSQL's `SELECT * INTO v FROM …`: the targets are not the list.
+    const items = splitTop(splitTop(list.text, /^INTO\b/i)[0], /^,/);
     items[0] = items[0].replace(/^\s*ALL\b/i, "").replace(/^\s*DISTINCT\b\s*/i, "");
     const on = /^ON\s*\(/i.exec(items[0]);
     if (on) items[0] = items[0].slice(closeParen(items[0], on[0].length - 1));
@@ -7046,17 +7062,17 @@ function starReadsInSql(sql: string, names: SchemaNames): { what: string; at: nu
       if (star.expr !== undefined) {
         for (const f of star.expr.matchAll(new RegExp(String.raw`(${SQL_NAME})\s*\(`, "g"))) read({ name: sqlName(f[1]), fn: true, alias: null }, s.index!);
         const p = SQL_PATH.exec(star.expr);
-        if (!p || p[0].length !== star.expr.trim().length + (star.expr.length - star.expr.trimStart().length)) continue;
+        if (!p || p[0].length !== star.expr.length) continue;
         qual = sqlName(p[1].split(/\s*\.\s*/).pop()!);
       }
-      for (const it of from) if (qual === null || qual === undefined || (it.alias ?? it.name) === qual) read(it, s.index!);
+      for (const it of from) if (qual === null || (it.alias ?? it.name) === qual) read(it, s.index!);
     }
   }
   for (const r of m.matchAll(/\bRETURNING\b/gi))
-    if (splitTop(sqlSpan(m, r.index! + 9, (w) => RETURNING_STOPS.test(w)).text, /^,/).some((it) => starOf(it) !== null)) hits.push({ what: "RETURNING *", at: r.index! });
+    if (splitTop(sqlSpan(m, r.index! + 9, listStop(RETURNING_STOPS)).text, /^,/).some((it) => starOf(it) !== null)) hits.push({ what: "RETURNING *", at: r.index! });
   // TABLE x: at a statement's start, after a WITH list or a set operator, and ending as a statement or a set's arm
   // does — so prose that starts "Table jobs are…" is not one.
-  for (const t of m.matchAll(new RegExp(String.raw`(?:^|[;()]|\b(?:UNION|INTERSECT|EXCEPT)(?:\s+(?:ALL|DISTINCT))?\b)\s*TABLE\s+(?:ONLY\s+)?((?:${SQL_NAME}\s*\.\s*)*${SQL_NAME})(?=\s*(?:$|[;)]|(?:ORDER|LIMIT|OFFSET|FETCH|UNION|INTERSECT|EXCEPT)\b))`, "gi"))) {
+  for (const t of m.matchAll(new RegExp(String.raw`(?:^|[;()]|\b(?:UNION|INTERSECT|EXCEPT)(?:\s+(?:ALL|DISTINCT))?\b)\s*TABLE\s+(?:ONLY\s+)?((?:${SQL_NAME}\s*\.\s*)*${SQL_NAME})(?=\s*(?:$|[;)]|\$_|(?:ORDER|LIMIT|OFFSET|FETCH|FOR|UNION|INTERSECT|EXCEPT)\b))`, "gi"))) {
     const parts = t[1].split(/\s*\.\s*/);
     read({ name: sqlName(parts[parts.length - 1]), fn: false, alias: null, qualified: parts.length > 1 }, t.index!);
   }
@@ -7131,12 +7147,18 @@ function checkStarReads() {
     [q("SELECT j.* FROM (w JOIN thoughts t ON true) AS j"), "thoughts"], [q("SELECT ((t)).* FROM thoughts t"), "thoughts"], [q("SELECT (t.*).* FROM thoughts t"), "thoughts"],
     ["x = 'unterminated\nsql`SELECT * FROM thoughts`", "thoughts"], ["a = 'x\nb = sql`SELECT * FROM ${'w'}, thoughts`", "thoughts"],
     [q("SELECT * FROM w; ANALYZE a, thoughts"), ""],
+    [q("SELECT 1 AS offset, * FROM thoughts"), "thoughts"], [q("SELECT *, 1 AS limit FROM thoughts"), "thoughts"],
+    [q("SELECT mode() WITHIN GROUP (ORDER BY content), t.* FROM thoughts t GROUP BY t.id"), "thoughts"], [q("UPDATE thoughts SET a = 1 RETURNING 1 AS values, *"), "RETURNING *"],
+    [q("TABLE thoughts FOR UPDATE"), "thoughts"], [q("TABLE thoughts ${x}"), "thoughts"], [q("SELECT * FROM thought_changes(1) WHERE id IN (SELECT 1)"), TC],
+    [q("SELECT 1 WHERE EXISTS (TABLE thoughts)"), "thoughts"], [q("SELECT * FROM w UNION DISTINCT TABLE thoughts"), "thoughts"], [q("TABLE thoughts UNION SELECT * FROM w"), "thoughts"],
+    [q("WITH thoughts AS (SELECT 1) TABLE public.thoughts"), "thoughts"], [q("SELECT * FROM w JOIN x ON x.a = ARRAY[s.b, s.thoughts]"), ""],
+    [q("SELECT (t.*) FROM thoughts t"), "thoughts"], [q("SELECT thought_changes.* FROM thought_changes(1) WITH ORDINALITY"), TC], [q("SELECT * INTO v FROM thoughts"), "thoughts"], [q("SELECT injoin.* FROM thoughts injoin"), "thoughts"],
   ];
   // The names are read off the masked text: a CREATE in a body or a comment, and a `$tag$` in a comment, change nothing.
   const synthetic = schemaNamesIn([["x.sql", "-- a $t$ in a comment\nCREATE FUNCTION a1() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\nDO $d$ BEGIN CREATE TABLE b1 (x int); END $d$;\n-- CREATE TABLE c1 (x int);\nCREATE TABLE IF NOT EXISTS d1 (x int);\nCREATE OR REPLACE VIEW e1 AS SELECT 1;\nCREATE UNLOGGED TABLE g1 (x int);\nCREATE MATERIALIZED VIEW IF NOT EXISTS h1 AS SELECT 1;\n/* $u$ */ CREATE FUNCTION f1() RETURNS int LANGUAGE sql AS 'SELECT 1';\n"]]);
   const namesRead = [...synthetic.functions].sort().join() === "a1,f1" && [...synthetic.relations].sort().join() === "d1,e1,g1,h1";
   const wrong = cases.filter(([t, want]) => starReads(t, names).map((h) => h.what).join() !== want);
-  const lines = starReads("const a = 1;\nconst b = sql`\n  SELECT id\n  FROM x;\n  SELECT * FROM thoughts`;", names).map((h) => h.line).join();
+  const lines = [...starReads("const a = 1;\nconst b = sql`\n  SELECT id\n  FROM x;\n  SELECT * FROM thoughts`;", names), ...starReads("a\nb\nsql`SELECT * FROM thoughts`", names)].map((h) => h.line).join();
   // The walk too: it reads each kind of file the brain's code has, and leaves the tests and benches; and the store's
   // own text, its listing put back to `*`, is found.
   const files = starReadFiles();
@@ -7144,9 +7166,9 @@ function checkStarReads() {
   const walkWrong = files === null ? [] : [...want.filter((f) => !files.includes(f)), ...["server-portable/test-store-sql.ts", "db/bench-hybrid.ts"].filter((f) => files.includes(f))];
   const store = readFileSync(join(ROOT, "server-portable/store-sql.ts"), "utf8");
   const starred = store.replace(/SELECT id, status, verdict[\s\S]*?remaining\s+FROM list_supersession_proposals/, "SELECT * FROM list_supersession_proposals");
-  if (wrong.length || !namesRead || lines !== "5" || walkWrong.length || starred === store || !starReads(starred, names).some((h) => h.what === "list_supersession_proposals(…)")
+  if (wrong.length || !namesRead || lines !== "5,3" || walkWrong.length || starred === store || !starReads(starred, names).some((h) => h.what === "list_supersession_proposals(…)")
       || !names.functions.has("thought_changes") || !names.relations.has("thoughts"))
-    fail(SELF, `check 41 no longer reads its probe as written (${JSON.stringify(wrong.map(([t]) => t))}${namesRead ? "" : "; the migrations' names misread"}; line ${lines}, not 5; walk ${JSON.stringify(walkWrong)}${starred === store ? "; the store's listing read is no longer where the probe puts it back to `*`" : ""}): a \`*\`, \`t.*\` or \`(x).*\` anywhere in a select list over a function, table or view a migration defines — through any FROM item, qualified to it or bare — TABLE and RETURNING * fail; named columns, a CTE, an uncounted function, an ON condition, a subquery's FROM, a comment, a literal and count(*) pass; the walk reads the store, db/, plugins, mcp-server, the dashboard and deploy/ and leaves tests and benches (SMD-3302)`);
+    fail(SELF, `check 41 no longer reads its probe as written (${JSON.stringify(wrong.map(([t]) => t))}${namesRead ? "" : "; the migrations' names misread"}; lines ${lines}, not 5,3; walk ${JSON.stringify(walkWrong)}${starred === store ? "; the store's listing read is no longer where the probe puts it back to `*`" : ""}): a \`*\`, \`t.*\` or \`(x).*\` anywhere in a select list over a function, table or view a migration defines — through any FROM item, qualified to it or bare — TABLE and RETURNING * fail; named columns, a CTE, an uncounted function, an ON condition, a subquery's FROM, a comment, a literal and count(*) pass; the walk reads the store, db/, plugins, mcp-server, the dashboard and deploy/ and leaves tests and benches (SMD-3302)`);
   for (const f of files ?? []) {
     for (const h of starReads(readFileSync(join(ROOT, f), "utf8"), names))
       fail(`${f}:${h.line}`, `a \`*\` over ${h.what === "RETURNING *" ? "a RETURNING" : h.what} — name the columns: a migration that adds one fails this prepared statement with 0A000 ("cached plan must not change result type") until the process restarts (check 41, SMD-3302)`);
