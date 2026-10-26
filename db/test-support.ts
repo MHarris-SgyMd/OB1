@@ -19,7 +19,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
+import { LOOPBACK_HOSTS, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -865,7 +865,9 @@ export async function secondLoopback(): Promise<string | null> {
   const token = crypto.randomUUID();
   const probe = Bun.serve({ port: 0, fetch: () => new Response(token) });
   try {
-    for (const host of ["[::1]", "127.0.0.2"]) {
+    // IPv6 loopback as connect.ts spells a URL's host: its LOOPBACK_HOSTS is the one spelling of the loopback names.
+    for (const host of [[...LOOPBACK_HOSTS].find((h) => h.startsWith("[")), "127.0.0.2"]) {
+      if (host === undefined) continue;
       const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text(), () => "");
       if (got === token) return host;
     }
