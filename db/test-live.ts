@@ -4698,6 +4698,8 @@ if (want("10")) {
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
+  let probesAsked = 0;
   /** An outage paced by probes, not the clock (SMD-3048): `down` answers each request while it lasts. */
   const outage = probePacedOutage();
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
@@ -4710,6 +4712,7 @@ if (want("10")) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       modelsNamed.push(body.model ?? "");
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
@@ -4947,7 +4950,7 @@ if (want("10")) {
   const beatsOf = async (worker: string) => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE ${`heartbeat:${worker}:%`}`) as { key: string; value: string }[];
   /**
    * Whether a follower's row says it polls: its first pass stamped, not ended, not running, with an outcome — its
-   * start stamps it running with none (SMD-3196: a follower's start stood in for by a 1.5 s sleep).
+   * start stamps it running with none (SMD-3196: a 1.5 s sleep stood in for its polling).
    */
   const polling = (value: string | undefined): boolean => {
     const b = JSON.parse(value ?? "{}") as { ended?: boolean; running?: boolean; outcome?: string | null };
@@ -5350,9 +5353,11 @@ if (want("10")) {
       }
 
       // A stop ends a probe in flight: after a timeout of 4 s the probe has the
-      // call's whole timeout, and a first stop about 1 s into it returns at
-      // once, where the probe would have run 3 s more (review pass 1; 8 s and 2 s
-      // into it before SMD-3196).
+      // call's whole timeout, and a first stop 1 s into it returns at once,
+      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
+      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // stop during the hung call takes another path, the call left to time out
+      // and no probe after it.
       {
         const stopProbe = new AbortController();
         const probeLines: string[] = [];
@@ -5366,12 +5371,14 @@ if (want("10")) {
           downUntil = Date.now() + 60_000;
           slow = await seed("Yara watched the pager while the provider hung.");
           await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
-          await Bun.sleep(5000);
+          const askedBefore = probesAsked;
+          const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
+          await Bun.sleep(1000);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status})`);
+          assert(probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${probed ? "" : "; no probe came within 15 s of the claim"})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -14478,8 +14485,10 @@ if (want("38")) {
     // transaction must begin within it, and the row's sleep start says it did.
     // The sleep begins the quiet after the capture above, and the transaction
     // about half a second after that capture, so it leads the sleep by the
-    // quiet less that half second — unless the scheduler's own start, its
-    // passes' start checks, outlasts the quiet, which 5 s leaves room for.
+    // quiet less that half second. It fails if the scheduler's own start, its
+    // passes' start checks, outlasts the quiet, or if more than the quiet
+    // passes between that capture and the transaction (the follower before
+    // stopping): the sleep then begins at once, and the lead is 0 or less.
     lines.length = 0;
     const ac2 = new AbortController();
     const late = sleepRun({ follow: true, quiet: 5, signal: ac2.signal });
@@ -14491,7 +14500,12 @@ if (want("38")) {
       [{ t: txBegan }] = await tx`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`;
       await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
-      sleptFrom = (await beat())?.slept?.from;
+      // The line comes before the row's write: polled for this sleep's mark, open (review pass 1).
+      await pollUntil(async () => {
+        const mark = (await beat())?.slept;
+        sleptFrom = mark?.to === null ? mark.from : undefined;
+        return sleptFrom !== undefined;
+      }, 5000);
       await tx`COMMIT`;
     } finally {
       tx.release();
