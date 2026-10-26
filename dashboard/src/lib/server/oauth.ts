@@ -168,7 +168,7 @@ function signedInAt(s: OAuthSettings, idToken: unknown): number | null {
 export const signedInSince = (signedAt: number | null | undefined, began: number) => typeof signedAt === 'number' && signedAt >= began - (began % 1000);
 
 /** The `gui` client's credentials, RFC 6749 §2.3.1: each half form-encoded, then base64. */
-function basic(s: OAuthSettings): string {
+export function basic(s: OAuthSettings): string {
 	const enc = (v: string) => encodeURIComponent(v).replace(/%20/g, '+');
 	return `Basic ${Buffer.from(`${enc(CLIENT_ID)}:${enc(s.secret)}`).toString('base64')}`;
 }
