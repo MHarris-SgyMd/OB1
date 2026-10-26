@@ -2053,8 +2053,11 @@ before that migration (070 from v1.9.0): upgrade the server, never run the
 `--reapply` the older preflight prints. A server left running across
 the migration fails each listing on a connection that had already listed
 ("cached plan must not change result type", the result type changed) until
-it restarts. DDL alone; no row moves; no grant is carried. Refuses by name
-without 016, 025 or 029; a re-apply is a no-op. test-schema [98] (230 rows
+it restarts: its reads asked for `*`. Since SMD-3302 every read of a function
+in the servers and db/ names its columns (check 41), so one a later migration
+adds is re-planned to the same result type. DDL alone; no row moves; no grant
+is carried. Refuses by name without 016, 025 or 029; a re-apply is a no-op.
+test-schema [98] (230 rows
 walked in pages of 200 and of 7, ties across page edges, a stale row re-judged
 under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade
 [20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,

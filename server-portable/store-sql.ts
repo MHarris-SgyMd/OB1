@@ -965,13 +965,20 @@ export class SqlStore implements ThoughtStore {
     // beside 110's, and a call both forms take (under three arguments beside
     // 029's, four beside 070's, five beside 109's) is then ambiguous (not
     // unique) and fails; seven resolve (preflight's lineage check names the
-    // leftover).
+    // leftover). Its columns by name, never `*`: a migration that adds one to
+    // the function leaves this statement's result type as it was, so the
+    // connection's prepared plan is re-planned rather than failing 0A000
+    // ("cached plan must not change result type") until the server restarts
+    // (SMD-3302). The writers' read and thought_changes' name theirs too.
     const a = opts.after;
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
-        SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean, ${opts.judgeKey ?? null}::text,
-                                                  ${a?.confidence ?? null}::numeric, ${a?.judgedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)`;
+        SELECT id, status, verdict, confidence, reason, similarity, judge_key, judged_at, reviewed_at, review_note, superseding_id,
+               older_id, older_content, older_created_at, newer_id, newer_content, newer_created_at, older_edited, newer_edited,
+               lineage, page_key, remaining
+          FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean, ${opts.judgeKey ?? null}::text,
+                                           ${a?.confidence ?? null}::numeric, ${a?.judgedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)`;
     } catch (e) {
       // list_thoughts' rule (SMD-2995): a time cast that failed is read alone, and only a cursor time Postgres cannot
       // read is the caller's, refused; anything else is the store's fault.
@@ -993,7 +1000,11 @@ export class SqlStore implements ThoughtStore {
     let read = false;
     if (rows.length) {
       try {
-        writers = await this.sql`SELECT * FROM list_proposal_writers(${this.sql.array(rows.map((r: Record<string, unknown>) => String(r.id)), "UUID")}::uuid[])`;
+        writers = await this.sql`
+          SELECT id, older_actor_name, older_actor_kind, older_trust, older_capture_only, older_superseded_by, older_lapses, older_takes,
+                 newer_actor_name, newer_actor_kind, newer_trust, newer_capture_only, newer_superseded_by, newer_lapses, newer_takes,
+                 same_capturer
+            FROM list_proposal_writers(${this.sql.array(rows.map((r: Record<string, unknown>) => String(r.id)), "UUID")}::uuid[])`;
         read = true;
       } catch (e) {
         if (!WRITERS_MISSING.test((e as Error).message)) throw e;
@@ -1008,10 +1019,12 @@ export class SqlStore implements ThoughtStore {
     // bind through sql.array (the driver has no array-literal form of its own,
     // as supersededAmong says); a null element is refused by the function.
     const rows = await this.sql`
-      SELECT * FROM thought_changes(
-        ${f.since ?? null}::timestamptz, ${f.after ?? null}::uuid,
-        ${f.agent ?? null}::text, ${f.notAgent ?? null}::text,
-        ${f.actions ? this.sql.array(f.actions, "TEXT") : null}::text[], ${f.limit}::int)`;
+      SELECT id, created_at, action, thought_id, actor_name, actor_kind, origin, source, present, head, changed, metadata_keys,
+             supersedes_before, supersedes_after, derivation
+        FROM thought_changes(
+          ${f.since ?? null}::timestamptz, ${f.after ?? null}::uuid,
+          ${f.agent ?? null}::text, ${f.notAgent ?? null}::text,
+          ${f.actions ? this.sql.array(f.actions, "TEXT") : null}::text[], ${f.limit}::int)`;
     return rows.map((r: Record<string, unknown>) => normaliseChange(r));
   }
 

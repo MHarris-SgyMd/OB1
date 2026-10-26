@@ -496,6 +496,12 @@
  *      probes it every second until its service is up, not after its 5 s
  *      default (SMD-3194); a disabled healthcheck is passed over. Its probe
  *      pins what it refuses and what it passes
+ *  41. the brain's own code (server-portable/, mcp-server/, dashboard/,
+ *      plugins/, db/; tests and benches aside) never reads `SELECT *` or
+ *      `t.*` from a function the core migrations define: the statement is
+ *      prepared, and a migration that adds a column to the function fails it
+ *      with 0A000 until the process restarts (SMD-3302); comments blanked,
+ *      strings read. Its probe pins what it refuses and what it passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -6806,6 +6812,50 @@ function checkHealthcheckStarts() {
   }
 }
 checkHealthcheckStarts();
+
+// ── 41: the brain's code names the columns it reads from a core function, never `*` (SMD-3302) ──
+/**
+ * 41: a `SELECT *` (or `t.*`) over a function the core migrations define, in the brain's own code — a server, a db/
+ * verb, a plugin, the dashboard. Bun prepares the statement, and a migration that adds a column to the function
+ * (110 added two to list_supersession_proposals) changes `*`'s result type: Postgres then refuses the connection's
+ * cached plan with 0A000, "cached plan must not change result type", on every call until the process restarts.
+ * Named columns re-plan to the same type. Comments blanked, strings read (the SQL is in them); a subquery, a table
+ * and a function no migration defines (unnest) pass. Tests and benches are not read: test-store-sql's control
+ * prepares `*` to show the failure, and a bench times `SELECT *` so every column is computed.
+ */
+const STAR_FUNCTION_DIRS = ["server-portable", "mcp-server", "dashboard", "plugins", "db"];
+const STAR_FUNCTION_RE = /\bSELECT\s+(?:DISTINCT\s+)?(?:[A-Za-z_]\w*\.)?\*(?:\s*,(?:(?!\bFROM\b)[^;])*)?\s+FROM\s+(?:"?public"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi;
+function starFunctionReads(text: string, owned: ReadonlySet<string>): string[] {
+  return [...blanked(text, false).matchAll(STAR_FUNCTION_RE)].map((m) => m[1].toLowerCase()).filter((n) => owned.has(n));
+}
+function checkStarFunctionReads() {
+  const owned = new Set(OWNED_FUNCTIONS.keys());
+  const cases: [string, number][] = [
+    ["sql`SELECT * FROM list_supersession_proposals(${a}::text)`", 1], ["SELECT p.* FROM thought_changes(NULL) p", 1],
+    ["select *, 1 from list_proposal_writers(x)", 1], ["SELECT DISTINCT * FROM public.stale_entities(i, 50)", 1],
+    ["SELECT *\n  FROM \"thought_changes\" (x)", 1],
+    ["SELECT id FROM list_supersession_proposals(x)", 0], ["SELECT * FROM thoughts WHERE id = 1", 0],
+    ["SELECT * FROM (SELECT id FROM thought_changes(x)) s", 0], ["SELECT * FROM unnest(x)", 0],
+    ["// SELECT * FROM thought_changes(x)\nconst y = 1;", 0], ["SELECT count(*) FROM thought_changes(x)", 0],
+    ["SELECT *, a FROM t WHERE x IN (SELECT 1 FROM thought_changes(x))", 0],
+  ];
+  const wrong = cases.filter(([t, n]) => starFunctionReads(t, owned).length !== n);
+  if (wrong.length || !owned.has("thought_changes"))
+    fail(SELF, `check 41 no longer reads its probe as written (${JSON.stringify(wrong.map(([t]) => t))}): a \`*\` or \`t.*\` over a core function fails, bare, qualified or quoted, after DISTINCT or before more columns; named columns, a table, a subquery, an uncounted function, a comment and count(*) pass (SMD-3302)`);
+  let names: string[];
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...STAR_FUNCTION_DIRS], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 41 is skipped)`);
+    return;
+  }
+  for (const f of names.filter((n) => /\.(?:[cm]?[jt]s|tsx)$/.test(n) && !/(?:^|\/)(?:test|bench)-[^/]*$/.test(n) && !n.includes("/node_modules/")).sort()) {
+    if (!existsSync(join(ROOT, f)) || !statSync(join(ROOT, f)).isFile()) continue;
+    for (const fn of starFunctionReads(readFileSync(join(ROOT, f), "utf8"), owned))
+      fail(f, `\`SELECT *\` from ${fn}(…) — name the columns read: a migration that adds one to the function fails this prepared statement with 0A000 ("cached plan must not change result type") until the process restarts (check 41, SMD-3302)`);
+  }
+}
+checkStarFunctionReads();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
