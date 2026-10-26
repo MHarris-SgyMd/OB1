@@ -358,6 +358,8 @@ const FUNCTIONS = [
   "subject_key_valid(text)",
   "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)",
   "ob1_drop_subject_derivation()",
+  // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
+  "ob1_client_key_set_once()",
 ];
 
 /**
