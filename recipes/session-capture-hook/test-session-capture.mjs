@@ -2667,6 +2667,11 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const calls = [];
   const thoughts = new Map(); // id → { key, content }
   let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0;
+  // A call held until a line reaches the canary's log, so two drains provably overlap (review pass 2: timing alone let them run apart).
+  let gate = null;
+  /** A gate on a log line written after it is set: an earlier case's line of the same words does not open it. */
+  const gateOn = (re) => { const g = new RegExp(re.source, "g"); return { re: g, base: (logOf(CANARY_ROOT).match(g) ?? []).length }; };
+  const gateSeen = () => (logOf(CANARY_ROOT).match(gate.re) ?? []).length > gate.base;
   const byName = (name) => { const n = String(name).toLowerCase(); if (thoughts.has(n)) return n; for (const [id, t] of thoughts) if (t.key === n) return id; return null; };
   const canary = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     if (away) return new Response("Bad Gateway", { status: 502 });
@@ -2682,7 +2687,10 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     const { name, arguments: args } = body.params;
     if (!surface.includes(name)) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } }));
     calls.push({ name, args: structuredClone(args) });
+    if (gate && !gate.opened) { for (let i = 0; i < 250 && !gateSeen(); i++) await sleep(20); gate.opened = gateSeen() ? "seen" : "timed out"; }
     if (slowMs) await sleep(slowMs);
+    if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
+    if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
     if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
     if (name === "capture_thought") {
       if (busy && /\[\[busy\]\]/.test(args.content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
@@ -2690,6 +2698,8 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
       const missing = (args.derived_from ?? []).map((d, i) => (byName(d) ? -1 : i)).filter((i) => i >= 0);
       if (missing.length) return err(`Refused: derived_from[${missing.join("], derived_from[")}] names no thought.`, { code: "DERIVED_FROM_MISSING", positions: missing });
       if (args.supersedes !== undefined && !byName(args.supersedes)) return err("Refused: no thought with the id given as supersedes.", { code: "REFUSED_SUPERSEDES_UNKNOWN" });
+      const sameText = [...thoughts].find(([, t]) => t.content === args.content);
+      if (sameText && args.client_key && !sameText[1].key) { sameText[1].key = args.client_key.toLowerCase(); return ok(`Captured as idea — id ${sameText[0]} — copies`, { id: sameText[0], existed: true, keyed: "recorded" }); }
       const held = args.client_key ? byName(args.client_key) : null;
       if (held) return ok(`Already captured — id ${held}: a thought there already has the \`client_key\` given as its id or its key, and holds other text than the one sent, so nothing was written and no model was called.`, { id: held, keyed: "matched" });
       const id = uuid(++nextId);
@@ -2700,6 +2710,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     if (!target) return err(`No thought with id ${args.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`, { code: "NOT_FOUND" });
     if (name === "update_thought") {
       if (args.supersedes && !byName(args.supersedes)) return err("Refused: no thought with the id given as supersedes.", { code: "REFUSED_SUPERSEDES_UNKNOWN" });
+      if (args.supersedes && byName(args.supersedes) === target) return err(`Refused: ${target} would close a supersedes loop.`, { code: "REFUSED_WOULD_CYCLE" });
       if (args.content !== undefined) thoughts.get(target).content = args.content;
       return ok(`Updated ${target}${target !== String(args.id).toLowerCase() ? `, named by its client_key ${String(args.id).toLowerCase()}` : ""} (content re-embedded).`, { id: target });
     }
@@ -2774,7 +2785,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   await post("capture_thought", { content: "a reply that names no id" }, { weird: true });
   const stableLog = logOf(STATE);
   assert(calls.length === 0 && !queueIn().length, `the canary's own connector, a read, a failed write and an id-less reply copy nothing (${calls.map((c) => c.name).join()})`);
-  assert(/fan-out: capture_thought did not land on stable, so it is not copied: Refused:/.test(stableLog) && /fan-out: stable's reply to capture_thought named no id, so it is not copied \(its shape: \{weird: boolean\}\)/.test(stableLog),
+  assert(/fan-out: capture_thought did not land on stable, so it is not copied: Refused:/.test(stableLog) && /fan-out: capture_thought did not land on stable, so it is not copied: its shape: \{weird: boolean\}/.test(stableLog),
     "…the failed write and the id-less reply are logged, the reply's shape and not its text");
 
   // The canary away: copies wait in its queue, in order, and land in order once it answers.
@@ -2803,10 +2814,11 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   away = true;
   for (let i = 0; i < 4; i++) await post("capture_thought", { content: `queued while away ${i}` }, captured(S(30 + i)));
   away = false;
-  slowMs = 150;
   calls.length = 0;
+  gate = gateOn(/drain: the queue is left to the drain in pid/);
   const [dA, dB] = await Promise.all([0, 1].map(() => spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } })));
-  slowMs = 0;
+  assert(gate.opened === "seen", `…the two provably overlapped: the second found the first holding the lock (${gate.opened})`);
+  gate = null;
   const posted = calls.map((c) => c.args.client_key);
   assert(dA.code === 0 && dB.code === 0 && posted.join() === [S(30), S(31), S(32), S(33)].join() && !queueIn().length,
     `two drains at once post each copy once, in order (${posted.map((k) => k?.slice(4, 8)).join()})`);
@@ -2836,20 +2848,48 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   away = true;
   for (let i = 0; i < 3; i++) await post("capture_thought", { content: `taken mid-drain ${i}` }, captured(S(40 + i)));
   away = false;
-  slowMs = 400;
   calls.length = 0;
+  gate = gateOn(/drain: took back the lock of pid \d+, silent for/);
   const first = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
-  for (let i = 0; i < 100 && !calls.length; i++) await sleep(20);
+  for (let i = 0; i < 250 && !calls.length; i++) await sleep(20);
   const stalled = new Date(Date.now() - 20 * 60_000);
   utimesSync(LOCK, stalled, stalled);
   const second = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
   await Promise.all([first, second]);
-  slowMs = 0;
+  assert(gate.opened === "seen", `…the second provably took the lock back from the first, mid-drain (${gate.opened})`);
+  gate = null;
   const once = calls.map((c) => c.args.client_key);
   // The copy the old holder had in flight is the one both may post (its key lands it as one thought); every later copy
   // is posted once, by the new holder, and none is left.
   assert(once.filter((x) => x === S(40)).length <= 2 && [S(41), S(42)].every((k) => once.filter((x) => x === k).length === 1) && !queueIn().length,
     `a drain whose lock was taken back stops after its copy in flight: the rest posted once, none left (${once.map((k) => k?.slice(4, 8)).join()})`);
+
+  // Review pass 2: a capture matched by key on stable wrote nothing there, so nothing is copied; a fault's reply is not a
+  // success; an edit named by its client_key on stable is copied by the id stable answered.
+  calls.length = 0;
+  await post("capture_thought", { content: "text stable never stored", client_key: S(70) }, { content: [{ type: "text", text: `Already captured — id ${S(70)}: a thought there already has the \`client_key\` given.` }], structuredContent: { id: S(70), keyed: "matched" } });
+  await post("update_thought", { id: S(1), content: "x" }, [{ type: "text", text: "update_thought failed: the REST core did not answer" }]);
+  await post("delete_thought", { id: S(1) }, { content: [{ type: "text", text: "delete_thought failed: x" }], structuredContent: { code: "FAILED" } });
+  assert(calls.length === 0 && /capture_thought matched a thought already on stable by its client_key and wrote nothing, so nothing is copied/.test(logOf(STATE)) && /update_thought did not land on stable, so it is not copied: update_thought failed/.test(logOf(STATE)),
+    `a capture stable matched by key, and a write whose reply is a fault, copy nothing (${calls.map((c) => c.name).join()})`);
+  await post("update_thought", { id: "0aaaaaaa-0000-4000-8000-000000000000", metadata_patch: { note: "by key" } }, { content: [{ type: "text", text: `Updated ${S(1)}, named by its client_key 0aaaaaaa-0000-4000-8000-000000000000 (metadata merged).` }], structuredContent: { id: S(1), byClientKey: "0aaaaaaa-0000-4000-8000-000000000000" } });
+  assert(calls.at(-1)?.name === "update_thought" && calls.at(-1).args.id === S(1), `an edit stable reached by a client_key is copied by the id stable answered (${calls.at(-1)?.args.id})`);
+  // A capture of text the canary already holds lands on that thought, and the log says so.
+  thoughts.set(uuid(7900), { key: null, content: "a thought the canary alone had" });
+  await post("capture_thought", { content: "a thought the canary alone had" }, captured(S(71)));
+  assert(byName(S(71)) === uuid(7900) && /copied capture_thought \(client_key 00009071-[^)]*\) → 00007900-0000-4000-8000-000000000000, recorded onto a thought already there by the same text/.test(logOf(CANARY_ROOT)),
+    "a capture whose text the canary already holds is recorded onto that thought, the log saying so");
+  // A fault on the canary holds the queue; metadata it refuses is dropped and the capture sent again; a supersedes that
+  // would close a loop there is dropped.
+  calls.length = 0;
+  const flt = await post("capture_thought", { content: "[[fault]] a copy met by the canary's fault" }, captured(S(72)));
+  assert(flt.code === 1 && queueIn().length === 1 && /kept: capture_thought .* update_thought failed: the REST core did not answer/.test(flt.err), `a fault (FAILED, no retryable) holds the queue, not given up (${flt.err.trim().slice(0, 120)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  const meta = await post("capture_thought", { content: "[[meta]] a copy with metadata the canary reserves", metadata: { reserved_x: "1" } }, captured(S(73)));
+  assert(meta.code === 0 && !("metadata" in calls.at(-1).args) && byName(S(73)) && /\(dropped: metadata\)/.test(logOf(CANARY_ROOT)), "metadata the canary refuses is dropped and the capture lands, the log saying so");
+  const cyc = await post("update_thought", { id: S(73), supersedes: S(73) }, [{ type: "text", text: `Updated ${S(73)} (now supersedes ${S(73)}).` }]);
+  assert(cyc.code === 0 && !queueIn().length && /skipped update_thought of 00009073-[^:]*: its only change, supersedes/.test(logOf(CANARY_ROOT)), "a supersedes that would close a loop there is dropped, an edit of nothing else skipped");
 
   // A copy the canary cannot validate is given up, not kept for ever behind a key's remedy (review pass 1).
   calls.length = 0;
@@ -2923,18 +2963,18 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   assert(det.code === 0 && det.ms < 2000 && calls[0]?.args.client_key === S(8), `as a hook, the copy is posted by a detached child and the hook returns at once (${det.ms} ms)`);
 
   // Copies a drain left (the canary away) get a drain at the session's next event, without a new write.
-  for (let i = 0; i < 40 && existsSync(join(CANARY_ROOT, "writes", "drain.lock")); i++) await sleep(50);
+  for (let i = 0; i < 100 && existsSync(join(CANARY_ROOT, "writes", "drain.lock")); i++) await sleep(50);
+  assert(!existsSync(join(CANARY_ROOT, "writes", "drain.lock")), "the detached child let its lock go");
   away = true;
   await post("capture_thought", { content: "Left in the queue" }, captured(S(10)));
   away = false;
   calls.length = 0;
-  // Tried within five minutes: a session event leaves the held queue for the next write (review pass 1: every Stop turn retried it).
-  await runHook({ session_id: "s-fan-soon", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
-  assert(!calls.some((c) => c.args.client_key === S(10)) && queueIn().length === 1, "a queue held within five minutes is not retried at every session event");
-  const longAgo = new Date(Date.now() - 6 * 60_000);
-  utimesSync(join(CANARY_ROOT, "writes", "held"), longAgo, longAgo);
+  // Tried within five minutes: a mid-session event leaves the held queue for the next write (review pass 1: every Stop
+  // turn retried it) — but a session's end tries it at once, its last chance before the next session (review pass 2).
+  await runHook({ session_id: "s-fan-soon", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, env);
+  assert(!calls.some((c) => c.args.client_key === S(10)) && queueIn().length === 1, "a queue held within five minutes is not retried at a compaction");
   await runHook({ session_id: "s-fan-end", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
-  assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length && !existsSync(join(CANARY_ROOT, "writes", "held")), "…past them, a session's next event drains the copies a drain left, and the stamp goes");
+  assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length && !existsSync(join(CANARY_ROOT, "writes", "held")), "…a session's end drains it at once, and the stamp goes");
   canary.stop(true);
 }
 

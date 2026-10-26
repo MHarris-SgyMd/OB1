@@ -73,7 +73,7 @@
  * chains and log: a brain away delays no other).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync, linkSync } from "node:fs";
 import { join, basename, relative, isAbsolute, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
@@ -2458,33 +2458,46 @@ export function fanOutPlan(hook, brains) {
   const targets = brains.filter((b) => b !== source && b.cfg.writeKey);
   if (!targets.length) return { skip: `${tool} through ${server}: no other brain has a write_key, so nothing is copied` };
   const input = hook.tool_input && typeof hook.tool_input === "object" && !Array.isArray(hook.tool_input) ? hook.tool_input : {};
-  const text = resultText(hook.tool_response);
+  const resp = hook.tool_response;
+  const text = resultText(resp);
+  const first = text.split("\n")[0];
+  const sc = resp && typeof resp === "object" && !Array.isArray(resp) ? (resp.structuredContent ?? resp.result?.structuredContent) : undefined;
+  const scId = typeof sc?.id === "string" && new RegExp(`^${UUID}$`, "i").test(sc.id) ? sc.id.toLowerCase() : undefined;
   // A write that failed reaches PostToolUseFailure, not this hook; a result
-  // that reads as an error is never copied all the same.
-  if (resultIsError(hook.tool_response, text)) return { skip: `${tool} did not land on ${source.name}, so it is not copied: ${oneLine(text).slice(0, 120)}` };
+  // that reads as an error is never copied all the same — a refusal's or a
+  // fault's code, or a reply that is not the tool's success: `Captured as`,
+  // `Updated`, `Deleted` (review pass 2: a fault's `update_thought failed: …`
+  // read as a success).
+  const success = { capture_thought: /^Captured as /, update_thought: /^Updated /, delete_thought: /^Deleted / }[tool];
+  if (resultIsError(resp, text) || typeof sc?.code === "string" || !(success.test(first) || (scId && !/^Already captured\b/.test(first) && sc?.keyed !== "matched")))
+    return { skip: /^Already captured\b/.test(first) || sc?.keyed === "matched"
+      // The key named a thought already there: nothing was written on the first brain, so nothing is copied (review pass 2).
+      ? `capture_thought matched a thought already on ${source.name} by its client_key and wrote nothing, so nothing is copied`
+      : `${tool} did not land on ${source.name}, so it is not copied: ${oneLine(text).slice(0, 120) || `its shape: ${shapeOf(resp)}`}` };
   let args;
   if (tool === "capture_thought") {
     // The id the first brain gave it: the result's structured id where the
     // shape carries one, else the reply's first line — `Captured as <type> —
-    // id <uuid>` (the type is the model's, up to 40 characters, so the id is
-    // the one after it, never one a type spells) or `Already captured — id
-    // <uuid>` (review pass 1).
-    const sc = hook.tool_response && typeof hook.tool_response === "object" && !Array.isArray(hook.tool_response) ? (hook.tool_response.structuredContent ?? hook.tool_response.result?.structuredContent) : undefined;
-    const first = text.split("\n")[0];
-    const id = (typeof sc?.id === "string" && new RegExp(`^${UUID}$`, "i").test(sc.id) ? sc.id : undefined)
-      ?? new RegExp(`^(?:Captured as .*? — id|Already captured — id) (${UUID})\\b`, "i").exec(first)?.[1]
-      ?? new RegExp(`^(?:Captured as|Already captured)\\b.*\\bid (${UUID})\\b`, "i").exec(first)?.[1];
-    if (!id) return { skip: `${source.name}'s reply to capture_thought named no id, so it is not copied (its shape: ${shapeOf(hook.tool_response)})` };
+    // id <uuid>`, the type the model's, up to 40 characters, so the id is the
+    // one after it, never one a type spells (review pass 1).
+    const id = scId
+      ?? new RegExp(`^Captured as .*? — id (${UUID})\\b`, "i").exec(first)?.[1]
+      ?? new RegExp(`^Captured as\\b.*\\bid (${UUID})\\b`, "i").exec(first)?.[1];
+    if (!id) return { skip: `${source.name}'s reply to capture_thought named no id, so it is not copied (its shape: ${shapeOf(resp)})` };
     if (typeof input.content !== "string") return { skip: "capture_thought's input carried no content, so it is not copied" };
     args = { ...pick(input, ["content", "derived_from", "supersedes", "source", "trust", "metadata"]), client_key: id.toLowerCase() };
-  } else if (tool === "update_thought") {
-    // `if_unchanged_since` is the first brain's clock: the copy is always newer, so it is not sent.
-    args = pick(input, ["id", "content", "metadata_patch", "supersedes"]);
-    if (typeof args.id !== "string") return { skip: "update_thought's input carried no id, so it is not copied" };
-    if (Object.keys(args).length === 1) return { skip: `update_thought of ${args.id} changed nothing a copy carries, so it is not copied` };
   } else {
-    args = pick(input, ["id", "detach_citations"]);
-    if (typeof args.id !== "string") return { skip: "delete_thought's input carried no id, so it is not copied" };
+    // The thought by the id the first brain answered: a name the caller gave
+    // as a client_key resolved there to the thought's own id, which is the
+    // copy's key (review pass 2); else the name as sent.
+    const answered = scId ?? new RegExp(`^(?:Updated|Deleted) (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+    args = tool === "update_thought"
+      // `if_unchanged_since` is the first brain's clock: the copy is always newer, so it is not sent.
+      ? pick(input, ["id", "content", "metadata_patch", "supersedes"])
+      : pick(input, ["id", "detach_citations"]);
+    if (answered) args.id = answered;
+    if (typeof args.id !== "string") return { skip: `${tool}'s input carried no id, so it is not copied` };
+    if (tool === "update_thought" && Object.keys(args).length === 1) return { skip: `update_thought of ${args.id} changed nothing a copy carries, so it is not copied` };
   }
   return { source, targets, op: { tool, args, from: source.name, session: typeof hook.session_id === "string" ? hook.session_id : null, at: new Date().toISOString() } };
 }
@@ -2513,27 +2526,40 @@ export const pendingWrites = () => (existsSync(WRITES_PENDING()) ? readdirSync(W
 function takeDrainLock() {
   mkdirSync(WRITES_DIR(), { recursive: true, mode: 0o700 });
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Made whole: the pid written to a file of this process's own, then
+    // linked into place — the link fails if a lock is there — so no drain
+    // ever reads a lock still empty, judges it stale and takes it from the
+    // drain making it (review pass 2: the two-drain case caught one doing
+    // so, and both stopped).
+    const mine = `${DRAIN_LOCK()}.new.${process.pid}`;
     try {
-      const fd = openSync(DRAIN_LOCK(), "wx", 0o600);
-      writeFileSync(fd, String(process.pid));
-      closeSync(fd);
+      writeFileSync(mine, String(process.pid), { mode: 0o600 });
+      linkSync(mine, DRAIN_LOCK());
+      unlinkSync(mine);
       return true;
     } catch (e) {
+      try { unlinkSync(mine); } catch { /* not made */ }
       if (e?.code !== "EEXIST") throw e;
       let pid = NaN, age = 0;
       try { pid = Number(readFileSync(DRAIN_LOCK(), "utf8").trim()); age = Date.now() - statSync(DRAIN_LOCK()).mtimeMs; } catch { continue; } // gone between the two: try again
-      if (Number.isInteger(pid) && pid !== process.pid && isAlive(pid) && age < DRAIN_LOCK_MAX_AGE_MS) return false;
+      if (liveLock(pid, age)) { log(`drain: the queue is left to the drain in pid ${pid}`); return false; }
       const aside = `${DRAIN_LOCK()}.${process.pid}`;
       try { renameSync(DRAIN_LOCK(), aside); } catch { continue; } // another took it back first: try for the new one
-      // Taken back only if it is still the lock judged above: one made in the gap is put back, its holder's.
-      let now = NaN;
-      try { now = Number(readFileSync(aside, "utf8").trim()); } catch { /* unreadable: judged as read */ }
-      if (now !== pid) { try { renameSync(aside, DRAIN_LOCK()); } catch { /* a third made one: theirs stands */ } return false; }
+      // Taken back only if what was moved aside is still a lock to take: its
+      // holder may have renewed it, or made a new one, in the gap — judged
+      // again on its pid AND its age (review pass 2). One still live goes back
+      // by a hard link, which fails rather than overwrite a lock made meanwhile.
+      let nowPid = pid, nowAge = age;
+      try { nowPid = Number(readFileSync(aside, "utf8").trim()); nowAge = Date.now() - statSync(aside).mtimeMs; } catch { /* unreadable: judged as read */ }
+      if (liveLock(nowPid, nowAge)) { try { linkSync(aside, DRAIN_LOCK()); } catch { /* a newer one stands */ } try { unlinkSync(aside); } catch { /* gone */ } log(`drain: the queue is left to the drain in pid ${nowPid}`); return false; }
       try { unlinkSync(aside); } catch { /* gone */ }
+      log(`drain: took back the lock of pid ${Number.isInteger(pid) ? pid : "?"}${Number.isInteger(pid) && isAlive(pid) ? `, silent for ${Math.round(age / 60_000)} min` : ", no longer running"}`);
     }
   }
   return false;
 }
+/** A lock to leave alone: another live process's, renewed within DRAIN_LOCK_MAX_AGE_MS. An unreadable one is not (review pass 2). */
+const liveLock = (pid, age) => Number.isInteger(pid) && pid > 0 && pid !== process.pid && isAlive(pid) && age < DRAIN_LOCK_MAX_AGE_MS;
 const releaseDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) === process.pid) unlinkSync(DRAIN_LOCK()); } catch { /* not ours, or gone */ } };
 /** Whether this process still holds the lock, its age reset: false once another has taken it back — the drain stops, the copy left to it. */
 const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) !== process.pid) return false; const t = new Date(); utimesSync(DRAIN_LOCK(), t, t); return true; } catch { return false; } };
@@ -2562,7 +2588,10 @@ export async function postWrite(cfg, op) {
     if (!result.isError) {
       const id = new RegExp(`\\b(${UUID})\\b`, "i").exec(text.split("\n")[0])?.[1];
       const keyed = typeof result.structuredContent?.keyed === "string" ? `, ${result.structuredContent.keyed}` : "";
-      return { done: true, line: `copied ${opLabel(op)}${id ? ` → ${id.toLowerCase()}` : ""}${keyed}${note}` };
+      // Recorded on a thought this brain already held by the same text — its own, now named by the first brain's id
+      // too, so the first brain's later edits and delete reach it (the server's rule: one text, one thought) (review pass 2).
+      const onto = result.structuredContent?.keyed === "recorded" && result.structuredContent?.existed === true ? " onto a thought already there by the same text" : "";
+      return { done: true, line: `copied ${opLabel(op)}${id ? ` → ${id.toLowerCase()}` : ""}${keyed}${onto}${note}` };
     }
     const v = verdictOf(result, text);
     // A key that cannot call the tool (a capture key in write_key): the
@@ -2572,6 +2601,10 @@ export async function postWrite(cfg, op) {
     // — kept, it would hold the queue for ever behind the wrong advice (review pass 1).
     if ((SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
     if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${note}` };
+    // A fault (FAILED: the REST core away behind the MCP server, the store
+    // restarting, a busy registry) carries no `retryable`, which verdictOf reads
+    // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
+    if (v.code === "FAILED") return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     if (v.mend === "derived" && args.derived_from) {
       const at = v.positions.filter((i) => i < args.derived_from.length);
       dropped.push(at.length ? `derived_from[${at.join(", ")}]` : "derived_from");
@@ -2579,7 +2612,16 @@ export async function postWrite(cfg, op) {
       if (!args.derived_from.length) delete args.derived_from;
       continue;
     }
-    if (v.mend === "supersedes" && typeof args.supersedes === "string") {
+    // Metadata the brain's server refuses (a key it reserves that the first
+    // brain's did not): dropped and sent again, as the session hook drops a
+    // summary's (review pass 2).
+    if (v.mend === "metadata" && (args.metadata !== undefined || args.metadata_patch !== undefined)) {
+      dropped.push(args.metadata !== undefined ? "metadata" : "metadata_patch");
+      delete args.metadata; delete args.metadata_patch;
+      if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, metadata_patch, this brain refuses (${oneLine(text).slice(0, 120)})` };
+      continue;
+    }
+    if ((v.mend === "supersedes" || v.code === "REFUSED_WOULD_CYCLE") && typeof args.supersedes === "string") {
       dropped.push("supersedes");
       delete args.supersedes;
       if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, supersedes, names no thought there` };
@@ -2601,11 +2643,14 @@ export async function postWrite(cfg, op) {
 export async function drainWrites(cfg) {
   const outcomes = [];
   pruneWrites();
+  const seen = new Set(); // names this drain has dealt with: one that answers ENOENT every time (a dangling link) cannot spin it (review pass 2)
   for (;;) {
     if (!takeDrainLock()) return outcomes;
     let stopped = false;
     try {
       for (const name of pendingWrites()) {
+        if (seen.has(name)) continue;
+        seen.add(name);
         // Still this drain's, its age reset before each copy: a lock another
         // took back means the rest is theirs now (review pass 1). Only a holder
         // silent past DRAIN_LOCK_MAX_AGE_MS loses it — a copy's longest is five
@@ -2616,7 +2661,7 @@ export async function drainWrites(cfg) {
         const path = join(WRITES_PENDING(), name);
         let op;
         try { op = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
-          if (e?.code === "ENOENT") continue; // the holder before this drain finished it as the lock passed: done
+          if (e?.code === "ENOENT") { try { unlinkSync(path); } catch { /* gone: the holder before finished it */ } continue; }
           moveWrite(path, WRITES_DEAD(), name);
           const o = { dead: true, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
@@ -2632,7 +2677,7 @@ export async function drainWrites(cfg) {
       }
     } finally { releaseDrainLock(); }
     if (!pendingWrites().length) clearHeld();
-    if (stopped || !pendingWrites().length) return outcomes;
+    if (stopped || !pendingWrites().some((n) => !seen.has(n))) return outcomes;
   }
 }
 
@@ -2649,11 +2694,12 @@ const heldRecently = () => { try { return Date.now() - statSync(HELD_PATH()).mti
 
 /** writes/dead/ pruned at thirty days and a temp file a writer left under writes/pending/, as pruneDead prunes the capture queue's. */
 function pruneWrites() {
-  for (const [dir, maxAge, only] of [[WRITES_DEAD(), DEAD_MAX_AGE_MS, null], [WRITES_PENDING(), CLAIM_MAX_AGE_MS, ".tmp"]]) {
+  // …and a lock a drain moved aside and was killed before removing (drain.lock.<pid>).
+  for (const [dir, maxAge, only] of [[WRITES_DEAD(), DEAD_MAX_AGE_MS, null], [WRITES_PENDING(), CLAIM_MAX_AGE_MS, /\.tmp$/], [WRITES_DIR(), CLAIM_MAX_AGE_MS, /^drain\.lock\.(?:new\.)?\d+$/]]) {
     let names = [];
     try { names = readdirSync(dir); } catch { continue; }
     for (const f of names) {
-      if (only && !f.endsWith(only)) continue;
+      if (only && !only.test(f)) continue;
       try { if (Date.now() - statSync(join(dir, f)).mtimeMs > maxAge) unlinkSync(join(dir, f)); } catch { /* gone */ }
     }
   }
@@ -2711,7 +2757,7 @@ async function checkWrites(brain, brains, tag) {
   const cfg = brain.cfg;
   if (cfg.connector) {
     const to = brains.filter((b) => b !== brain && b.cfg.writeKey).map((b) => b.name);
-    console.log(`${tag}fan-out: writes through ${cfg.connector} are copied to ${to.length ? to.join(", ") : "no brain — none has a write_key"}`);
+    console.log(`${tag}fan-out: writes through ${cfg.connector} ${to.length ? `are copied to ${to.join(", ")}` : "stay on this brain (no other brain has a write_key)"}`);
   }
   if (!cfg.writeKey) return 0;
   let tools;
@@ -2732,12 +2778,16 @@ async function checkWrites(brain, brains, tag) {
 }
 
 /** Any other hook run: a brain whose queue holds copies a drain left (it was away) gets a drain, so they land without waiting for the next write. */
-async function kickWriteDrains(brains) {
+async function kickWriteDrains(brains, { atEnd = false } = {}) {
   for (const b of brains) {
     if (!b.cfg.writeKey) continue;
     useStateRoot(b.root);
-    // A queue held on a copy tried within HELD_RETRY_MS waits for the next write or the next window (review pass 1).
-    if (pendingWrites().length && !heldRecently()) await startDrain(b, `[${b.name}] `);
+    // A queue held on a copy tried within HELD_RETRY_MS waits for the next
+    // write or the next window (review pass 1) — save at a session's end, its
+    // last chance before the next session (review pass 2). Never the session's
+    // exit: a failure here is the log's.
+    try { if (pendingWrites().length && (atEnd || !heldRecently())) await startDrain(b, `[${b.name}] `); }
+    catch (e) { log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
   }
 }
 
@@ -3054,7 +3104,7 @@ export async function main(argv) {
     code = Math.max(code, await hookForBrain(hook, b, several, { minIntervalMin, harness, onSecret }));
   }
   // Copies a drain left behind (their brain away) get another drain at every session event.
-  await kickWriteDrains(brains);
+  await kickWriteDrains(brains, { atEnd: String(hook.hook_event_name ?? "") === "SessionEnd" });
   return code;
 }
 
