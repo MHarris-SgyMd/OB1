@@ -65,8 +65,10 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the forwarder (SMD-2583), and n8n under its opt-in profile
- *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
+ *      compose.yaml publishes the forwarder (SMD-2583), the break-glass
+ *      listener under the auth profile on a literal 127.0.0.1 and no knob, the
+ *      one named exception (LOOPBACK_MAPPINGS, SMD-3307), and n8n under its
+ *      opt-in profile (SMD-2210); the database, Ollama and the typed-decision tier (jev)
  *      publish through compose.host-ports.yaml, a second -f, and the
  *      observability profile's Grafana through compose.grafana-port.yaml
  *      (SMD-1849); and
@@ -77,7 +79,7 @@
  *      read the stack's project through a stub carrying compose.yaml's own
  *      `name:` on one code line that reads an env file, and name it nowhere
  *      else in code but a short list (SMD-2873).
- *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
+ *      The files are parsed with Bun.YAML (SMD-1844); no other exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
  *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
@@ -509,6 +511,15 @@
  *      reaches the result is read too). Its probe pins what it refuses and
  *      passes, the migrations' names, the line it reports, and that its walk
  *      reads each kind of file the brain's code has
+ *  42. in test-rest.ts, test-server.ts and db/test-support.ts every server
+ *      and child is held to 127.0.0.1 — Bun.serve and Bun.listen name
+ *      hostname "127.0.0.1" at their object's top level, a node listen its
+ *      host, an object giving a child PORT 0 or OB1_LISTEN_HOST that literal,
+ *      set last with no spread after it — read on the code alone (comments,
+ *      strings and regex literals blanked; a file it cannot read through is
+ *      reported): on macOS a port picked for every address can be one another
+ *      app holds on 127.0.0.1, which answers there in its place (SMD-3323);
+ *      LISTEN_EVERY_ADDRESS names the exceptions, one site each, with why
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -2319,7 +2330,8 @@ function checkSupabaseIsms() {
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
 // publishes the server (since SMD-1846 the proxy in front of it, on the same
-// knobs), plus n8n under the opt-in `orchestration` profile
+// knobs), the break-glass listener under the `auth` profile on a literal
+// 127.0.0.1 (SMD-3307), plus n8n under the opt-in `orchestration` profile
 // since SMD-2210; the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
@@ -2406,15 +2418,27 @@ function documentedEnvKnobs(pattern: RegExp) {
 const PUBLISHES: Record<string, string[]> = {
   // The forwarder, in front of the stack's one origin (SMD-1846, SMD-2583):
   // the proxy behind it is on internal networks alone and the server is
-  // `/mcp` on it, neither publishing; and n8n under `--profile orchestration`
-  // (SMD-2210): its editor, API, webhooks and MCP endpoint on loopback, for
-  // the provisioning step and an AI client on this host.
-  "compose.yaml": ["forwarder", "n8n"],
+  // `/mcp` on it, neither publishing; the break-glass listener under the auth
+  // profile (SMD-3307), on a literal 127.0.0.1 (LOOPBACK_MAPPINGS); and n8n
+  // under `--profile orchestration` (SMD-2210): its editor, API, webhooks and
+  // MCP endpoint on loopback, for the provisioning step and an AI client on
+  // this host.
+  "compose.yaml": ["forwarder", "breakglass", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   "compose.grafana-port.yaml": ["lgtm"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
+/**
+ * The named exceptions to the house form: a service whose one mapping is on a literal 127.0.0.1, with no `_BIND`
+ * knob a deploy/.env could widen — [the mapping, its documented `_PORT` knob, its default port]. The break-glass
+ * listener (SMD-3307; ADR decision 15) is the operator's way in while the authorization server is down, key
+ * sign-in to the GUI, so loopback alone is its whole point: a `BREAKGLASS_BIND=0.0.0.0` would offer key sign-in
+ * on the network, the weaker door the configured origin closes.
+ */
+const LOOPBACK_MAPPINGS: Record<string, [string, string, string]> = {
+  breakglass: ["127.0.0.1:${BREAKGLASS_PORT:-8001}:8001", "BREAKGLASS_PORT", "8001"],
+};
 /** The house form: the host port is the bind knob's own `_PORT` knob, so no mapping publishes on another's (SMD-2685: jev on `${SERVER_PORT}` would bind the proxy's port first and take its clients' keys). */
 const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{\1_PORT:-([1-9]\d*)\}:\d+$/;
 /** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
@@ -2462,6 +2486,12 @@ function publishedPortGapsIn(text: string, { documented }: { documented: Set<str
       const v = String(item);
       const line = lineOf(text, v) || lineOf(text, "ports");
       if (portFields(v) < 3) { gaps.push(["no-address", service, line, v]); continue; }
+      const literal = LOOPBACK_MAPPINGS[service];
+      if (literal && v === literal[0]) {
+        if (documented && !documented.has(literal[1])) gaps.push(["undocumented-knob", service, line, literal[1]]);
+        else { published.push(service); knobs.push([service, literal[1].replace(/_PORT$/, ""), literal[2]]); }
+        continue;
+      }
       const m = PORT_ITEM.exec(v);
       if (!m) { gaps.push(["not-house-form", service, line, v]); continue; }
       if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, line, `${m[1]}_BIND defaults to "${m[2]}"`]);
@@ -2505,6 +2535,11 @@ const PORT_PROBES: [string, string[], string[]][] = [
   [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${OTHER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
   [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8020"\n`, ["not-house-form"], []],
   [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${JEV_PORT:-08000}:8020"\n`, ["not-house-form"], []],
+  // The named loopback exception (LOOPBACK_MAPPINGS): the break-glass listener's literal, and no other spelling or service.
+  [`services:\n  breakglass:\n    ports:\n      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"\n`, [], ["breakglass"]],
+  [`services:\n  breakglass:\n    ports:\n      - "0.0.0.0:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["not-house-form"], []],
+  [`services:\n  breakglass:\n    ports:\n      - "\${BREAKGLASS_BIND:-127.0.0.1}:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["undocumented-knob"], []],
+  [`services:\n  forwarder:\n    ports:\n      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["not-house-form"], []],
   // What reaches outside the file, or the host, without a ports: item.
   [`services:\n  postgres:\n    extends:\n      file: base/pg.yaml\n      service: pg\n`, ["extends"], []],
   [`include:\n  - other.yaml\nservices:\n  server:\n    ports:\n      - ${GOOD}\n`, ["include"], ["server"]],
@@ -2544,7 +2579,8 @@ const ENV_EXAMPLE_PROBES: [string, string, number][] = [
 ];
 
 function checkPublishedPorts() {
-  const knobs = documentedEnvKnobs(/_BIND$/);
+  // The _BIND knobs, and the _PORT knob of each named loopback exception, which has no _BIND.
+  const knobs = documentedEnvKnobs(new RegExp(`_BIND$|^(${Object.values(LOOPBACK_MAPPINGS).map(([, k]) => k).join("|")})$`));
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
   // The file every operator copies to deploy/.env: a live line there is a setting every stack brought up from it runs with, whatever compose.yaml's fallback says, and no check renders it (CI writes its own .env). A live _BIND line put the stack on the network (SMD-1844); a COMPOSE_PROJECT_NAME there renames the project, a COMPOSE_FILE adds a file no check reads, a _PORT moves a mapping onto another's port (SMD-2685 review pass 3). So the live lines are exactly the keys an operator must fill in.
@@ -2579,7 +2615,7 @@ function checkPublishedPorts() {
       }
     }
   }
-  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
+  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND", "BREAKGLASS_PORT"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
     const gotKinds = got.gaps.map((g) => g[0]);
@@ -3052,6 +3088,7 @@ const KNOB_SERVICE_ONLY: Record<string, string> = {
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): compose.yaml's x-hook-env, merged by the REST core alone — no other service serves a webhook, so none is handed the secrets",
 };
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_LISTEN_HOST: "the one address a server run outside the stack listens on — a suite's child on 127.0.0.1 (SMD-3323); a container is reached on the mesh, so it listens on every address, and a value forwarded from deploy/.env would cut it off from the proxy",
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
@@ -6301,8 +6338,11 @@ const ROOT_ROLE: TransportRole = {
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
-    // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
-    ["./auth.ts", new Set(["routable"])],
+    // The request rebuilt where its URL will not parse (SMD-2535), and the address listened on (SMD-3323), in auth.ts so
+    // the vendored copies have them (SMD-2595).
+    ["./auth.ts", new Set(["listenHostFrom", "routable"])],
+    // This host's addresses, so an OB1_LISTEN_HOST it does not have stops the server in words (SMD-3323): no store.
+    ["node:os", new Set(["networkInterfaces"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
@@ -6737,8 +6777,10 @@ const meshName = (kind: "mcp" | "api") => `${kind}.ob1.internal`;
 // compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
 // tables from them.
 /** A router, its `middlewares:` line left out when `mw` is "" (a router with none, as /mcp and /health have had since SMD-2532 took not-legacy away). */
-const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
-  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
+const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string, entry = "web") =>
+  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [${entry}]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
+/** A headers middleware setting one request header (an empty value deletes it). */
+const routeHeader = (name: string, header: string, value: string) => `    ${name}:\n      headers:\n        customRequestHeaders:\n          ${header}: "${value}"\n`;
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
@@ -7181,6 +7223,425 @@ function checkStarReads() {
   }
 }
 checkStarReads();
+// ── 42: a suite's servers listen on 127.0.0.1, where they are reached (SMD-3323) ──
+/**
+ * 42: in test-rest.ts, test-server.ts and db/test-support.ts, every server and child is held to 127.0.0.1
+ * (listenSites says how each is read: a Bun.serve or Bun.listen call's own `hostname`, a node-style `.listen(`'s
+ * host, an object giving a child `PORT` 0 or naming `OB1_LISTEN_HOST`, each that literal, set last and with no
+ * spread after it). Listening on every address, a server can be handed, on macOS, a port another app (Tailscale, a
+ * VM's port forwarder) holds on 127.0.0.1, which then answers 127.0.0.1 at that port in its place: 8 of 18,000
+ * binds on every address took such a port, 0 of 18,000 on 127.0.0.1, and test-rest failed 7–8 runs in 300 under
+ * load from it. No suite sees a server put back on every address (the collision is rare, and Linux has none), so
+ * this does. Code alone is read (codeOnly): a quote in a comment, a regex literal or a `//` in a string earlier on
+ * the line does not carry the reading past a call or skip one, and a `hostname` nested, commented or quoted inside
+ * the call is not its own (review pass 2 found the first form's reading of a test-server provider ran 16,842
+ * characters past it on an apostrophe). A file the reader cannot read through is reported, never passed (review
+ * pass 3). LISTEN_EVERY_ADDRESS names each server or child that must listen on every address, by its file and a
+ * fragment that names it and no other, with why; a fragment that names none, several, or one already held is
+ * reported. Its probe pins each of these. The ticket's PR 2 widens the file list to the other suites.
+ */
+const LISTEN_LOOPBACK_FILES = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts"];
+const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
+  ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
+  ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
+  ["server-portable/test-rest.ts", "OB1_LISTEN_HOST: value", "[11b]'s refusing children: told a value that is no address, or none the host has, they exit before they serve"],
+  ["server-portable/test-rest.ts", 'OB1_LISTEN_HOST: "  "', "[11b]'s blank child: on every address on purpose, asked only at the second loopback address"],
+  ["server-portable/test-server.ts", "OB1_LISTEN_HOST: LISTEN_PLANTED", "the MCP server's refusing child: told a planted value, it exits before it serves"],
+  ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
+];
+/**
+ * `text` as code alone, offsets kept: each comment, each string's and template literal's text and each regex
+ * literal's body blanked to spaces (newlines kept), the quotes and backticks left, so a quoted key still reads as
+ * one and no quote, parenthesis or brace inside them is counted. `openAt` is where a template or a `${` opened that
+ * the text ends inside (-1 for none): a reading that ran on, which the check reports at its line rather than trusts.
+ */
+function codeOnly(text: string): { code: string; openAt: number } {
+  const out = text.split("");
+  const n = text.length;
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < Math.min(to, n); k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  // Per `${` still open, the braces opened inside it: its `}` is the one met at zero; and where each opened.
+  const open: number[] = [];
+  const openedAt: number[] = [];
+  let unclosedAt = -1;
+  const KEYWORD = /^(return|typeof|case|in|of|void|delete|throw|new|yield|await|else|do|default)$/;
+  /** The word ending at `k`, and whether a `.` comes before it (a property, not a keyword). */
+  const wordAt = (k: number) => {
+    let w = k;
+    while (w >= 0 && /[\w$]/.test(out[w])) w--;
+    let p = w;
+    while (p >= 0 && /\s/.test(out[p])) p--;
+    return { word: out.slice(w + 1, k + 1).join(""), dotted: out[p] === "." };
+  };
+  /** Whether a `/` at `at` starts a regex: where an expression starts, not after a value. */
+  const startsRegex = (at: number): boolean => {
+    let k = at - 1;
+    while (k >= 0 && /\s/.test(out[k])) k--;
+    if (k < 0) return true;
+    const ch = out[k];
+    // `a++ / 2`, `a-- / 2`: a postfix operator ends a value. `x! / 2`: TypeScript's non-null assertion does too,
+    // where the `!` follows a value with no space; `!/re/` negates a regex.
+    if ((ch === "+" || ch === "-") && out[k - 1] === ch) return false;
+    if (ch === "!" && k > 0 && /[\w$)\]]/.test(out[k - 1])) {
+      const before = wordAt(k - 1);
+      return !before.dotted && KEYWORD.test(before.word); // `return!/re/` negates; `x! / 2` divides
+    }
+    if (/[(,=:[!&|?{};+\-*%<>~^]/.test(ch)) return true;
+    // A keyword, not a property named like one (`a.of / 2`).
+    const { word, dotted } = wordAt(k);
+    return !dotted && KEYWORD.test(word);
+  };
+  // Template text from `from` to its closing backtick or its next `${`.
+  const template = (from: number): number => {
+    let j = from;
+    while (j < n && text[j] !== "`" && !(text[j] === "$" && text[j + 1] === "{")) j += text[j] === "\\" ? 2 : 1;
+    blank(from, j);
+    if (j >= n) {
+      unclosedAt = from - 1;
+      return n;
+    }
+    if (text[j] === "$") {
+      open.push(0);
+      openedAt.push(j);
+      return j + 2;
+    }
+    return j + 1;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === "/" && d === "/") {
+      const e = text.indexOf("\n", i);
+      const end = e < 0 ? n : e;
+      blank(i, end);
+      i = end;
+    } else if (c === "/" && d === "*") {
+      const e = text.indexOf("*/", i + 2);
+      const end = e < 0 ? n : e + 2;
+      blank(i, end);
+      i = end;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+      blank(i + 1, j);
+      i = j + 1;
+    } else if (c === "`") {
+      i = template(i + 1);
+    } else if (c === "}" && open.length && open[open.length - 1] === 0) {
+      open.pop();
+      openedAt.pop();
+      i = template(i + 1);
+    } else if (c === "/" && startsRegex(i)) {
+      let j = i + 1;
+      let cls = false;
+      while (j < n && text[j] !== "\n") {
+        if (text[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (text[j] === "[") cls = true;
+        else if (text[j] === "]") cls = false;
+        else if (text[j] === "/" && !cls) break;
+        j++;
+      }
+      blank(i + 1, j);
+      i = j + 1;
+    } else {
+      if (c === "{" && open.length) open[open.length - 1]++;
+      else if (c === "}" && open.length) open[open.length - 1]--;
+      i++;
+    }
+  }
+  return { code: out.join(""), openAt: unclosedAt >= 0 ? unclosedAt : openedAt.length ? openedAt[0] : -1 };
+}
+
+/**
+ * Each bracket's partner in `code`, in one pass: `match[i]` for an opening or closing bracket at `i`, -1 where it
+ * has none. `unpairedAt` is the first closing bracket that meets another kind's opening or none, else the first
+ * opening left open, else -1.
+ */
+function bracketsOf(code: string): { match: Int32Array; unpairedAt: number } {
+  const match = new Int32Array(code.length).fill(-1);
+  const stack: number[] = [];
+  const pair: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  let unpairedAt = -1;
+  for (let k = 0; k < code.length; k++) {
+    const c = code[k];
+    if (c === "(" || c === "[" || c === "{") stack.push(k);
+    else if (c === ")" || c === "]" || c === "}") {
+      const o = stack.pop();
+      if (o === undefined || code[o] !== pair[c]) {
+        if (unpairedAt < 0) unpairedAt = k;
+        continue;
+      }
+      match[o] = k;
+      match[k] = o;
+    }
+  }
+  return { match, unpairedAt: unpairedAt >= 0 ? unpairedAt : stack.length ? stack[0] : -1 };
+}
+
+/** The parts of a bracketed list (an argument list, an object's entries) split at its own commas: [start, end) each. */
+function partsOf(code: string, match: Int32Array, open: number): [number, number][] {
+  const close = match[open];
+  const parts: [number, number][] = [];
+  let start = open + 1;
+  for (let k = open + 1; k < close; k++) {
+    const c = code[k];
+    if ((c === "(" || c === "[" || c === "{") && match[k] > k) k = match[k];
+    else if (c === ",") {
+      parts.push([start, k]);
+      start = k + 1;
+    }
+  }
+  if (code.slice(start, close).trim()) parts.push([start, close]);
+  return parts;
+}
+
+/** `text` between the first and last character of code in [a, b): a value's source, comments around it left out. */
+function sourceOf(text: string, code: string, a: number, b: number): string {
+  let s = a;
+  let e = b;
+  while (s < e && /\s/.test(code[s])) s++;
+  while (e > s && /\s/.test(code[e - 1])) e--;
+  return text.slice(s, e);
+}
+
+/** An object literal's own entries in order: each key and its value's source, or a spread. */
+type Entry = { key: string; value: string } | { spread: true };
+function entriesOf(text: string, code: string, match: Int32Array, open: number): Entry[] {
+  if (match[open] < 0) return [];
+  const entries: Entry[] = [];
+  for (const [a, b] of partsOf(code, match, open)) {
+    const part = code.slice(a, b);
+    if (/^\s*\.\.\./.test(part)) {
+      entries.push({ spread: true });
+      continue;
+    }
+    const m = /^\s*(?:([A-Za-z_$][\w$]*)|(["'])\s*\2)\s*:/.exec(part);
+    if (!m) {
+      // A computed key could be any key, as a spread could; a method, getter, setter or shorthand of a name sets
+      // that key to no literal.
+      if (/^\s*(?:(?:get|set|async)\s+)?\*?\s*\[/.test(part)) entries.push({ spread: true });
+      else {
+        const named = /^\s*(?:(?:get|set|async)\s+(?=[A-Za-z_$*]))?\*?\s*([A-Za-z_$][\w$]*)/.exec(part);
+        if (named) entries.push({ key: named[1], value: "" });
+      }
+      continue;
+    }
+    const quote = m[2] ? a + part.indexOf(m[2]) : -1;
+    const key = m[1] ?? text.slice(quote + 1, text.indexOf(m[2], quote + 1));
+    entries.push({ key, value: sourceOf(text, code, a + m[0].length, b) });
+  }
+  return entries;
+}
+
+/** Whether `key` is set, last, to a value `ok` takes, with no spread after it that could set it again. */
+function heldBy(entries: Entry[], key: string, ok: (value: string) => boolean): boolean {
+  let at = -1;
+  entries.forEach((e, k) => {
+    if ("key" in e && e.key === key) at = k;
+  });
+  if (at < 0) return false;
+  const e = entries[at];
+  return "key" in e && ok(e.value) && !entries.slice(at + 1).some((x) => "spread" in x);
+}
+
+const LOOPBACK_LITERAL = /^(["'`])127\.0\.0\.1\1$/;
+const isLoopback = (v: string) => LOOPBACK_LITERAL.test(v);
+
+/** One place a server or child is started, and whether it is held to 127.0.0.1. */
+type ListenSite = { line: number; what: string; loopback: boolean; text: string };
+
+/**
+ * Every place in `text` a server or child is started, each with whether it is held to 127.0.0.1:
+ * - a Bun.serve or Bun.listen call (`Bun.serve (`, `Bun?.serve(`, `Bun["serve"](`, `Bun.serve<T>(`): its object
+ *   sets `hostname` to that literal, last and with no spread after it, or names a `unix` socket; a Bun.serve or
+ *   Bun.listen named but not called (an alias this cannot follow) is a site never held, `typeof Bun.serve` aside;
+ * - a node-style `.listen(`: its second argument is that literal, or its object's `host` is, or it listens on a
+ *   path (a string that is not all digits);
+ * - an object that gives a child `PORT` 0 or names `OB1_LISTEN_HOST`: `OB1_LISTEN_HOST` is that literal, last
+ *   and with no spread after it.
+ * Code alone is read (codeOnly). A file it cannot read through — a template or `${` left open, or brackets that do
+ * not pair by kind — is one problem of its own, never a pass.
+ */
+function listenSites(text: string): ListenSite[] | { line: number; why: string } {
+  const starts = [0];
+  for (let k = 0; k < text.length; k++) if (text[k] === "\n") starts.push(k + 1);
+  const lineOf = (at: number) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= at) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+  const { code, openAt } = codeOnly(text);
+  const { match, unpairedAt } = bracketsOf(code);
+  if (openAt >= 0) return { line: lineOf(openAt), why: "a template or ${ opened here is left open where the file ends" };
+  if (unpairedAt >= 0) return { line: lineOf(unpairedAt), why: "a bracket here does not pair" };
+  const sites: ListenSite[] = [];
+  const objectAt = (paren: number): number => {
+    for (let k = paren + 1; k < code.length; k++) if (!/\s/.test(code[k])) return code[k] === "{" ? k : -1;
+    return -1;
+  };
+  // The dot form read on the code (`Bun/* c */.serve` is one), the bracket form on the text, its name a string.
+  const named = [
+    ...code.matchAll(/\bBun\s*(?:\?\.|\.)\s*(serve|listen)\b/g),
+    ...[...text.matchAll(/\bBun\s*(?:\?\.\s*)?\[\s*(["'])(serve|listen)\1\s*\]/g)].filter((m) => code.slice(m.index, m.index + 3) === "Bun").map((m) => Object.assign([m[0], m[2]], { index: m.index })),
+  ];
+  for (const m of named) {
+    const fn = m[1];
+    const after = /^\s*(?:\?\.\s*)?(?:<[^()]*>\s*)?\(/.exec(code.slice(m.index + m[0].length));
+    if (!after) {
+      if (!/\btypeof\s*$/.test(code.slice(Math.max(0, m.index - 12), m.index))) sites.push({ line: lineOf(m.index), what: `Bun.${fn} named, not called (an alias this check cannot follow)`, loopback: false, text: text.slice(m.index, m.index + m[0].length) });
+      continue;
+    }
+    const paren = m.index + m[0].length + after[0].length - 1;
+    const obj = objectAt(paren);
+    const entries = obj >= 0 ? entriesOf(text, code, match, obj) : null;
+    const loopback = entries !== null && (heldBy(entries, "hostname", isLoopback) || entries.some((e) => "key" in e && e.key === "unix"));
+    sites.push({ line: lineOf(m.index), what: `Bun.${fn}(${entries === null ? " with no object literal" : ""}`, loopback, text: text.slice(m.index, match[paren] + 1) });
+  }
+  for (const m of code.matchAll(/\.\s*listen\s*\(/g)) {
+    if (/\bBun\s*(\?\.)?\s*$/.test(code.slice(Math.max(0, m.index - 6), m.index))) continue;
+    const paren = m.index + m[0].length - 1;
+    if (match[paren] < 0) continue;
+    const args = partsOf(code, match, paren);
+    const first = args[0] ? sourceOf(text, code, ...args[0]) : "";
+    let loopback: boolean;
+    if (/^["']/.test(first)) loopback = !/^(["'])\d*\1$/.test(first); // a path; a string of digits is a port
+    else if (first.startsWith("{")) {
+      const entries = entriesOf(text, code, match, args[0][0] + code.slice(...args[0]).indexOf("{"));
+      loopback = heldBy(entries, "host", isLoopback) || entries.some((e) => "key" in e && e.key === "path");
+    } else loopback = args[1] !== undefined && isLoopback(sourceOf(text, code, ...args[1]));
+    sites.push({ line: lineOf(m.index), what: ".listen(", loopback, text: text.slice(m.index, match[paren] + 1) });
+  }
+  for (const m of code.matchAll(/\{/g)) {
+    const entries = entriesOf(text, code, match, m.index);
+    const port = entries.find((e): e is { key: string; value: string } => "key" in e && e.key === "PORT");
+    const givesPort0 = port !== undefined && /^(?:(["'`])0\1|0|String\(0\))$/.test(port.value);
+    const namesHost = entries.some((e) => "key" in e && e.key === "OB1_LISTEN_HOST");
+    if (!givesPort0 && !namesHost) continue;
+    sites.push({ line: lineOf(m.index), what: givesPort0 ? 'a child given PORT "0"' : "a child given OB1_LISTEN_HOST", loopback: heldBy(entries, "OB1_LISTEN_HOST", isLoopback), text: text.slice(m.index, match[m.index] + 1) });
+  }
+  return sites.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * The problems in `text`: one where the file cannot be read through, else each site not held to 127.0.0.1 that no
+ * `allowed` fragment names, and each fragment that names no site, more than one, or one already held (stale).
+ */
+type ListenProblem = { line: number; kind: "unread" | "site" | "exception"; msg: string };
+function listenProblems(text: string, allowed: string[] = []): ListenProblem[] {
+  const sites = listenSites(text);
+  if (!Array.isArray(sites)) return [{ line: sites.line, kind: "unread", msg: `check 42 cannot read the file through: ${sites.why}` }];
+  const out: ListenProblem[] = [];
+  const excused = new Set<ListenSite>();
+  for (const fragment of allowed) {
+    const named = sites.filter((s) => s.text.includes(fragment));
+    if (named.length !== 1) out.push({ line: 0, kind: "exception", msg: `the exception \`${fragment}\` names ${named.length} sites, not one` });
+    else if (named[0].loopback) out.push({ line: named[0].line, kind: "exception", msg: `the exception \`${fragment}\` names a site already held to 127.0.0.1` });
+    else excused.add(named[0]);
+  }
+  for (const s of sites) if (!s.loopback && !excused.has(s)) out.push({ line: s.line, kind: "site", msg: `${s.what} not held to 127.0.0.1` });
+  return out;
+}
+
+function checkLoopbackListeners() {
+  const cases: [string, number, string[]?][] = [
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response("x") });', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x") });', 0],
+    ["const s = Bun.serve({ port: 0, hostname: '127.0.0.1' });", 0],
+    ['const s = Bun.serve({\n  port: 0,\n  hostname: "127.0.0.1",\n  fetch(req) { return new Response(")"); },\n});', 0],
+    ['const s = Bun.serve({\n  port: 0,\n  fetch(req) { return new Response("hostname: \\"127.0.0.1\\""); },\n});', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "0.0.0.0", fetch });', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", tls: {}, hostname: "0.0.0.0" });', 1],
+    ['const s = Bun.serve({ port: 0, tls: { hostname: "127.0.0.1" } });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", ...opts });', 1],
+    ['const s = Bun.serve({ ...opts, hostname: "127.0.0.1" });', 0],
+    ['const s = Bun.serve({ port: 0, hostname: /* why */ "127.0.0.1" // last\n});', 0],
+    ['const s = Bun.serve({ unix: "/tmp/s.sock", fetch });', 0],
+    ['const s = Bun?.serve({ port: 0 });', 1],
+    ['const { serve } = Bun; const f = Bun.serve; f({ port: 0 });', 1],
+    ['type S = ReturnType<typeof Bun.serve>;', 0],
+    ['x = a++ / 2 + `/${q}`;\nconst s = Bun.serve({ port: 0 });\nconst u = `v`;', 1],
+    ['const t = `${n++ / 2}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const r = x! / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const r = a.of / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const ok = !/a`b/.test(x); const s = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 0],
+    ['const t = `open ${x', 1],
+    ['const t = `open\nconst s = Bun.serve({ port: 0 });', 1],
+    ['const v = a++ / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1" ];', 1],
+    ['server.listen("0", () => done());', 1],
+    ['const ok = () => { return!/\'/.test(s); }; const s = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 0],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", ["hostname"]: x });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", hostname });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", get hostname() { return "0.0.0.0"; } });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", async fetch(req) { return new Response(""); } });', 0],
+    ['const s = Bun/* c */.serve({ port: 0 });', 1],
+    ['const s = Bun.serve({\n  port: 0,\n  // hostname: "127.0.0.1",\n});', 1],
+    ['const s = Bun.serve({ port: 0, /* hostname: "127.0.0.1", */ });', 1],
+    // An apostrophe in a comment inside a bad call, a good call after it: the bad one is still read.
+    ['const a = Bun.serve({\n  port: 0,\n  // the stub\'s answer (as the provider\n  fetch: () => new Response("x"),\n});\nconst b = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 1],
+    ['const a = Bun.serve({ port: 0, fetch: (r) => new Response(r.url.replace(/"/g, "")) });\nconst b = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 1],
+    ['const a = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (r) => new Response(r.url.replace(/\\)/g, "")) });', 0],
+    ['const a = Bun.serve({\n  port: 0, hostname: "127.0.0.1",\n  // see a) above\n  fetch,\n});', 0],
+    ['const t = `a ${`b ${"c"}`} Bun.serve(`; const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(`${x}"`) });', 0],
+    ['const u = "http://x"; const s = Bun.serve({ port: 0 });', 1],
+    ["const u = `http://127.0.0.1:${p}`; const s = Bun.serve({ port: 0, fetch });", 1],
+    ['const n = x / 2; const s = Bun.serve({ port: 0, hostname: "127.0.0.1" }); const m = y / 3;', 0],
+    ['// the bare server prints Bun\'s own `warn: Bun.serve()` line', 0],
+    ['const w = "warn: Bun.serve() closed";', 0],
+    ['const s = Bun["serve"]({ port: 0 });', 1],
+    ['const s = Bun.serve ({ port: 0 });', 1],
+    ['const s = Bun.serve<{ id: number }>({ port: 0 });', 1],
+    ['const s = Bun.serve(opts);', 1],
+    ['const l = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {} });', 0],
+    ['const l = Bun.listen({ port: 0, socket: {} });', 1],
+    ['const l = Bun.listen({ unix: "/tmp/s.sock", socket: {} });', 0],
+    ['server.listen(0, "127.0.0.1", () => done());', 0],
+    ['server.listen(0, () => done());', 1],
+    ['server.listen({ port: 0, host: "127.0.0.1" });', 0],
+    ['server.listen("/tmp/s.sock");', 0],
+    ['  env: { PATH: "", PORT: "0", MCP_ACCESS_KEY: KEY },', 1],
+    ["  env: { PATH: '', PORT: '0' },", 1],
+    ['  env: { PATH: "", "PORT": "0" },', 1],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1" },', 0],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "0.0.0.0" },', 1],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", ...env },', 1],
+    ['  env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1" },', 0],
+    ['  serveChild(dir, "api.ts", { KEY: "k", OB1_LISTEN_HOST: "  " });', 1],
+    ['  env: { /* c */ "PORT": "0" },', 1],
+    ['  env: {\n    PATH: "",\n    PORT: "0",\n    OB1_LISTEN_HOST: "127.0.0.1",\n  },', 0],
+    ['  // env: { PORT: "0" }', 0],
+    ['  const env = { PORT: "8000" };', 0],
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response(token) });', 0, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response(token) });\nconst t = Bun.serve({ port: 0, fetch: () => new Response(token) });', 3, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(token) });', 1, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0 });', 2, ["new Response(token)"]],
+  ];
+  const wrong = cases.map(([t, n, allowed]) => ({ t, want: n, got: listenProblems(t, allowed ?? []).length })).filter((c) => c.got !== c.want);
+  if (wrong.length) fail(SELF, `check 42 no longer reads its probe as written (${JSON.stringify(wrong)}): code alone is read and an unreadable file reported, a call's own top-level hostname with no spread after it, a node listen's host, a child's OB1_LISTEN_HOST, and each exception naming one site still on every address (SMD-3323)`);
+  for (const f of LISTEN_LOOPBACK_FILES) {
+    if (!existsSync(join(ROOT, f))) { fail(f, `missing — check 42 holds its servers to 127.0.0.1 (SMD-3323)`); continue; }
+    const allowed = LISTEN_EVERY_ADDRESS.filter(([file]) => file === f).map(([, fragment]) => fragment);
+    for (const p of listenProblems(readFileSync(join(ROOT, f), "utf8"), allowed)) {
+      const fix = {
+        site: `on macOS a port picked for every address can be one another app holds on 127.0.0.1, which then answers there in its place; set hostname to the literal "127.0.0.1" (a node listen: its host; a child: OB1_LISTEN_HOST), last and with no spread after it, or list the site in LISTEN_EVERY_ADDRESS with why`,
+        exception: "make its fragment name exactly one site that is still on every address, or drop the entry",
+        unread: "a site after it could not be seen; mend the code there, or teach codeOnly the construct, with a probe case",
+      }[p.kind];
+      fail(p.line > 0 ? `${f}:${p.line}` : p.kind === "exception" ? SELF : f, `${p.msg} — ${fix} (check 42, SMD-3323)`);
+    }
+  }
+}
+checkLoopbackListeners();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
@@ -7261,9 +7722,12 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
   + routeRouter("dashboard", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "", "app")
+  // The break-glass entrypoint's one router (SMD-3307): the GUI, marked; web strips the marker (PROXY_SERVICE's entrypoint middleware).
+  + routeRouter("dashboard-breakglass", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "breakglass-listener", "app", "breakglass")
   + routeHealth("mcp")
   + "  middlewares:\n"
   + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + routeHeader("breakglass-listener", "X-OB1-Listener", "breakglass") + routeHeader("strip-listener", "X-OB1-Listener", "")
   + "  services:\n" + routeService("mcp", `http://${meshName("mcp")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000")
   + routeService("app", "http://app.ob1.internal.:8000");
@@ -7299,6 +7763,10 @@ const PROXY_SERVICE = {
     TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000",
     TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
     TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete",
+    TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES: "strip-listener@file",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_ADDRESS: ":8001",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_HTTP_ALIASHEADERSSTRATEGY: "delete",
     TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
     TRAEFIK_ACCESSLOG: "true",
     TRAEFIK_ACCESSLOG_FORMAT: "json",
@@ -7336,6 +7804,20 @@ const FORWARDER_SERVICE = {
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
+/**
+ * compose.yaml's break-glass listener (SMD-3307; ADR decision 15), whole but for its label (the script's, held as the
+ * forwarder's) and its logging: the forwarder's script and confinement on `--port 8001`, the proxy's `breakglass`
+ * entrypoint, which routes the GUI alone and marks it; under the auth profile alone, published on a literal
+ * 127.0.0.1 (check 13's LOOPBACK_MAPPINGS), on `edge` and `front` alone. A key sign-in reaches the GUI through it
+ * while the stack is configured, so a change to it is made here too, on purpose.
+ */
+const BREAKGLASS_SERVICE = {
+  ...FORWARDER_SERVICE,
+  profiles: ["auth"],
+  command: ["bun", "/forwarder.ts", "--port", "8001"],
+  ports: ["127.0.0.1:${BREAKGLASS_PORT:-8001}:8001"],
+  healthcheck: { ...FORWARDER_SERVICE.healthcheck, test: ["CMD-SHELL", "grep -qE ':1F41 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"] },
+};
 /** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 37's DASHBOARD_PROVIDER names the first. */
 const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
@@ -7370,11 +7852,12 @@ const MCP_SERVICE = {
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
- * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin and the configured
- * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so dropping or
- * pinning it would reopen that door), and the authorization server's secret for its `gui` client, the one secret it
- * holds, which signs the operator in through the AS while the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its
- * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin, the break-glass port
+ * and the configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off but on the
+ * break-glass port, ADR decision 16, so dropping or pinning it would reopen that door), and the authorization
+ * server's secret for its `gui` client, the one secret it holds, which signs the operator in through the AS while
+ * the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its health on its
+ * own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
  * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
  */
 const APP_SERVICE = {
@@ -7387,6 +7870,7 @@ const APP_SERVICE = {
     COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
     OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
     OB1_AUTH_SECRET_GUI: "${OB1_AUTH_SECRET_GUI:-}",
+    BREAKGLASS_PORT: "${BREAKGLASS_PORT:-8001}",
   },
   stop_grace_period: "${OB1_STOP_GRACE:-10}s",
   depends_on: { api: { condition: "service_started" } },
@@ -7668,6 +8152,14 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const fdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(forwarder, ["labels", "logging"]))), FORWARDER_SERVICE, "services.forwarder", fdiffs);
     if (fdiffs.length) flag("proxy", `${fdiffs.slice(0, 6).join("; ")}${fdiffs.length > 6 ? `; and ${fdiffs.length - 6} more` : ""} — compose.yaml's forwarder is check 28's FORWARDER_SERVICE, its label aside: it holds the stack's published port and every client's bytes, so a change to it is made there too, on purpose (SMD-2583)`);
+    // The break-glass listener, whole, its label the same script (SMD-3307).
+    const breakglass = isMapping(services.breakglass) ? services.breakglass : undefined;
+    const bdiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(breakglass, ["labels", "logging"]))), BREAKGLASS_SERVICE, "services.breakglass", bdiffs);
+    pathDiffs(breakglass && isMapping(breakglass.labels) ? breakglass.labels["ob1.forwarder"] : undefined, FORWARDER_SCRIPT, "services.breakglass.labels.ob1.forwarder", bdiffs);
+    const botherLabels = Object.keys(breakglass && isMapping(breakglass.labels) ? breakglass.labels : {}).filter((k) => k !== "ob1.forwarder");
+    if (botherLabels.length) bdiffs.push(`services.breakglass.labels carries ${botherLabels.join(", ")} beside ob1.forwarder, where its one label is its script`);
+    if (bdiffs.length) flag("proxy", `${bdiffs.slice(0, 6).join("; ")}${bdiffs.length > 6 ? `; and ${bdiffs.length - 6} more` : ""} — compose.yaml's breakglass is check 28's BREAKGLASS_SERVICE, its label the forwarder's script: it publishes the GUI's key sign-in while the stack is configured, on loopback alone, so a change to it is made there too, on purpose (SMD-3307)`);
     // The MCP server built on the REST core, whole (SMD-2287): what it holds, how it starts, its health.
     const mcp = isMapping(services.mcp) ? services.mcp : undefined;
     const mdiffs: string[] = [];
@@ -7729,7 +8221,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       if (name === "app" && file in GRAFANA_APP_ENV && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_APP_ENV[file])) flag("keys", `sets services.app.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_APP_ENV holds ${JSON.stringify(GRAFANA_APP_ENV[file])} — the overlay names the operator GUI's link to the Grafana it reaches and nothing else: any other key there steers the GUI, its origin or its REST core included (SMD-2280)`);
       continue;
     }
-    if (name === "proxy" || name === "forwarder") continue;
+    if (name === "proxy" || name === "forwarder" || name === "breakglass") continue;
     const extra = Object.keys(svc).filter((k) => !SERVICE_KEYS.includes(k));
     if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — a compose.yaml service sets only check 28's SERVICE_KEYS, which act inside its own container: \`pid: service:proxy\` with a capability wrote a route file through /proc/<pid>/root that Traefik loaded live (SMD-2685, measured), and a hook may run privileged; a key that is safe is added there on purpose`);
     const confinement = Object.fromEntries(CONFINEMENT_KEYS.filter((k) => k in svc).map((k) => [k, svc[k]]));
@@ -7743,7 +8235,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
   const wantNets = FILE_NETWORKS[file] ?? null;
   if (canonJson(doc.networks ?? null) !== canonJson(wantNets)) flag("networks", `defines networks ${JSON.stringify(doc.networks ?? null)} where check 28's FILE_NETWORKS holds ${JSON.stringify(wantNets)} — a network renamed, made external or defined twice under one name puts the proxy, or a service that answers as a backend, on another network (SMD-2658 review pass 3; SMD-2685's second key into stable's mesh)`);
   for (const [name, def] of Object.entries(services)) {
-    if (base && (name === "proxy" || name === "forwarder")) continue;
+    if (base && (name === "proxy" || name === "forwarder" || name === "breakglass")) continue;
     const got = isMapping(def) ? def.networks ?? null : null;
     const want = SERVICE_NETWORKS[file]?.[name] ?? null;
     // compose.yaml's every service is named there: one that names no network lands on compose's default, beside nothing else (SMD-2583 review pass 1: null held null).
@@ -7851,10 +8343,12 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"],
   // The forwarder and the proxy behind it (SMD-2583).
   ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
-  ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "    networks: [edge, front]\n", "    networks: [edge, front, mesh]\n"],
+  ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "      - \"${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000\"\n    networks: [edge, front]\n", "      - \"${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000\"\n    networks: [edge, front, mesh]\n"],
+  ["compose.yaml's breakglass on the mesh too, beside every backend", "compose.yaml", "      - \"127.0.0.1:${BREAKGLASS_PORT:-8001}:8001\"\n    networks: [edge, front]\n", "      - \"127.0.0.1:${BREAKGLASS_PORT:-8001}:8001\"\n    networks: [edge, front, mesh]\n"],
   ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
   ["the forwarder's inline script dialling whatever its lookup answers", "compose.yaml", "return addresses.find((a) => own.has(a.toLowerCase()) === false", "return addresses[0] ?? addresses.find((a) => own.has(a.toLowerCase()) === false"],
-  ["the forwarder's label a script other than its config's", "compose.yaml", "    labels:\n      ob1.forwarder: *forwarder\n", "    labels:\n      ob1.forwarder: \"an older script\"\n"],
+  ["the forwarder's label a script other than its config's", "compose.yaml", "    # recreates the container, as the proxy's route table does.\n    labels:\n      ob1.forwarder: *forwarder\n", "    # recreates the container, as the proxy's route table does.\n    labels:\n      ob1.forwarder: \"an older script\"\n"],
+  ["breakglass's label a script other than the forwarder's", "compose.yaml", "        target: /forwarder.ts\n    labels:\n      ob1.forwarder: *forwarder\n    ports:\n      - \"127.0.0.1", "        target: /forwarder.ts\n    labels:\n      ob1.forwarder: \"an older script\"\n    ports:\n      - \"127.0.0.1"],
   ["compose.yaml's front given a route out", "compose.yaml", "  front:\n    internal: true\n", "  front: {}\n"],
   ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.3-alpine\n"],
 ];
@@ -8525,7 +9019,7 @@ await checkPlugins();
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped", breakglass: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",

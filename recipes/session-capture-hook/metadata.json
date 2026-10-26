@@ -1,12 +1,12 @@
 {
   "name": "Session Capture Hook",
-  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan that blanks a single-line secret and refuses a multi-line key blob. The summary is derived by default; an opt-in `summary: \"model\"` has a local model — through the egress gate — rewrite it into what was decided, falling back to the derived text. Off until you paste the hooks it prints.",
+  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan that blanks a single-line secret and refuses a multi-line key blob. The summary is derived by default; an opt-in `summary: \"model\"` has a local model — through the egress gate — rewrite it into what was decided, falling back to the derived text. With several brains it can also copy each write made through one connector to the others (an async PostToolUse hook, each copy under the first brain's id as its client_key, in order). Off until you paste the hooks it prints.",
   "category": "recipes",
   "author": {
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.5.0",
+  "version": "1.6.0",
   "requires": {
     "open_brain": true,
     "services": [],
@@ -16,7 +16,7 @@
     }
   },
   "requires_skills": ["session-summary"],
-  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress", "several-brains"],
+  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress", "several-brains", "write-fan-out"],
   "difficulty": "beginner",
   "estimated_time": "10 minutes",
   "created": "2026-09-22",

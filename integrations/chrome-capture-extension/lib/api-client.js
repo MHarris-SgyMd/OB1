@@ -139,10 +139,11 @@
   const META_KEYS_MAX = 8;
   const META_VALUE_MAX = 200;
   const META_KEY_RE = /^[a-z][a-z0-9_]{1,39}$/;
-  // The brain's own keys (its extractor's tags, the source and the actor
-  // columns), and the keys a ticket's lifecycle is read from, which a
-  // capture-only key may not set: a capture naming one is refused.
-  const RESERVED_META = new Set(['people', 'action_items', 'dates_mentioned', 'topics', 'type', 'type_raw', 'source', 'actor_kind', 'actor_name', 'trust', 'embedding_model', 'metadata_extraction_failed', 'issue', 'ticket', 'status', 'status_type', 'linear_updated_at']);
+  // The brain's own keys (its extractor's tags, the source, the actor
+  // columns and the client_key a copied write keeps, SMD-3314), and the
+  // keys a ticket's lifecycle is read from, which a capture-only key may
+  // not set: a capture naming one is refused.
+  const RESERVED_META = new Set(['people', 'action_items', 'dates_mentioned', 'topics', 'type', 'type_raw', 'source', 'actor_kind', 'actor_name', 'trust', 'embedding_model', 'metadata_extraction_failed', 'client_key', 'issue', 'ticket', 'status', 'status_type', 'linear_updated_at']);
   // The keys kept first, in this order; then the platform's own (Gemini's
   // conversation and response ids, …) while there is room.
   const META_FIRST = ['content_fingerprint', 'extension_platform', 'capture_mode', 'source_type', 'conversation_id', 'conversation_title', 'page_title', 'page_url'];

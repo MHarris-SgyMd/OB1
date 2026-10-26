@@ -286,8 +286,9 @@ are ignored. The config is `scripts/commitlint.config.ts`.
 
 ## Changelog & versioning (fork changes)
 
-The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
-[`FORK.md`](FORK.md)'s "Versioning" section. A change to the fork's own code, as
+The fork is versioned `MAJOR.MINOR.PATCH` — plain SemVer from 2.0.0; 1.0.0 to 1.9.0
+carried `+upstream.<sha>` — and the rules are in [`FORK.md`](FORK.md)'s "Versioning"
+section. A change to the fork's own code, as
 opposed to a vendored contribution, records itself as a **release fragment** rather
 than by editing a hand-numbered FORK.md section:
 
@@ -307,7 +308,8 @@ than by editing a hand-numbered FORK.md section:
   cut, which records itself in `releases.json` instead (SMD-1860).
 - **A removal names its side of the version contract.** This applies to a
   fragment that removes or renames a URL, route, port or setting in a file a
-  release ships, or that deletes vendored code. It says in one sentence which
+  release ships, a flag or named value of a command a shipped image runs, or
+  that deletes vendored code. It says in one sentence which
   side of the contract the change falls on (FORK.md, "Versioning", "What the
   version contract covers"; SMD-2687). Inside the contract it is a `major`.
   Maintainer tooling and vendored code are outside it, so there it is a `minor`,

@@ -2514,7 +2514,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // refuses the edit whole, as before, and says so; an answer clears it.
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
-    const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
+    const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
     const embedsOk = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });

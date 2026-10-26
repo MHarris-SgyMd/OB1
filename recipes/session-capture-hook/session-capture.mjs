@@ -73,7 +73,7 @@
  * chains and log: a brain away delays no other).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync, linkSync } from "node:fs";
 import { join, basename, relative, isAbsolute, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
@@ -92,6 +92,8 @@ const CONFIG_SHAPE = '{"url": "http://127.0.0.1:8010/mcp", "key": "<capture key>
 const BRAINS_SHAPE = '{"brains": [{"name": "stable", "url": "http://127.0.0.1:8010/mcp", "key_file": "<path>"}, {"name": "canary", "url": "http://127.0.0.1:8011/mcp", "key_file": "<path>"}]}';
 /** A brain's name: it names a directory and prefixes every line said of that brain. */
 const BRAIN_NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** An MCP server's name as the harness spells it in a tool's name (`mcp__<server>__<tool>`): a brain's `connector` (SMD-3314). */
+const CONNECTOR_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Where the url came from, as a message names it: the variable wins over the file, as loadConfig reads them. */
 const urlSource = () => (process.env.OB1_BRAIN_URL ? "OB1_BRAIN_URL" : CONFIG_PATH);
 export const STATE_BASE = process.env.OB1_SESSION_CAPTURE_STATE
@@ -434,6 +436,7 @@ export function loadBrains() {
   if (!Array.isArray(list) || !list.length) throw new Error(`${CONFIG_PATH}'s "brains" is not a list of brains — write it as ${BRAINS_SHAPE}`);
   for (const k of ["url", "key", "key_file"]) if (cfg[k] !== undefined) throw new Error(`${CONFIG_PATH} sets "${k}" beside "brains" — set each brain's url and key inside its own entry, as ${BRAINS_SHAPE}`);
   const seen = new Set();
+  const seenConnectors = new Set();
   return list.map((b, i) => {
     if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error(`${CONFIG_PATH}'s brain ${i + 1} is not an object — write it as {"name", "url", "key" or "key_file"}`);
     const name = typeof b.name === "string" ? b.name : "";
@@ -444,7 +447,17 @@ export function loadBrains() {
     const endpoint = b.url ? endpointOf(b.url, where) : undefined;
     const key = keyOf(b);
     if (!endpoint || !key) throw new Error(`brain "${name}" in ${CONFIG_PATH} has no url or key — give it both (a capture key minted on that brain: bun server-portable/keygen.ts --name session-hook --scope capture)`);
-    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...shared } };
+    // The write fan-out (SMD-3314): `connector`, the name of the harness's MCP
+    // server whose writes reach this brain directly — its writes are copied to
+    // the others; and a `write_key` (or `write_key_file`), the key a copy is
+    // written to this brain with. Both optional: without them nothing is copied.
+    if (b.connector !== undefined && !(typeof b.connector === "string" && CONNECTOR_RE.test(b.connector))) throw new Error(`brain "${name}" in ${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)`);
+    if (b.write_key !== undefined && b.write_key_file !== undefined) throw new Error(`brain "${name}" in ${CONFIG_PATH} sets both "write_key" and "write_key_file" — give one`);
+    const writeKey = b.write_key || (b.write_key_file ? readFileSync(b.write_key_file, "utf8").trim() : "");
+    if ((b.write_key !== undefined || b.write_key_file !== undefined) && !writeKey) throw new Error(`brain "${name}" in ${CONFIG_PATH} has an empty write key — mint one on that brain: bun server-portable/keygen.ts --name claude-code --scope write`);
+    if (b.connector !== undefined && seenConnectors.has(b.connector)) throw new Error(`${CONFIG_PATH} names connector "${b.connector}" for two brains — a connector's writes reach one brain`);
+    if (b.connector !== undefined) seenConnectors.add(b.connector);
+    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...shared } };
   });
 }
 
@@ -2370,6 +2383,414 @@ async function checkBrain(cfg, tag, onSecret) {
   return 0;
 }
 
+// ── The write fan-out (SMD-3314) ─────────────────────────────────────────────
+//
+// A PostToolUse hook on the brain's write tools: each capture, edit and delete
+// that lands on the brain a connector names is repeated on every other brain
+// with a write key, through that brain's own key and its own queue. A copied
+// capture carries `client_key`: the id the first brain gave the thought, which
+// the server keeps on the copy (migration 112), so an edit or a pointer that
+// names the thought by that id finds the copy on every brain. The queue keeps
+// the first brain's order, one write at a time: a capture lands before the
+// edit or the delete of it, and a brain away holds its queue until it answers.
+
+/** The write tools a fan-out repeats. */
+export const FANOUT_TOOLS = ["capture_thought", "update_thought", "delete_thought"];
+const WRITES_DIR = () => join(STATE_DIR, "writes");
+const WRITES_PENDING = () => join(WRITES_DIR(), "pending");
+const WRITES_DEAD = () => join(WRITES_DIR(), "dead");
+const DRAIN_LOCK = () => join(WRITES_DIR(), "drain.lock");
+/** A drain lock held this long by a live process is a stalled drain's, and is taken back. */
+const DRAIN_LOCK_MAX_AGE_MS = 15 * 60_000;
+
+/**
+ * A tool's result as the harness hands it to a PostToolUse hook, as text. The
+ * shape of an MCP tool's `tool_response` is not documented, so every shape a
+ * result takes is read: a string (or the JSON of one of the others), a list of
+ * content blocks, or an object carrying them.
+ */
+export function resultText(resp) {
+  if (resp == null) return "";
+  if (typeof resp === "string") {
+    const t = resp.trim();
+    if (t.startsWith("[") || t.startsWith("{")) { try { return resultText(JSON.parse(t)); } catch { /* not JSON: the text itself */ } }
+    return resp;
+  }
+  if (Array.isArray(resp)) return resp.map((c) => (typeof c === "string" ? c : typeof c?.text === "string" ? c.text : "")).join("\n");
+  if (typeof resp === "object") {
+    if (Array.isArray(resp.content)) return resultText(resp.content);
+    if (typeof resp.text === "string") return resp.text;
+    if (typeof resp.structuredContent?.text === "string") return resp.structuredContent.text;
+    if (resp.result && typeof resp.result === "object") return resultText(resp.result);
+  }
+  return "";
+}
+
+/** Whether a result is the tool's error: its flag, where the shape carries one, else its words (a refusal, a fault, an unknown id). */
+export function resultIsError(resp, text) {
+  if (resp && typeof resp === "object" && !Array.isArray(resp) && (resp.isError === true || resp.result?.isError === true)) return true;
+  return /^\s*(?:Refused\b|Error\b|No thought with id\b|MCP error\b)/.test(text);
+}
+
+/** A value's outline for the log — its types and keys, never its text. */
+function shapeOf(v, depth = 0) {
+  if (Array.isArray(v)) return depth > 1 ? "list" : `list[${v.length ? shapeOf(v[0], depth + 1) : ""}]`;
+  if (v && typeof v === "object") return depth > 1 ? "object" : `{${Object.keys(v).slice(0, 8).map((k) => `${k}: ${shapeOf(v[k], depth + 1)}`).join(", ")}}`;
+  return v === null ? "null" : typeof v;
+}
+
+/** The named keys of an object that it holds, as they are (a null too: update_thought's `supersedes: null` clears). */
+const pick = (o, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
+
+/**
+ * What a PostToolUse hook copies, and where: `{ source, targets, op }`, or
+ * `{ skip }` — a reason to log, or null for a tool that is not the fan-out's.
+ * The source is the brain whose `connector` names the tool's server; a write
+ * through any other server (the canary's own connector, its test traffic) is
+ * that brain's alone. The targets are the other brains with a write key.
+ */
+export function fanOutPlan(hook, brains) {
+  const m = /^mcp__(.+)__([a-z_]+)$/.exec(String(hook?.tool_name ?? ""));
+  if (!m || !FANOUT_TOOLS.includes(m[2])) return { skip: null };
+  const [, server, tool] = m;
+  const source = brains.find((b) => b.cfg.connector === server);
+  if (!source) return { skip: null };
+  const targets = brains.filter((b) => b !== source && b.cfg.writeKey);
+  if (!targets.length) return { skip: `${tool} through ${server}: no other brain has a write_key, so nothing is copied` };
+  const input = hook.tool_input && typeof hook.tool_input === "object" && !Array.isArray(hook.tool_input) ? hook.tool_input : {};
+  const resp = hook.tool_response;
+  const text = resultText(resp);
+  const first = text.split("\n")[0];
+  const sc = resp && typeof resp === "object" && !Array.isArray(resp) ? (resp.structuredContent ?? resp.result?.structuredContent) : undefined;
+  const scId = typeof sc?.id === "string" && new RegExp(`^${UUID}$`, "i").test(sc.id) ? sc.id.toLowerCase() : undefined;
+  // A write that failed reaches PostToolUseFailure, not this hook; a result
+  // that reads as an error is never copied all the same — a refusal's or a
+  // fault's code, or a reply that is not the tool's success: `Captured as`,
+  // `Updated`, `Deleted` (review pass 2: a fault's `update_thought failed: …`
+  // read as a success).
+  const success = { capture_thought: /^Captured as /, update_thought: /^Updated /, delete_thought: /^Deleted / }[tool];
+  if (resultIsError(resp, text) || typeof sc?.code === "string" || !(success.test(first) || (scId && !/^Already captured\b/.test(first) && sc?.keyed !== "matched")))
+    return { skip: /^Already captured\b/.test(first) || sc?.keyed === "matched"
+      // The key named a thought already there: nothing was written on the first brain, so nothing is copied (review pass 2).
+      ? `capture_thought matched a thought already on ${source.name} by its client_key and wrote nothing, so nothing is copied`
+      : `${tool} did not land on ${source.name}, so it is not copied: ${oneLine(text).slice(0, 120) || `its shape: ${shapeOf(resp)}`}` };
+  let args;
+  if (tool === "capture_thought") {
+    // The id the first brain gave it: the result's structured id where the
+    // shape carries one, else the reply's first line — `Captured as <type> —
+    // id <uuid>`, the type the model's, up to 40 characters, so the id is the
+    // one after it, never one a type spells (review pass 1).
+    const id = scId
+      ?? new RegExp(`^Captured as .*? — id (${UUID})\\b`, "i").exec(first)?.[1]
+      ?? new RegExp(`^Captured as\\b.*\\bid (${UUID})\\b`, "i").exec(first)?.[1];
+    if (!id) return { skip: `${source.name}'s reply to capture_thought named no id, so it is not copied (its shape: ${shapeOf(resp)})` };
+    if (typeof input.content !== "string") return { skip: "capture_thought's input carried no content, so it is not copied" };
+    args = { ...pick(input, ["content", "derived_from", "supersedes", "source", "trust", "metadata"]), client_key: id.toLowerCase() };
+  } else {
+    // The thought by the id the first brain answered: a name the caller gave
+    // as a client_key resolved there to the thought's own id, which is the
+    // copy's key (review pass 2); else the name as sent.
+    const answered = scId ?? new RegExp(`^(?:Updated|Deleted) (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+    args = tool === "update_thought"
+      // `if_unchanged_since` is the first brain's clock: the copy is always newer, so it is not sent.
+      ? pick(input, ["id", "content", "metadata_patch", "supersedes"])
+      : pick(input, ["id", "detach_citations"]);
+    if (answered) args.id = answered;
+    if (typeof args.id !== "string") return { skip: `${tool}'s input carried no id, so it is not copied` };
+    if (tool === "update_thought" && Object.keys(args).length === 1) return { skip: `update_thought of ${args.id} changed nothing a copy carries, so it is not copied` };
+  }
+  return { source, targets, op: { tool, args, from: source.name, session: typeof hook.session_id === "string" ? hook.session_id : null, at: new Date().toISOString() } };
+}
+
+/** Writes a copy into the current brain's queue: a name that sorts in the order the hooks ran, written whole before it is seen. */
+export function enqueueWrite(op) {
+  mkdirSync(WRITES_PENDING(), { recursive: true, mode: 0o700 });
+  const name = `${String(Date.now()).padStart(15, "0")}-${String(process.hrtime.bigint() % 10n ** 15n).padStart(15, "0")}-${process.pid}.json`;
+  const tmp = join(WRITES_PENDING(), `.${name}.tmp`);
+  writeFileSync(tmp, JSON.stringify(op), { mode: 0o600 });
+  renameSync(tmp, join(WRITES_PENDING(), name));
+  return name;
+}
+
+/** The current brain's queued copies, oldest first. */
+export const pendingWrites = () => (existsSync(WRITES_PENDING()) ? readdirSync(WRITES_PENDING()).filter((f) => f.endsWith(".json") && !f.startsWith(".")).sort() : []);
+
+/**
+ * One drain per brain at a time: the lock, or false when a live drain holds
+ * it. Its age is the time since its holder last began a copy (drainWrites
+ * touches it before each), so a long drain is never mistaken for a stalled
+ * one; a dead holder's, or one silent past DRAIN_LOCK_MAX_AGE_MS, is taken
+ * back by renaming it aside — one process's rename wins, so two never both
+ * take it and each make a lock of its own (review pass 1).
+ */
+function takeDrainLock() {
+  mkdirSync(WRITES_DIR(), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Made whole: the pid written to a file of this process's own, then
+    // linked into place — the link fails if a lock is there — so no drain
+    // ever reads a lock still empty, judges it stale and takes it from the
+    // drain making it (review pass 2: the two-drain case caught one doing
+    // so, and both stopped).
+    const mine = `${DRAIN_LOCK()}.new.${process.pid}`;
+    try {
+      writeFileSync(mine, String(process.pid), { mode: 0o600 });
+      linkSync(mine, DRAIN_LOCK());
+      unlinkSync(mine);
+      return true;
+    } catch (e) {
+      try { unlinkSync(mine); } catch { /* not made */ }
+      if (e?.code !== "EEXIST") throw e;
+      let pid = NaN, age = 0;
+      try { pid = Number(readFileSync(DRAIN_LOCK(), "utf8").trim()); age = Date.now() - statSync(DRAIN_LOCK()).mtimeMs; } catch { continue; } // gone between the two: try again
+      if (liveLock(pid, age)) { log(`drain: the queue is left to the drain in pid ${pid}`); return false; }
+      const aside = `${DRAIN_LOCK()}.${process.pid}`;
+      try { renameSync(DRAIN_LOCK(), aside); } catch { continue; } // another took it back first: try for the new one
+      // Taken back only if what was moved aside is still a lock to take: its
+      // holder may have renewed it, or made a new one, in the gap — judged
+      // again on its pid AND its age (review pass 2). One still live goes back
+      // by a hard link, which fails rather than overwrite a lock made meanwhile.
+      let nowPid = pid, nowAge = age;
+      try { nowPid = Number(readFileSync(aside, "utf8").trim()); nowAge = Date.now() - statSync(aside).mtimeMs; } catch { /* unreadable: judged as read */ }
+      if (liveLock(nowPid, nowAge)) { try { linkSync(aside, DRAIN_LOCK()); } catch { /* a newer one stands */ } try { unlinkSync(aside); } catch { /* gone */ } log(`drain: the queue is left to the drain in pid ${nowPid}`); return false; }
+      try { unlinkSync(aside); } catch { /* gone */ }
+      log(`drain: took back the lock of pid ${Number.isInteger(pid) ? pid : "?"}${Number.isInteger(pid) && isAlive(pid) ? `, silent for ${Math.round(age / 60_000)} min` : ", no longer running"}`);
+    }
+  }
+  return false;
+}
+/** A lock to leave alone: another live process's, renewed within DRAIN_LOCK_MAX_AGE_MS. An unreadable one is not (review pass 2). */
+const liveLock = (pid, age) => Number.isInteger(pid) && pid > 0 && pid !== process.pid && isAlive(pid) && age < DRAIN_LOCK_MAX_AGE_MS;
+const releaseDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) === process.pid) unlinkSync(DRAIN_LOCK()); } catch { /* not ours, or gone */ } };
+/** Whether this process still holds the lock, its age reset: false once another has taken it back — the drain stops, the copy left to it. */
+const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) !== process.pid) return false; const t = new Date(); utimesSync(DRAIN_LOCK(), t, t); return true; } catch { return false; } };
+
+/** A copy as the log names it: the tool and the id or key it names, never its text. */
+const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${op.args.client_key})` : ` of ${op.args.id}`}`;
+
+/**
+ * One copy onto a brain, through its write key. `done` — landed, or skipped
+ * for good: the thought it names was never copied there (NOT_FOUND); `keep` —
+ * the brain did not answer, or answered a transient: the queue stops here, in
+ * order; `dead` — refused for good. A pointer the brain does not know (a
+ * thought each brain's own writers made, a board-sync row) is dropped and the
+ * write tried again, as the server's contract asks (SMD-3314 PR 1).
+ */
+export async function postWrite(cfg, op) {
+  const wcfg = { ...cfg, key: cfg.writeKey };
+  const args = structuredClone(op.args);
+  const dropped = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let result;
+    try { result = await rpc(wcfg, "tools/call", { name: op.tool, arguments: args }); }
+    catch (e) { return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(String(e?.message ?? e)).slice(0, 200)}` }; }
+    const text = textOfResult(result);
+    const note = dropped.length ? ` (dropped: ${dropped.join(", ")})` : "";
+    if (!result.isError) {
+      const id = new RegExp(`\\b(${UUID})\\b`, "i").exec(text.split("\n")[0])?.[1];
+      const keyed = typeof result.structuredContent?.keyed === "string" ? `, ${result.structuredContent.keyed}` : "";
+      // Recorded on a thought this brain already held by the same text — its own, now named by the first brain's id
+      // too, so the first brain's later edits and delete reach it (the server's rule: one text, one thought) (review pass 2).
+      const onto = result.structuredContent?.keyed === "recorded" && result.structuredContent?.existed === true ? " onto a thought already there by the same text" : "";
+      return { done: true, line: `copied ${opLabel(op)}${id ? ` → ${id.toLowerCase()}` : ""}${keyed}${onto}${note}` };
+    }
+    const v = verdictOf(result, text);
+    // A key that cannot call the tool (a capture key in write_key): the
+    // operator's to fix, and every later copy would meet it — kept, in order.
+    // Only "Tool … not found" (or disabled): the SDK answers an input it
+    // cannot validate with the same -32602, and that copy is refused for good
+    // — kept, it would hold the queue for ever behind the wrong advice (review pass 1).
+    if ((SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) || v.code === "REFUSED_CLIENT_KEY_SCOPE") return { keep: true, line: `kept: ${opLabel(op)} — the write key cannot ${v.code === "REFUSED_CLIENT_KEY_SCOPE" ? "send a client_key (a capture key)" : `call ${op.tool}`}; mint a write key on this brain (bun server-portable/keygen.ts --name claude-code --scope write) and set write_key — --check says` };
+    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${note}` };
+    // A fault (FAILED: the REST core away behind the MCP server, the store
+    // restarting, a busy registry) carries no `retryable`, which verdictOf reads
+    // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
+    if (v.code === "FAILED") return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    if (v.mend === "derived" && args.derived_from) {
+      const at = v.positions.filter((i) => i < args.derived_from.length);
+      dropped.push(at.length ? `derived_from[${at.join(", ")}]` : "derived_from");
+      args.derived_from = at.length ? args.derived_from.filter((_, i) => !at.includes(i)) : [];
+      if (!args.derived_from.length) delete args.derived_from;
+      continue;
+    }
+    // Metadata the brain's server refuses (a key it reserves that the first
+    // brain's did not): dropped and sent again, as the session hook drops a
+    // summary's (review pass 2).
+    if (v.mend === "metadata" && (args.metadata !== undefined || args.metadata_patch !== undefined)) {
+      dropped.push(args.metadata !== undefined ? "metadata" : "metadata_patch");
+      delete args.metadata; delete args.metadata_patch;
+      if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, metadata_patch, this brain refuses (${oneLine(text).slice(0, 120)})` };
+      continue;
+    }
+    if ((v.mend === "supersedes" || v.code === "REFUSED_WOULD_CYCLE") && typeof args.supersedes === "string") {
+      dropped.push("supersedes");
+      delete args.supersedes;
+      if (op.tool === "update_thought" && Object.keys(args).length === 1) return { done: true, line: `skipped ${opLabel(op)}: its only change, supersedes, names no thought there` };
+      continue;
+    }
+    if (v.retryable) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}` };
+  }
+  return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };
+}
+
+/**
+ * The current brain's queue, oldest first, one copy at a time, until it is
+ * empty or a copy is kept — the rest wait behind it, in order. One drain per
+ * brain: a drain that finds the lock held leaves the queue to its holder, and a
+ * holder looks once more after it lets go, so a copy queued meanwhile is not
+ * left behind. Returns each copy's outcome; each is also a line in the log.
+ */
+export async function drainWrites(cfg) {
+  const outcomes = [];
+  pruneWrites();
+  const seen = new Set(); // names this drain has dealt with: one that answers ENOENT every time (a dangling link) cannot spin it (review pass 2)
+  for (;;) {
+    if (!takeDrainLock()) return outcomes;
+    let stopped = false;
+    try {
+      for (const name of pendingWrites()) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        // Still this drain's, its age reset before each copy: a lock another
+        // took back means the rest is theirs now (review pass 1). Only a holder
+        // silent past DRAIN_LOCK_MAX_AGE_MS loses it — a copy's longest is five
+        // attempts at POST_TIMEOUT_MS, well inside — so the one copy such a
+        // holder had in flight is the only one two drains can both post, and
+        // its key makes the second land as the same thought.
+        if (!holdDrainLock()) { stopped = true; break; }
+        const path = join(WRITES_PENDING(), name);
+        let op;
+        try { op = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+          if (e?.code === "ENOENT") { try { unlinkSync(path); } catch { /* gone: the holder before finished it */ } continue; }
+          moveWrite(path, WRITES_DEAD(), name);
+          const o = { dead: true, line: `not copied (given up): ${name} does not parse` };
+          log(o.line); outcomes.push(o); continue;
+        }
+        let o = await postWrite(cfg, op);
+        // Kept for a week: given up, as the capture queue gives a payload up
+        // (PENDING_MAX_AGE_MS) — what it named is skipped there afterwards.
+        if (o.keep && Date.now() - Date.parse(op.at) > PENDING_MAX_AGE_MS) o = { dead: true, line: `not copied (given up after a week): ${o.line.replace(/^kept: /, "")}` };
+        log(o.line);
+        outcomes.push(o);
+        if (o.keep) { stopped = true; markHeld(name); break; }
+        if (o.dead) moveWrite(path, WRITES_DEAD(), name); else removeWrite(path); // already gone: the holder before finished it too
+      }
+    } finally { releaseDrainLock(); }
+    if (!pendingWrites().length) clearHeld();
+    if (stopped || !pendingWrites().some((n) => !seen.has(n))) return outcomes;
+  }
+}
+
+/** A copy's file moved aside, or removed: false when it is already gone (another drain's). */
+function moveWrite(path, dir, name) { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); renameSync(path, join(dir, name)); return true; } catch (e) { if (e?.code === "ENOENT") return false; throw e; } }
+function removeWrite(path) { try { unlinkSync(path); return true; } catch (e) { if (e?.code === "ENOENT") return false; throw e; } }
+
+/** The queue held on a copy: stamped, so session events try it again at most every HELD_RETRY_MS rather than at every turn (review pass 1). */
+const HELD_PATH = () => join(WRITES_DIR(), "held");
+const HELD_RETRY_MS = 5 * 60_000;
+function markHeld(name) { try { writeFileSync(HELD_PATH(), name, { mode: 0o600 }); } catch { /* a stamp failure only means an earlier retry */ } }
+function clearHeld() { try { unlinkSync(HELD_PATH()); } catch { /* none */ } }
+const heldRecently = () => { try { return Date.now() - statSync(HELD_PATH()).mtimeMs < HELD_RETRY_MS; } catch { return false; } };
+
+/** writes/dead/ pruned at thirty days and a temp file a writer left under writes/pending/, as pruneDead prunes the capture queue's. */
+function pruneWrites() {
+  // …and a lock a drain moved aside and was killed before removing (drain.lock.<pid>).
+  for (const [dir, maxAge, only] of [[WRITES_DEAD(), DEAD_MAX_AGE_MS, null], [WRITES_PENDING(), CLAIM_MAX_AGE_MS, /\.tmp$/], [WRITES_DIR(), CLAIM_MAX_AGE_MS, /^drain\.lock\.(?:new\.)?\d+$/]]) {
+    let names = [];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const f of names) {
+      if (only && !only.test(f)) continue;
+      try { if (Date.now() - statSync(join(dir, f)).mtimeMs > maxAge) unlinkSync(join(dir, f)); } catch { /* gone */ }
+    }
+  }
+}
+
+/** Drains a brain's queue: in this process under OB1_SESSION_CAPTURE_SYNC=1 (its outcomes said on stderr), else in a detached child. */
+async function startDrain(brain, tag) {
+  useStateRoot(brain.root);
+  if (process.env.OB1_SESSION_CAPTURE_SYNC === "1") {
+    const outcomes = await drainWrites(brain.cfg);
+    for (const o of outcomes) console.error(`session-capture: ${tag}${o.line}`);
+    return outcomes.some((o) => !o.done) ? 1 : 0;
+  }
+  ensureDirs();
+  const fd = openSync(LOG_PATH(), "a", 0o600);
+  const child = spawn(process.execPath, [SELF, "--drain-writes", "--brain", brain.name], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
+  child.unref();
+  closeSync(fd);
+  return 0;
+}
+
+/**
+ * The hook on PostToolUse: queue the copy on each target, then drain each.
+ * Exits 0 — a copy's fate is the log's, never the session's — save under
+ * OB1_SESSION_CAPTURE_SYNC=1, where a copy not landed is exit 1, as a capture
+ * not landed is there. A queue or drain that throws is logged, not thrown.
+ */
+async function fanOutHook(hook, brains) {
+  const sync = process.env.OB1_SESSION_CAPTURE_SYNC === "1";
+  try {
+    const plan = fanOutPlan(hook, brains);
+    if (!plan.op) {
+      if (plan.skip) { useStateRoot(brains[0].root); log(`fan-out: ${plan.skip}`); }
+      return 0;
+    }
+    for (const t of plan.targets) { useStateRoot(t.root); enqueueWrite(plan.op); log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`); }
+    let code = 0;
+    for (const t of plan.targets) code = Math.max(code, await startDrain(t, `[${t.name}] `));
+    return sync ? code : 0;
+  } catch (e) {
+    log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`);
+    if (sync) console.error(`session-capture: fan-out: ${e?.message ?? e}`);
+    return sync ? 1 : 0;
+  }
+}
+
+/**
+ * --check's lines for the fan-out, per brain: the connector whose writes are
+ * copied from it and where to; for a brain with a write key, that the key can
+ * edit and delete, that the brain keeps a client_key (a server from before
+ * migration 112 drops the argument unread, and every later edit of the copy
+ * would find nothing), and what its queue holds. Returns the exit code.
+ */
+async function checkWrites(brain, brains, tag) {
+  const cfg = brain.cfg;
+  if (cfg.connector) {
+    const to = brains.filter((b) => b !== brain && b.cfg.writeKey).map((b) => b.name);
+    console.log(`${tag}fan-out: writes through ${cfg.connector} ${to.length ? `are copied to ${to.join(", ")}` : "stay on this brain (no other brain has a write_key)"}`);
+  }
+  if (!cfg.writeKey) return 0;
+  let tools;
+  try { tools = (await rpc({ ...cfg, key: cfg.writeKey }, "tools/list", {}, 15_000)).tools ?? []; } catch (e) { console.error(`session-capture: ${tag}the write key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
+  const names = tools.map((t) => t.name);
+  const missing = FANOUT_TOOLS.filter((t) => !names.includes(t));
+  if (missing.length) { console.error(`session-capture: ${tag}the write key cannot call ${missing.join(", ")} — mint a write key on this brain: bun server-portable/keygen.ts --name claude-code --scope write`); return 1; }
+  const capture = tools.find((t) => t.name === "capture_thought");
+  if (!capture?.inputSchema?.properties?.client_key) { console.error(`session-capture: ${tag}this brain's capture_thought takes no client_key — its server is from before migration 112 (SMD-3314): upgrade it before copying writes to it`); return 1; }
+  useStateRoot(brain.root);
+  const queued = pendingWrites();
+  const dead = existsSync(WRITES_DEAD()) ? readdirSync(WRITES_DEAD()).filter((f) => f.endsWith(".json")).length : 0;
+  // The oldest copy's age: a queue held on it for long is the one thing an operator needs to see (review pass 1).
+  let oldest = "";
+  if (queued.length) { try { const at = Date.parse(JSON.parse(readFileSync(join(WRITES_PENDING(), queued[0]), "utf8")).at); if (Number.isFinite(at)) oldest = `, the oldest ${Math.max(0, Math.round((Date.now() - at) / 60_000))} min old`; } catch { /* unreadable: the drain says so */ } }
+  console.log(`${tag}write key: ok — it can capture, edit and delete, and the brain keeps a client_key. Copies queued: ${queued.length}${oldest}${dead ? `; given up: ${dead} (in ${WRITES_DEAD()})` : ""}`);
+  return 0;
+}
+
+/** Any other hook run: a brain whose queue holds copies a drain left (it was away) gets a drain, so they land without waiting for the next write. */
+async function kickWriteDrains(brains, { atEnd = false } = {}) {
+  for (const b of brains) {
+    if (!b.cfg.writeKey) continue;
+    useStateRoot(b.root);
+    // A queue held on a copy tried within HELD_RETRY_MS waits for the next
+    // write or the next window (review pass 1) — save at a session's end, its
+    // last chance before the next session (review pass 2). Never the session's
+    // exit: a failure here is the log's.
+    try { if (pendingWrites().length && (atEnd || !heldRecently())) await startDrain(b, `[${b.name}] `); }
+    catch (e) { log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
+  }
+}
+
 // ── Hook JSON to paste ───────────────────────────────────────────────────────
 
 /** A path as a shell word: quoted when it carries anything the shell would split or expand. */
@@ -2407,6 +2828,18 @@ export function hookJson(harness, { event, minInterval = 20, runtime } = {}) {
     return spec.timeout ? { type: "command", command: cmd, timeout: HARNESS[harness].timeoutSec } : { type: "command", command: cmd };
   };
   return { hooks: Object.fromEntries(events.map((ev) => [ev, [{ hooks: [handlerFor(ev)] }]])) };
+}
+
+/**
+ * The fan-out's settings JSON (SMD-3314): a PostToolUse hook on the write
+ * tools of one connector's server, anchored — `^mcp__open-brain__` would match
+ * nothing else, but the harness reads a matcher with any other character as an
+ * unanchored regex — and async, so a copy never holds the session.
+ */
+export function fanOutHookJson({ connector = "open-brain", runtime } = {}) {
+  if (!CONNECTOR_RE.test(connector)) throw new Error(`fanOutHookJson: "${connector}" is no MCP server's name`);
+  const cmd = [shellWord(runtime || process.execPath), shellWord(SELF)].join(" ");
+  return { hooks: { PostToolUse: [{ matcher: `^mcp__${connector}__(${FANOUT_TOOLS.join("|")})$`, hooks: [{ type: "command", command: cmd, async: true }] }] } };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -2490,6 +2923,21 @@ export async function main(argv) {
     if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
+    // The write fan-out's hook (SMD-3314): Claude Code's async PostToolUse, for
+    // the connector the config names on a brain (or --connector, or open-brain).
+    if (has(args, "--fan-out")) {
+      if (h !== "claude-code") { console.error(`--fan-out is Claude Code's: ${HARNESS[h].label} has no async PostToolUse hook`); return 2; }
+      for (const f of ["--event", "--min-interval", "--trigger"]) if (has(args, f)) { console.error(`${f} is the session hook's; --fan-out prints the write fan-out's PostToolUse hook alone`); return 2; }
+      let connector = flag(args, "--connector");
+      if (connector === "") { console.error("--connector <the MCP server's name>"); return 2; }
+      if (connector === undefined) { try { connector = loadBrains().find((b) => b.cfg.connector)?.cfg.connector; } catch { /* no config: the default */ } }
+      connector ??= "open-brain";
+      if (!CONNECTOR_RE.test(connector)) { console.error(`--connector takes an MCP server's name — letters, digits, hyphens and underscores — not "${connector}"`); return 2; }
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. Copies go to the brains the config gives a write_key.`);
+      console.log(JSON.stringify(fanOutHookJson({ connector }), null, 2));
+      return 0;
+    }
+    if (has(args, "--connector")) { console.error("--connector goes with --fan-out"); return 2; }
     const { event, error } = eventFlag(args); // absent: the harness's default events
     if (error) { console.error(error); return 2; }
     // A flag of the other by-hand form would validate nowhere and vanish (second review pass).
@@ -2518,10 +2966,27 @@ export async function main(argv) {
     let code = 0;
     for (const b of brains) {
       useStateRoot(b.root);
-      const c = await checkBrain(b.cfg, brains.length > 1 ? `[${b.name}] ` : "", onSecret);
-      code = Math.max(code, c);
+      const tag = brains.length > 1 ? `[${b.name}] ` : "";
+      const c = await checkBrain(b.cfg, tag, onSecret);
+      code = Math.max(code, c, await checkWrites(b, brains, tag));
     }
     return code;
+  }
+  if (has(args, "--drain-writes")) {
+    // A brain's queue of copied writes, by hand or as the hook's child (SMD-3314).
+    const brainName = flag(args, "--brain");
+    if (!brainName) { console.error("--drain-writes --brain <name> (a brain the config gives a write_key)"); return 2; }
+    let b;
+    try {
+      const brains = loadBrains();
+      b = brains.find((x) => x.name === brainName);
+      if (!b) throw new Error(`no brain named "${brainName}" in ${CONFIG_PATH} (its brains: ${brains.map((x) => x.name).join(", ")})`);
+      if (!b.cfg.writeKey) throw new Error(`brain "${brainName}" has no write_key, so nothing is copied to it`);
+    } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
+    useStateRoot(b.root);
+    const outcomes = await drainWrites(b.cfg);
+    if (process.stdout.isTTY) for (const o of outcomes) console.log(o.line);
+    return outcomes.some((o) => !o.done) ? 1 : 0;
   }
   if (has(args, "--dry-run")) {
     const path = flag(args, "--dry-run");
@@ -2626,6 +3091,8 @@ export async function main(argv) {
   // appears (fifth review pass).
   let brains;
   try { brains = loadBrains(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  // A write tool's result (SMD-3314): copied to the other brains, nothing captured.
+  if (String(hook.hook_event_name ?? "") === "PostToolUse") return fanOutHook(hook, brains);
   // Each brain prepares from its own state and posts in a child of its own
   // (SMD-3313): its chains supersede its own ids, its queue waits for it alone,
   // and one away delays no other. One brain says what it always said; several
@@ -2636,6 +3103,8 @@ export async function main(argv) {
     useStateRoot(b.root);
     code = Math.max(code, await hookForBrain(hook, b, several, { minIntervalMin, harness, onSecret }));
   }
+  // Copies a drain left behind (their brain away) get another drain at every session event.
+  await kickWriteDrains(brains, { atEnd: String(hook.hook_event_name ?? "") === "SessionEnd" });
   return code;
 }
 

@@ -5,7 +5,7 @@ import type { RequestHandler } from './$types';
 import { HOME } from '$lib/paths';
 import { exchangeCode, oauthSettings, signedInSince, signInFrom } from '$lib/server/oauth';
 import { revocations, rest } from '$lib/server/rest';
-import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
+import { closeSession, cookieOptions, openSession, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
 import { FIRST_READ, whoAmI } from '$lib/server/signin';
 
 // The authorization server's answer (SMD-3307): the redirect URI the AS
@@ -23,9 +23,11 @@ const back = (why: string): never => {
 	throw redirect(303, `${base}/signin?refused=${why}`);
 };
 
-export const GET: RequestHandler = async ({ cookies, url, request }) => {
+export const GET: RequestHandler = async ({ cookies, url, request, locals }) => {
 	const s = oauthSettings(env);
 	if (!s) back('not_configured');
+	// Never on the break-glass port, as the start never is: the AS answers at the origin alone, and a session opened here would be the origin's under the port's cookie (review pass 2).
+	if (locals.breakglass) back('stale');
 	const state = url.searchParams.get('state');
 	const held = signInFrom(cookies.get(SIGNIN_COOKIE));
 	// The cookie goes only with its own answer: a stray or stale callback leaves a sign-in in flight alone (review pass 1).
@@ -71,8 +73,8 @@ export const GET: RequestHandler = async ({ cookies, url, request }) => {
 		back(who ? 'cannot_read' : 'token');
 	}
 	// A sign-in over a live session replaces it, as a key's does; it, and any the store ends for room, have their tokens revoked (session.ts onTokensEnded).
-	closeSession(cookies.get(SESSION_COOKIE));
-	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought') });
-	cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
+	closeSession(locals.session?.id);
+	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought'), breakglass: false });
+	cookies.set(locals.sessionCookie, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 	throw redirect(303, HOME);
 };
