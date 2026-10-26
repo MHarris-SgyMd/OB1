@@ -2657,6 +2657,327 @@ console.log("\n[11] Several brains: each its own key, queue and supersedes chain
   canary.stop(true);
 }
 
+console.log("\n[12] The write fan-out: a write through the connector's server is copied to each brain with a write key, a capture under the first brain's id as its client_key, in order, one at a time (SMD-3314)");
+{
+  // A canary that answers as the server since migration 112: a capture keeps
+  // its client_key and one with a key it holds is matched; update and delete
+  // take an id or a key, an unknown one NOT_FOUND; a pointer it does not know
+  // is refused with its code. `canaryOld` answers with a capture_thought that
+  // takes no client_key (a server from before 112).
+  const calls = [];
+  const thoughts = new Map(); // id → { key, content }
+  let nextId = 7000, away = false, canaryOld = false, busy = false, slowMs = 0;
+  // A call held until a line reaches the canary's log, so two drains provably overlap (review pass 2: timing alone let them run apart).
+  let gate = null;
+  /** A gate on a log line written after it is set: an earlier case's line of the same words does not open it. */
+  const gateOn = (re) => { const g = new RegExp(re.source, "g"); return { re: g, base: (logOf(CANARY_ROOT).match(g) ?? []).length }; };
+  const gateSeen = () => (logOf(CANARY_ROOT).match(gate.re) ?? []).length > gate.base;
+  const byName = (name) => { const n = String(name).toLowerCase(); if (thoughts.has(n)) return n; for (const [id, t] of thoughts) if (t.key === n) return id; return null; };
+  const canary = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    if (away) return new Response("Bad Gateway", { status: 502 });
+    const body = await req.json();
+    const envelope = (payload) => ({ jsonrpc: "2.0", id: body.id, ...payload });
+    const key = req.headers.get("x-brain-key");
+    const scope = key === "canary-write-key" ? "write" : key === "canary-cap-key" ? "capture" : null;
+    if (!scope) return Response.json(envelope({ error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } }));
+    const surface = scope === "write" ? ["capture_thought", "update_thought", "delete_thought", "search_thoughts"] : ["capture_thought"];
+    if (body.method === "tools/list") return Response.json(envelope({ result: { tools: surface.map((name) => ({ name, inputSchema: { type: "object", properties: name === "capture_thought" ? { content: {}, ...(canaryOld ? {} : { client_key: {} }) } : { id: {} } } })) } }));
+    const ok = (text, sc = {}) => Response.json(envelope({ result: { content: [{ type: "text", text }], structuredContent: sc } }));
+    const err = (text, sc) => Response.json(envelope({ result: { isError: true, content: [{ type: "text", text }], structuredContent: { retryable: false, ...sc } } }));
+    const { name, arguments: args } = body.params;
+    if (!surface.includes(name)) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } }));
+    calls.push({ name, args: structuredClone(args) });
+    if (gate && !gate.opened) { for (let i = 0; i < 250 && !gateSeen(); i++) await sleep(20); gate.opened = gateSeen() ? "seen" : "timed out"; }
+    if (slowMs) await sleep(slowMs);
+    if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
+    if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
+    if (/\[\[invalid\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool capture_thought" }] } }));
+    if (name === "capture_thought") {
+      if (busy && /\[\[busy\]\]/.test(args.content)) return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true });
+      if (args.client_key !== undefined && scope !== "write") return err("Refused: `client_key` needs a key that can read", { code: "REFUSED_CLIENT_KEY_SCOPE" });
+      const missing = (args.derived_from ?? []).map((d, i) => (byName(d) ? -1 : i)).filter((i) => i >= 0);
+      if (missing.length) return err(`Refused: derived_from[${missing.join("], derived_from[")}] names no thought.`, { code: "DERIVED_FROM_MISSING", positions: missing });
+      if (args.supersedes !== undefined && !byName(args.supersedes)) return err("Refused: no thought with the id given as supersedes.", { code: "REFUSED_SUPERSEDES_UNKNOWN" });
+      const sameText = [...thoughts].find(([, t]) => t.content === args.content);
+      if (sameText && args.client_key && !sameText[1].key) { sameText[1].key = args.client_key.toLowerCase(); return ok(`Captured as idea — id ${sameText[0]} — copies`, { id: sameText[0], existed: true, keyed: "recorded" }); }
+      const held = args.client_key ? byName(args.client_key) : null;
+      if (held) return ok(`Already captured — id ${held}: a thought there already has the \`client_key\` given as its id or its key, and holds other text than the one sent, so nothing was written and no model was called.`, { id: held, keyed: "matched" });
+      const id = uuid(++nextId);
+      thoughts.set(id, { key: args.client_key?.toLowerCase() ?? null, content: args.content });
+      return ok(`Captured as idea — id ${id} — copies`, { id, ...(args.client_key ? { keyed: "recorded" } : {}) });
+    }
+    const target = byName(args.id);
+    if (!target) return err(`No thought with id ${args.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`, { code: "NOT_FOUND" });
+    if (name === "update_thought") {
+      if (args.supersedes && !byName(args.supersedes)) return err("Refused: no thought with the id given as supersedes.", { code: "REFUSED_SUPERSEDES_UNKNOWN" });
+      if (args.supersedes && byName(args.supersedes) === target) return err(`Refused: ${target} would close a supersedes loop.`, { code: "REFUSED_WOULD_CYCLE" });
+      if (args.content !== undefined) thoughts.get(target).content = args.content;
+      return ok(`Updated ${target}${target !== String(args.id).toLowerCase() ? `, named by its client_key ${String(args.id).toLowerCase()}` : ""} (content re-embedded).`, { id: target });
+    }
+    thoughts.delete(target);
+    return ok(`Deleted ${target}. Its previous content is preserved in the audit trail.`, { id: target });
+  } });
+  const CANARY_URL = `http://127.0.0.1:${canary.port}/`;
+  const WRITE_KEYFILE = join(TMP, "canary-write.key");
+  writeFileSync(WRITE_KEYFILE, "canary-write-key\n", { mode: 0o600 });
+  const fanCfg = { brains: [{ name: "stable", url: URL_, key: "cap-key", connector: "open-brain" }, { name: "canary", url: CANARY_URL, key: "canary-cap-key", write_key_file: WRITE_KEYFILE, connector: "open-brain-canary" }] };
+  const FAN_CFG = join(TMP, "fan.json");
+  writeFileSync(FAN_CFG, JSON.stringify(fanCfg), { mode: 0o600 });
+  const env = { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_CONFIG: FAN_CFG };
+  const CANARY_ROOT = join(STATE, "brains", "canary");
+  const queueIn = () => (existsSync(join(CANARY_ROOT, "writes", "pending")) ? readdirSync(join(CANARY_ROOT, "writes", "pending")).filter((f) => f.endsWith(".json")) : []);
+  const logOf = (root) => (existsSync(join(root, "log")) ? readFileSync(join(root, "log"), "utf8") : "");
+  const S = (n) => uuid(9000 + n); // stable's ids
+  const post = (tool, input, response, extra = {}) => runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: `mcp__open-brain__${tool}`, tool_input: input, tool_response: response, ...extra }, env);
+  const captured = (id) => [{ type: "text", text: `Captured as idea — id ${id} — release` }];
+  const original = readFileSync(CONFIG, "utf8");
+  const brainsOf = (json) => { writeFileSync(CONFIG, JSON.stringify(json), { mode: 0o600 }); try { return loadBrains(); } finally { writeFileSync(CONFIG, original, { mode: 0o600 }); } };
+  const refusalOf = (json) => { try { brainsOf(json); return ""; } catch (e) { return e.message; } };
+  rmSync(STATE, { recursive: true, force: true });
+
+  // The config.
+  const bs = brainsOf(fanCfg);
+  assert(bs[0].cfg.connector === "open-brain" && bs[0].cfg.writeKey === undefined && bs[1].cfg.connector === "open-brain-canary" && bs[1].cfg.writeKey === "canary-write-key",
+    "each brain's connector and write key are read, the write key from its file");
+  assert(/has a "connector" that is no MCP server's name/.test(refusalOf({ brains: [{ ...fanCfg.brains[0], connector: "open brain!" }, fanCfg.brains[1]] })), "a connector that is no server's name is refused");
+  assert(/sets both "write_key" and "write_key_file"/.test(refusalOf({ brains: [fanCfg.brains[0], { ...fanCfg.brains[1], write_key: "x" }] })), "a write key given twice is refused");
+  assert(/names connector "open-brain" for two brains/.test(refusalOf({ brains: [fanCfg.brains[0], { ...fanCfg.brains[1], connector: "open-brain" }] })), "one connector named for two brains is refused");
+  assert(!refusalOf({ brains: [fanCfg.brains[0], { ...fanCfg.brains[1], write_key: "SEKRET-W", write_key_file: undefined, connector: "bad name" }] }).includes("SEKRET-W"), "…and no refusal quotes a write key");
+
+  // A capture through open-brain: copied under stable's id as its client_key, the caller's own arguments with it.
+  const c1 = await post("capture_thought", { content: "The release plan, as stable wrote it", source: "mcp", trust: "agent", metadata: { plan: "v2" } }, captured(S(1).toUpperCase()));
+  const copy = calls.at(-1);
+  assert(c1.code === 0 && calls.length === 1 && copy.name === "capture_thought" && copy.args.client_key === S(1) && copy.args.content === "The release plan, as stable wrote it" && copy.args.source === "mcp" && copy.args.trust === "agent" && copy.args.metadata?.plan === "v2",
+    `a capture is copied, its client_key stable's id lower-cased, its arguments as sent (${JSON.stringify(copy?.args)})`);
+  assert(!queueIn().length && /copied capture_thought \(client_key 00009001-0000-4000-8000-000000000000\) → 00007001-0000-4000-8000-000000000000, recorded/.test(logOf(CANARY_ROOT)) && /\[canary\] copied capture_thought/.test(c1.err),
+    `…the queue empties, and the canary's log names the copy, its id there and the outcome, no text (${c1.err.trim().slice(0, 120)})`);
+  assert(!logOf(CANARY_ROOT).includes("The release plan"), "…the log carries no thought's text");
+
+  // Every shape a result arrives in: a string, the JSON of the content blocks, an object carrying them.
+  for (const [i, shape] of [[2, `Captured as idea — id ${S(2)} — x`], [3, JSON.stringify(captured(S(3)))], [4, { content: captured(S(4)) }], [5, { result: { content: captured(S(5)) } }]]) {
+    await post("capture_thought", { content: `shape ${i}` }, shape);
+  }
+  // The structured id where the result carries one; and the id after the type, never one a model's type spells (review pass 1).
+  await post("capture_thought", { content: "structured id" }, { content: [{ type: "text", text: "Saved." }], structuredContent: { id: S(15) } });
+  await post("capture_thought", { content: "a type spelling an id" }, [{ type: "text", text: `Captured as id ${S(16)} — id ${S(17)} — x` }]);
+  assert(calls.at(-2).args.client_key === S(15) && calls.at(-1).args.client_key === S(17), `the structured id is taken, and the id after the type, not one the type spells (${calls.at(-2).args.client_key?.slice(0, 8)}, ${calls.at(-1).args.client_key?.slice(0, 8)})`);
+  calls.splice(-2, 2);
+  // A reply with notes after its first line: the id is the first line's — a note naming another thought's id is not it.
+  await post("capture_thought", { content: "shape with notes" }, [{ type: "text", text: `Captured as idea — id ${S(11)} — release\n\nNote: this text was already captured as ${S(11)}. To record that it supersedes ${S(12)}, call update_thought with id ${S(13)} and \`supersedes\` ${S(12)}.` }]);
+  assert(calls.at(-1).args.client_key === S(11), `a reply's notes naming other ids do not move the key: the first line's id is it (${calls.at(-1).args.client_key?.slice(0, 8)})`);
+  calls.pop();
+  assert(calls.slice(1).map((c) => c.args.client_key).join() === [S(2), S(3), S(4), S(5)].join(), `the id is read from a string, a JSON string, an object and a nested result alike (${calls.slice(1).map((c) => c.args.client_key?.slice(0, 8)).join()})`);
+
+  // An edit: the id as sent (the canary resolves it by key), if_unchanged_since dropped; a delete the same.
+  calls.length = 0;
+  const u1 = await post("update_thought", { id: S(1), content: "The release plan, revised", if_unchanged_since: "2026-10-26T00:00:00.000Z" }, [{ type: "text", text: `Updated ${S(1)} (content re-embedded).` }]);
+  assert(u1.code === 0 && calls[0]?.name === "update_thought" && calls[0].args.id === S(1) && calls[0].args.content === "The release plan, revised" && !("if_unchanged_since" in calls[0].args) && thoughts.get(uuid(7001)).content === "The release plan, revised",
+    `an edit is copied by stable's id, without if_unchanged_since, and lands on the canary's copy (${JSON.stringify(calls[0]?.args)})`);
+  const d1 = await post("delete_thought", { id: S(2) }, [{ type: "text", text: `Deleted ${S(2)}. Its previous content is preserved in the audit trail.` }]);
+  assert(d1.code === 0 && calls[1]?.name === "delete_thought" && calls[1].args.id === S(2) && !thoughts.has(uuid(7002)), "a delete is copied by stable's id, and removes the canary's copy");
+
+  // Never copied: another server's write (the canary's own connector, its test traffic), a read, a write that failed, a reply with no id.
+  calls.length = 0;
+  await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain-canary__capture_thought", tool_input: { content: "the canary's own probe" }, tool_response: captured(uuid(7999)) }, env);
+  await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__search_thoughts", tool_input: { query: "x" }, tool_response: "Found 1 thought" }, env);
+  await post("capture_thought", { content: "refused on stable" }, { isError: true, content: [{ type: "text", text: "Refused: `metadata.source` is set by the server" }] });
+  await post("update_thought", { id: S(9), content: "x" }, [{ type: "text", text: `No thought with id ${S(9)}. It may already have been deleted.` }]);
+  await post("capture_thought", { content: "a reply that names no id" }, { weird: true });
+  const stableLog = logOf(STATE);
+  assert(calls.length === 0 && !queueIn().length, `the canary's own connector, a read, a failed write and an id-less reply copy nothing (${calls.map((c) => c.name).join()})`);
+  assert(/fan-out: capture_thought did not land on stable, so it is not copied: Refused:/.test(stableLog) && /fan-out: capture_thought did not land on stable, so it is not copied: its shape: \{weird: boolean\}/.test(stableLog),
+    "…the failed write and the id-less reply are logged, the reply's shape and not its text");
+
+  // The canary away: copies wait in its queue, in order, and land in order once it answers.
+  away = true;
+  calls.length = 0;
+  const a1 = await post("capture_thought", { content: "Captured while the canary was away" }, captured(S(6)));
+  const a2 = await post("update_thought", { id: S(6), metadata_patch: { note: "edited while away" } }, [{ type: "text", text: `Updated ${S(6)} (metadata merged).` }]);
+  assert(a1.code === 1 && a2.code === 1 && queueIn().length === 2 && /kept: capture_thought/.test(a1.err) && calls.length === 0, `the canary away: both copies kept in its queue, the hook says so (${a1.err.trim().slice(0, 100)})`);
+  away = false;
+  const dr = await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(dr.code === 0 && calls.map((c) => c.name).join() === "capture_thought,update_thought" && calls[1].args.id === S(6) && !queueIn().length && byName(S(6)),
+    `back, --drain-writes lands them in the order they were made: the capture, then its edit, which finds the copy by key (${calls.map((c) => c.name).join()})`);
+
+  // A copy kept on a transient holds the queue: the next copy waits behind it, and both land in order once it answers.
+  busy = true;
+  calls.length = 0;
+  await post("capture_thought", { content: "[[busy]] a capture the canary's store refuses for now" }, captured(S(20)));
+  const behind = await post("update_thought", { id: S(1), metadata_patch: { note: "made after the busy capture" } }, [{ type: "text", text: `Updated ${S(1)} (metadata merged).` }]);
+  assert(behind.code === 1 && queueIn().length === 2 && !calls.some((c) => c.name === "update_thought"), `a kept copy holds the queue: the edit made after it is not sent ahead of it (${calls.map((c) => c.name).join()})`);
+  busy = false;
+  calls.length = 0;
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(calls.map((c) => c.name).join() === "capture_thought,update_thought" && !queueIn().length, `…and once the store answers, both land, the capture first (${calls.map((c) => c.name).join()})`);
+
+  // Two drains started at once over one queue (review pass 1): each copy posted once, in the order made.
+  away = true;
+  for (let i = 0; i < 4; i++) await post("capture_thought", { content: `queued while away ${i}` }, captured(S(30 + i)));
+  away = false;
+  calls.length = 0;
+  gate = gateOn(/drain: the queue is left to the drain in pid/);
+  const [dA, dB] = await Promise.all([0, 1].map(() => spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } })));
+  assert(gate.opened === "seen", `…the two provably overlapped: the second found the first holding the lock (${gate.opened})`);
+  gate = null;
+  const posted = calls.map((c) => c.args.client_key);
+  assert(dA.code === 0 && dB.code === 0 && posted.join() === [S(30), S(31), S(32), S(33)].join() && !queueIn().length,
+    `two drains at once post each copy once, in order (${posted.map((k) => k?.slice(4, 8)).join()})`);
+
+  // The lock: a dead holder's taken back; a live holder's left alone; one silent past fifteen minutes taken back.
+  const LOCK = join(CANARY_ROOT, "writes", "drain.lock");
+  away = true;
+  await post("capture_thought", { content: "behind a lock" }, captured(S(34)));
+  away = false;
+  calls.length = 0;
+  writeFileSync(LOCK, String(process.pid));
+  const heldLive = await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(heldLive.code === 0 && calls.length === 0 && queueIn().length === 1, "a live holder's fresh lock: the drain leaves the queue to it");
+  const old = new Date(Date.now() - 20 * 60_000);
+  utimesSync(LOCK, old, old);
+  const heldStale = await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(heldStale.code === 0 && calls[0]?.args.client_key === S(34) && !queueIn().length && !existsSync(LOCK), "…one silent past fifteen minutes is taken back, the copy lands, the lock let go");
+  away = true;
+  await post("capture_thought", { content: "behind a dead holder" }, captured(S(35)));
+  away = false;
+  writeFileSync(LOCK, "2147483646");
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(calls.at(-1)?.args.client_key === S(35) && !queueIn().length, "…a dead holder's is taken back at once");
+
+  // A drain whose lock another took back mid-drain stops before its next copy, leaving the rest to the new holder:
+  // every copy posted once (review pass 1).
+  away = true;
+  for (let i = 0; i < 3; i++) await post("capture_thought", { content: `taken mid-drain ${i}` }, captured(S(40 + i)));
+  away = false;
+  calls.length = 0;
+  gate = gateOn(/drain: took back the lock of pid \d+, silent for/);
+  const first = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  for (let i = 0; i < 250 && !calls.length; i++) await sleep(20);
+  const stalled = new Date(Date.now() - 20 * 60_000);
+  utimesSync(LOCK, stalled, stalled);
+  const second = spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  await Promise.all([first, second]);
+  assert(gate.opened === "seen", `…the second provably took the lock back from the first, mid-drain (${gate.opened})`);
+  gate = null;
+  const once = calls.map((c) => c.args.client_key);
+  // The copy the old holder had in flight is the one both may post (its key lands it as one thought); every later copy
+  // is posted once, by the new holder, and none is left.
+  assert(once.filter((x) => x === S(40)).length <= 2 && [S(41), S(42)].every((k) => once.filter((x) => x === k).length === 1) && !queueIn().length,
+    `a drain whose lock was taken back stops after its copy in flight: the rest posted once, none left (${once.map((k) => k?.slice(4, 8)).join()})`);
+
+  // Review pass 2: a capture matched by key on stable wrote nothing there, so nothing is copied; a fault's reply is not a
+  // success; an edit named by its client_key on stable is copied by the id stable answered.
+  calls.length = 0;
+  await post("capture_thought", { content: "text stable never stored", client_key: S(70) }, { content: [{ type: "text", text: `Already captured — id ${S(70)}: a thought there already has the \`client_key\` given.` }], structuredContent: { id: S(70), keyed: "matched" } });
+  await post("update_thought", { id: S(1), content: "x" }, [{ type: "text", text: "update_thought failed: the REST core did not answer" }]);
+  await post("delete_thought", { id: S(1) }, { content: [{ type: "text", text: "delete_thought failed: x" }], structuredContent: { code: "FAILED" } });
+  assert(calls.length === 0 && /capture_thought matched a thought already on stable by its client_key and wrote nothing, so nothing is copied/.test(logOf(STATE)) && /update_thought did not land on stable, so it is not copied: update_thought failed/.test(logOf(STATE)),
+    `a capture stable matched by key, and a write whose reply is a fault, copy nothing (${calls.map((c) => c.name).join()})`);
+  await post("update_thought", { id: "0aaaaaaa-0000-4000-8000-000000000000", metadata_patch: { note: "by key" } }, { content: [{ type: "text", text: `Updated ${S(1)}, named by its client_key 0aaaaaaa-0000-4000-8000-000000000000 (metadata merged).` }], structuredContent: { id: S(1), byClientKey: "0aaaaaaa-0000-4000-8000-000000000000" } });
+  assert(calls.at(-1)?.name === "update_thought" && calls.at(-1).args.id === S(1), `an edit stable reached by a client_key is copied by the id stable answered (${calls.at(-1)?.args.id})`);
+  // A capture of text the canary already holds lands on that thought, and the log says so.
+  thoughts.set(uuid(7900), { key: null, content: "a thought the canary alone had" });
+  await post("capture_thought", { content: "a thought the canary alone had" }, captured(S(71)));
+  assert(byName(S(71)) === uuid(7900) && /copied capture_thought \(client_key 00009071-[^)]*\) → 00007900-0000-4000-8000-000000000000, recorded onto a thought already there by the same text/.test(logOf(CANARY_ROOT)),
+    "a capture whose text the canary already holds is recorded onto that thought, the log saying so");
+  // A fault on the canary holds the queue; metadata it refuses is dropped and the capture sent again; a supersedes that
+  // would close a loop there is dropped.
+  calls.length = 0;
+  const flt = await post("capture_thought", { content: "[[fault]] a copy met by the canary's fault" }, captured(S(72)));
+  assert(flt.code === 1 && queueIn().length === 1 && /kept: capture_thought .* update_thought failed: the REST core did not answer/.test(flt.err), `a fault (FAILED, no retryable) holds the queue, not given up (${flt.err.trim().slice(0, 120)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+  rmSync(join(CANARY_ROOT, "writes", "held"), { force: true });
+  const meta = await post("capture_thought", { content: "[[meta]] a copy with metadata the canary reserves", metadata: { reserved_x: "1" } }, captured(S(73)));
+  assert(meta.code === 0 && !("metadata" in calls.at(-1).args) && byName(S(73)) && /\(dropped: metadata\)/.test(logOf(CANARY_ROOT)), "metadata the canary refuses is dropped and the capture lands, the log saying so");
+  const cyc = await post("update_thought", { id: S(73), supersedes: S(73) }, [{ type: "text", text: `Updated ${S(73)} (now supersedes ${S(73)}).` }]);
+  assert(cyc.code === 0 && !queueIn().length && /skipped update_thought of 00009073-[^:]*: its only change, supersedes/.test(logOf(CANARY_ROOT)), "a supersedes that would close a loop there is dropped, an edit of nothing else skipped");
+
+  // A copy the canary cannot validate is given up, not kept for ever behind a key's remedy (review pass 1).
+  calls.length = 0;
+  const inval = await post("capture_thought", { content: "[[invalid]] a copy the canary's schema refuses" }, captured(S(36)));
+  const DEAD = join(CANARY_ROOT, "writes", "dead");
+  assert(inval.code === 1 && !queueIn().length && existsSync(DEAD) && readdirSync(DEAD).length === 1 && /not copied \(given up\): capture_thought .* Input validation error/.test(logOf(CANARY_ROOT)),
+    "a copy refused as invalid input goes to writes/dead, the queue moving on");
+  rmSync(DEAD, { recursive: true, force: true });
+
+  // A copy kept for a week is given up, so a brain that never answers does not hold the queue for ever.
+  away = true;
+  await post("capture_thought", { content: "a week-old copy" }, captured(S(37)));
+  const [stale] = queueIn();
+  const staleOp = JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", stale), "utf8"));
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", stale), JSON.stringify({ ...staleOp, at: new Date(Date.now() - 8 * 86_400_000).toISOString() }), { mode: 0o600 });
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  away = false;
+  assert(!queueIn().length && readdirSync(DEAD).length === 1 && /not copied \(given up after a week\): capture_thought/.test(logOf(CANARY_ROOT)), "a copy kept past a week is given up");
+  rmSync(DEAD, { recursive: true, force: true });
+
+  // A copy whose thought never reached the canary: skipped, not retried for ever; a pointer it does not know: dropped, the write kept.
+  calls.length = 0;
+  const nf = await post("update_thought", { id: S(50), content: "a thought from before the copying began" }, [{ type: "text", text: `Updated ${S(50)} (content re-embedded).` }]);
+  assert(nf.code === 0 && !queueIn().length && /skipped update_thought of 00009050-0000-4000-8000-000000000000: no thought there has that id or keeps it as its client_key/.test(logOf(CANARY_ROOT)), "an edit of a thought the canary never got is skipped and logged, the queue moves on");
+  const ptr = await post("capture_thought", { content: "A synthesis of a board-sync row", derived_from: [S(1), S(60)], supersedes: S(61) }, captured(S(7)));
+  const tries = calls.filter((c) => c.name === "capture_thought");
+  assert(ptr.code === 0 && tries.at(-1).args.derived_from?.join() === S(1) && !("supersedes" in tries.at(-1).args) && byName(S(7)) && /copied capture_thought \(client_key 00009007-[^)]*\) → [^ ]+, recorded \(dropped: derived_from\[1\], supersedes\)/.test(logOf(CANARY_ROOT)),
+    `pointers the canary does not know are dropped and the capture lands, the log saying which (${tries.length} tries)`);
+  const supOnly = await post("update_thought", { id: S(1), supersedes: S(62) }, [{ type: "text", text: `Updated ${S(1)} (now supersedes ${S(62)}).` }]);
+  assert(supOnly.code === 0 && /skipped update_thought of 00009001-[^:]*: its only change, supersedes, names no thought there/.test(logOf(CANARY_ROOT)), "an edit whose only change is an unknown supersedes is skipped");
+
+  // A copy the canary matches by key (a retry after a lost reply) lands as the same thought.
+  const again = await post("capture_thought", { content: "The release plan, sent again" }, captured(S(1)));
+  assert(again.code === 0 && /copied capture_thought \(client_key 00009001-[^)]*\) → 00007001-0000-4000-8000-000000000000, matched/.test(logOf(CANARY_ROOT)), "a capture whose key the canary holds is matched, the same thought");
+
+  // A capture key in write_key: kept, the queue held, the remedy named.
+  const capOnly = { brains: [fanCfg.brains[0], { ...fanCfg.brains[1], write_key_file: undefined, write_key: "canary-cap-key" }] };
+  const CAP_CFG = join(TMP, "fan-cap.json");
+  writeFileSync(CAP_CFG, JSON.stringify(capOnly), { mode: 0o600 });
+  const capRun = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__update_thought", tool_input: { id: S(1), content: "x" }, tool_response: [{ type: "text", text: `Updated ${S(1)} (content re-embedded).` }] }, { ...env, OB1_SESSION_CAPTURE_CONFIG: CAP_CFG });
+  assert(capRun.code === 1 && queueIn().length === 1 && /kept: update_thought of [^ ]+ — the write key cannot call update_thought; mint a write key/.test(capRun.err), `a capture key as the write key holds the queue and names the remedy (${capRun.err.trim().slice(0, 140)})`);
+  rmSync(join(CANARY_ROOT, "writes", "pending"), { recursive: true, force: true });
+
+  // --check: the connector and where its writes go; the write key's reach; a canary from before 112 refused.
+  const ck = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(ck.code === 0 && /^\[stable\] fan-out: writes through open-brain are copied to canary$/m.test(ck.out) && /^\[canary\] write key: ok — it can capture, edit and delete, and the brain keeps a client_key\. Copies queued: 0/m.test(ck.out),
+    `--check names the connector, where its writes go, and the write key's reach (${ck.out.trim().slice(0, 200)})`);
+  canaryOld = true;
+  const ckOld = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  canaryOld = false;
+  assert(ckOld.code === 1 && /\[canary\] this brain's capture_thought takes no client_key — its server is from before migration 112/.test(ckOld.err), "…and a canary whose server takes no client_key fails it");
+  const ckCap = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CAP_CFG } });
+  assert(ckCap.code === 1 && /\[canary\] the write key cannot call update_thought, delete_thought/.test(ckCap.err), "…and so does a write key that cannot edit");
+
+  // The hook to paste: anchored to the config's connector, async, no key.
+  const ph = await spawnScript(["--print-hook", "claude-code", "--fan-out"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  const printed = JSON.parse(ph.out);
+  const entry = printed.hooks.PostToolUse[0];
+  assert(ph.code === 0 && entry.matcher === "^mcp__open-brain__(capture_thought|update_thought|delete_thought)$" && entry.hooks[0].async === true && entry.hooks[0].type === "command" && !ph.out.includes("canary-write-key") && !ph.out.includes("cap-key"),
+    `--print-hook --fan-out prints an async PostToolUse hook anchored on the config's connector, no key (${entry?.matcher})`);
+  const phOther = await spawnScript(["--print-hook", "claude-code", "--fan-out", "--connector", "my-brain"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  const phCodex = await spawnScript(["--print-hook", "codex", "--fan-out"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  const phStray = await spawnScript(["--print-hook", "claude-code", "--connector", "x"], { env: { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG } });
+  assert(JSON.parse(phOther.out).hooks.PostToolUse[0].matcher.startsWith("^mcp__my-brain__") && phCodex.code === 2 && /Claude Code's/.test(phCodex.err) && phStray.code === 2,
+    "--connector names another server; Codex and a stray --connector are refused");
+
+  // Detached: as a hook without the sync switch, the copy still lands.
+  calls.length = 0;
+  const det = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__capture_thought", tool_input: { content: "Copied by a detached child" }, tool_response: captured(S(8)) }, { OB1_SESSION_CAPTURE_CONFIG: FAN_CFG });
+  for (let i = 0; i < 100 && !calls.length; i++) await sleep(50);
+  assert(det.code === 0 && det.ms < 2000 && calls[0]?.args.client_key === S(8), `as a hook, the copy is posted by a detached child and the hook returns at once (${det.ms} ms)`);
+
+  // Copies a drain left (the canary away) get a drain at the session's next event, without a new write.
+  for (let i = 0; i < 100 && existsSync(join(CANARY_ROOT, "writes", "drain.lock")); i++) await sleep(50);
+  assert(!existsSync(join(CANARY_ROOT, "writes", "drain.lock")), "the detached child let its lock go");
+  away = true;
+  await post("capture_thought", { content: "Left in the queue" }, captured(S(10)));
+  away = false;
+  calls.length = 0;
+  // Tried within five minutes: a mid-session event leaves the held queue for the next write (review pass 1: every Stop
+  // turn retried it) — but a session's end tries it at once, its last chance before the next session (review pass 2).
+  await runHook({ session_id: "s-fan-soon", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, env);
+  assert(!calls.some((c) => c.args.client_key === S(10)) && queueIn().length === 1, "a queue held within five minutes is not retried at a compaction");
+  await runHook({ session_id: "s-fan-end", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
+  assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length && !existsSync(join(CANARY_ROOT, "writes", "held")), "…a session's end drains it at once, and the stamp goes");
+  canary.stop(true);
+}
+
 fake.stop(true);
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${"─".repeat(52)}\n${passed + failed} assertions: ${passed} passed, ${failed} failed\n${failed ? "FAIL" : "PASS"}`);

@@ -8,9 +8,10 @@
 // is its origin then (review pass 1). With neither, Grafana is reached
 // nowhere, and there is no link.
 
-/** The nav's link to Grafana: GRAFANA_LINK, else GRAFANA_ROUTE; null when neither is set or sound. */
-export function grafanaUrl(env: Record<string, string | undefined>): string | null {
-	return link(env.GRAFANA_LINK) ?? link(env.GRAFANA_ROUTE);
+/** The nav's link to Grafana: GRAFANA_LINK, else GRAFANA_ROUTE; null when neither is set or sound, or, on the break-glass port (SMD-3307), when it is a path on the origin, which that port does not route. */
+export function grafanaUrl(env: Record<string, string | undefined>, breakglass = false): string | null {
+	const url = link(env.GRAFANA_LINK) ?? link(env.GRAFANA_ROUTE);
+	return breakglass && url?.startsWith('/') ? null : url;
 }
 
 /** A path on this origin or an http(s) URL; null for anything else. No control character or space: a browser drops a tab or line break, so `/\t/host` would be `//host` (review pass 1). */

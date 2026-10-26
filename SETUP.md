@@ -559,12 +559,16 @@ query log, its status (version, migrations, sizes, the workers' heartbeats),
 any thought, and the pages of the plugins `OB1_PLUGINS` turns on.
 A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
 or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
-or the sign-in form is refused as cross-site; once it is set, sign in there and
-not at `127.0.0.1`, where the form is refused the same way. A stack configured
+or the sign-in form is refused, the page naming the plain-HTTP address the
+dashboard takes it from instead; once it is set, sign in there and not at
+`127.0.0.1`, where the form is refused the same way, the page naming the origin. A stack configured
 with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
 sign-in: it signs the operator in through the authorization server, with the
 password `provision.ts --init` wrote, `OB1_AUTH_OPERATOR_PASSWORD` in
-`deploy/.env` (`dashboard/README.md`).
+`deploy/.env` (`dashboard/README.md`). On the brain's machine, its break-glass
+port, `http://127.0.0.1:8001/dashboard/` (`BREAKGLASS_PORT`), takes an access key
+whatever the authorization server's state, for when it is down — at that address,
+not `localhost`, which it refuses.
 
 ### 6. Optional: workflows beside the brain (n8n)
 

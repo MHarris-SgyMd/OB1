@@ -5,11 +5,16 @@
  * named what shipped: a brain's identity was "the highest migration its ledger
  * records" plus whichever server happened to be checked out. The scheme is
  *
- *   MAJOR.MINOR.PATCH+upstream.<sha>
+ *   MAJOR.MINOR.PATCH
  *
- * the build metadata carrying the upstream pin, so a version says both what the
- * fork is and what it sits on. The rules that pick the bump live in FORK.md's
- * "Versioning" section and are checked, not remembered (check-fork-consistency).
+ * plain SemVer from 2.0.0 (SMD-3317). The releases before it (1.0.0 to 1.9.0)
+ * carried the upstream pin as build metadata, `MAJOR.MINOR.PATCH+upstream.<sha>`;
+ * the pin is frozen now (SMD-1256), and a release records it as data instead —
+ * releases.json's `upstream` key, UPSTREAM_PIN below — so the version no longer
+ * spells it. semverCompare ignores build metadata, so the two forms order as
+ * their cores do: a brain stamped `1.9.0+upstream.9543c29` is behind a `2.0.0`
+ * server. The rules that pick the bump live in FORK.md's "Versioning" section
+ * and are checked, not remembered (check-fork-consistency).
  *
  * This module is node-only on purpose. It reads the filesystem and hashes files,
  * and it is imported by migrate.ts, preflight.ts and check-fork-consistency.ts.
@@ -23,7 +28,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The upstream commit the fork sits on — FORK.md's pin, `upstream-pin-9543c29`. */
+/** The upstream commit the fork sits on — FORK.md's pin, `upstream-pin-9543c29`, frozen (SMD-1256). Each release records it as data (releases.json's `upstream`); from 2.0.0 the version does not carry it (SMD-3317). */
 export const UPSTREAM_PIN = "9543c29";
 
 /** The fork's repository, for compare links and release downloads — one definition for the assembler and the release job (SMD-1860). */
@@ -43,11 +48,14 @@ export const REPO_URL = "https://github.com/MHarris-SgyMd/OB1";
  * `1.8.0` the ninth (084..089, a minor: five additive migrations);
  * `1.9.0` the tenth (090..103, a minor: thirteen additive migrations);
  * before any, 044 wrote the pre-first-release baseline `0.0.0`.
+ * Those carry `+upstream.9543c29`; from 2.0.0 the cut writes the plain version
+ * here (SMD-3317), so this is the last cut's string as it was written, not one
+ * built from UPSTREAM_PIN.
  * The highest migration that upserts ob1_config.schema_version writes this
  * exact string (103 today); check-fork's 17d holds the two equal, and
  * scripts/assemble-release.ts refuses --write until both say the version.
  */
-export const FORK_VERSION = `1.9.0+upstream.${UPSTREAM_PIN}`;
+export const FORK_VERSION = "1.9.0+upstream.9543c29";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASES_PATH = join(ROOT, "releases.json");
@@ -200,6 +208,10 @@ function selfCheck() {
   bad += eq(sign(semverCompare("1.0.0-rc.1", "1.0.0")), -1, "pre-release precedes release");
   bad += eq(sign(semverCompare("1.0.0-rc.2", "1.0.0-rc.10")), -1, "numeric pre-release fields");
   bad += eq(sign(semverCompare("1.9.0", FORK_VERSION)), 0, "FORK_VERSION core is 1.9.0 (the tenth release)");
+  // SMD-3317: from 2.0.0 the version is plain; a brain stamped in the old form orders by its core.
+  bad += eq(sign(semverCompare("1.9.0+upstream.9543c29", "2.0.0")), -1, "a 1.x stamp with the pin is behind a plain 2.0.0");
+  bad += eq(sign(semverCompare("2.0.0", "2.0.0+upstream.9543c29")), 0, "a plain version and the same core with the pin are equal");
+  bad += eq(schemaVersionValue("INSERT INTO ob1_config (key, value) VALUES\n  ('schema_version', '2.0.0')\nON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"), "2.0.0", "a plain schema_version is read");
   const rel = [{ version: "1.0.0", range: [1, 44] }];
   bad += eq(versionForMigration(44, rel), "1.0.0", "44 is in 1.0.0's range");
   bad += eq(versionForMigration(45, rel), null, "45 is unreleased");

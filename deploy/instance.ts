@@ -17,8 +17,9 @@
 // COMPOSE_FILE there, which compose's own interpolation reads, asks for the same files with -f). Each port's
 // setting is read from the compose files' own mapping, the house form check 13 of
 // scripts/check-fork-consistency.ts holds, "${X_BIND:-127.0.0.1}:${X_PORT:-N}:C" (read a little more widely
-// here: any names, any default address). Who holds a port is read from every container, stopped ones included
-// (one takes its port back when it starts; Docker's stopped ones through their port bindings), of every runtime
+// here: any names, any default address), or its one literal loopback exception, "127.0.0.1:${X_PORT:-N}:C",
+// which names a port setting alone (the break-glass listener, SMD-3307). Who holds a port is read from every
+// container, stopped ones included (one takes its port back when it starts; Docker's stopped ones through their port bindings), of every runtime
 // on PATH, by compose's labels: its project, its service, and the env files it was made from — the label compose
 // writes for --env-file or COMPOSE_ENV_FILES, or, made with neither, the `.env` of its project's directory. A
 // port no container publishes but a connection reaches is a process on the host. Exit 0 when the brain is its
@@ -32,11 +33,13 @@ import net from "node:net";
 const HERE = import.meta.dir;
 const USAGE = "usage: bun --no-env-file deploy/instance.ts check [--env-file PATH …] [-f FILE …] [--profile NAME …] [-p NAME] [--runtime docker|podman]\n       bun deploy/instance.ts --self-check";
 
-/** A published port's setting, as a compose file's house-form mapping names it. */
-export type Knob = { service: string; target: number; port: string; bind: string };
+/** A published port's setting, as a compose file's house-form mapping names it; `bind` null for a literal loopback one. */
+export type Knob = { service: string; target: number; port: string; bind: string | null };
 const HOUSE = /^\$\{([A-Z][A-Z0-9_]*):-[^}]*\}:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
+/** Check 13's named exception: a literal 127.0.0.1 with the port's setting alone (the break-glass listener, SMD-3307). */
+const LOOPBACK = /^127\.0\.0\.1:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
 
-/** Each house-form mapping in a compose file's text, by service and container port. */
+/** Each house-form or literal loopback mapping in a compose file's text, by service and container port. */
 export function knobsIn(text: string): Knob[] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch { return []; }
@@ -45,8 +48,11 @@ export function knobsIn(text: string): Knob[] {
   for (const [service, def] of Object.entries(services)) {
     const ports = Array.isArray(def?.ports) ? def.ports : [];
     for (const p of ports) {
-      const m = typeof p === "string" ? HOUSE.exec(p.trim()) : null;
+      const item = typeof p === "string" ? p.trim() : "";
+      const m = HOUSE.exec(item);
+      const l = LOOPBACK.exec(item);
       if (m) out.push({ service, target: Number(m[3]), bind: m[1], port: m[2] });
+      else if (l) out.push({ service, target: Number(l[2]), bind: null, port: l[1] });
     }
   }
   return out;
@@ -135,7 +141,7 @@ export function sameEnvFiles(c: Pick<Container, "envFile" | "workingDir">, envFi
 export function portWords(p: Published, knobs: Knob[], shown: string): { setting: string; fix: string; where: string } {
   const k = knobs.filter((x) => x.service === p.service && x.target === p.target).at(-1);
   return {
-    setting: k ? `${k.port} (${p.service}'s port; ${k.bind} its address)` : `${p.service}'s port ${p.target}, a mapping in the compose files`,
+    setting: k ? `${k.port} (${p.service}'s port; ${k.bind ? `${k.bind} its address` : "on 127.0.0.1 alone"})` : `${p.service}'s port ${p.target}, a mapping in the compose files`,
     fix: k ? `set ${k.port} in ${shown} to a free port` : `change ${p.service}'s mapping`,
     where: `${p.hostIp.includes(":") ? `[${p.hostIp}]` : p.hostIp || "0.0.0.0"}:${p.port}${p.protocol === "tcp" ? "" : "/" + p.protocol}`,
   };
@@ -472,6 +478,9 @@ async function selfCheck() {
   n8n:
     ports:
       - "\${N8N_BIND:-127.0.0.1}:\${N8N_PORT:-5678}:5678"
+  breakglass:
+    ports:
+      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"
   odd:
     ports:
       - "9000:9000"
@@ -607,8 +616,9 @@ echo "stub $rt: $*" >&2; exit 1
   const keysOf = (x: string) => settingsIn(x).map((s) => s.key).join();
   const cases: [string, boolean][] = [
     ["a house-form mapping names its port and address settings", knobs.some((k) => k.service === "forwarder" && k.target === 8000 && k.port === "SERVER_PORT" && k.bind === "SERVER_BIND")],
-    ["a mapping not in the house form names no setting", knobs.length === 2 && !knobs.some((k) => k.service === "odd")],
-    ["every port mapping in deploy/'s compose files is in the house form, so names its setting", realMappings.length > 0 && realMappings.length === realKnobs.length],
+    ["the break-glass listener's literal loopback mapping names its port setting (SMD-3307)", knobs.some((k) => k.service === "breakglass" && k.target === 8001 && k.port === "BREAKGLASS_PORT" && k.bind === null)],
+    ["a mapping in neither form names no setting", knobs.length === 3 && !knobs.some((k) => k.service === "odd")],
+    ["every port mapping in deploy/'s compose files is in the house form or the literal loopback one, so names its setting", realMappings.length > 0 && realMappings.length === realKnobs.length],
     ["compose's render: each published port, a range as each of its ports, protocol kept", JSON.stringify(publishedIn({ services: { f: { ports: [{ target: 8000, published: "8040", host_ip: "127.0.0.1" }, { target: 80, published: "9100-9101", protocol: "udp" }] }, api: { ports: [{ target: 8000 }] } } }).map((p) => `${p.service}:${p.port}/${p.protocol}`)) === JSON.stringify(["f:8040/tcp", "f:9100/udp", "f:9101/udp"])],
     ["ps lists stopped containers too, and each one's id, state, env-file label and project directory", PS_ARGS.includes("-a") && containersIn("abcdef0123456789|a|p|ob1b|forwarder|Exited|/e|/w").map((x) => x.id + x.state + x.envFile + x.workingDir).join() === "abcdef012345exited/e/w"],
     ["bindings: docker's address and IPv6, podman's IPv6, a range, a protocol, and an exposed port with none", JSON.stringify(bindingsIn("127.0.0.1:8010->8000/tcp, [::]:9000-9002->9000-9002/udp, ::1:18653->80/tcp, :::18652->80/tcp, 8000/tcp")) === JSON.stringify([{ ip: "127.0.0.1", from: 8010, to: 8010, protocol: "tcp" }, { ip: "::", from: 9000, to: 9002, protocol: "udp" }, { ip: "::1", from: 18653, to: 18653, protocol: "tcp" }, { ip: "::", from: 18652, to: 18652, protocol: "tcp" }])],

@@ -16,18 +16,20 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | File | What it is |
 |---|---|
 | `serve.ts` | The entry, `bun serve.ts`: the SvelteKit server `bun run build` writes to `build/`, on PORT (8000), with the origin set (below) |
-| `src/hooks.server.ts` | Every request: the session, the sign-in wall, and the headers that keep a page out of caches and frames |
+| `src/hooks.server.ts` | Every request: its origin, the session, the sign-in wall, and the headers that keep a page out of caches and frames |
 | `src/lib/server/session.ts` | The sessions, held in the server's memory (a key or the authorization server's tokens), and the sign-in answers already taken |
 | `src/lib/server/oauth.ts` | Sign-in through the authorization server as its `gui` client: the authorization request, the code's exchange, a refresh, a revocation, a session's renewal |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key (a core operation's or a plugin's) |
 | `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
 | `src/lib/server/signin.ts` | Whether key sign-in is offered, whoami's answer, and a refused sign-in's words |
+| `src/lib/server/listener.ts` | Which listener a request came in by (the origin, or the break-glass port), and the origin an unsafe request may come from |
 | `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
 | `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
 | `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
 | `smoke-oauth.ts` | The sign-in through the authorization server, driven the same way on a configured stack |
-| `test-oauth.ts` | `oauth.ts` offline, against a fake token endpoint |
+| `smoke-breakglass.ts` | The break-glass key sign-in on a configured stack with the authorization server down, and the origin refusing it |
+| `test-oauth.ts` | `oauth.ts`, the revoker, the session store's revocations and the break-glass listener's rules offline |
 
 ## In the stack
 
@@ -42,8 +44,8 @@ Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
 `https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
 `OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key — or, on a stack
 configured with the authorization server, through it ("Signing in", below). One or the
-other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
-cross-site ("The origin", below).
+other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused, the
+page naming the address that takes it ("The origin", below).
 
 ## Signing in
 
@@ -93,30 +95,51 @@ cross-site ("The origin", below).
   thousand at most). A restart forgets its sessions, and what is still due, before it
   could. The access token itself stays good at the REST core until it lapses (600 s at
   most), as the core checks it without asking the AS; it never left the GUI. With the
-  AS not answering, the page says sign-in is unavailable; break-glass key sign-in on a
-  loopback-only port is SMD-3307's second PR. With no secret or no sound origin, it
-  says so, and signs no one in.
+  AS not answering, the page says sign-in is unavailable and names the break-glass
+  port; with no secret or no sound origin, it says so too. Either way it signs no one
+  in on the origin.
+- **Break-glass** (SMD-3307; ADR decision 15). While the stack is configured, the
+  `breakglass` service publishes a second port on `127.0.0.1` alone
+  (`BREAKGLASS_PORT`, 8001 unless set; no `_BIND` knob, and no tunnel points at it):
+  the forwarder's script on the proxy's `breakglass` entrypoint, which routes
+  `/dashboard` alone and marks each request `X-OB1-Listener: breakglass`. The `web`
+  entrypoint deletes that header from every request on the origin, so only the proxy
+  sets it. On that port the page offers key sign-in whatever the AS's state — the
+  operator's way in on the brain's machine when the AS is down, misconfigured or
+  locked out — and starts no sign-in through the AS. A session made there opens pages
+  there alone, and one made on the origin opens none there; each rides a cookie of its
+  own name (`ob1_dashboard_breakglass_<port>` there), so where the two share a host
+  (an origin of `http://127.0.0.1:…`), or two brains' break-glass ports share
+  127.0.0.1, neither overwrites the other; it is never Secure, the port being plain
+  HTTP. What reaches the port is this machine: its browsers, and its containers too,
+  through the engine's name for the host (`host.docker.internal`,
+  `host.containers.internal`), as they reach any loopback port; the stack's own
+  servers reach the GUI on the mesh besides.
 - **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
   the server holds 1,000 in all. A sign-in over a live session ends the old one.
 - **The origin is shared.** The cookie rides `/dashboard` alone, but any page served
   elsewhere on the same origin (Grafana at `/grafana/` with
   `compose.grafana-public.yaml`, say) can send requests to `/dashboard` that carry it,
-  and SvelteKit's origin check passes them. A script running in such a page reaches
+  and the GUI's origin check passes them. A script running in such a page reaches
   what the signed-in visitor's key reaches (ADR, "Path-based public routes carry
   obligations").
 
 ## The origin
 
-SvelteKit refuses a form posted from another origin, and the cookie is Secure only on
-https. So the server must know the origin a browser sees:
+The GUI refuses any request that changes something (POST, PUT, PATCH, DELETE, with a
+body or without) posted from another origin — its own check, `hooks.server.ts`, in
+place of SvelteKit's, which would refuse the break-glass port's forms — and the cookie
+is Secure only on https. So the server must know the origin a browser sees:
 
 - **`OB1_PUBLIC_ORIGIN`**, when it is a sound public origin (the authorization
   server's rules: https, or http on a loopback host, and an origin alone). Set it when
   a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. It is
   then the only origin the GUI takes a form from, as it is the one the authorization
-  server and every redirect name: sign in there, not at `127.0.0.1`. (A loopback sign-in
-  beside a public origin is SMD-3307's break-glass listener.) An
-  unsound one is warned of and passed over.
+  server and every redirect name: sign in there, not at `127.0.0.1`. The break-glass
+  port takes its own origin alone, `http://127.0.0.1:${BREAKGLASS_PORT}` — not
+  `localhost`, which another process may answer on `::1` (the port is published on
+  127.0.0.1 alone), nor the configured origin, from whose pages a key could otherwise
+  be posted there. An unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a
   LAN address signs in as it is reached through the stack's port. Reached without
@@ -129,9 +152,10 @@ https. So the server must know the origin a browser sees:
 |---|---|
 | `OB1_REST_URL` | The REST core; `http://api.ob1.internal.:8000` on the mesh unless set |
 | `OB1_PUBLIC_ORIGIN` | The origin behind TLS (above) |
-| `COMPOSE_PROFILES` | Key sign-in is off while it names `auth` |
+| `COMPOSE_PROFILES` | Key sign-in is off on the origin while it names `auth` |
+| `BREAKGLASS_PORT` | The break-glass port on the host, 8001 unless set: `http://127.0.0.1:<it>` is the one origin the GUI takes a form from on that listener, and its session cookie's name carries it. Changed, it needs `app` recreated as well as `breakglass` (a plain `compose up -d` does both) |
 | `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
-| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
+| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin, so not on the break-glass port, which routes the GUI alone. With neither, no link |
 | `PORT` | 8000 unless set |
 | `OB1_STOP_GRACE` | The stop's grace, as the servers read it: the GUI drains within it, less 2 s |
 
