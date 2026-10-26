@@ -64,6 +64,9 @@
  *   that one: anthropics/claude-code#95270). All three serve the provider's
  *   OpenID document, whose `issuer` is `<origin>/auth`;
  * - `/healthz`, for compose.
+ * And on a port of its own, ADMIN_PORT (3001), which no proxy rule routes to,
+ * the admin listener the operator GUI's page of grants reads and revokes
+ * through (SMD-3307 PR 3; admin.ts says what it takes and answers).
  * Each is matched on the request target's path as the library reads it, never
  * decoded or resolved. A target that is not a path (absolute-form, which only
  * a caller on the mesh can send: the proxy rewrites it), or that holds a
@@ -105,6 +108,7 @@ import { configFromEnv, type Config } from "./config.ts";
 import { ACCESS_TOKEN_TYPE, chainRotates, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
+import { ADMIN_PORT, adminRoute, basicCredentials, isGuiClient } from "./admin.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 import { guard, say, serve, targetOf, whyOf } from "./target.ts";
 
@@ -665,7 +669,40 @@ const server = serve((req, res) => {
   purge();
 }));
 
-// A stop (compose's SIGTERM) closes the listener, lets the requests in flight
+// The admin listener (admin.ts; SMD-3307 PR 3): the operator GUI's page of
+// grants, on the mesh, routed by no proxy rule. The GUI client's credentials
+// are checked before the path is read; failures are counted per address, as
+// the token endpoint's are, and an address past them is refused for the rest
+// of the window. The address is the socket's: no proxy stands in front.
+const adminFailures = new WindowLimit(TOKEN_FAILURES.limit, TOKEN_FAILURES.windowMs);
+const GUI_SECRETS: Record<string, string | undefined> = Object.fromEntries([...GUI_CLIENTS].map((id) => [id, C.secrets[id]]));
+function answer(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
+  res.end(JSON.stringify(body));
+}
+const admin = serve((req, res) => {
+  const target = targetOf(req.url);
+  if (!target) return answer(res, 400, { error: "invalid_request", error_description: "bad request target: send the path alone" });
+  const address = req.socket.remoteAddress ?? "";
+  const wait = adminFailures.wait(address);
+  if (wait) return tooMany(res, wait, "too many failed authentications from this address");
+  if (!isGuiClient(basicCredentials(req.headers.authorization), GUI_SECRETS)) {
+    adminFailures.record(address);
+    return answer(res, 401, { error: "invalid_client", error_description: "the admin listener takes the operator GUI's client credentials, as HTTP Basic" }, { "www-authenticate": 'Basic realm="ob1-auth-admin"' });
+  }
+  const route = adminRoute(req.method ?? "", target.path);
+  if (route.kind === "list") return answer(res, 200, store.grants());
+  if (route.kind === "revoke") {
+    if (!store.dropGrant(route.id)) return answer(res, 404, { error: "not_found", error_description: "no live grant has that id" });
+    console.log(`grant ${route.id} revoked on the operator's page of grants`);
+    res.writeHead(204, { "cache-control": "no-store" });
+    return res.end();
+  }
+  if (route.kind === "method") return answer(res, 405, { error: "method_not_allowed" }, { allow: route.allow });
+  answer(res, 404, { error: "not_found" });
+}).listen(ADMIN_PORT, "0.0.0.0", guard("the admin listener's start", () => console.log(`admin listener on ${ADMIN_PORT}: the operator GUI's page of grants, on the mesh`)));
+
+// A stop (compose's SIGTERM) closes the listeners, lets the requests in flight
 // finish for up to 5 s, closes the store and exits; without a handler Bun
 // ignored the signal and every stop waited out the grace period for SIGKILL
 // (server-portable/shutdown.ts measured the same). A second signal, or the
@@ -691,8 +728,15 @@ function stop(signal: string) {
   if (stopping) return done(1);
   stopping = true;
   try {
-    server.close(guard("the stop", () => done(0)));
+    // Done once both listeners have closed.
+    let open = 2;
+    const closed = guard("the stop", () => {
+      if (--open === 0) done(0);
+    });
+    server.close(closed);
+    admin.close(closed);
     server.closeIdleConnections();
+    admin.closeIdleConnections();
     setTimeout(guard("the stop's bound", () => done(1)), 5000).unref();
   } catch (e) {
     say(() => `the stop on ${signal} failed: ${whyOf(e)}`);

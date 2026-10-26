@@ -21,7 +21,9 @@
  *     callback, which opens a session (a cookie scoped to /dashboard) and
  *     sends it home, where the who line names oauth:operator with write;
  *   - the views render under the token session: overview, status, browse,
- *     the change feed, the workers;
+ *     the change feed, the workers; the nav offers the page of grants, which
+ *     lists this sign-in's own grant (SMD-3307 PR 3), and a revoke posted
+ *     from another origin is refused;
  *   - no page, header, navigation data, script module or cookie of the GUI's
  *     holds a token (nothing JWT-shaped), and the GUI's cookies are the
  *     session's alone (the Verify line: the browser holds no token);
@@ -38,6 +40,11 @@
  *     day's max_age (the AS asks gui every time, whatever the request says);
  *     a consent denied at the AS comes back in words and opens nothing; a
  *     refusal word the page does not know (`constructor`) is none.
+ *
+ * With `--revoke-client <id>` (CI: a client restart-check.ts --hold-grant
+ * signed in), the page lists that client's grant, a revoke removes it and
+ * says so, and a second revoke of it says it is gone; CI then holds the AS
+ * to refusing that client's refresh token (restart-check.ts --refused).
  *
  * With `--renewal`, before signing out it waits past the session's access
  * token's expiry (620 s) and loads pages again: they render only if the GUI
@@ -59,6 +66,7 @@ if (!BASE || !ORIGIN || !PASSWORD) {
 }
 const LOCAL = new URL(BASE).origin;
 const RENEWAL = args.includes("--renewal");
+const REVOKE_CLIENT = flag("revoke-client");
 const COOKIE = "ob1_dashboard_session";
 
 let pass = 0;
@@ -177,8 +185,24 @@ assert(home.status === 200 && /oauth:operator/.test(who) && /write key/.test(who
 const views = await Promise.all(["/status", "/thoughts", "/changes", "/workers", "/query-log"].map(async (p) => [p, await go(jar, `${BASE}${p}`)] as const));
 assert(views.every(([, r]) => r.status === 200), `…and so do the status, browse, the change feed, the workers and the query log (${views.map(([p, r]) => `${p} ${r.status}`).join(", ")})`);
 
+// The page of grants (SMD-3307 PR 3): offered in the nav, listing this sign-in's own grant among the rest.
+const grantsOf = (html: string) => html.split('data-testid="grant"').slice(1).map((li) => ({ id: /data-grant="([^"]+)"/.exec(li)?.[1] ?? "", text: li.slice(0, li.indexOf("</li>")) }));
+const grants = await go(jar, `${BASE}/grants`);
+const listed = grantsOf(grants.html);
+assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && listed.some((g) => g.text.includes("This dashboard")), `the nav offers the page of grants, which lists this dashboard's own sign-in (${grants.status}, ${listed.length} grant(s))`);
+const revokeElsewhere = await fetch(`${BASE}/grants?/revoke`, { method: "POST", redirect: "manual", headers: { origin: "https://elsewhere.example", "content-type": "application/x-www-form-urlencoded", cookie: cookieFor(jar, "/dashboard/grants") }, body: new URLSearchParams({ grant: listed[0]?.id ?? "x" }).toString() });
+assert(revokeElsewhere.status === 403, `…a revoke posted from another origin is refused (${revokeElsewhere.status})`);
+if (REVOKE_CLIENT) {
+  const theirs = listed.find((g) => g.text.includes(`registered client ${REVOKE_CLIENT}`));
+  const revoked = theirs ? await go(jar, `${BASE}/grants?/revoke`, { form: { grant: theirs.id } }) : { status: 0, location: "", html: "", headers: new Headers() };
+  const afterRevoke = await go(jar, `${BASE}/grants?revoked=1`);
+  assert(!!theirs && revoked.status === 303 && revoked.location === "/dashboard/grants?revoked=1" && afterRevoke.html.includes('data-testid="revoked"') && !grantsOf(afterRevoke.html).some((g) => g.id === theirs.id), `--revoke-client: its grant is listed, a revoke removes it and says so (${theirs ? revoked.status : "not listed"} → ${revoked.location})`);
+  const twice = theirs ? await go(jar, `${BASE}/grants?/revoke`, { form: { grant: theirs.id } }) : { status: 0, location: "" };
+  assert(twice.status === 303 && twice.location === "/dashboard/grants?gone=1", `…and revoked again, it is gone, nothing more done (${twice.status} → ${twice.location})`);
+}
+
 // No token where the browser can see it.
-const pages = [signin, home, ...views.map(([, r]) => r), await go(jar, `${BASE}/__data.json`), await go(jar, `${BASE}/status/__data.json`)];
+const pages = [signin, home, grants, ...views.map(([, r]) => r), await go(jar, `${BASE}/__data.json`), await go(jar, `${BASE}/status/__data.json`)];
 const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
 const scripts = new Set<string>();
 let leaked = pages.some((p) => JWT.test(p.html) || [...p.headers.values()].some((v) => JWT.test(v)));

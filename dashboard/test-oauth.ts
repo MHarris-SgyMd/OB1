@@ -31,6 +31,7 @@ const session = await import('./src/lib/server/session.ts');
 const { keySignInOffered } = await import('./src/lib/server/signin.ts');
 const { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } = await import('./src/lib/server/listener.ts');
 const { grafanaUrl } = await import('./src/lib/server/grafana.ts');
+const { grantsOffered, listGrants, revokeGrant } = await import('./src/lib/server/grants.ts');
 
 let pass = 0;
 let fail = 0;
@@ -294,6 +295,32 @@ console.log('▸ the break-glass listener (SMD-3307)');
 	assert(keySignInOffered(req('GET', {}), {}) && keySignInOffered(req('GET', bg), {}), 'not configured, key sign-in on either listener');
 	assert(!keySignInOffered(req('GET', {}), configured) && !keySignInOffered(req('GET', { 'x-ob1-listener': 'web' }), configured), 'configured, none on the origin');
 	assert(keySignInOffered(req('GET', bg), configured) && keySignInOffered(req('GET', bg), { COMPOSE_PROFILES: 'observability,auth' }), '…and key sign-in on the break-glass listener, whatever the authorization server\'s state');
+}
+
+console.log('▸ the page of grants (SMD-3307 PR 3)');
+{
+	const s = oauthSettings(env)!;
+	const calls: { url: string; init: RequestInit }[] = [];
+	const answering = (status: number, body?: unknown) => (async (url: string | URL | Request, init?: RequestInit) => {
+		calls.push({ url: String(url), init: init ?? {} });
+		return new Response(body === undefined ? null : JSON.stringify(body), { status });
+	}) as typeof fetch;
+	const failing = (async () => {
+		throw new TypeError('fetch failed');
+	}) as unknown as typeof fetch;
+	const row = { id: 'Gr4nt_id-1', clientId: 'https://client.example/meta.json', clientName: null, accountId: 'operator', scope: 'openid brain:read', resources: [`${ORIGIN}/mcp`], createdAt: 1, renewedAt: 2, expiresAt: 3 };
+	const listed = await listGrants(s, answering(200, { grants: [row, { id: 'bad id/../x' }, { id: 7 }, null], more: true }));
+	const sentAuth = new Headers(calls[0]?.init.headers).get('authorization') ?? '';
+	const [id, secret] = Buffer.from(sentAuth.replace(/^Basic /, ''), 'base64').toString().split(':').map((h) => decodeURIComponent(h.replace(/\+/g, ' ')));
+	assert(calls[0]?.url === 'http://auth.ob1.internal.:3001/grants' && id === 'gui' && secret === SECRET, "the listing is the admin listener's on the mesh, port 3001, under the gui client's own credentials as Basic");
+	assert(listed.ok && listed.grants.length === 1 && listed.grants[0].id === row.id && listed.grants[0].resources[0] === `${ORIGIN}/mcp` && listed.more, "…each row read as a grant, one with an id the AS never makes (a path, a number, none) dropped, and `more` kept");
+	assert(JSON.stringify(await listGrants(s, answering(401))) === JSON.stringify({ ok: false, refused: 401 }) && JSON.stringify(await listGrants(s, answering(503))) === JSON.stringify({ ok: false, unreachable: true }) && JSON.stringify(await listGrants(s, failing)) === JSON.stringify({ ok: false, unreachable: true }), '…the GUI\'s credentials refused said as refused; a 503, or no answer at all, as unreachable');
+	calls.length = 0;
+	assert((await revokeGrant(s, row.id, answering(204))) === 'revoked' && calls[0]?.url === `http://auth.ob1.internal.:3001/grants/${row.id}/revoke` && calls[0]?.init.method === 'POST', 'a revoke is a POST to the grant\'s own revoke path: 204 is revoked');
+	assert((await revokeGrant(s, row.id, answering(404))) === 'gone' && (await revokeGrant(s, row.id, answering(401))) === 'refused' && (await revokeGrant(s, row.id, answering(500))) === 'unreachable' && (await revokeGrant(s, row.id, failing)) === 'unreachable', '…404 is no live grant of that id, 401 refused, a 500 or no answer unreachable');
+	calls.length = 0;
+	assert((await revokeGrant(s, '../../auth/token', answering(204))) === 'gone' && calls.length === 0, '…and an id the AS never makes is sent nowhere');
+	assert(grantsOffered({ canCapture: true }, s) && !grantsOffered({ canCapture: false }, s) && !grantsOffered(null, s) && !grantsOffered({ canCapture: true }, null), 'the page is offered to a session that may write on a configured stack, and to no read session, no visitor, and on no stack without the AS');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

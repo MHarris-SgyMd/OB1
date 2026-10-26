@@ -432,7 +432,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it at `/cgi-bin/metrics`, the one path that answers; nothing on `data` reaches that port, and the exporter itself listens on the container's loopback (SMD-3023). It dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). It shares no network with the model providers or the mesh | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); its admin listener, `auth.ob1.internal:3001`, which the operator GUI's page of grants dials and no proxy rule routes to (SMD-3307 PR 3); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
@@ -3498,7 +3498,10 @@ its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
 since SMD-2287 PR 5b; the operator GUI signs the operator in through it as
 the confidential `gui` client, code and PKCE with a refresh token, with
-`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`). The
+`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`), and lists and
+revokes grants on its page of grants through the server's admin listener:
+port 3001 on the mesh, which no proxy rule routes to, taking the `gui`
+client's credentials alone (`auth/admin.ts`). The
 MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3621,9 +3624,11 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
-  the GUI's sign-out does its own. The operator's page of grants is SMD-3307's
-  third PR; until then, the compromise steps under "Custody and backups" below
-  end every grant.
+  the GUI's sign-out does its own. The operator revokes any client's on the
+  GUI's page of grants (`/dashboard/grants`, SMD-3307 PR 3): its refresh
+  tokens are refused at once, and the access token it holds lapses within
+  ten minutes (the maintainer's choice of 2026-10-26: no revocation list).
+  The compromise steps under "Custody and backups" below end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
@@ -3793,7 +3798,7 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the GUI's page of grants (SMD-3307's third PR). The release overlay does not pin an image for it yet,
+SMD-2286). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover
