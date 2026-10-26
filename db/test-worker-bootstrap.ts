@@ -13,10 +13,10 @@
  * closed loopback port, the one URL dialled, refused at once (SMD-2752).
  */
 
-import { providerEndpoint } from "../server-portable/embed.ts";
+import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeChat, probeUntil, ProviderOutage, sameModel, regateMessage, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
 let fail = 0;
@@ -314,6 +314,77 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   w.end();
   clock += SUSPECT_WINDOW_MS + 1;
   ok(w.begin("503", "E") === "outage", "a suspect meeting an outage past the window is in an outage like any other thought");
+
+  // The schedule carried across outages that come back at once (SMD-2679 PR 4a-2b): from where the last ended, inside the window and nothing settled since.
+  let resumeClock = 0;
+  const r = new ProviderOutage(() => resumeClock);
+  ok(r.resumeFrom(0, 60_000) === 0, "no outage yet: the schedule starts at its first wait");
+  r.begin("429");
+  r.end(3, 5);
+  resumeClock = 30_000;
+  ok(r.resumeFrom(5, 60_000) === 3, "back inside the window with nothing settled since: the last outage's step");
+  ok(r.resumeFrom(6, 60_000) === 0, "…a thought settled since (re-embedded, or recorded failed): the first wait again");
+  resumeClock = 60_000;
+  ok(r.resumeFrom(5, 60_000) === 0, "…past the window: the first wait again");
+  const plain = new ProviderOutage(() => 0);
+  plain.begin("503");
+  plain.end();
+  ok(plain.resumeFrom(-1, 60_000) === 0 && plain.resumeFrom(0, 60_000) === 0, "an end with no step and no count (extract's) never carries a schedule");
+
+  // followClassify — whose a --follow re-embed worker's error is (SMD-2679 PR 4a-2b, review pass 4).
+  const pg = (errno: string, code?: string) => Object.assign(new Error(`pg ${errno}`), { name: "PostgresError", errno, ...(code ? { code } : {}) });
+  const http = (status: number, body = "") => new ProviderError(`Embeddings request to http://h/v1 failed: ${status} ${body}`, "http", status, body);
+  const runtime = (code: string) => Object.assign(new TypeError("fetch failed"), { code });
+  const cells: [unknown, string, string][] = [
+    [pg("08006"), "db-wait", "a connection failure"],
+    [pg("57P01"), "db-wait", "an administrator's shutdown"],
+    [Object.assign(new Error("Connection closed"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" }), "db-wait", "Bun's connection closed"],
+    [pg("42501"), "db-end", "a privilege revoked"],
+    [pg("42883"), "db-end", "a function gone"],
+    [pg("57014"), "db-end", "a statement past statement_timeout"],
+    [pg("40P01"), "db-moment", "a deadlock"],
+    [pg("40001"), "db-moment", "a serialisation retry"],
+    [pg("55P03"), "db-moment", "a lock not available"],
+    [pg("53200"), "db-moment", "out of memory"],
+    [pg("25006"), "db-moment", "a read-only transaction"],
+    [pg("25P02"), "db-moment", "an aborted transaction"],
+    [pg("53100"), "db-moment", "a disk full"],
+    [pg("0A000"), "db-end", "a feature the server lacks"],
+    [pg("57P04"), "db-end", "the database dropped"],
+    [pg("XX000"), "thought", "an internal error: recorded, not cycled"],
+    [pg("P0001"), "thought", "a function's own guard"],
+    [pg("OB002"), "thought", "an invariant the projector holds"],
+    [pg("23503"), "thought", "a foreign key (a thought deleted under the write)"],
+    [pg("22P02"), "thought", "the thought's data (invalid text)"],
+    [pg("23505"), "thought", "a unique violation"],
+    [pg("54000"), "thought", "a program limit the thought exceeds"],
+    [http(429, "rate limited"), "backpressure", "a 429"],
+    [http(503, "server busy"), "backpressure", "a 503"],
+    [http(404, '{"error":{"message":"model \\"m\\" not found, try pulling it first"}}'), "backpressure", "the model not served"],
+    [http(500), "maybe-poison", "a 500"],
+    [http(502), "maybe-poison", "a 502"],
+    [http(504), "maybe-poison", "a 504"],
+    [http(408), "maybe-poison", "a 408"],
+    [new ProviderError("Embeddings request to http://h/v1 timed out after 2 s", "timeout"), "maybe-poison", "a timeout"],
+    [runtime("ECONNREFUSED"), "maybe-poison", "a connection refused"],
+    [runtime("ENOTFOUND"), "maybe-poison", "a name not resolved"],
+    [http(400, '{"error":{"message":"the input exceeds the model\'s context length"}}'), "thought", "a 400 about its length"],
+    [http(413, "too large"), "thought", "a 413"],
+    [new ProviderError("not sent: the egress gate refused it", "egress"), "thought", "the egress gate's refusal"],
+    [http(400, '{"error":{"message":"rejected by the content filter"}}'), "probe-decides", "a 400 not about length"],
+    [http(401, "invalid api key"), "probe-decides", "a 401"],
+    [http(404, "404 page not found"), "probe-decides", "a 404 naming no model (a wrong base URL)"],
+    [http(405), "probe-decides", "a 405"],
+    [http(415), "probe-decides", "a 415"],
+    [http(422, "unknown parameter dimensions"), "probe-decides", "a 422"],
+    [new ProviderError("Embeddings response was not JSON", "body"), "probe-decides", "a body not of the shape"],
+    [new Error("Embedding width mismatch: expected 1024, got 768"), "probe-decides", "a width mismatch"],
+    [runtime("CERT_HAS_EXPIRED"), "probe-decides", "a runtime error the rules do not know (an expired certificate)"],
+    [new TypeError("x is not a function"), "probe-decides", "a bare TypeError"],
+    [undefined, "probe-decides", "nothing at all"],
+  ];
+  const wrong = cells.filter(([e, want]) => followClassify(e) !== want).map(([e, want, what]) => `${what}: ${followClassify(e)}, not ${want}`);
+  ok(wrong.length === 0, `followClassify reads each of ${cells.length} errors as whose it is: the database's state, the provider's, the thought's, or the probe's to decide (${wrong.join("; ") || "every cell"})`);
 
   // A stop ends a probe in flight, as "out" (review pass 1).
   const hang = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });

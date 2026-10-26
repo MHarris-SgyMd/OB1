@@ -99,14 +99,16 @@ if (!URL_) {
  * [33] and [35] check the projection after the sections that write tickets
  * and sources, which are the rest's, so they stay there; [end] checks it again
  * at every run's end. Extract takes four short sections of the rest's, each
- * on its own client, to keep the rest under the full-stack jobs.
+ * on its own client, to keep the rest under the full-stack jobs. [9f],
+ * re-embed's follower outage cases, came out of [9] into extract, so long
+ * keeps its time (SMD-2679 PR 4a-2b).
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "10h", "17", "37", "37b", "39", "41", "43"],
+  extract: ["9f", "10", "10e", "10f", "10h", "17", "37", "37b", "39", "41", "43"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -3904,6 +3906,8 @@ if (want("9")) {
         IF EXISTS (SELECT 1 FROM zz_new WHERE work_type LIKE 'reembed:%') THEN INSERT INTO zz_reembed_seen VALUES (current_setting('statement_timeout') || ' ' || current_setting('work_mem')); END IF;
         RETURN NULL; END $$;
       CREATE TRIGGER zz_reembed_seen AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_new FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_seen()`);
+    // A 300 ms first outage wait from the start, still doubling: a poisoned row's outage waited the real 5 s (review pass 4).
+    const restoreOutage = shortenOutage(300);
     try {
       // Through the start and idle; a thought captured meanwhile, with no
       // vector, is pooled at the next poll and re-embedded; a stop exits 0.
@@ -4050,6 +4054,7 @@ if (want("9")) {
       assert(claimStamped && claimOutcome === "threw 42501" && claimRow?.ended === true && claimRow.outcome === "failed",
         `a permanent database error at a worker's claim ends the follower too, its row ended failed (${claimOutcome ?? "still running after 15 s"}; row ${JSON.stringify(claimRow)})`);
     } finally {
+      restoreOutage();
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_seen ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_seen(); DROP TABLE IF EXISTS zz_reembed_seen`);
       await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
       await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
@@ -4060,6 +4065,551 @@ if (want("9")) {
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   await sql`DELETE FROM thoughts`;
+}
+
+// [9f] The re-embed follower's outage waits (SMD-2679 PR 4a-2b): db/reembed.ts
+// --follow in this process, against a stub provider of its own and a relay in
+// front of Postgres — the provider and the database going away at the start
+// and mid-pass, whose each error is (worker-bootstrap.ts's followClassify,
+// whose every cell test-worker-bootstrap.ts holds; here one case per path it
+// sends a thought down), and what the follower says, stamps and ends with. Its
+// own section, in the extract shard, so the long shard keeps its time (review
+// pass 4).
+
+if (want("9f")) {
+  console.log("\n[9f] db/reembed.ts --follow: the provider and the database going away, at the start and mid-pass");
+  await sql`DELETE FROM thoughts`;
+  const DIM = EMBEDDING_DIM;
+  const PROBE = "reembed.ts provider probe";
+  /** Every embedding, the probe's too, answers downStatus (an outage: 503, or a crash's 500), 401 (a key refused) or a 404 naming the model (Ollama pulling it). */
+  let providerDown503 = false;
+  let downStatus = 503;
+  let keyRefused401 = false;
+  let modelGone404 = false;
+  /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
+  let limitConcurrent = false;
+  let embedInFlight = 0;
+  /** Every row's embedding answers rowsStatus while the probe's passes, as a tokens-per-minute limit the probe's few tokens slip under. */
+  let rowsLimited = false;
+  let rowsStatus = 429;
+  /** A hemlock note answers 500 every time; each row's call is held slowMs; the probe's calls are counted. */
+  let poison = false;
+  let slowMs = 0;
+  let probeCalls = 0;
+  const axisFor = (text: string) => {
+    let h = 0;
+    for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return 1 + (h % (DIM - 1));
+  };
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      const input = String(((await req.json()) as { input?: string }).input ?? "");
+      const probe = input === PROBE;
+      if (probe) probeCalls++;
+      if (providerDown503) return Response.json({ error: { message: "stub: overloaded" } }, { status: downStatus });
+      if (keyRefused401) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+      if (modelGone404) return Response.json({ error: { message: `model "stub-embed" not found, try pulling it first` } }, { status: 404 });
+      if (rowsLimited && !probe) return Response.json({ error: { message: "stub: rate limit reached for tokens per minute" } }, { status: rowsStatus });
+      if (limitConcurrent && !probe) {
+        if (embedInFlight > 0) return Response.json({ error: { message: "stub: too many requests" } }, { status: 429 });
+        embedInFlight++;
+        await Bun.sleep(150);
+        embedInFlight--;
+      }
+      if (input.includes("zz-filtered")) return Response.json({ error: { message: "stub: the request was rejected by the content filter" } }, { status: 400 });
+      if (input.includes("zz-overlong")) return Response.json({ error: { message: "stub: the input exceeds the model's context length" } }, { status: 400 });
+      if (poison && input.includes("hemlock")) return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
+      await Bun.sleep(10);
+      const v = new Array(DIM).fill(0);
+      v[axisFor(input)] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    },
+  });
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DATABASE_URL: URL_,
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`,
+    OB1_LLM_LOCAL: "1",
+    OB1_EMBEDDING_MODEL: "stub-embed",
+    OB1_EMBEDDING_DIM: String(DIM),
+    OB1_LLM_TIMEOUT: "2",
+  };
+  delete env.OB1_EMBEDDING_DIMENSIONS;
+  delete env.OB1_CHUNK_CONTEXT;
+  delete env.OB1_LLM_API_KEY;
+  const OWN_KEY = `reembed:stub-embed@${DIM}`;
+  const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+  const row = async () => {
+    const [r] = await sql`SELECT value FROM ob1_config WHERE key = ${ROW}`;
+    return r ? (JSON.parse(r.value) as { running?: boolean; outcome?: string | null; ended?: boolean; every_s?: number; refused?: string }) : null;
+  };
+  const newThought = async (text: string) => (await sql`INSERT INTO thoughts (content) VALUES (${text}) RETURNING id::text AS id`)[0].id as string;
+  const atModel = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+  /** A run that should return of itself, bounded: past 15 s it is stopped and null. */
+  const bounded = async (opts: Omit<ReembedOptions, "writer" | "signal">) => {
+    const ac = new AbortController();
+    const running = runReembed({ url: URL_!, env, ...opts, signal: ac.signal, writer: { out: () => {}, err: () => {} } }).then((code) => ({ code }));
+    const r = await Promise.race([running, Bun.sleep(15_000).then(() => null)]);
+    if (r === null) {
+      ac.abort();
+      await running;
+    }
+    return r;
+  };
+  try {
+  // In-process on a 300 ms first outage wait, still doubling: a follower's lines as they come, its exit.
+  const restoreOutage = shortenOutage(300);
+  try {
+    const liveFollower = (extra: Partial<ReembedOptions> = {}) => {
+      const lines: string[] = [];
+      const ac = new AbortController();
+      const done = runReembed({ url: URL_!, env, follow: 1, workers: 1, batch: 1, signal: ac.signal, ...extra, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const saw = (re: RegExp, ms = 15_000) => pollUntil(async () => lines.some((l) => re.test(l)), ms);
+      /** Its row stamped idle: through its start and its first drain. */
+      const idle = () => pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      const stop = async () => {
+        ac.abort();
+        return await Promise.race([done, Bun.sleep(15_000).then(() => "still running")]);
+      };
+      /** Its end, when it ends of itself within `ms`; else stopped, and null. */
+      const ended = async (ms = 15_000) => {
+        const end = await Promise.race([done, Bun.sleep(ms).then(() => null)]);
+        if (end === null) await stop();
+        return end;
+      };
+      return { lines, done, saw, stop, idle, ended };
+    };
+    /** The probe's schedule as each wait's line says it: the first wait, in seconds. */
+    const waitsOf = (lines: string[]) => lines.map((l) => /the follower calls stub-embed at .* after ([\d.]+) s and then twice as long/.exec(l)?.[1]).filter((w): w is string => w !== undefined).map(Number);
+    /** An error at every statement that pools re-embed claims: a 40P01, as a lock order two transactions met in opposite ways, unless a case names another. */
+    const createDeadlock = (errcode = "40P01", words = "zz: deadlock detected") => sql.unsafe(`CREATE FUNCTION zz_reembed_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN RAISE EXCEPTION '${words}' USING ERRCODE = '${errcode}'; END IF; RETURN NULL; END $$;
+      CREATE TRIGGER zz_reembed_deadlock AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_deadlock()`);
+    const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${OWN_KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+
+    // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
+    providerDown503 = true;
+    const late = liveFollower();
+    const waitedAtStart = await late.saw(/the embedding provider is not answering at start \(Embeddings request to .* failed: 503/);
+    const lateThought = await newThought("a thought a follower started in an outage re-embeds");
+    providerDown503 = false;
+    const lateAnswered = await late.saw(/the embedding provider answers after \d+ s/);
+    const lateEmbedded = await pollUntil(() => atModel(lateThought), 15_000);
+    const lateExit = await late.stop();
+    assert(waitedAtStart && lateAnswered && lateEmbedded && lateExit === "exit 0",
+      `a follower whose provider does not answer at its start waits for it, then pools: said, answered, the thought re-embedded, a stop 0 (waited ${waitedAtStart}, answered ${lateAnswered}, embedded ${lateEmbedded}; ${lateExit})`);
+
+    // Mid-pass: the row in hand goes back to the pool unrecorded, the follower's row waits mid-pass, and resumes when the provider answers.
+    // At 500, a crash's status, so the thought in hand is a suspect (a 503 makes none).
+    downStatus = 500;
+    const mid2 = liveFollower();
+    const mid2Stamped = await mid2.idle();
+    providerDown503 = true;
+    const midThought = await newThought("a thought the provider's outage sends back to the pool");
+    const sentBack = await mid2.saw(/the embedding provider is not answering \(Embeddings request .* 500.*goes back to the pool unrecorded/);
+    const waitingRow = await pollUntil(async () => { const r = (await row()) as { waitingMidPass?: string[]; outcome?: string } | null; return JSON.stringify(r?.waitingMidPass) === JSON.stringify(["reembed"]) && r?.outcome === "failed"; }, 15_000);
+    const claimAtOutage = await claimOf(midThought);
+    providerDown503 = false;
+    const resumed = await mid2.saw(/the embedding provider answers again after \d+ s; polling resumes/);
+    const midEmbedded = await pollUntil(() => atModel(midThought), 15_000);
+    // Re-embedded, it is a suspect no longer: moved back to the pool and in hand at the next outage, it goes back unrecorded again (ProviderOutage's settled).
+    providerDown503 = true;
+    await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${midThought}::uuid`;
+    const sentBackAgain = await pollUntil(async () => mid2.lines.filter((l) => l.includes(`${midThought} goes back to the pool unrecorded`)).length >= 2, 15_000);
+    const claimAgain = await claimOf(midThought);
+    providerDown503 = false;
+    const midAgain = await pollUntil(() => atModel(midThought), 15_000);
+    const mid2Exit = await mid2.stop();
+    downStatus = 503;
+    assert(mid2Stamped && sentBack && waitingRow && claimAtOutage?.status === "pending" && claimAtOutage.last_error === null && resumed && midEmbedded && mid2Exit === "exit 0",
+      `a provider outage mid-pass sends the row back to the pool unrecorded (${JSON.stringify(claimAtOutage)}), the follower's row waits mid-pass, failed, and the pass resumes when the provider answers (idle ${mid2Stamped}, sent back ${sentBack}, row waiting ${waitingRow}, resumed ${resumed}, embedded ${midEmbedded}; ${mid2Exit})`);
+    assert(sentBackAgain && claimAgain?.status === "pending" && midAgain,
+      `…and the thought, re-embedded since, is no suspect at the next outage: back to the pool unrecorded again, then re-embedded (sent back again ${sentBackAgain}, embedded ${midAgain}; claim ${JSON.stringify(claimAgain)})`);
+
+    // A row the provider fails again right after it answered a probe is the row's own: recorded failed, not cycled for ever.
+    poison = true;
+    const sick = liveFollower();
+    await sick.idle();
+    const sickThought = await newThought("the hemlock note an outage follower meets");
+    const recordedSick = await pollUntil(async () => (await claimOf(sickThought))?.status === "failed", 20_000);
+    const sickClaim = await claimOf(sickThought);
+    // A second poisoned thought's outage, right after: the first was recorded failed, so a thought settled since and the schedule starts over (review pass 4).
+    const sickThought2 = await newThought("the second hemlock note an outage follower meets");
+    const recordedSick2 = await pollUntil(async () => (await claimOf(sickThought2))?.status === "failed", 20_000);
+    const sickExit = await sick.stop();
+    poison = false;
+    const sickWaits = waitsOf(sick.lines);
+    assert(recordedSick && /provider error again right after the provider answered a probe, so this thought's/.test(sickClaim?.last_error ?? "") && sickExit === "exit 0",
+      `a row that draws the provider's error again right after a probe answered is recorded failed as its own (${sickClaim?.last_error?.slice(0, 120)}; ${sickExit})`);
+    assert(recordedSick2 && sickWaits.length === 2 && sickWaits[1] === sickWaits[0],
+      `…and the next poisoned thought's outage starts the schedule over, the one before recorded failed since (recorded ${recordedSick2}; waits ${JSON.stringify(sickWaits)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${sickThought}::uuid OR id = ${sickThought2}::uuid`;
+
+    // The provider refusing the request itself mid-pass ends the follower, refused `provider`, nothing marked failed.
+    const keyed = liveFollower();
+    await keyed.idle();
+    keyRefused401 = true;
+    const keyThought = await newThought("a thought the refused key leaves pending");
+    const keyEnd = await keyed.ended();
+    keyRefused401 = false;
+    const keyRow = await row();
+    const keyClaim = await claimOf(keyThought);
+    assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 401/.test(l)),
+      `a key refused mid-pass ends the follower with 2, its row refused provider, the row in hand left pending (${keyEnd}; row ${JSON.stringify(keyRow)}; claim ${JSON.stringify(keyClaim)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${keyThought}::uuid`;
+
+    // A 400 about one thought's length is that thought's: recorded failed, the follower goes on (review pass 1: it ended the follower, refused provider, and every restart met the same row first).
+    const lengthy = liveFollower();
+    await lengthy.idle();
+    const overlong = await newThought("a zz-overlong thought the provider refuses by its length");
+    const overlongFailed = await pollUntil(async () => (await claimOf(overlong))?.status === "failed", 15_000);
+    const afterOverlong = await newThought("a thought the follower takes after a length refusal");
+    const afterEmbedded = await pollUntil(() => atModel(afterOverlong), 15_000);
+    const lengthyExit = await lengthy.stop();
+    assert(overlongFailed && afterEmbedded && lengthyExit === "exit 0" && !lengthy.lines.some((l) => /refused the request itself/.test(l)),
+      `a 400 about a thought's length records that thought failed and the follower goes on, a stop 0 (failed ${overlongFailed}, next embedded ${afterEmbedded}; ${lengthyExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${overlong}::uuid`;
+
+    // A 400 not about length that the probe's text then gets answered (a content filter) is the thought's too: recorded failed, the follower goes on (review pass 2: it ended the follower, refused provider).
+    const filtering = liveFollower();
+    await filtering.idle();
+    const filtered = await newThought("a zz-filtered thought the provider's content filter rejects");
+    const filteredFailed = await pollUntil(async () => (await claimOf(filtered))?.status === "failed", 15_000);
+    const filteredClaim = await claimOf(filtered);
+    const afterFiltered = await newThought("a thought the follower takes after a filtered one");
+    const afterFilteredEmbedded = await pollUntil(() => atModel(afterFiltered), 15_000);
+    const filteringExit = await filtering.stop();
+    assert(filteredFailed && /content filter.*the provider answered a probe right after, so this thought's/.test(filteredClaim?.last_error ?? "") && afterFilteredEmbedded && filteringExit === "exit 0",
+      `a 400 the probe's text then gets answered is the thought's: recorded failed, said so, the follower goes on, a stop 0 (${filteredClaim?.last_error?.slice(0, 160)}; next embedded ${afterFilteredEmbedded}; ${filteringExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${filtered}::uuid`;
+
+    // The model missing mid-pass (a 404 naming it, as while Ollama pulls it) is waited for, as an outage is — not the request refused.
+    const pulled = liveFollower();
+    await pulled.idle();
+    modelGone404 = true;
+    const pulledThought = await newThought("a thought in hand while the model is pulled");
+    const pulledBack = await pollUntil(async () => pulled.lines.some((l) => l.includes(`${pulledThought} goes back to the pool unrecorded`)), 15_000);
+    // Two probes into the wait: the probe's "missing" read as out, and the thought not failed meanwhile.
+    const pulledProbes = probeCalls;
+    const pulledProbed = await pollUntil(async () => probeCalls >= pulledProbes + 2, 15_000);
+    const pulledClaim = await claimOf(pulledThought);
+    modelGone404 = false;
+    const pulledEmbedded = await pollUntil(() => atModel(pulledThought), 15_000);
+    const pulledExit = await pulled.stop();
+    assert(pulledBack && pulledProbed && pulledClaim?.status !== "failed" && pulledEmbedded && pulledExit === "exit 0",
+      `the model missing mid-pass is waited for: the thought back in the pool, not recorded failed over two probes' 404s, then re-embedded, a stop 0 (back ${pulledBack}, probed ${pulledProbed}, embedded ${pulledEmbedded}; claim ${JSON.stringify(pulledClaim)}; ${pulledExit})`);
+
+    // A rate limit under three workers records nothing failed: a 429 is no thought's (review pass 1: re-claimed suspects met it again).
+    const limited = liveFollower({ workers: 3 });
+    await limited.idle();
+    limitConcurrent = true;
+    const limitedThoughts: string[] = [];
+    try {
+      for (let i = 0; i < 6; i++) limitedThoughts.push(await newThought(`a thought the rate limit meets, number ${i}`));
+      await pollUntil(async () => (await Promise.all(limitedThoughts.map(atModel))).every(Boolean), 40_000);
+    } finally {
+      limitConcurrent = false;
+    }
+    const limitedFailed = Number((await sql`SELECT count(*) AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'failed' AND thought_id = ANY(${sql.array(limitedThoughts, "TEXT")}::uuid[])`)[0].n);
+    const limitedDone = (await Promise.all(limitedThoughts.map(atModel))).filter(Boolean).length;
+    const limitedExit = await limited.stop();
+    // Rows getting past the limit each cycle start the schedule over: the waits do not grow (review pass 3: they doubled at every cycle).
+    const limitedWaits = waitsOf(limited.lines);
+    assert(limitedFailed === 0 && limitedDone === 6 && limitedExit === "exit 0",
+      `three workers under a 429 for any second call in flight record no thought failed and re-embed all six (${limitedFailed} failed, ${limitedDone} done; ${limitedExit})`);
+    assert(limitedWaits.length >= 2 && limitedWaits.every((w) => w === limitedWaits[0]),
+      `…each cycle that re-embedded something starts the probe's schedule over, so the waits stay at the first (${JSON.stringify(limitedWaits)})`);
+    for (const id of limitedThoughts) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+
+    // A rate limit the probe passes and the rows do not: each outage that comes back at once waits twice as long as the last, not the first wait again (review pass 2: every 5 s for as long as it lasted).
+    const throttledFollower = liveFollower();
+    await throttledFollower.idle();
+    rowsLimited = true;
+    const waits = () => waitsOf(throttledFollower.lines);
+    let throttledThought = "";
+    try {
+      throttledThought = await newThought("a thought a tokens-per-minute limit holds back");
+      await pollUntil(async () => waits().length >= 3, 20_000);
+    } finally {
+      rowsLimited = false;
+    }
+    const seen = waits().slice(0, 3);
+    const throttledEmbedded = await pollUntil(() => atModel(throttledThought), 15_000);
+    const throttledClaim = await claimOf(throttledThought);
+    const throttledExit = await throttledFollower.stop();
+    assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
+      `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${throttledThought}::uuid`;
+
+    // The write's database errors are no thought's (review pass 3: each was recorded as its failure). A trigger on thoughts raises them for a marker.
+    await sql.unsafe(`CREATE FUNCTION zz_reembed_write_error() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.content LIKE '%zz-write-deadlock%' AND NEW.embedding IS DISTINCT FROM OLD.embedding THEN RAISE EXCEPTION 'zz: deadlock detected' USING ERRCODE = '40P01'; END IF;
+        IF NEW.content LIKE '%zz-write-timeout%' AND NEW.embedding IS DISTINCT FROM OLD.embedding THEN RAISE EXCEPTION 'canceling statement due to statement timeout' USING ERRCODE = '57014'; END IF;
+        IF NEW.content LIKE '%zz-write-guard%' AND NEW.embedding IS DISTINCT FROM OLD.embedding THEN RAISE EXCEPTION 'zz: a guard refused this write' USING ERRCODE = 'P0001'; END IF;
+        RETURN NEW; END $$;
+      CREATE TRIGGER zz_reembed_write_error BEFORE UPDATE ON thoughts FOR EACH ROW EXECUTE FUNCTION zz_reembed_write_error()`);
+    const dropWriteError = () => sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_write_error ON thoughts; DROP FUNCTION IF EXISTS zz_reembed_write_error()`);
+    let deadlocked: ReturnType<typeof liveFollower> | null = null;
+    let deadlockExit: string | null = null;
+    let deadlockSaid = false, deadlockClaim: { status: string; last_error: string | null } | undefined, deadlockEmbedded = false, writeDeadlock = "";
+    let guarded = "", guardFailed = false, guardClaim: { status: string; last_error: string | null } | undefined;
+    try {
+      // Contention at the write sends the thought back unrecorded; once it clears, it is re-embedded.
+      deadlocked = liveFollower();
+      await deadlocked.idle();
+      writeDeadlock = await newThought("a zz-write-deadlock thought whose write meets an edit's lock");
+      deadlockSaid = await deadlocked.saw(/the write met the database's moment \(zz: deadlock detected\) — .* goes back to the pool unrecorded/);
+      deadlockClaim = await claimOf(writeDeadlock);
+      await sql`UPDATE thoughts SET content = 'a thought whose write met an edit''s lock, the lock gone' WHERE id = ${writeDeadlock}::uuid`;
+      deadlockEmbedded = await pollUntil(() => atModel(writeDeadlock), 15_000);
+      // A function's own guard refusing the write (P0001) is the thought's: recorded failed, the follower goes on (review pass 5: it cycled through the pool for ever, unrecorded).
+      guarded = await newThought("a zz-write-guard thought a function's own guard refuses");
+      guardFailed = await pollUntil(async () => (await claimOf(guarded))?.status === "failed", 15_000);
+      guardClaim = await claimOf(guarded);
+      deadlockExit = await deadlocked.stop();
+    } finally {
+      if (deadlockExit === null) await deadlocked?.stop();
+    }
+    assert(deadlockSaid && deadlockClaim?.status !== "failed" && deadlockEmbedded && deadlockExit === "exit 0",
+      `a deadlock at the write sends the thought back to the pool unrecorded, said, and it is re-embedded once the lock is gone (said ${deadlockSaid}, embedded ${deadlockEmbedded}; claim ${JSON.stringify(deadlockClaim)}; ${deadlockExit})`);
+    assert(guardFailed && /a guard refused this write/.test(guardClaim?.last_error ?? "") && deadlockExit === "exit 0",
+      `a function's own guard refusing the write records that thought failed, and the follower goes on (claim ${JSON.stringify(guardClaim)}; ${deadlockExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${writeDeadlock}::uuid OR id = ${guarded || null}::uuid`;
+    // A statement past statement_timeout at the write ends the follower, its row failed, the thought not recorded.
+    const timedWrite = liveFollower();
+    let timedWriteEnd: string | null = null;
+    let writeTimeout = "";
+    try {
+      await timedWrite.idle();
+      writeTimeout = await newThought("a zz-write-timeout thought whose write runs past the timeout");
+      timedWriteEnd = await timedWrite.ended();
+    } finally {
+      await dropWriteError();
+      if (timedWriteEnd === null) await timedWrite.stop();
+    }
+    const timedWriteRow = await row();
+    const timedWriteClaim = await claimOf(writeTimeout);
+    assert(timedWriteEnd === "threw 57014" && timedWriteRow?.ended === true && timedWriteRow.outcome === "failed" && timedWriteClaim?.status !== "failed",
+      `a statement timeout at the write ends the follower — thrown 57014, for the scheduler's budget — its row failed, the thought not recorded (${timedWriteEnd}; row ${JSON.stringify(timedWriteRow)}; claim ${JSON.stringify(timedWriteClaim)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${writeTimeout}::uuid`;
+
+    // A probe answered with a refusal — the key revoked while the provider was away — is the request's: the follower ends, refused provider, not "answers again".
+    const revoked = liveFollower();
+    await revoked.idle();
+    providerDown503 = true;
+    const revokedThought = await newThought("a thought in hand when the key is revoked");
+    const revokedWaiting = await revoked.saw(/goes back to the pool unrecorded, and the follower waits for the provider/);
+    keyRefused401 = true;
+    providerDown503 = false;
+    const revokedEnd = await revoked.ended();
+    keyRefused401 = false;
+    const revokedRow = await row();
+    const revokedSaid = revoked.lines.some((l) => /answers now, refusing the request itself/.test(l));
+    const revokedResumed = revoked.lines.some((l) => /answers again after/.test(l));
+    const revokedClaim = await claimOf(revokedThought);
+    assert(revokedWaiting && revokedEnd === "exit 2" && revokedRow?.refused === "provider" && revokedSaid && !revokedResumed && revokedClaim?.status === "pending",
+      `a probe answered with a refusal ends the follower refused provider, said as such, the thought pending (waiting ${revokedWaiting}, said ${revokedSaid}, said as resumed ${revokedResumed}; ${revokedEnd}; row ${JSON.stringify(revokedRow)}; claim ${JSON.stringify(revokedClaim)})`);
+    await sql`DELETE FROM thoughts WHERE id = ${revokedThought}::uuid`;
+
+    // The gate refusing the probe's own subject (a deny policy whose term reads a row's type): an outage is probed under the subject of the thought that began it, not read as answered (review pass 1: the next thought was recorded failed at every cycle).
+    const gatedEnv = { ...env, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "type:gated-outage" } as Record<string, string>;
+    const gated = liveFollower({ env: gatedEnv });
+    const gatedIdle = await gated.idle();
+    providerDown503 = true;
+    const [{ id: gatedThought }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('a gated thought the outage sends back', ${{ type: "gated-outage" }}) RETURNING id::text AS id`;
+    const gatedWaiting = await gated.saw(/goes back to the pool unrecorded, and the follower waits for the provider/);
+    // Two probes into the wait, each under the thought's subject: a refused probe would have ended it at the first.
+    const gatedProbes = probeCalls;
+    const gatedProbed = await pollUntil(async () => probeCalls >= gatedProbes + 2, 15_000);
+    const gatedClaimInOutage = await claimOf(gatedThought);
+    providerDown503 = false;
+    const gatedEmbedded = await pollUntil(() => atModel(gatedThought), 15_000);
+    const gatedExit = await gated.stop();
+    assert(gatedIdle && gatedWaiting && gatedProbed && gatedClaimInOutage?.status !== "failed" && gatedEmbedded && gatedExit === "exit 0",
+      `with the probe's own subject refused by the gate, an outage waits, probing under the thought's subject: nothing recorded failed through two probes' 503s, then re-embedded (idle ${gatedIdle}, waiting ${gatedWaiting}, probed ${gatedProbed}, embedded ${gatedEmbedded}; claim in the outage ${JSON.stringify(gatedClaimInOutage)}; ${gatedExit})`);
+    await sql`DELETE FROM thoughts WHERE id = ${gatedThought}::uuid`;
+
+    // A poll's statement past the session's statement_timeout ends the follower, its row failed — no longer swallowed.
+    const timed = liveFollower({ session: { statement_timeout: "1s" } });
+    let timedEnd: string | null = null;
+    try {
+      await timed.idle();
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_slow_pool() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN PERFORM pg_sleep(3); END IF; RETURN NULL; END $$;
+        CREATE TRIGGER zz_reembed_slow_pool AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_slow_pool()`);
+      await newThought("a thought a slow pool meets");
+      timedEnd = await timed.ended();
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_slow_pool ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_slow_pool()`);
+      if (timedEnd === null) await timed.stop();
+    }
+    const timedRow = await row();
+    assert(timedEnd === "threw 57014" && timedRow?.ended === true && timedRow.outcome === "failed",
+      `a poll's statement past statement_timeout ends the follower, its row ended failed, for the sleep scheduler's budget to read (${timedEnd}; row ${JSON.stringify(timedRow)})`);
+
+    // The check while the provider does not answer: through, said `out`, without waiting for it (review: the check said `up`).
+    providerDown503 = true;
+    const outChecked: unknown[] = [];
+    const outCheck = await bounded({ job: undefined, follow: 1, check: true, onStart: (r) => outChecked.push(r) });
+    providerDown503 = false;
+    assert(outCheck?.code === 0 && JSON.stringify(outChecked) === JSON.stringify([{ ok: true, provider: "out" }]),
+      `reembed's check with the provider not answering is through and says out, without waiting (exit ${outCheck?.code ?? "none in 15 s"}; heard ${JSON.stringify(outChecked)})`);
+
+    // Contention (a deadlock's 40P01) at a pool costs that pool, the first's included: the follower goes on.
+    await createDeadlock();
+    const dropDeadlock = () => sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_deadlock ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_deadlock()`);
+    let firstDeferred = false, firstEmbedded = false, pollDeferred = false, pollEmbedded = false, locked: string | null = null, retryLines = "";
+    let fkDeferred = false, fkEmbedded = false;
+    let contended: ReturnType<typeof liveFollower> | null = null;
+    try {
+      const lockedFirst = await newThought("a thought the first pool's deadlock defers");
+      contended = liveFollower({ retryFailed: true });
+      firstDeferred = await contended.saw(/the first pool could not be written \(zz: deadlock detected\) — the follower tries it again at its next poll/);
+      const retrySaidEarly = contended.lines.some((l) => /--retry-failed:/.test(l));
+      await dropDeadlock();
+      firstEmbedded = await pollUntil(() => atModel(lockedFirst), 15_000);
+      // The deferred pool's own lines, said when it ran, not as zeros at the start (review pass 1).
+      retryLines = `${retrySaidEarly ? "said early" : "not early"}, ${contended.lines.filter((l) => /--retry-failed: \d+ failed row\(s\) returned to the pool/.test(l)).length} after`;
+      await createDeadlock();
+      const pollFrom = contended.lines.length;
+      const lockedPoll = await newThought("a thought a poll's deadlock defers");
+      pollDeferred = await pollUntil(async () => contended!.lines.slice(pollFrom).some((l) => /the pool could not be written this poll \(zz: deadlock detected\) — the next poll tries again/.test(l)), 15_000);
+      await dropDeadlock();
+      pollEmbedded = await pollUntil(() => atModel(lockedPoll), 15_000);
+      // A thought deleted under the pool's insert (23503) costs that poll too: no thought is in hand at a pool (review pass 5: it ended the follower).
+      await createDeadlock("23503", "zz: violates foreign key constraint");
+      const fkFrom = contended.lines.length;
+      const fkThought = await newThought("a thought a poll's foreign-key race defers");
+      fkDeferred = await pollUntil(async () => contended!.lines.slice(fkFrom).some((l) => /the pool could not be written this poll \(zz: violates foreign key constraint\) — the next poll tries again/.test(l)), 15_000);
+      await dropDeadlock();
+      fkEmbedded = await pollUntil(() => atModel(fkThought), 15_000);
+      locked = await contended.stop();
+    } finally {
+      await dropDeadlock();
+      if (locked === null) await contended?.stop();
+    }
+    assert(firstDeferred && firstEmbedded && pollDeferred && pollEmbedded && locked === "exit 0" && retryLines === "not early, 1 after",
+      `a deadlock at the first pool defers it to the next poll, and one at a poll costs that poll: said, each thought re-embedded once the lock clears, a stop 0; the deferred pool's --retry-failed line said once, when it ran (first ${firstDeferred}/${firstEmbedded}; poll ${pollDeferred}/${pollEmbedded}; retry ${retryLines}; ${locked})`);
+    assert(fkDeferred && fkEmbedded,
+      `…and a thought deleted under a poll's insert (23503) costs that poll, not the follower: said, the next poll's thought re-embedded (said ${fkDeferred}, embedded ${fkEmbedded}; ${locked})`);
+
+    // The database gone at the start's reads, at the first pool and under a thought in hand (a relay cut).
+    const startRelay = await cuttableRelay(URL_!);
+    try {
+      // At the reads: waited for, said; back, the follower pools.
+      await startRelay.cut();
+      const early = liveFollower({ url: startRelay.url });
+      const earlyWaited = await early.saw(/the database is not answering [\s\S]* — waiting for it/);
+      await startRelay.restore();
+      const earlyBack = await early.saw(/the database answers again/);
+      const earlyThought = await newThought("a thought a follower started in a database outage re-embeds");
+      const earlyEmbedded = await pollUntil(() => atModel(earlyThought), 15_000);
+      const earlyExit = await early.stop();
+      assert(earlyWaited && earlyBack && earlyEmbedded && earlyExit === "exit 0",
+        `a follower whose database does not answer at its start's reads waits for it, then pools (waited ${earlyWaited}, back ${earlyBack}, embedded ${earlyEmbedded}; ${earlyExit})`);
+
+      // At the first pool, a stop ending the wait: the stop's 130, not the record moved.
+      providerDown503 = true;
+      const atPool = liveFollower({ url: startRelay.url });
+      const poolProbing = await atPool.saw(/the embedding provider is not answering at start/);
+      await startRelay.cut();
+      providerDown503 = false;
+      const poolWaited = await atPool.saw(/the database is not answering [\s\S]* — waiting for it/);
+      const poolExit = await atPool.stop();
+      await startRelay.restore();
+      assert(poolProbing && poolWaited && poolExit === "exit 130" && !atPool.lines.some((l) => /model-switch|now records/.test(l)),
+        `a stop while the first pool waits for the database is the stop's (130), not the record moved (${poolExit}; ${atPool.lines.filter((l) => /records|stopped/.test(l)).join(" | ").slice(0, 300)})`);
+
+      // A thought in hand when the database goes: nothing recorded, its lease returned at the next poll that reaches the database, not left to expire.
+      // A 30 s call timeout, so a loaded runner's slow answer is not read as the provider's outage.
+      const held = liveFollower({ url: startRelay.url, env: { ...env, OB1_LLM_TIMEOUT: "30" } as Record<string, string> });
+      await held.idle();
+      // Inside this follower's 30 s OB1_LLM_TIMEOUT, so the call answers and the write meets the cut, with seconds to land it.
+      slowMs = 3000;
+      const heldThought = await newThought("a thought in hand when the database goes");
+      const inHand = await pollUntil(async () => (await claimOf(heldThought))?.status === "claimed", 15_000);
+      await startRelay.cut();
+      const heldStopped = await held.saw(/this worker stops, recording nothing for/);
+      slowMs = 0;
+      await startRelay.restore();
+      const heldEmbedded = await pollUntil(() => atModel(heldThought), 15_000);
+      const heldExit = await held.stop();
+      assert(inHand && heldStopped && heldEmbedded && heldExit === "exit 0",
+        `a thought in hand when the database goes records nothing, and its lease, unreturned then, is returned at the next poll, so it re-embeds well inside its TTL (in hand ${inHand}, stopped ${heldStopped}, embedded ${heldEmbedded}; ${heldExit}; ${JSON.stringify(held.lines.slice(2)).slice(0, 1500)})`);
+      // A stop while a poll waits for the database: 0, said, no counts read (review pass 1: counts() threw, the run rejected).
+      const downStop = liveFollower({ url: startRelay.url });
+      await downStop.idle();
+      await startRelay.cut();
+      const downWaiting = await downStop.saw(/the database is not answering [\s\S]* — the follower waits for it/);
+      const downExit = await downStop.stop();
+      await startRelay.restore();
+      assert(downWaiting && downExit === "exit 0" && downStop.lines.some((l) => /stopped while the database was not answering: .* the pool's counts are not read/.test(l)),
+        `a stop while a poll waits for the database ends the follower 0, said, with no counts read (${downExit}; ${downStop.lines.slice(-2).join(" | ").slice(0, 300)})`);
+      // Its row could not be ended with the database away: gone, so the next case waits for its own follower's stamp, not this stale one.
+      await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+    } finally {
+      slowMs = 0;
+      providerDown503 = false;
+      await startRelay.close();
+    }
+
+    // The database gone mid-follow is waited out, said once; back, the follower pools again.
+    const relay = await cuttableRelay(URL_!);
+    try {
+      const t0 = Date.now();
+      const marks: string[] = [];
+      const mark = (what: string) => marks.push(`${what}@${Date.now() - t0}ms/${cut.lines.length}`);
+      const cut = liveFollower({ url: relay.url });
+      const idleSeen = await cut.idle();
+      mark(`idle ${idleSeen}`);
+      await relay.cut();
+      mark("cut");
+      const waitedDb = await cut.saw(/the database is not answering .* the follower waits for it/);
+      mark("waited");
+      await relay.restore();
+      const dbBack = await cut.saw(/the database answers again after \d+ s; polling resumes/, 20_000);
+      mark("back");
+      // Back, it polls once at once and then on its interval, not in a loop (review pass 2: the reset dropped, 7,092 commits in 5 s).
+      const commits = async () => { await sql`SELECT pg_stat_clear_snapshot()`; return Number((await sql`SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()`)[0].xact_commit); };
+      await Bun.sleep(500);
+      const commitsFrom = await commits();
+      await Bun.sleep(1500);
+      const commitsBack = (await commits()) - commitsFrom;
+      mark(`commits ${commitsBack}`);
+      const afterDb = await newThought("a thought the follower finds after the database came back");
+      const dbEmbedded = await pollUntil(() => atModel(afterDb), 15_000);
+      mark("embedded");
+      const cutExit = await cut.stop();
+      mark("stopped");
+      assert(waitedDb && dbBack && dbEmbedded && cutExit === "exit 0" && commitsBack < 400,
+        `the database gone mid-follow is waited out and said; back, the follower re-embeds what it finds (waited ${waitedDb}, back ${dbBack}, embedded ${dbEmbedded}; ${cutExit}; ${marks.join(" ")}; ${JSON.stringify(cut.lines.slice(-6)).slice(0, 800)})`);
+    } finally {
+      await relay.close();
+    }
+  } finally {
+    restoreOutage();
+    providerDown503 = false;
+    keyRefused401 = false;
+    modelGone404 = false;
+    limitConcurrent = false;
+    rowsLimited = false;
+    poison = false;
+    slowMs = 0;
+    downStatus = 503;
+    rowsStatus = 429;
+  }
+  } finally {
+    provider.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
+    await sql`DELETE FROM thoughts`;
+  }
 }
 
 // ── 10. db/extract-entities.ts — the second consumer, end to end ─────────────
