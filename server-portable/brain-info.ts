@@ -258,7 +258,8 @@ export interface WorkerHeartbeat {
 /** What set the scheduler's re-embed pass down for a sleep (WorkerHeartbeat.aside), beside a model switch, which sets it aside. */
 export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "statement", "outage", "failed"] as const;
 /** The sleep scheduler's re-embed pass set aside or down (WorkerHeartbeat.aside). */
-export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string } | { kind: (typeof REEMBED_DOWN)[number] } };
+export type ReembedDown = (typeof REEMBED_DOWN)[number];
+export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string } | { kind: ReembedDown } };
 
 /** Why a sleep stopped on its budget: its clock spent, or a pass's statement cancelled past statement_timeout (SMD-2679). */
 export const BUDGET_STOPS = ["clock", "statement"] as const;
@@ -280,7 +281,7 @@ function parseAside(a: unknown): SleepAside | undefined {
   if (r === null || typeof r !== "object") return undefined;
   const { kind, recorded, configured } = r as Record<string, unknown>;
   if (kind === "model-switch") return modelName(recorded) && modelName(configured) && recorded !== configured ? { reembed: { kind, recorded, configured } } : undefined;
-  return (REEMBED_DOWN as readonly unknown[]).includes(kind) ? { reembed: { kind: kind as (typeof REEMBED_DOWN)[number] } } : undefined;
+  return (REEMBED_DOWN as readonly unknown[]).includes(kind) ? { reembed: { kind: kind as ReembedDown } } : undefined;
 }
 
 /** A `budget` value as db/sleep.ts writes it, or undefined: counts, each within its flag's bound. */

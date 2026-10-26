@@ -1184,7 +1184,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // otherwise. A run under a foreign key is refused above.
   const TARGET = parseReembedKey(JOB)?.model ?? embedConfig.embeddingModel;
 
-  /** The pool's rules over the thoughts and this job's claim rows (poolRules, below run()). */
+  /** The pool's rules over the thoughts and this job's claim rows (poolRules, above run()). */
   const { notAtTarget, poolable, doneButNotAtTarget, accepted, standingBound, standingAcceptance } = poolRules(sql, TARGET, BACKFILL);
   const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget()})`;
 
@@ -2161,11 +2161,11 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         try {
           // A follower reads the record before each batch, not only at its poll: a --switch-model run by hand beside
           // it had the whole drain — a sleep's backlog — written at the old model after the switch (SMD-2679 PR 4b,
-          // review pass 4). The batches in hand still land; the next poll's pool ends the follower, 2.
+          // review pass 4). The batches in hand still land; the follower ends, 2, once the drain returns.
           if (FOLLOW) {
             const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
             if (r && r.value !== embedConfig.embeddingModel) {
-              switchedTo = String(r.value);
+              switchedTo = r.value;
               return;
             }
           }

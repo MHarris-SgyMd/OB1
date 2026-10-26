@@ -93,8 +93,8 @@
  * sleep with work re-embeds. A brain with vectors from before migration 021,
  * which carry no model, re-embeds them in its first sleeps — one call a row,
  * across sleeps the clock ends — and the start line and --dry-run count them
- * (reembed.ts --dry-run before upgrading). The extraction follower runs alone until its
- * pool is drained — nothing pending, in flight or not yet in the pool —
+ * (reembed.ts --dry-run before upgrading). The extraction follower runs
+ * alone until its pool is drained — nothing pending, in flight or not yet in the pool —
  * because consolidation judges a thought against neighbours that must be
  * extracted first (consolidate.ts's header; deploy/README.md's "Start extract
  * alone on a backlog", a rule there until now). The consolidation follower
@@ -210,10 +210,9 @@
  *    yet enqueued included, re-embed's only while it runs — not set down
  *    or aside — and only the leases this sleep can work; another process's
  *    claims under the claim passes' keys count too), or a pass waiting for
- *    its provider —
- *    as the clock was spent; an
- *    idle clock-out ends the sleep as quietly as a drained one, the next still
- *    after a live call, and one sleep's exits 0.
+ *    its provider — as the clock was spent; an idle clock-out ends the sleep
+ *    as quietly as a drained one, the next still after a live call, and one
+ *    sleep's exits 0 — 1 if its re-embed was set down or aside.
  * The settings go out as startup parameters, which a transaction pooler —
  * PgBouncer, a managed host's pooled endpoint — refuses: the scheduler
  * connects to Postgres directly, as the compose stack's does. The worker
@@ -320,7 +319,7 @@ import { join } from "node:path";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { budgetWords, heldWords, REEMBED_DOWN, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
+import { budgetWords, heldWords, REEMBED_DOWN, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type ReembedDown, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { reembedBacklog, run as runReembed } from "./reembed.ts";
@@ -474,7 +473,8 @@ export const statementTimedOut = (e: unknown): boolean => (e as { errno?: unknow
  * flight under this process's extraction worker ids (MINE) claimed since this
  * run began, and `stalledMine` those of them stalled: another's claim, or a
  * lease a scheduler gone left — on another host, or this container before a
- * restart — is no thought this one holds.
+ * restart — is no thought this one holds. `unlabelled`, re-embed's alone
+ * (reembedBacklog's): of the unpooled, the vectors that carry no model.
  */
 type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number; unlabelled?: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
@@ -490,6 +490,8 @@ const joinsPast = (p: Pool): boolean => p.unpooled === 0 && p.pending + p.claime
 const MINE = `extract-${hostname()}-${process.pid}-`;
 /** Re-embed's worker ids in this process (reembed.ts's `workerId`, heldHere's). */
 const REEMBED_MINE = `reembed-${hostname()}-${process.pid}-`;
+/** Consolidation's worker ids in this process (heldHere's). */
+const CONSOLIDATE_MINE = `consolidate-${hostname()}-${process.pid}-`;
 /** The work extraction has that no stall holds back: rows pending that are not stalled, and thoughts not yet in the pool (none in a claims-only read). */
 const newerWork = (p: Pool): number => p.pending - p.stalledPending + p.unpooled;
 /**
@@ -940,7 +942,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * its provider not answering — said, on the row, the claim passes running
    * on; the next sleep with work tries it again. Cleared as each sleep begins.
    */
-  let reembedDown: (typeof REEMBED_DOWN)[number] | null = null;
+  let reembedDown: ReembedDown | null = null;
   /** Re-embed set down or aside at any point of this sleep: its pool left, so a one-shot sleep exits 1 (review pass 3: one taken up mid-sleep, or its clock-out, exited 0). */
   let reembedLeft = false;
   const asideWord = (): SleepAside | null =>
@@ -1298,7 +1300,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     (await sql`
       SELECT thought_id::text AS id, work_type AS job FROM thought_work_claims
        WHERE work_type IN (${JOBS.reembed}, ${JOBS.extract}, ${JOBS.consolidate}) AND status = 'claimed'
-         AND (starts_with(worker_id, ${REEMBED_MINE}) OR starts_with(worker_id, ${MINE}) OR starts_with(worker_id, ${`consolidate-${hostname()}-${process.pid}-`}))`) as { id: string; job: string }[];
+         AND (starts_with(worker_id, ${REEMBED_MINE}) OR starts_with(worker_id, ${MINE}) OR starts_with(worker_id, ${CONSOLIDATE_MINE}))`) as { id: string; job: string }[];
   /**
    * A wake's abandoned claims to the back of the queue. The release keeps
    * enqueued_at and counts no attempt (015), and claims are taken oldest
@@ -1742,7 +1744,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (switched(rec)) await setReembedAside(rec);
       else {
         const refused = re.start && !re.start.ok ? re.start.refused : undefined;
-        await setReembedDown(re.timedOut ? "statement" : refused && (REEMBED_DOWN as readonly string[]).includes(refused) ? (refused as (typeof REEMBED_DOWN)[number]) : re.code === 2 ? "provider" : "failed");
+        await setReembedDown(re.timedOut ? "statement" : refused && (REEMBED_DOWN as readonly string[]).includes(refused) ? (refused as ReembedDown) : re.code === 2 ? "provider" : "failed");
       }
       return true;
     };
@@ -1767,7 +1769,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       return stopping;
     };
     /** The words for what set re-embed down: its own lines name the cause; this says what the scheduler does about it. */
-    const downCause: Record<(typeof REEMBED_DOWN)[number], string> = {
+    const downCause: Record<ReembedDown, string> = {
       provider: "the embedding provider refused it (a key, credit, or the request itself)",
       model: "the embedding model is not served",
       egress: "the egress policy refuses its call",
@@ -1784,7 +1786,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * row flags it before it reads `aside`; not for its provider not answering,
      * the provider's state (review pass 2).
      */
-    const setReembedDown = async (kind: (typeof REEMBED_DOWN)[number]): Promise<void> => {
+    const setReembedDown = async (kind: ReembedDown): Promise<void> => {
       reembedDown = kind;
       reembedLeft = true;
       if (kind === "outage") delete words.reembed;
