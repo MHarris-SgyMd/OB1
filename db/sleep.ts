@@ -380,6 +380,12 @@ export interface SleepOptions {
   budgetMs?: number;
   /** The grace after the clock in ms (BUDGET_GRACE_S), when a test drives it faster. */
   budgetGraceMs?: number;
+  /**
+   * The quiet and the poll in ms, in place of `quiet` and `poll`'s whole seconds, when a test drives the scheduler
+   * faster than --quiet and --poll's floor of a second (SMD-3196).
+   */
+  quietMs?: number;
+  pollMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -696,6 +702,10 @@ export async function run(opts: SleepOptions): Promise<number> {
     const problem = v === undefined ? null : numberProblem(name, v, { min: 0 });
     if (problem !== null) throw new RangeError(problem);
   }
+  for (const [name, v] of [["quietMs", opts.quietMs], ["pollMs", opts.pollMs]] as const) {
+    const problem = v === undefined ? null : numberProblem(name, v, { min: 1 });
+    if (problem !== null) throw new RangeError(problem);
+  }
   if (opts.signal?.aborted && !opts.dryRun) {
     err(STOPPED_EARLY);
     return 130;
@@ -712,7 +722,10 @@ export async function run(opts: SleepOptions): Promise<number> {
 type Running = { name: PassName; done: Promise<number>; settled: boolean; code: number | null; stop: PassStop | null; abort: AbortController; hushed: boolean; start: StartResult | null; timedOut: boolean };
 
 async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, out: Writer["out"], err: Writer["err"]): Promise<number> {
-  const { quiet: QUIET, poll: POLL, workers: WORKERS } = n;
+  const { workers: WORKERS } = n;
+  /** The quiet and the poll in seconds: a test's milliseconds in place of the flags' whole seconds (SMD-3196). */
+  const QUIET = opts.quietMs !== undefined ? opts.quietMs / 1000 : n.quiet;
+  const POLL = opts.pollMs !== undefined ? opts.pollMs / 1000 : n.poll;
   /** Each pass's session settings, and the sleep's clock and grace (SMD-2679). */
   const SESSION = budgetSession(n);
   const BUDGET_MS = opts.budgetMs ?? n.budget * 60_000;
