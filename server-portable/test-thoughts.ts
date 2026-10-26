@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, firstLineTicket, isTicket, metadataTicket, OWN_ANSWER, OWN_HEAD, ownRules, ownSubjectMessages, ownSubjectOf, ruleSubject, SUBJECT_RULES_KEY, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectRuleKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -2614,7 +2614,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
 
 // ── 17. A thought's own subject (SMD-3306) ───────────────────────────────────
 
-console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticket it is filed under, else its first line's; the model's question is SMD-3299's round 4 own question word for word; an answer is read into 111's key shapes, a ticket first");
+console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the rules read the ticket it is filed under, else a session summary's header ticket its prompts name; the model's question is the subject's own, pinned by hash; an answer is read into 111's key shapes, a ticket first and one PR alone; a subject is current under its rule's key or the current question");
 {
   // The key's shapes, as 111's subject_key_valid reads them.
   for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
@@ -2631,7 +2631,18 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     // Review pass 1: a ticket-shaped encoding, hash or licence is no ticket; PR-502 is a PR; a ticket too long for 111's key is none.
     ["Move to SHA-256 (SMD-1234)", "ticket:SMD-1234"], ["SHA-256 migration", "phrase:sha-256 migration"], ["UTF-8 handling", "phrase:utf-8 handling"], ["PR-502", "pr:502"],
     [`SMD-${"1".repeat(250)}`, `phrase:smd-${"1".repeat(196)}`],
-    ["", null], ["   ", null], ["ϒ", null],
+    // Review pass 4: an answer is a PR only when it is one, at most two words before it and no number after it.
+    ["PR 7, the fix", "pr:7"], ["PR #12 - the fix", "pr:12"], ["PR 5 to main", "pr:5"], ["client PR 780 merge", "pr:780"], ["PR 727's review", "pr:727"],
+    ["Notes on the merge queue (across PRs #20–#45)", "phrase:notes on the merge queue (across prs #20–#45)"], ["PR 12 and PR 13", "phrase:pr 12 and pr 13"],
+    ["PR 10–12", "phrase:pr 10–12"], ["PR 502 and 503", "phrase:pr 502 and 503"], ["PR 12/13", "phrase:pr 12/13"], ["PR 10 → 12", "phrase:pr 10 → 12"], ["PRs 502 and 503", "phrase:prs 502 and 503"],
+    ["PR 12 & 13", "phrase:pr 12 & 13"], ["PR 12, and 13", "phrase:pr 12, and 13"], ["PR 12 and/or 13", "phrase:pr 12 and/or 13"],
+    ["PR #12, 23 commits", "phrase:pr #12, 23 commits"], ["PR 727, 2026-10-20", "phrase:pr 727, 2026-10-20"], ["PR 012, then PR #12 again", "phrase:pr 012, then pr #12 again"],
+    ["the merge of PR 727", "phrase:the merge of pr 727"], ["the PRs behind #727", "phrase:the prs behind #727"],
+    ["PR 727, then v2.0.0", "version:v2.0.0"], ["#5, #6 and #7, the v2.1.0 cut", "version:v2.1.0"],
+    // Review pass 6: a word before the PR has a letter and is no PR of its own, so a list of PRs is no PR.
+    ["PR #12, PR #13", "phrase:pr #12, pr #13"], ["#12, #13", "phrase:#12, #13"], ["PR#12 PR#13", "phrase:pr#12 pr#13"], ["12, PR 13", "phrase:12, pr 13"],
+    ["the client PR 780", "pr:780"], ["OB1 PR 509", "pr:509"],
+    ["", null], ["   ", null], ["ϒ", null], ["—", null],
   ];
   for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);
   const long = subjectKey("word ".repeat(80));
@@ -2640,46 +2651,107 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
   assert(longOne === `phrase:${"x".repeat(200)}`, "…and one word longer than the bound is cut at it");
   for (const [answer] of keyed) { const k = subjectKey(answer); assert(k === null || subjectKeyValid(k), `every key made is one 111 admits (${k})`); }
 
-  // The rules: the ticket filed under (ticket, else issue: node_state's), else the first ticket on the first non-blank line.
+  // The rules: the ticket filed under (ticket, else issue: node_state's), else a session summary's header ticket.
   assert(metadataTicket({ ticket: "SMD-1" }) === "SMD-1" && metadataTicket({ issue: " SMD-2 " }) === "SMD-2" && metadataTicket({ ticket: "not one", issue: "SMD-3" }) === "SMD-3",
     "the metadata's ticket, else its issue, the first that is a ticket id, trimmed");
   assert(metadataTicket({ ticket: 5 }) === null && metadataTicket({ ticket: "SMD-1 and SMD-2" }) === null && metadataTicket({ ticket: "smd-1" }) === null && metadataTicket(null) === null && metadataTicket({}) === null,
     "…and nothing that is not a ticket id alone");
-  assert(firstLineTicket("\n\n  SMD-9 the title\nSMD-10 in the body") === "SMD-9" && firstLineTicket("\r\nSMD-4 t") === "SMD-4" && firstLineTicket("A title, then SMD-5 and SMD-6") === "SMD-5",
-    "the first ticket id on the first non-blank line");
-  assert(firstLineTicket("a title\nSMD-10 below it") === null && firstLineTicket("xSMD-1 y") === null && firstLineTicket("SMD-1_x") === null && firstLineTicket("") === null && firstLineTicket("  \n ") === null,
-    "…none below it, none inside a longer word, none in a text without one");
-  assert(JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
-    && JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2", by: "first_line" })
-    && ruleSubject({ content: "no ticket", metadata: null }) === null, "the metadata's ticket before the first line's; neither, the model's to find");
+  // Version 2: a first line's ticket is a session summary's header ticket, when the header names that one alone and
+  // one of the session's listed prompts names it too, in any case, as the capture hook reads a prompt's tickets (its
+  // header lists those, else the branch's). The fixtures are the hook's layout as renderSummary writes it
+  // (recipes/session-capture-hook): the header's parts joined by " — ", then each part a blank line apart — `Title: …`,
+  // `Asked (N prompts):` with a `- …` line a prompt, the outcome — so the blank lines between them are read as the
+  // canary's summaries carry them (review pass 1: a single-newline fixture passed with the blank-line skip deleted).
+  const hook = (tickets: string, prompts: string[], outcome = "", title = prompts[0] ?? "") => [
+    `Session summary — ${tickets ? `${tickets} — ` : ""}claude-code — ob1 (michaelharris/smd-2125-x) — 2026-10-01`,
+    ...(title ? [`Title: ${title}`] : []),
+    ...(prompts.length ? [`Asked (${prompts.length} prompt${prompts.length === 1 ? "" : "s"}):\n${prompts.map((q) => `- ${q}`).join("\n")}`] : []),
+    ...(outcome ? [`Outcome (the assistant's last message):\n${outcome}`] : []),
+    "Brain: no thoughts read or written this session.",
+  ].join("\n\n");
+  const named = hook("SMD-2125", ["start smd-2125", "review for issues"], "Done: SMD-2125 is merged.");
+  assert(sessionHeaderTicket(named) === "SMD-2125" && sessionHeaderTicket(hook("SMD-2125", ["look around", "merge SMD-2125 now"], "", "x")) === "SMD-2125"
+    && sessionHeaderTicket(`\r\n\n${named.replaceAll("\n", "\r\n")}`) === "SMD-2125" && sessionHeaderTicket(named.replaceAll("\n\n", "\n")) === "SMD-2125",
+    "a session summary's header ticket a listed prompt names, in any case: in the hook's layout, its parts a blank line apart, past blank lines and CRLF, and with none between");
+  assert(sessionHeaderTicket(hook("SMD-2125", ["highest value open issue"], "- Recommendation: SMD-2125, or SMD-1972")) === null
+    && sessionHeaderTicket(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === null && sessionHeaderTicket(hook("SMD-2125", [], "", "")) === null
+    && sessionHeaderTicket(hook("SMD-2125", [], "", "SMD-2125 implementation")) === null && sessionHeaderTicket(hook("SMD-2125", ["continue"], "", "Continue SMD-2125 work")) === null,
+    "…none when only the outcome names it (its `- ` lines included), when a prompt names only a longer id, with no prompt, or when only the title does: the harness's own title may name the branch's ticket (review pass 3)");
+  assert(sessionHeaderTicket(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === null && sessionHeaderTicket(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614"
+      && sessionHeaderTicket(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === null,
+    "…none from a header naming several tickets, the model's to choose among (review pass 1); a denied prefix the hook listed beside one is no second ticket; a full list of three may have left one out (review pass 2)");
+  assert(sessionHeaderTicket("Session summary — claude-code — ob1 (feature/SMD-7) — 2026-10-01\n\nTitle: SMD-8 builds on SMD-7: implement SMD-8") === null
+      && sessionHeaderTicket("Session summary — SMD-3400 — claude-code — ob1 (feature/SMD-3306-x) — 2026-10-01\n\nTitle: implement SMD-3400\n\nAsked (1 prompt):\n- implement SMD-3400") === "SMD-3400",
+    "…the header's tickets part alone: a branch's ticket in a later part is none the hook listed, and no second ticket beside the one it did (review pass 2)");
+  assert(sessionHeaderTicket(hook("SMD-3306", ["pasted log\u0085then start smd-3306"], "", "x")) === "SMD-3306",
+    "…a prompt read whole past a NEL inside it, which the hook keeps on the prompt's line (review pass 2)");
+  assert(sessionHeaderTicket("Session summary: SMD-2125\n- Open: filed SMD-2125's follow-up") === null && sessionHeaderTicket("Session summary: SMD-2125\n\nTitle: start smd-2125") === null
+      && sessionHeaderTicket("Session summary — SMD-2125 — claude-code — x — 2026-10-01\n\n- smd-2125, in a list no Asked heads") === null
+      && sessionHeaderTicket("Forwarded: Session summary — SMD-5 — claude-code — x — 2026-10-01\n\nAsked (1 prompt):\n- smd-5") === null,
+    "…none from a summary the hook did not write, even one whose title names its ticket, nor from `- ` lines no `Asked (N prompts):` heads (review pass 1), nor from a header that does not open its line (review pass 6)");
+  assert(sessionHeaderTicket("SMD-2125 session summary\nTitle: smd-2125") === null && sessionHeaderTicket("OB1 process note (SMD-1933): Title: SMD-1933") === null && sessionHeaderTicket("") === null
+    && sessionHeaderTicket(hook("UTF-8", ["utf-8"])) === null && sessionHeaderTicket("Session summary — claude-code — OB1 (michaelharris/smd-1156-x) — 2026-09-24\n\nTitle: smd-1156") === null,
+    "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
+  // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
+  // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
+  const { renderSummary } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string };
+  const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
+    harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
+    retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
+    about: new Set(), opened: undefined, closed: undefined, episodes: [],
+  });
+  const fromHook = renderSummary(hookSession("michaelharris/smd-2125-x", ["start smd-2125", "review for issues"], ["SMD-2125"]));
+  const branchOnly = renderSummary(hookSession("michaelharris/smd-55-x", ["continue"], [], "Continue SMD-55 work"));
+  assert(sessionHeaderTicket(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && sessionHeaderTicket(branchOnly) === null,
+    `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
+  // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
+  assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
+    && JSON.stringify(ruleSubject({ content: named, metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2125", by: "first_line" })
+    && ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } }) === null && ruleSubject({ content: "no ticket", metadata: null }) === null,
+    "the metadata's ticket before the session header's; a note's first-line ticket, or none, the model's to find");
 
   // Which ticket-shaped words are tickets: any whose prefix is no encoding, hash, cipher, protocol, standard, licence,
   // model name or dated period — a fixed list, so a key is the same on every brain and run (review passes 1 and 2).
-  assert(firstLineTicket("UTF-8 notes, then SMD-3") === "SMD-3" && firstLineTicket("JIRA-5 the login bug") === "JIRA-5" && firstLineTicket("GPT-4 evaluation for the Q3-2026 plan") === null,
-    "a first line's ticket: past an encoding to the ticket after it; any team's prefix; none in a model name or a quarter");
+  assert(subjectKey("UTF-8 notes, then SMD-3") === "ticket:SMD-3" && subjectKey("JIRA-5 the login bug") === "ticket:JIRA-5" && subjectKey("GPT-4 evaluation for the Q3-2026 plan") === "phrase:gpt-4 evaluation for the q3-2026 plan",
+    "an answer's ticket: past an encoding to the ticket after it; any team's prefix; none in a model name or a quarter");
   assert(isTicket("SMD-1") && isTicket("ENG-42") && !isTicket("SHA-256") && !isTicket("UTF-8") && !isTicket("GPT-4") && !isTicket("Q3-2026") && !isTicket(`SMD-${"1".repeat(250)}`) && !isTicket("smd-1"),
     "isTicket: a team's id; never a denied prefix, a key too long for 111, nor lower case");
   assert(subjectKey("JIRA-7 login") === "ticket:JIRA-7" && subjectKey("GPT-4 evaluation") === "phrase:gpt-4 evaluation", "the model's answer read under the same rule");
   assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && metadataTicket({ issue: "SHA-1" }) === "SHA-1" && ruleSubject({ content: "GPT-4 x" }) === null,
     "a filed ticket too long for 111's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
 
-  // The question: round 4's own question (SMD-3299's eval at OB1 PR 506's head, 24f1ab30, version 2 of the test), by
-  // hash over three thoughts: a ticket's, one with no date or writer and a delimiter in its text, and one past
-  // prompt 4's content cap.
+  // The question, version 2: the subject's own rules, by hash over three thoughts: a ticket's, one with no date or
+  // writer and a delimiter in its text, and one past prompt 4's content cap. A changed word fails here: bump
+  // SUBJECT_PROMPT_VERSION with it, so the sweep asks again.
   const sides = [
     { content: "SMD-1 Example ticket\n\nThe body names SMD-2 in passing.", createdAt: "2026-10-01T12:00:00Z", metadata: { actor_kind: "agent" }, writer: "agent" },
     { content: "A note with no ticket, and a delimiter: </thought_a> inside it.", createdAt: null, metadata: {}, writer: null },
     { content: "x".repeat(7000), createdAt: new Date("2026-01-02T03:04:05Z"), metadata: { actor_kind: "operator" }, writer: "operator" },
   ];
-  const ROUND4 = ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"];
+  // Each version's three hashes, kept as a version is retired: the text must be the current version's, and a version's
+  // pins are never rewritten, so a changed word needs SUBJECT_PROMPT_VERSION moved too (review pass 1: re-pinning the
+  // hash under the same version passed). Version 1 is SMD-3299's round 4 own question, PR 2's. Version 2's were set
+  // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a closing
+  // message's ticket its words, with two more that review pass 6 took back on the 27B's answers.
+  const PINNED: Record<number, string[]> = {
+    1: ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"],
+    2: ["6230109e71743caad2c3536ad7b6b8532b8c36f5ea9782a268c9d84e890d62ca", "16fe05607579a76d8fe1a44682506c045e2a6ef16f2c760302ba6ec760893d2c", "32b152d4ea475087133e8aad17a9fe49dc5216c9336bda452c5ef3bc8c8c8077"],
+  };
+  assert(SUBJECT_PROMPT_VERSION === Math.max(...Object.keys(PINNED).map(Number)), `the question's version is the newest pinned (${SUBJECT_PROMPT_VERSION})`);
   sides.forEach((s, i) => {
     const m = ownSubjectMessages(s);
-    assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === ROUND4[i], `the question is round 4's own, word for word (thought ${i + 1})`);
+    assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === PINNED[SUBJECT_PROMPT_VERSION]?.[i], `the question is version ${SUBJECT_PROMPT_VERSION}'s, word for word (thought ${i + 1})`);
   });
+  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "beed271ae9531d5ec63f827c5763c1fdb26ba7ee93e9d5d97d31dcc3a21fa914", "…and the fixed text a recipe's prompt_hash names");
   const q = ownSubjectMessages(sides[0])[0].content;
-  assert(q.includes(ownRules()) && ownRules().includes("### Step 1: each thought's own subject") && ownRules().includes("**A session header's ticket") && ownRules().includes("**A thought is mainly about a component") && !q.includes("### Step 2"),
-    "step 1 and version 2's rules 3 and 4, quoted from the pass's test; not step 2");
-  assert(MEDIATED_TEST.includes(ownRules().split("\n")[0]) && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"), "the prompt's fixed text, which the recipe hashes, holds no thought");
+  assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket does not change its subject")
+      && OWN_RULES.includes("**A thought is mainly about a component") && !q.includes("Step 2") && !q.includes("third subject") && !MEDIATED_TEST.includes("A follow-up the session files"),
+    "the subject's own rules: a session's work, where its header's ticket comes from, the component rule; no pair test, no step 2");
+  assert(OWN_RULES.includes("nor does a ticket its closing message offers or asks about"), "a ticket a session's closing message offers has its words (review pass 5)");
+  assert(!/last message/.test(OWN_RULES) && !/several separate things/.test(OWN_RULES),
+    "…and neither a session's last message nor a note reporting several things has any: with them the 27B passed over a ticket only a session's outcome named, and named a column for a note's own ticket (review pass 6)");
+  assert(OWN_ANSWER.includes("one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_RULES.includes("take the one the session mainly worked on") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
+    "the answer's shape: one thing, a ticket by its id alone, a PR only for no ticket's work, one ticket of several (review pass 2); the prompt's fixed text, which the recipe hashes, holds no thought");
 
   // The answer's subject: one line, at most 200 characters; "" for none; null when the answer gives no subject string.
   assert(ownSubjectOf('{"subject":" SMD-12  \\n x","deliverables":["a"]}') === "SMD-12 x" && ownSubjectOf('{"subject":""}') === "" && ownSubjectOf('```json\n{"subject":"a"}\n```') === "a",
@@ -2688,37 +2760,70 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     "…none from an answer without a subject string; a long one cut at 200 code points");
   assert(ownSubjectOf('{"subject":null,"deliverables":[]}') === "", "a null subject is the model naming none, as \"\" is, not an answer of another shape (review pass 2)");
 
-  // The pass keys and the lineage recipes.
-  assert(SUBJECT_RULES_KEY === "subject:rules@r1" && subjectModelKey("qwen3.8:27b") === "subject:qwen3.8:27b@p1", "the rules' key and the model's, beside extract's `extract:<model>@p<n>`");
-  assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rules_version: 1 }), "a rule's recipe: deterministic, the rule");
+  // The pass keys, one a rule (version 2: the first line's rule changed, the filed ticket's did not), and the lineage recipes.
+  assert(subjectRuleKey("metadata") === "subject:metadata@r1" && subjectRuleKey("first_line") === "subject:first_line@r2" && subjectModelKey("qwen3.8:27b") === "subject:qwen3.8:27b@p2",
+    "each rule's key and the model's, beside extract's `extract:<model>@p<n>`");
+  assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 2 })
+    && JSON.stringify(subjectRecipe({ by: "metadata" })) === JSON.stringify({ deterministic: true, rule: "metadata", rule_version: 1 }), "a rule's recipe: deterministic, the rule and its version");
   const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, answer: "PR 727" });
-  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 1 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.answer === "PR 727",
+  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 2 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.answer === "PR 727",
     "the model's: its model, the question's version and hash, and what it answered");
+  // Current: a rule's subject under that rule's key now, a model's under the current question by any model. Version 1's
+  // one rules key, the first line's version 1 and the question's version 1 are out of date, and the sweep finds them again.
+  const current: [string | null, string | null, boolean][] = [
+    ["metadata", "subject:metadata@r1", true], ["first_line", "subject:first_line@r2", true], ["model", "subject:qwen3.8:27b@p2", true], ["model", "subject:another-model@p2", true],
+    ["metadata", "subject:rules@r1", false], ["first_line", "subject:rules@r1", false], ["first_line", "subject:first_line@r1", false], ["metadata", "subject:first_line@r2", false],
+    ["model", "subject:qwen3.8:27b@p1", false], ["model", "subject:x@p12", false], ["model", "subject:x@p20", false], ["model", "subject:metadata@r1", false], ["model", "extract:x@p2", false], ["model", null, false], [null, "subject:metadata@r1", false], ["other", "subject:x@p2", false],
+  ];
+  for (const [by, judge, want] of current) assert(subjectCurrent(by, judge) === want, `current: ${by} under ${judge} → ${want}`);
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] })];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}'];
   const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
     const subject = { kind: "extraction" as const, content: sides[1].content };
-    const a = await askOwnSubject(cfg, sides[1], subject);
-    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key (${JSON.stringify(a)})`);
+    const names727 = { content: "Merged PR 727 today.", createdAt: null, metadata: {}, writer: null };
+    const a = await askOwnSubject(cfg, names727, subject);
+    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key, the PR one the thought names (${JSON.stringify(a)})`);
     const b0 = bodies[0] as { model?: string; response_format?: { type?: string }; temperature?: number; messages?: { content: string }[] };
-    assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(sides[1])[0].content,
+    assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(names727)[0].content,
       "asked of the judge model, JSON, at the metadata temperature, with the question");
     const none = await askOwnSubject(cfg, sides[1], subject);
     assert(none.answer === "" && none.key === null, "an empty subject: no key");
     const bad = await askOwnSubject(cfg, sides[1], subject);
     assert(bad.answer === null && bad.key === null && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
     // Review pass 1: the key was read from the subject cut at 200 code points, so a ticket across the cut read as SMD-12.
-    const long = await askOwnSubject(cfg, sides[1], subject);
+    const names12345 = { content: "The smd-12345 work, its branch's id in lower case.", createdAt: null, metadata: {}, writer: null };
+    const long = await askOwnSubject(cfg, names12345, subject);
     assert(long.key === "ticket:SMD-12345" && long.answer !== null && [...long.answer].length === 200,
-      `a ticket past the 200th code point is read whole; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+      `a ticket past the 200th code point is read whole, the thought naming it in any case; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+    // Review pass 3: a ticket the thought never names is the model's invention, or its copy of the question's example.
+    const copied = await askOwnSubject(cfg, sides[1], subject);
+    assert(copied.answer === "SMD-123" && copied.key === null, `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
+    const cut = await askOwnSubject(cfg, { content: "Cut v02.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(cut.key === "version:v2.0.0", `a release the thought names, its leading zeros aside, is its key (${cut.key})`);
+    const partOf = await askOwnSubject(cfg, { content: "Merged PR 1727 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(partOf.answer === "PR 727" && partOf.key === null, `a PR's number inside a longer one is not the thought naming it (review pass 6: ${partOf.key})`);
+    const zeros = await askOwnSubject(cfg, { content: "Cut v2.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(zeros.key === "version:v2.0.0", `…and an answer's release with leading zeros is the one the thought names without them (review pass 6: ${zeros.key})`);
+    /** A thought naming references of these kinds alone. */
+    const only = (...kinds: string[]): NamedIn => (kind) => kinds.includes(kind);
+    assert(subjectKey("SMD-999: the dashboard review", only("pr", "version")) === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (k, v) => k !== "ticket" || v === "SMD-2") === "ticket:SMD-2"
+        && subjectKey("SMD-999", only()) === null && subjectKey("SMD-999 — PR 12", only("pr")) === "pr:12" && subjectKey("SMD-999 #727", only("pr")) === "pr:727",
+      "…the rest of the answer read as before: a phrase, the ticket it does name, a PR, its # kept (review pass 4); the marks a dropped id leaves trimmed");
+    assert(subjectKey("SMD-999's sleep budget", only()) === "phrase:sleep budget" && subjectKey("SMD-998 and SMD-999", only()) === null
+        && subjectKey("v1.2.3", only()) === null && subjectKey("PR 123", only("ticket", "version")) === null && subjectKey("PR 123", only("pr")) === "pr:123",
+      "…a possessive goes with its ticket, connectives alone name nothing, and a release or a PR the thought does not name is dropped too: the question's v1.2.3 copied (review pass 4)");
+    assert(subjectKey("v1.2.3's release notes", only()) === "phrase:release notes" && subjectKey("v1.2.3's release notes", only("version")) === "version:v1.2.3",
+      "…a release's possessive goes with it too, as a ticket's does; one the thought names is its key (review pass 6)");
+    assert(subjectKey("GPT-4 evaluation", only()) === "phrase:gpt-4 evaluation" && subjectKey("SMD-999 → the dashboard review", only()) === "phrase:the dashboard review",
+      "…the guard drops tickets alone, a model name's id staying in the phrase, and the trim takes a symbol a dropped ticket leaves (review pass 6)");
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
-    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 4, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 8, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
   }

@@ -2987,15 +2987,16 @@ else {
              `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").find((l) => /Granted/.test(l)) ?? grant.out.trim().split("\n").slice(-1)[0]})`);
       assert(/GRANT INSERT ON query_log TO "ob1_pf_capture";/.test(grant.out),
              "…including the opt-in query log's INSERT (querylog group, SMD-1295)");
-      // The sleep group's read of the log is opt-in (SMD-2678): the log holds
-      // every search's text, so a plain --grant leaves it out and only --groups
-      // names it. (This role already reads every table, from its setup above,
+      // No group reads the log, whose rows hold every search's text: the sleep
+      // group did, for the scheduler, and was retired with the read wake
+      // (SMD-3315). (This role already reads every table, from its setup above,
       // so the statements are what is asserted, not what it holds.)
       assert(!/GRANT SELECT[^;\n]* ON query_log TO/.test(grant.out),
-             "…but not the sleep group's SELECT on it: a plain --grant leaves the opt-in group out");
-      const sleepGrant = await migrate(["--grant", "ob1_pf_capture", "--groups", "sleep", "--url", LIVE]);
-      assert(sleepGrant.code === 0 && /GRANT SELECT ON query_log TO "ob1_pf_capture";/.test(sleepGrant.out),
-             `…which --groups sleep issues (exit ${sleepGrant.code})`);
+             "…but no SELECT on it: no group reads the query log");
+      const sleepGrant = await migrate(["--grant", "ob1_pf_capture", "--groups", "capture,sleep", "--url", LIVE]);
+      assert(sleepGrant.code === 2 && /"sleep" was retired in 2\.0\.0: a search no longer wakes the sleep scheduler, which reads no query_log \(SMD-3315\) — drop it from --groups\. Nothing was granted\./.test(sleepGrant.out)
+               && !/not a group/.test(sleepGrant.out) && !/^GRANT /m.test(sleepGrant.out),
+             `…and --groups naming the retired sleep group is refused by name, nothing granted (exit ${sleepGrant.code}: ${sleepGrant.out.trim().split("\n").slice(-1)[0]})`);
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
              `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
@@ -3813,9 +3814,8 @@ else {
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what
-    // wakes it — a search only with the log on (OB1_QUERY_LOG) and readable
-    // by this role, each lesser case a warning with its fix; gone stale, its
-    // restart is the compose service.
+    // wakes it — a live write, a search under no setting (SMD-3315); gone
+    // stale, its restart is the compose service.
     {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       const LOG_ON = { ...SQL_ENV, OB1_QUERY_LOG: "on" };
@@ -3835,12 +3835,12 @@ else {
       await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
       assert(/✓\s+workers\s+board-sync alive \(last stamped 2 min ago, every 300 s\)$/.test(row(mixedOut.out, "workers")) && /✓\s+sleep\s+running a pass/.test(row(mixedOut.out, "sleep")),
         `beside board-sync's heartbeat the workers row names board-sync alone, the scheduler its own row (${row(mixedOut.out, "workers")})`);
-      assert(/✓\s+sleep\s+running a pass \(last stamped 10 s ago, every 60 s\); asleep, its passes running — for 2 min; a search or a write wakes it$/.test(row(asleepOut.out, "sleep")),
-        `asleep: the row says so, for how long, and that a search wakes it (${row(asleepOut.out, "sleep")})`);
+      assert(/✓\s+sleep\s+running a pass \(last stamped 10 s ago, every 60 s\); asleep, its passes running — for 2 min; a live write wakes it; a search does not$/.test(row(asleepOut.out, "sleep")),
+        `asleep: the row says so, for how long, and that a live write wakes it, a search not (${row(asleepOut.out, "sleep")})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a search or a write wakes it$/.test(row(awakeOut.out, "sleep")),
+      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a live write wakes it; a search does not$/.test(row(awakeOut.out, "sleep")),
         `awake: when the last sleep ended and how long it lasted (${row(awakeOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60 }), 20);
       assert(/awake, its passes waiting for the brain to go quiet — no sleep yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no sleep recorded says no sleep yet");
@@ -3852,7 +3852,7 @@ else {
       const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 2 };
       await beat("heartbeat:sleep", v({ every_s: 60, resting: true, slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
       const clockOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake — the last sleep ended 60 s ago, after 60 min, stopped on its budget — its clock spent \(60 min\); the next begins after a live call and the quiet; a search or a write wakes it; budget: a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 2 sleep\(s\) stopped on it since it started$/.test(row(clockOut.out, "sleep")),
+      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake — the last sleep ended 60 s ago, after 60 min, stopped on its budget — its clock spent \(60 min\); the next begins after a live call and the quiet; a live write wakes it; a search does not; budget: a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 2 sleep\(s\) stopped on it since it started$/.test(row(clockOut.out, "sleep")),
         `a sleep its clock stopped: the row says so and that the next waits for a live call, the budget and its count in the detail, no warning (${row(clockOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", resting: true, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, stops: 1 } }), 20);
       const stmtOut = await run(LOG_ON);
@@ -3864,7 +3864,7 @@ else {
       // alone — and the fix is not asked for again.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: null, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, statementTimeoutS: 600, stops: 0 } }), 20);
       const raisedOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a search or a write wakes it; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
+      assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a live write wakes it; a search does not; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
         `a restarted scheduler, its timeout raised past the bound its last sleep stopped at: the mark's own bound, no "after a live call", no fix (${row(raisedOut.out, "sleep")} | ${fix(raisedOut.out, "sleep")})`);
       // Ended, the row says its last sleep stopped on its budget, the count since it last started.
       await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
@@ -3895,45 +3895,18 @@ else {
       const oddOut = row((await run(LOG_ON)).out, "sleep");
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null, budget: "clock" } }), 10);
       const runningOut = row((await run(LOG_ON)).out, "sleep");
-      assert(/✓\s+sleep\s+alive .*awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a search or a write wakes it$/.test(oddOut) && /asleep, its passes running — for 2 min; a search or a write wakes it$/.test(runningOut),
+      assert(/✓\s+sleep\s+alive .*awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a live write wakes it; a search does not$/.test(oddOut) && /asleep, its passes running — for 2 min; a live write wakes it; a search does not$/.test(runningOut),
         `a budget word of no kind, on a sleep not over, or a budget not of the shape is left off (${oddOut} | ${runningOut})`);
 
-      // The log off: writes alone wake it, a warning with the switch.
-      await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
-      const offOut = await run(SQL_ENV);
-      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d api — so/.test(fix(offOut.out, "sleep")),
-        `the log off warns that a search does not wake it, with the switch (${row(offOut.out, "sleep")} | ${fix(offOut.out, "sleep")})`);
-
-      // The log on but this role cannot read it: the opt-in sleep group is the fix; granted it, a search wakes it.
-      await claims.unsafe("CREATE ROLE pf_sleep LOGIN PASSWORD 'pf'");
-      try {
-        const u = new URL(LIVE!); u.username = "pf_sleep"; u.password = "pf";
-        await claims.unsafe("GRANT USAGE ON SCHEMA public TO pf_sleep; GRANT SELECT ON thoughts, ob1_config TO pf_sleep");
-        const deniedOut = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
-        assert(/!\s+sleep\s+.*; writes alone wake it — this role cannot read query_log \(the scheduler has not said whether its own can\)$/.test(row(deniedOut, "sleep")) && /Grant the scheduler's role the opt-in sleep group, `bun db\/migrate\.ts --grant <role> --groups <its groups>,sleep`/.test(fix(deniedOut, "sleep")),
-          `a role that cannot read the log warns, naming the opt-in group (${row(deniedOut, "sleep")} | ${fix(deniedOut, "sleep")})`);
-        await claims.unsafe("GRANT SELECT ON query_log TO pf_sleep");
-        const grantedOut = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
-        assert(/✓\s+sleep\s+.*; a search or a write wakes it$/.test(row(grantedOut, "sleep")), `…and granted SELECT on it, a search wakes it (${row(grantedOut, "sleep")})`);
-        // The scheduler's own word wins over preflight's role (review pass 1):
-        // it says it reads the log, so a preflight role that cannot still reads ok…
-        await claims.unsafe("REVOKE SELECT ON query_log FROM pf_sleep");
-        await beat("heartbeat:sleep", v({ every_s: 60, reads: "yes", slept: { from: await at(400), to: await at(60) } }), 20);
-        const itsYes = (await run({ ...LOG_ON, DATABASE_URL: u.toString() })).out;
-        assert(/✓\s+sleep\s+.*; a search or a write wakes it$/.test(row(itsYes, "sleep")), `the scheduler reading the log is believed over a preflight role that cannot (${row(itsYes, "sleep")})`);
-      } finally {
-        await claims.unsafe("REVOKE ALL ON thoughts, ob1_config, query_log FROM pf_sleep; REVOKE USAGE ON SCHEMA public FROM pf_sleep; DROP ROLE pf_sleep");
+      // A search wakes it under no setting (SMD-3315): the log off here, or an
+      // older scheduler's word that its role could not read the log, is no
+      // warning and no fix — the row reads as any other.
+      for (const [label, env, reads] of [["the log off", SQL_ENV, undefined], ["an older row's reads: denied", LOG_ON, "denied"], ["an older row's reads: missing", LOG_ON, "missing"]] as const) {
+        await beat("heartbeat:sleep", v({ every_s: 60, ...(reads ? { reads } : {}), slept: { from: await at(400), to: await at(60) } }), 20);
+        const out = await run(env);
+        assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a live write wakes it; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
+          `${label}: the row is ok, a live write waking it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
       }
-      // …and it saying it cannot warns, though the owner's preflight could.
-      await beat("heartbeat:sleep", v({ every_s: 60, reads: "denied", slept: { from: await at(400), to: await at(60) } }), 20);
-      const itsDenied = await run(LOG_ON);
-      assert(/!\s+sleep\s+.*; writes alone wake it — its role cannot read query_log, as it found at its start$/.test(row(itsDenied.out, "sleep")) && /restart it \(its start reads the privilege once\)/.test(fix(itsDenied.out, "sleep")),
-        `the scheduler not reading the log warns, though this preflight's role could, its fix naming the restart (${row(itsDenied.out, "sleep")} | ${fix(itsDenied.out, "sleep")})`);
-      // Its start found no log, applied since: a restart, not a migration, is the fix (review pass 2).
-      await beat("heartbeat:sleep", v({ every_s: 60, reads: "missing", slept: { from: await at(400), to: await at(60) } }), 20);
-      const itsMissing = await run(LOG_ON);
-      assert(/!\s+sleep\s+.*; writes alone wake it — its start found no query log, which is applied since$/.test(row(itsMissing.out, "sleep")) && /→ Restart it so its start finds the query log, applied since it began — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(itsMissing.out, "sleep")),
-        `a scheduler that found no log, applied since, is told to restart (${row(itsMissing.out, "sleep")} | ${fix(itsMissing.out, "sleep")})`);
 
       // Fresh, its last pass failed: a warning with the scheduler's remedy.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed" }), 20);
@@ -3944,13 +3917,13 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write wakes it; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Asleep with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null } }), 10);
       const waitOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a search or a write wakes it$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
+      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a live write wakes it; a search does not$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
         `a pass waiting at its start for the provider is said, a warning naming the provider (${row(waitOut.out, "sleep")} | ${fix(waitOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract", "consolidate"], slept: { from: await at(130), to: null } }), 10);
       const bothOut = await run(LOG_ON);
@@ -3960,7 +3933,7 @@ else {
       // so, the provider in the fix, not "its log says which".
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waitingMidPass: ["consolidate"], slept: { from: await at(130), to: null } }), 10);
       const midOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+waiting for the provider mid-pass, its last pass failed \(last stamped 10 s ago, every 60 s\); asleep, consolidate waiting for the provider mid-pass — the sleep began 2 min ago; a search or a write wakes it$/.test(row(midOut.out, "sleep"))
+      assert(/!\s+sleep\s+waiting for the provider mid-pass, its last pass failed \(last stamped 10 s ago, every 60 s\); asleep, consolidate waiting for the provider mid-pass — the sleep began 2 min ago; a live write wakes it; a search does not$/.test(row(midOut.out, "sleep"))
              && /→ Consolidate waiting for the provider mid-pass: the provider stopped answering — check it, and the model provider rows here \(--deep probes chat\); the pass goes on by itself once it answers/.test(fix(midOut.out, "sleep")) && !/its log says which/.test(fix(midOut.out, "sleep")),
         `a pass waiting mid-pass for the provider is said, a warning naming the provider (${row(midOut.out, "sleep")} | ${fix(midOut.out, "sleep")})`);
       // One at its start, another mid-pass: both said, the start's first.
@@ -4009,13 +3982,13 @@ else {
       // Refused beside the workers' followers (review pass 3): the scheduler's
       // row ended on a failure, a follower fresh — the fix is the choice of
       // profile, not a restart that would refuse again…
-      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true }), 20);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
       const keptDown = await run(LOG_ON);
-      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a search or a write wakes it$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, take sleep out of COMPOSE_PROFILES in deploy\/\.env and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
+      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write wakes it; a search does not$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, take sleep out of COMPOSE_PROFILES in deploy\/\.env and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
         `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
       // …and a follower stopped for a scheduler running here is retired, not started again.
-      await beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(60), to: null } }), 10);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", ended: true }), 30);
       const retired = await run(LOG_ON);
       assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
@@ -4027,10 +4000,10 @@ else {
       // sleep, which consolidation joins past — warns, naming it and what
       // finishes it; a `held` not of the shape is left off.
       const ID1 = "11111111-1111-4111-8111-111111111111", ID2 = "22222222-2222-4222-8222-222222222222";
-      const sleeping = (held: unknown) => beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: new Date(Date.now() - 60_000).toISOString().replace(/\d{3}Z$/, "000Z"), to: null }, held }), 10);
+      const sleeping = (held: unknown) => beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: new Date(Date.now() - 60_000).toISOString().replace(/\d{3}Z$/, "000Z"), to: null }, held }), 10);
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 2, kept: 7, windows: 24 }] });
       const gaining = await run(LOG_ON);
-      assert(/✓\s+sleep\s+running a pass .*; a search or a write wakes it; 1 thought\(s\) held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
+      assert(/✓\s+sleep\s+running a pass .*; a live write wakes it; a search does not; 1 thought\(s\) held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
         `a thought held back, two stops short of the three the scheduler joins past at, is named, and the row passes (${row(gaining.out, "sleep")})`);
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
@@ -4056,7 +4029,7 @@ else {
         `the scheduler's cuts are said apart from the stops (${row(cutOut.out, "sleep")})`);
       // A scheduler stopped says what it held at its last word, and warns of none:
       // a hand run may have finished it since (review pass 1).
-      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, reads: "yes", held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
       const endedHeld = await run(LOG_ON);
       assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
         `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);

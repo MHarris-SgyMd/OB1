@@ -33,6 +33,10 @@
  * Beyond the library's contract, for the server (SMD-2285's third cut):
  * - `countClients()`, the registered clients stored, which the server holds
  *   to OB1_AUTH_MAX_CLIENTS;
+ * - `grants()` and `dropGrant()`, for the operator's page of grants (SMD-3307):
+ *   the live grants, newest first and bounded, each with its client's
+ *   registered name and its newest refresh token; and one grant revoked whole, its
+ *   rows and the Grant itself, in one transaction;
  * - `purge()`, which the server runs once listening and hourly. Registration is
  *   open, as MCP clients expect, so without it the clients of abandoned
  *   sign-ins, and of anyone registering for the sake of it, would fill the
@@ -58,6 +62,23 @@ const GRANTABLE = ["AccessToken", "AuthorizationCode", "RefreshToken", "DeviceCo
 
 type Payload = Record<string, unknown> & { grantId?: string; uid?: string; userCode?: string };
 
+/**
+ * A live grant as the page of grants shows it (SMD-3307). The times are the
+ * library's, in seconds: when it was made, its last renewal (the newest live
+ * refresh token's issue, when it is more than a minute after the grant's: the
+ * sign-in's own comes a second after it; a rotation, or a second sign-in on
+ * the grant, is later), and when it lapses; `refreshTokens` counts its live
+ * ones, spent ones included until they lapse (none: an answer never exchanged,
+ * a session idle past 14 days, or a client that takes no refresh token; review
+ * pass 2). `clientName` is a registered
+ * client's own `client_name`, null for a static client or a metadata-document
+ * one (whose id names its host), and is the client's word, not a checked one.
+ */
+export type GrantRow = { id: string; clientId: string; clientName: string | null; accountId: string; scope: string; resources: string[]; createdAt: number | null; renewedAt: number | null; expiresAt: number | null; refreshTokens: number };
+
+/** The most grants one listing returns, newest first: each GUI sign-in is a grant of its own, so a busy month holds many. */
+export const MAX_GRANTS_LISTED = 500;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS oidc (
   model TEXT NOT NULL,
@@ -75,6 +96,11 @@ CREATE INDEX IF NOT EXISTS oidc_user_code ON oidc (model, user_code) WHERE user_
 `;
 
 const nowS = () => Math.floor(Date.now() / 1000);
+
+/** How long after a grant's making its first refresh token may come and still be the sign-in's own, not a renewal: the code's exchange follows the consent by a second or so. */
+export const RENEWAL_AFTER_S = 60;
+/** A grant's last renewal: its newest live refresh token's issue, when it comes later than the sign-in's own. */
+const renewedAfter = (made: number | null, newest: number | null) => (made !== null && newest !== null && newest > made + RENEWAL_AFTER_S ? newest : null);
 
 /**
  * The library's clock tolerance, in seconds: it accepts a token until its
@@ -116,6 +142,15 @@ function prepare(db: Database) {
     destroy: db.query(`DELETE FROM oidc WHERE model = $model AND id = $id`),
     revoke: db.query(`DELETE FROM oidc WHERE grant_id = $grant AND model IN (${GRANTABLE.map((m) => `'${m}'`).join(", ")})`),
     countClients: db.query<{ n: number }, []>(`SELECT count(*) AS n FROM oidc WHERE model = 'Client'`),
+    // The live grants, newest first, one more than asked so the caller knows there are more; each with its live
+    // refresh tokens (how many, spent ones included until they lapse, and the newest's issue) and its client's
+    // registered name.
+    grants: db.query<{ id: string; payload: string; renewed: number | null; refreshes: number; client_name: string | null }, { now: number; limit: number }>(`SELECT g.id, g.payload,
+      (SELECT max(${read("r.payload", "$.iat")}) FROM oidc r WHERE r.model = 'RefreshToken' AND r.grant_id = g.id AND (r.expires_at IS NULL OR r.expires_at > $now)) AS renewed,
+      (SELECT count(*) FROM oidc r WHERE r.model = 'RefreshToken' AND r.grant_id = g.id AND (r.expires_at IS NULL OR r.expires_at > $now)) AS refreshes,
+      (SELECT ${read("c.payload", "$.client_name")} FROM oidc c WHERE c.model = 'Client' AND c.id = ${read("g.payload", "$.clientId")}) AS client_name
+      FROM oidc g WHERE g.model = 'Grant' AND (g.expires_at IS NULL OR g.expires_at > $now)
+      ORDER BY coalesce(${read("g.payload", "$.iat")}, 0) DESC, g.id LIMIT $limit`),
     // A client older than $before that nothing alive since $before names: a
     // grant, a code or a refresh token (by its clientId), or a sign-in under
     // way (an interaction, by its request's client_id). Its registration access
@@ -205,6 +240,13 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
       q.revoke.run({ grant: grantId });
     },
   });
+  /** A grant's rows (revokeByGrantId's) and the Grant itself, together: the client it was for when it was live, else null. */
+  const dropGrant = db.transaction((id: string): string | null => {
+    const live = parsed(q.find.get({ model: "Grant", id, now: clock() }));
+    q.revoke.run({ grant: id });
+    const dropped = q.destroy.run({ model: "Grant", id }).changes > 0;
+    return dropped && live ? String(live.clientId ?? "") : null;
+  });
   /** One pass, in one transaction: idle clients (with everything that names them), then rows expired a day ago. */
   const purge = db.transaction(() => {
     const before = clock() - IDLE_S;
@@ -221,6 +263,37 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
     /** The registered clients stored now. */
     countClients: () => q.countClients.get()?.n ?? 0,
     purge: (): { clients: number; expired: number } => purge(),
+    /** The live grants, newest first, at most `limit`, and whether there are more. A payload that will not parse is skipped. */
+    grants: (limit = MAX_GRANTS_LISTED): { grants: GrantRow[]; more: boolean } => {
+      const rows = q.grants.all({ now: clock(), limit: limit + 1 });
+      const grants = rows.slice(0, limit).flatMap((r): GrantRow[] => {
+        let p: Payload;
+        try {
+          p = JSON.parse(r.payload) as Payload;
+        } catch {
+          return [];
+        }
+        const num = (v: unknown) => (typeof v === "number" ? v : null);
+        const openid = p.openid as { scope?: unknown } | undefined;
+        const resources = p.resources && typeof p.resources === "object" ? (p.resources as Record<string, unknown>) : {};
+        const scopes = new Set([openid?.scope, ...Object.values(resources)].flatMap((v) => (typeof v === "string" ? v.split(" ").filter(Boolean) : [])));
+        return [{
+          id: r.id,
+          clientId: String(p.clientId ?? ""),
+          clientName: typeof r.client_name === "string" ? r.client_name : null,
+          accountId: String(p.accountId ?? ""),
+          scope: [...scopes].join(" "),
+          resources: Object.keys(resources),
+          createdAt: num(p.iat),
+          renewedAt: renewedAfter(num(p.iat), num(r.renewed)),
+          expiresAt: num(p.exp),
+          refreshTokens: r.refreshes,
+        }];
+      });
+      return { grants, more: rows.length > limit };
+    },
+    /** One grant revoked whole: its codes and tokens and the Grant itself, in one transaction. The client it was for, or null when no live grant had that id. */
+    dropGrant: (id: string): string | null => dropGrant(id),
   });
 }
 
@@ -291,6 +364,58 @@ async function selfCheck(): Promise<number> {
     expect("revoking a grant leaves the Grant itself, which the library destroys on its own", (await grant.find("g1"))?.accountId === "operator");
     await grant.destroy("g1");
     expect("destroy removes the row", (await grant.find("g1")) === undefined);
+
+    // The page of grants (SMD-3307): the live ones newest first, each with its last renewal and its client's own name.
+    await client.upsert("named", { client_id: "named", client_name: "Claude Code" });
+    await grant.upsert("ga", { accountId: "operator", clientId: "named", iat: t - 100, exp: t + 86_400, openid: { scope: "openid offline_access" }, resources: { "https://b.example/mcp": "brain:read" } }, 86_400);
+    await grant.upsert("gb", { accountId: "operator", clientId: "gui", iat: t - 50, exp: t + 86_400, resources: { "https://b.example/api": "brain:write" } }, 86_400);
+    await grant.upsert("gold", { accountId: "operator", clientId: "gui", iat: t - 200, exp: t + 10 }, 10);
+    await refresh.upsert("ra1", { grantId: "ga", iat: t - 100 }, 3600);
+    await refresh.upsert("ra2", { grantId: "ga", iat: t - 20 }, 3600);
+    await refresh.upsert("rb1", { grantId: "gb", iat: t - 50 }, 10);
+    await grant.upsert("gc", { accountId: "operator", clientId: "gui", iat: t - 40, exp: t + 86_400 }, 86_400);
+    await refresh.upsert("rc1", { grantId: "gc", iat: t - 39 }, 3600);
+    // Rotated long ago, its newer token since lapsed: the renewal reads the live tokens alone (review pass 2's mutant S21).
+    await grant.upsert("gd", { accountId: "operator", clientId: "gui", iat: t - 400, exp: t + 86_400 }, 86_400);
+    await refresh.upsert("rd1", { grantId: "gd", iat: t - 399 }, 3600);
+    await refresh.upsert("rd2", { grantId: "gd", iat: t - 200 }, 10);
+    t += 11 + CLOCK_TOLERANCE;
+    const listed = open.grants();
+    const ga = listed.grants.find((g) => g.id === "ga");
+    const gc = listed.grants.find((g) => g.id === "gc");
+    const gd = listed.grants.find((g) => g.id === "gd");
+    expect("the live grants are listed newest first, an expired one left out", listed.grants.map((g) => g.id).join() === "gc,gb,ga,gd" && !listed.more, JSON.stringify(listed));
+    expect("a grant's row names its client, the registered name, its scopes, resources and times, its lapse included", ga?.clientId === "named" && ga.clientName === "Claude Code" && ga.scope === "openid offline_access brain:read" && ga.resources.join() === "https://b.example/mcp" && ga.createdAt === t - 111 - CLOCK_TOLERANCE && ga.expiresAt === t + 86_400 - 11 - CLOCK_TOLERANCE, JSON.stringify(ga));
+    expect("a rotated grant's last renewal is its newest live refresh token's issue, and it counts both", ga?.renewedAt === t - 31 - CLOCK_TOLERANCE && ga.refreshTokens === 2, JSON.stringify(ga));
+    expect("one live refresh token is the sign-in's own, no renewal", gc?.renewedAt === null && gc.refreshTokens === 1, JSON.stringify(gc));
+    expect("a refresh token lapsed is no renewal, nor counted: the live one left is the sign-in's own", gd?.renewedAt === null && gd.refreshTokens === 1, JSON.stringify(gd));
+    expect("a static client's grant has no registered name, and with its refresh tokens lapsed no renewal and none counted", listed.grants[1]?.clientName === null && listed.grants[1]?.renewedAt === null && listed.grants[1]?.refreshTokens === 0, JSON.stringify(listed.grants[1]));
+    expect("a listing is bounded, and says there are more", open.grants(1).grants.length === 1 && open.grants(1).more);
+    // A payload JSON.parse will not read (a row written by hand): skipped, the listing still answering.
+    const rawList = new Database(file);
+    rawList.query("INSERT INTO oidc (model, id, payload, expires_at) VALUES ('Grant', 'gbad', '{not json', ?)").run(t + 600);
+    rawList.close();
+    let listThrew = "";
+    let withBad: { grants: { id: string }[] } = { grants: [] };
+    try {
+      withBad = open.grants();
+    } catch (e) {
+      listThrew = (e as Error).message;
+    }
+    expect("a grant whose payload will not parse is skipped, not the listing's end", listThrew === "" && !withBad.grants.some((g) => g.id === "gbad") && withBad.grants.length === 4, listThrew || JSON.stringify(withBad.grants.map((g) => g.id)));
+    await grant.destroy("gbad");
+    expect("dropping a grant removes its refresh tokens and the Grant, and names the client it was for", open.dropGrant("ga") === "named" && (await refresh.find("ra2")) === undefined && (await grant.find("ga")) === undefined && open.grants().grants.map((g) => g.id).join() === "gc,gb,gd");
+    expect("dropping a grant that is not there says so", open.dropGrant("ga") === null && open.dropGrant("no-such-grant") === null);
+    // A grant lapsed but not yet purged (a stale page's revoke): removed all the same, and said as no live grant (review pass 3).
+    await grant.upsert("glapsed", { accountId: "operator", clientId: "named", iat: t - 100, exp: t - 1 }, -CLOCK_TOLERANCE - 1);
+    const lapsedSaid = open.dropGrant("glapsed");
+    const peek = new Database(file, { readonly: true });
+    const lapsedLeft = peek.query<{ n: number }, []>("SELECT count(*) AS n FROM oidc WHERE model = 'Grant' AND id = 'glapsed'").get()?.n;
+    peek.close();
+    expect("dropping a lapsed grant removes it and says no live grant had that id", lapsedSaid === null && lapsedLeft === 0);
+    await grant.destroy("gb");
+    await grant.destroy("gc");
+    await grant.destroy("gd");
 
     await device.upsert("d1", { userCode: "ABCD-EFGH", grantId: "g3" }, 600);
     expect("a device code is found by its user code", (await device.findByUserCode("ABCD-EFGH")) !== undefined);

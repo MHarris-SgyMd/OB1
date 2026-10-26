@@ -257,6 +257,9 @@ async function notesArm() {
   const signedIn = await signIn(WRITE_KEY!);
   const home = await get("/");
   assert(signedIn.status === 303 && home.status === 200, `the write key signs in for the Notes arm (${signedIn.status}, ${home.status})`);
+  // The page of grants is a stack configured with the authorization server's (SMD-3307 PR 3; review pass 1): here, no nav names it and its page is a 404.
+  const grants = await get("/grants");
+  assert(!navOf(home.html).includes('href="/dashboard/grants"') && grants.status === 404, `with no authorization server, the write key's nav has no page of grants, and its address is a 404 (${grants.status})`);
   // The root layout reads the address, so SvelteKit runs it again at every navigation and the nav follows the registry (review pass 2; pass 4: only a browser run held it).
   const rootData = await get("/__data.json");
   let rereads = false;
