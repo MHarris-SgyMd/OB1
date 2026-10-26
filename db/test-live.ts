@@ -15685,13 +15685,24 @@ if (want("38")) {
 }
 
 if (want("38b")) {
-  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
+  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 2.45 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM query_log`;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
   const MODEL = "stub-long";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
+  /**
+   * The woken-every-sleep cases' clock (SMD-3196): the scheduler's quiet and
+   * poll, the wake into each sleep, the stub's windows and the stall floor,
+   * each at this share of the seconds the cases were written in (quiet and
+   * poll 1 s, wakes 3.5 s in, windows of 1 s and 8 s, a 1 s floor), so their
+   * ratios hold. A pass's own start doesn't scale: on a slow runner it takes a
+   * second or more of each wake's 2.45 s, which leaves the stuck window
+   * in hand about 1.4 s against the 0.7 s floor (2.5 s against 1 s before).
+   */
+  const SCALE = 0.7;
+  const scaled = (ms: number) => Math.round(ms * SCALE);
   // The extraction key [38] leaves recorded is another model's, which every
   // pass's start would refuse: set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
@@ -15752,14 +15763,15 @@ if (want("38b")) {
       if (marker === "stuck") {
         // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
         const t0 = Date.now();
-        await Promise.race([Bun.sleep(8000), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        await Promise.race([Bun.sleep(scaled(8000)), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
         stuckCalls.push([t0, Date.now()]);
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
       }
       if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
-      // A window of the long document takes a second (the stuck thought's one window eight, above), a judgenote's
-      // longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2); the rest are quick.
-      await Bun.sleep(marker === "long" ? 1000 : marker === "judgenote" ? 1500 : 100);
+      // A window of the long document takes a second scaled (the stuck thought's one window eight, above), a
+      // judgenote's longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2);
+      // the rest are quick.
+      await Bun.sleep(marker === "long" ? scaled(1000) : marker === "judgenote" ? 1500 : 100);
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -15780,18 +15792,19 @@ if (want("38b")) {
   };
   const lines: string[] = [];
   /**
-   * A --follow scheduler (quiet 1 s, poll 1 s) woken 3.5 s into every sleep
-   * by a logged search, until `done` holds or `cap` sleeps have begun: the
-   * sleeps it took, and its exit code once stopped — bounded, so a scheduler
-   * that never gets there fails its assertion rather than hanging the suite.
+   * A --follow scheduler (quiet and poll 1 s, scaled) woken 3.5 s scaled into
+   * every sleep by a logged search, until `done` holds or `cap` sleeps have
+   * begun: the sleeps it took, and its exit code once stopped — bounded, so a
+   * scheduler that never gets there fails its assertion rather than hanging
+   * the suite.
    */
   const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>, onWake?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
     lines.length = 0;
     lineAt.length = 0;
     const ac = new AbortController();
-    // A 1 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
+    // A 1 s stall floor for a stop, scaled: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
     wakeReads.length = 0;
-    const run = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 1000, signal: ac.signal, writer: { out: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); }, err: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); } } });
+    const run = runSleep({ url: URL_!, sql: counting, env, quietMs: scaled(1000), pollMs: scaled(1000), follow: true, minStampEveryS: 1, stallFloorMs: scaled(1000), signal: ac.signal, writer: { out: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); }, err: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); } } });
     let sleeps = 0, reached = false;
     const asleep = () => lines.filter((l) => /asleep: no live call/.test(l)).length;
     const deadline = Date.now() + cap * 8000;
@@ -15800,9 +15813,9 @@ if (want("38b")) {
       if (asleep() > sleeps) {
         sleeps = asleep();
         if (sleeps > cap) break;
-        await Bun.sleep(3500);
+        await Bun.sleep(scaled(3500));
         if (await done()) { reached = true; break; }
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake 3.5 s into the sleep')`;
+        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake into the sleep')`;
         // Awake now: work captured in the awake period, before the next sleep —
         // after the scheduler has taken the wake (its tail move done), as an
         // awake period's captures come, not in the poll before it noticed.
@@ -15824,7 +15837,7 @@ if (want("38b")) {
   try {
     // The ticket's reproduction (review pass 2 of SMD-1794): one thought
     // longer than every sleep — six windows of a second each against sleeps
-    // of 3.5 s — captured first, so it is the first claim; six short ones; a
+    // of 3.5 s, both scaled — captured first, so it is the first claim; six short ones; a
     // pair for consolidation to judge, days apart on one axis.
     const longText = Array.from({ length: 6 }, (_, p) => `The longdoc chapter ${p}. ${Array.from({ length: 24 }, (__, i) => `Line ${p}.${i} of the longdoc.`).join(" ")}`).join("\n\n");
     const long = await capture(longText, 0, 5);
@@ -15839,13 +15852,13 @@ if (want("38b")) {
     const all = [long, ...shorts];
     const statuses = await Promise.all(all.map(status));
     assert(a.reached && statuses.every((s) => s === "succeeded") && judged.length > 0 && a.code === 0,
-      `woken 3.5 s into every sleep, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} sleep(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
+      `woken ${scaled(3500) / 1000} s into every sleep, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} sleep(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
     assert(a.sleeps >= 2 && longCalls.length <= 6 + wakes && new Set(longCalls.map((c) => c.part)).size === 6,
       `…across more than one sleep, no window sent again but the one each wake took in hand: ${longCalls.length} window calls for 6 windows over ${wakes} sleep(s) (${longCalls.map((c) => c.part).join(",")})`);
     assert(lines.some((l) => /extraction drained — consolidating beside it/.test(l)) && !lines.some((l) => /extraction holds only/.test(l)),
       "…consolidation joined because extraction drained, not past a stalled thought — the document gained windows at every sleep");
 
-    // A single window longer than every sleep: eight seconds against 3.5 s.
+    // A single window longer than every sleep: eight seconds against 3.5 s, both scaled.
     // Its stops gain nothing, so after three in a row consolidation joins past
     // it while it is still pending, and the row names it.
     await sql`DELETE FROM thoughts`;
@@ -16016,7 +16029,7 @@ if (want("38b")) {
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
-    // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
+    // The first call for the stalled window, start to end: an abort ends it before its eight seconds (scaled).
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
     const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
     const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
@@ -16094,7 +16107,9 @@ if (want("38b")) {
     };
     const byItselfSay = (l: string) => { byItself.push(l); if (/extraction drained — consolidating beside it/.test(l)) consolidatingBeside = true; };
     const byItselfAc = new AbortController();
-    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
+    // The passes poll for new work every second, not every 15 s: the note comes after extraction's pass has drained,
+    // and waited out its poll, 15 s of this case's 16 (SMD-3196).
+    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, passFollowS: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
     let byItselfRow: { stops: number; stalled: number; cuts: number } | undefined;
     try {
       const besideSeen = await pollUntil(async () => consolidatingBeside, 30_000);
@@ -16157,7 +16172,8 @@ if (want("38b")) {
       const jl: { l: string; at: number }[] = [];
       let stopJ: PassStop | null = null;
       // Mid-pass, let-outs two seconds apart, so a wait still read once the judge answers would let the second note out (review pass 1).
-      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      // The passes poll for new work every second: mid-pass, consolidation waited out a 15 s poll after the judge answered (SMD-3196).
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, passFollowS: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
       const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
       // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
@@ -16220,8 +16236,18 @@ if (want("38b")) {
       assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
         `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
     };
-    await judgeCase(false);
-    await judgeCase(true);
+    // The judge's outage waited on a schedule of 1 s, then 2 s each, where the
+    // shipped 5 s and 10 s put the probe that finds it back at 15 s, the judge
+    // back at about 9 (SMD-3196). The waits aren't what either case asserts;
+    // test-worker-bootstrap.ts holds the shipped schedule.
+    const keptOutage = { ...OUTAGE_MS };
+    try {
+      Object.assign(OUTAGE_MS, { first: 1000, max: 2000 });
+      await judgeCase(false);
+      await judgeCase(true);
+    } finally {
+      Object.assign(OUTAGE_MS, keptOutage);
+    }
     judgeProbeDown = false;
     judgeMissing = false;
 
