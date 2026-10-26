@@ -305,6 +305,13 @@ than by editing a hand-numbered FORK.md section:
   and Markdown aside, comes with no fragment added or modified; the refusal
   names the files that asked (SMD-1857). The one landing that passes without a fragment is a release
   cut, which records itself in `releases.json` instead (SMD-1860).
+- **A removal names its side of the version contract.** This applies to a
+  fragment that removes or renames a URL, route, port or setting in a file a
+  release ships, or that deletes vendored code. It says in one sentence which
+  side of the contract the change falls on (FORK.md, "Versioning", "What the
+  version contract covers"; SMD-2687). Inside the contract it is a `major`.
+  Maintainer tooling and vendored code are outside it, so there it is a `minor`,
+  with an **Upgrading:** line in the changelog entry.
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
   commit, after the commit that bumps the version and adds its migration; the

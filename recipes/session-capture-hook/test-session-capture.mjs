@@ -44,6 +44,7 @@ const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
+  loadBrains, useStateRoot,
 } = await import(SCRIPT);
 
 let passed = 0, failed = 0;
@@ -2554,6 +2555,106 @@ console.log("\n[10] What a dropped provenance list leaves, and a payload from be
   writeFileSync(npPath, JSON.stringify({ session_id: "s-noprep", chain_id: "s-noprep", episode: 1, harness: "claude-code", event: "SessionEnd", text: "[[store-down]] a payload from before prepared_at", fingerprint: "fp-noprep", derived_from: [], prompts: 1, attempts: 0 }));
   const np = (await postPending(cfg, npPath)).find((o) => basename(o.file ?? "") === basename(npPath));
   assert(np && !np.ok && np.dead && existsSync(join(STATE, "dead", basename(npPath))), `a payload with no prepared_at, eight days old by its name, is given up (${np?.error ?? "no outcome"})`);
+}
+
+// ── [11] Several brains (SMD-3313) ───────────────────────────────────────────
+console.log("\n[11] Several brains: each its own key, queue and supersedes chain (SMD-3313)");
+{
+  // A second brain: ids of its own (uuid(5000 + n)), a capture key of its own,
+  // and a switch that takes it away (a 502 from its front).
+  const canaryReceived = [];
+  let canaryAway = false;
+  const canary = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    if (canaryAway) return new Response("Bad Gateway", { status: 502 });
+    const body = await req.json();
+    const envelope = (payload) => ({ jsonrpc: "2.0", id: body.id, ...payload });
+    if (req.headers.get("x-brain-key") !== "canary-cap-key") return Response.json(envelope({ error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } }));
+    if (body.method === "tools/list") return Response.json(envelope({ result: { tools: [{ name: "capture_thought" }] } }));
+    if (body.method === "tools/call") {
+      const n = canaryReceived.push({ args: body.params.arguments });
+      return new Response(`event: message\ndata: ${JSON.stringify(envelope({ result: { content: [{ type: "text", text: `Captured as observation — id ${uuid(5000 + n)} — topics` }] } }))}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+    }
+    return Response.json(envelope({ error: { code: -32601, message: "Method not found" } }));
+  } });
+  const CANARY_URL = `http://127.0.0.1:${canary.port}/`;
+  const CANARY_KEYFILE = join(TMP, "canary.key");
+  writeFileSync(CANARY_KEYFILE, "canary-cap-key\n", { mode: 0o600 });
+  const brainsCfg = { brains: [{ name: "stable", url: URL_, key: "cap-key" }, { name: "canary", url: CANARY_URL, key_file: CANARY_KEYFILE }] };
+  const BRAINS_CFG = join(TMP, "brains.json");
+  writeFileSync(BRAINS_CFG, JSON.stringify(brainsCfg), { mode: 0o600 });
+  const env = { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG };
+  const CANARY_ROOT = join(STATE, "brains", "canary");
+  /** A chain's state under a brain's root, the module's root put back after. */
+  const stateIn = (root, chain) => { useStateRoot(root); try { return readState(chain); } finally { useStateRoot(STATE); } };
+  const pendingIn = (root) => (existsSync(join(root, "pending")) ? readdirSync(join(root, "pending")).filter((f) => f.endsWith(".json")) : []);
+  /** loadBrains on a config written in CONFIG's place (the module read CONFIG_PATH when imported), CONFIG put back after. */
+  const original = readFileSync(CONFIG, "utf8");
+  const brainsOf = (json) => { writeFileSync(CONFIG, typeof json === "string" ? json : JSON.stringify(json), { mode: 0o600 }); try { return loadBrains(); } finally { writeFileSync(CONFIG, original, { mode: 0o600 }); } };
+  const refusalOf = (json) => { try { brainsOf(json); return ""; } catch (e) { return e.message; } };
+
+  // The config.
+  const bs = brainsOf(brainsCfg);
+  assert(bs.length === 2 && bs[0].name === "stable" && bs[0].root === STATE && bs[1].name === "canary" && bs[1].root === CANARY_ROOT,
+    "a brains list is two brains, the first on the root a one-brain config keeps, the second under brains/<name>");
+  assert(bs[0].cfg.key === "cap-key" && bs[1].cfg.key === "canary-cap-key" && bs[1].cfg.url === CANARY_URL && /\(brain "canary"\)/.test(bs[1].cfg.where),
+    "…each with its own url and key (the canary's from its key_file), and where its url came from naming the brain");
+  const one = brainsOf({ url: URL_, key: "cap-key" });
+  assert(one.length === 1 && one[0].root === STATE && one[0].cfg.url === URL_ && loadConfig().url === URL_, "the one-brain shape is one brain on the same root, and loadConfig is its settings");
+  assert(/names brain "stable" twice/.test(refusalOf({ brains: [brainsCfg.brains[0], brainsCfg.brains[0]] })), "a name given twice is refused");
+  assert(/needs a "name" of lower-case letters, digits and hyphens/.test(refusalOf({ brains: [{ ...brainsCfg.brains[0], name: "../up" }] })), "a name that is no directory's is refused");
+  assert(/sets "url" beside "brains"/.test(refusalOf({ url: URL_, ...brainsCfg })), "a top-level url beside a brains list is refused: which brain it meant is no answer");
+  assert(/brain "canary" in .* has no url or key/.test(refusalOf({ brains: [brainsCfg.brains[0], { name: "canary", url: CANARY_URL }] })), "a brain with no key is refused, by its name");
+  assert(/"brains" is not a list of brains/.test(refusalOf({ brains: [] })) && /"brains" is not a list of brains/.test(refusalOf({ brains: { name: "x" } })), "an empty or non-list brains is refused");
+  assert(!refusalOf({ brains: [{ name: "stable", url: URL_, key: "SEKRET-IN-ERR" }, { name: "canary", url: CANARY_URL }] }).includes("SEKRET"), "…and no refusal quotes a key");
+  process.env.OB1_BRAIN_URL = CANARY_URL; process.env.OB1_CAPTURE_KEY = "canary-cap-key";
+  try {
+    const viaEnv = brainsOf(brainsCfg);
+    assert(viaEnv.length === 1 && viaEnv[0].cfg.url === CANARY_URL && viaEnv[0].root === STATE, "OB1_BRAIN_URL is one brain, over the file's list, as it was over the file's url");
+  } finally { delete process.env.OB1_BRAIN_URL; delete process.env.OB1_CAPTURE_KEY; }
+  assert(/no brain named "nope"/.test((() => { writeFileSync(CONFIG, JSON.stringify(brainsCfg), { mode: 0o600 }); try { loadConfig("nope"); return ""; } catch (e) { return e.message; } finally { writeFileSync(CONFIG, original, { mode: 0o600 }); } })()), "loadConfig of a name the config lacks says so");
+
+  // The hook: each brain captures, under its own key, on its own chain.
+  rmSync(STATE, { recursive: true, force: true });
+  received.length = 0;
+  const r1 = await runHook({ session_id: "s-multi", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
+  const stableFirst = stateIn(STATE, "s-multi")?.thought_id, canaryFirst = stateIn(CANARY_ROOT, "s-multi")?.thought_id;
+  assert(r1.code === 0 && /session-capture: \[stable\] captured 0000/.test(r1.err) && /session-capture: \[canary\] captured 0000/.test(r1.err), `exit 0, each brain's capture named (${r1.err.trim().slice(0, 140)})`);
+  assert(received.length === 1 && received[0].key === "cap-key" && canaryReceived.length === 1 && canaryReceived[0].args.content === received[0].args.content,
+    "one capture reached each brain, the same summary, stable's under stable's key (the canary's checks its own)");
+  assert(stableFirst && canaryFirst === uuid(5001) && stableFirst !== canaryFirst && existsSync(join(CANARY_ROOT, "log")), "each brain's chain holds its own id, the canary's under brains/canary, with a log of its own");
+  // The session's next ending: each brain's capture supersedes ITS id.
+  const r2 = await runHook({ session_id: "s-multi", transcript_path: join(TMP, "two.jsonl"), cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
+  assert(r2.code === 0 && received.length === 2 && canaryReceived.length === 2 && received[1].args.supersedes === stableFirst && canaryReceived[1].args.supersedes === canaryFirst,
+    `the next ending supersedes each brain's own id: stable's ${stableFirst}, the canary's ${canaryFirst} (${received[1]?.args.supersedes} / ${canaryReceived[1]?.args.supersedes})`);
+
+  // A brain away: the other's capture lands at once; the away one waits in its own queue and lands once it answers, with no duplicate.
+  canaryAway = true;
+  const r3 = await runHook({ session_id: "s-away", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
+  const stableAway = stateIn(STATE, "s-away")?.thought_id;
+  assert(r3.code === 1 && /\[stable\] captured 0000/.test(r3.err) && /\[canary\] not captured/.test(r3.err) && received.length === 3 && stableAway, `the canary away: stable's lands, the canary's is not, exit 1 (${r3.err.trim().slice(0, 160)})`);
+  assert(pendingIn(CANARY_ROOT).some((f) => /-s-away\.json$/.test(f)) && !pendingIn(STATE).some((f) => /-s-away\.json$/.test(f)), "…the canary's payload waits in its own queue, none in stable's");
+  canaryAway = false;
+  const drained = await spawnScript(["--brain", "canary", "--post"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
+  assert(drained.code === 0 && canaryReceived.length === 3 && received.length === 3 && stateIn(CANARY_ROOT, "s-away")?.thought_id === uuid(5003) && !pendingIn(CANARY_ROOT).length,
+    `back, --post --brain canary drains its queue: the canary captures, stable sees no duplicate (${drained.err.trim().slice(0, 100)})`);
+  const unknown = await spawnScript(["--brain", "nope", "--post"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
+  assert(unknown.code === 2 && /no brain named "nope"/.test(unknown.err) && /its brains: stable, canary/.test(unknown.err), "--post for a brain the config lacks is refused, naming its brains");
+
+  // Detached: each brain's child posts its own (the child is told its brain).
+  const before = [received.length, canaryReceived.length];
+  const det = await runHook({ session_id: "s-multi-detached", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG });
+  for (let i = 0; i < 100 && (received.length === before[0] || canaryReceived.length === before[1]); i++) await sleep(50);
+  assert(det.code === 0 && received.length === before[0] + 1 && canaryReceived.length === before[1] + 1 && stateIn(CANARY_ROOT, "s-multi-detached")?.thought_id,
+    `as a hook, each brain's detached child posts to its own brain (${received.length - before[0]} / ${canaryReceived.length - before[1]})`);
+
+  // --check: each brain, named; the worst exit.
+  const ck = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
+  assert(ck.code === 0 && /^\[stable\] ok: /m.test(ck.out) && /^\[canary\] ok: /m.test(ck.out) && ck.out.includes(`State: ${CANARY_ROOT}`), `--check checks each brain and names it, each with its own state (${ck.out.trim().slice(0, 160)})`);
+  canaryAway = true;
+  const ckAway = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
+  canaryAway = false;
+  assert(ckAway.code === 1 && /^\[stable\] ok: /m.test(ckAway.out) && /session-capture: \[canary\] .* did not answer tools\/list/.test(ckAway.err), "…a brain away fails the check, naming it, the other still said ok");
+  canary.stop(true);
 }
 
 fake.stop(true);

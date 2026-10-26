@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3015 assertions: 3015 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and ten (110) migrations applied, and
+`bun test-schema.ts` prints `3048 assertions: 3048 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and eleven (111) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -2064,6 +2064,40 @@ cursor, 109 re-applied beside it), test-upgrade [20bb], test-live [16]
 (`--after` over 51 rows), `server-portable/test-preflight.ts`, the store, e2e
 and REST suites.
 
+Migration 111 records a thought's own subject (SMD-3306). The consolidation pass
+decides "evolves" pair by pair, and three rounds of asking its link step another
+way did not meet their bars (SMD-3299); SMD-3116 defines evolves as a later
+segment of the same work, which is a property of each thought's own subject, and
+asked of one thought alone the judge model names the ticket blind raters agree
+on for 241 to 242 of the 245 thoughts whose subject is a ticket (versions 2 and
+3 of the test's step 1). A `subject` facet holds
+it, one standing per thought (a partial unique index), with a probe on its key
+for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
+`pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, one shape
+for the validator and the writer (`subject_key_valid`) — how it was found
+(`metadata`, `first_line` or `model`), the pass's key and `origin: derived`.
+It is written standing and only ever closed, as a relation is (084), through
+`record_thought_subject(thought, key, by, judge_key, agent, fingerprint,
+recipe)`: refused, answering `stale`, when the thought's text moved since the
+pass read it; the same key, way and pass kept, its lineage moved; anything else
+replacing it; a NULL key closing it. Its lineage row (artifact kind `subject`,
+the thought at the fingerprint read) is written in the same transaction and
+dropped with the facet; preflight's lineage check fails a standing subject
+without one, and counts no subject as stale (the subject pass reads the
+fingerprint itself until `rebuild_derived` gains an arm). The validator is 102's
+body and the lineage writer 084's, each with the new kind added. Refuses by name
+without 016, 042, 061, 084 or 102 (102 read by its door's sentinel); a re-apply
+is a no-op. No grant moves: the writer needs what 084's does — INSERT on
+`thought_facets` (the structure group), UPDATE on it and on `thoughts`, the
+derivations writes (the capture group). The extraction pass records the rules'
+subject with each thought's entities, and `extract-entities.ts --subjects` finds
+the rest ("A thought's own subject", under `extract-entities.ts` below); the
+sweep's place in sleep, the threads and their read follow (SMD-3306).
+test-schema [99] (the key's shape, every refusal, each action of the door, the
+lineage and the delete), test-upgrade [20bc] (refused without each
+prerequisite; onto a populated brain at 110, nothing moved), test-live [10h]
+(the pass and the sweep), `server-portable/test-preflight.ts`.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2175,7 +2209,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
-| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
@@ -2763,6 +2797,10 @@ OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorde
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
+bun extract-entities.ts --url … --subjects              # each thought's own subject where none stands at its text: the rules, then the judge model for the rest (SMD-3306)
+bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
+bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
+#   with --limit N and --timeout SECONDS (300, per model call) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -2988,6 +3026,39 @@ before the call; a row it refuses to send to a chat endpoint not declared local
 (`OB1_CHAT_LOCAL`, or `OB1_LLM_LOCAL` when chat is the embeddings endpoint) is a
 failed claim naming the rule, and the banner's `egress:` line says what the run
 will do before it claims anything.
+
+**A thought's own subject (SMD-3306).** With each thought's entities the pass
+records its own subject when a rule finds it: the ticket it is filed under
+(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else
+the first ticket on its first non-blank line. A ticket-shaped word there counts
+unless its prefix is on a fixed list of encodings, hashes, protocols,
+standards, licences, model names and dated periods, so `UTF-8`, `SHA-256` or
+`GPT-4` leaves the thought to the model, and a key is the same on every brain
+and every run. It goes through migration 111's
+`record_thought_subject` at the text the claim read, under the rules' key
+`subject:rules@r1`, and the pass asks no model for it. `--subjects` is the sweep
+for the rest (`db/subject-sweep.ts`): each thought with no standing subject at
+its current text, extracted before 111, keyed by no rule or edited since, gets
+the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`). The model is
+asked step 1 of the mediated-pair test about the thought alone, SMD-3299's
+round 4 own question word for word (`server-portable/subject.ts`), and its
+answer is read into a key: the first ticket id in it, else a PR's number, else a
+release's version, else the answer as a lower-case phrase. On SMD-3299's 275
+canary thoughts, blind raters agree on a ticket for 245; the rules named one for
+232 and were right on 230, and with the 27B asked about the other 13, 243 were
+right (99.2%), where the raters agree with each other on 98.1%. The sweep takes
+one thought at a time without a lease, the door's lock and fingerprint check
+making a sweep beside the pass safe. An answer naming nothing records nothing,
+so the next sweep asks again; one that is not JSON with a subject records
+nothing either, is said, and exits 1, as the pass fails a malformed answer.
+`--subjects rules` stops at the rules, for a brain whose judge model has not
+been measured on the question (the stable brain's, today). The egress gate
+reads each row before its question, and a policy that refuses every row
+refuses the sweep before any; the rules alone send nothing. On a brain before
+111, or under a role without the door's grants, the pass records no subject and
+says so once, its entities standing; the sweep refuses either by name before
+any question, exit 2. A dry run reads on through a signal, as the pass's does.
+Sleep does not run the sweep yet (SMD-3306).
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -3917,7 +3988,7 @@ once for a model gone missing or a call no probe answers): "asleep,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a wake. A follower's own row
-(`heartbeat:extract:…`, `heartbeat:consolidate:…`) carries the word with its
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
 own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins.
@@ -5378,12 +5449,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3015 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1645 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 3048 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1703 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 317 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5539,7 +5610,7 @@ classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
-worker of either kind waits a database outage out — `databaseUnavailable`
+worker of either kind, and `reembed.ts`'s follower (SMD-2679), waits a database outage out — `databaseUnavailable`
 names the errors that mean the database is not answering (a connection
 refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
 `waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
@@ -5554,19 +5625,28 @@ refused for as long as the brain is at `max_connections`, so that one is still
 warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
 out the same way.
 - **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
-- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
-- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; re-embed's follower never on a 429, a 503 or the model not served, and its probe tells a thought's 400 (answered) from the request's (refused too). With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+- **Re-embed's follower** reads each thought's error by `followClassify`: the thought's only when it names the thought (its length, the egress gate, its data) or the provider answers the probe's text right after; else the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one). It has no pauses: one 5xx, 408, 429 or timeout is an outage, one coming back within a minute and a poll interval of the probe answering, nothing re-embedded since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
 
 A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
-the `classifyError` rules, the identity cases that refuse before connecting and
-the outage rules and schedule, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
-[10] and [16] each follower outlasting a database cut through a relay and a
+the `classifyError` rules and every `followClassify` cell, the identity cases
+that refuse before connecting and the outage rules and schedule, the schedule
+carried across outages included, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
+[10], [16] and [9f] each follower outlasting a database cut through a relay and a
 provider outage (a 503, and in [10] the model missing, a hung provider, a
-thought that fails every time, and the refusal at start); and `test-cli.ts`'s census checks that
+thought that fails every time, and the refusal at start; in [9f] a 503 at the
+start and mid-pass, the check during one, the model missing mid-pass, a
+thought that fails every time, a 429 under three workers and one the probe
+passes, a key revoked mid-wait, a deadlock and a statement timeout at the
+write, a 401, a length 400 and a content filter's 400 mid-pass, a probe the egress gate refuses, a poll
+past statement_timeout, a deadlock at a pool, and the cut at the start's
+reads, at its first pool, under a thought in hand, mid-follow and under a
+stop); and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 

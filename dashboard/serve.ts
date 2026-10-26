@@ -21,10 +21,12 @@
 // OB1_STOP_GRACE (the stop's grace, as the servers read it), COMPOSE_PROFILES
 // (key sign-in is off while it names auth) and GRAFANA_LINK or GRAFANA_ROUTE
 // (the Grafana link, set by the overlays that reach Grafana).
-// It holds no key and no secret of its own: each visitor's key is the call's.
+// It holds no brain key of its own: each visitor's key or token is the call's. Its one
+// secret is OB1_AUTH_SECRET_GUI, its credential as the authorization server's `gui`
+// client, which signs the operator in through it while the stack is configured (SMD-3307).
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
-import { originProblem } from "../server-portable/oauth-edge.ts";
+import { configuredIn, originProblem } from "../server-portable/oauth-edge.ts";
 import { drainBoundFrom } from "../server-portable/shutdown.ts";
 
 const env = process.env;
@@ -86,6 +88,13 @@ if (publicOrigin && !problem) {
   // the dashboard still serves the address it is reached by.
   if (problem) console.warn(`dashboard: ${problem}; signing in at the address each request names instead.`);
   env.PROTOCOL_HEADER = "x-forwarded-proto";
+}
+// Configured for the authorization server, the GUI signs in only through it (SMD-3307), as its `gui` client:
+// without the client's secret, or a sound origin to redirect through, it offers no sign-in at all. Said at the
+// start, as the MCP server says its own (the sign-in page says it too).
+if (configuredIn(env.COMPOSE_PROFILES)) {
+  if (!env.OB1_AUTH_SECRET_GUI?.trim()) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_AUTH_SECRET_GUI is not set, so no sign-in is offered: set it in deploy/.env (provision.ts --init writes it) and recreate app.");
+  else if (!publicOrigin || problem) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_PUBLIC_ORIGIN is not a sound origin, so no sign-in through the authorization server is offered.");
 }
 env.PORT ||= "8000";
 env.HOST ||= "0.0.0.0";

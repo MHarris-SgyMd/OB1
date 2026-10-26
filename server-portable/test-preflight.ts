@@ -1324,6 +1324,23 @@ else {
   assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — the edge closed — the check is ok again: a closed relation is history");
   await ctx.unsafe(`SELECT delete_thought('${relB}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${relA}'::uuid)`);
+  // 111's kind (SMD-3306): a standing own subject without its lineage row is
+  // refused the same way, the subject named, and the remedy is the subject's
+  // own: close it and record it again through record_thought_subject. The
+  // thought is removed after, so the counts below are as they were.
+  const subA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-111 Session summary — SMD-3306', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const subFp = String((await ctx.unsafe(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = '${subA}'::uuid`))[0].f);
+  const recordSubject = async () => (await ctx.unsafe(`SELECT record_thought_subject('${subA}'::uuid, 'ticket:SMD-3306', 'first_line', 'subject:t@p1', NULL, '${subFp}', NULL) AS r`))[0].r as { action: string; id: string };
+  const sub111 = await recordSubject();
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = '${sub111.id}'::uuid`);
+  const noSubject = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub111.id}\\)`).test(noSubject.out) && /An own subject's row is written by 111's record_thought_subject: close the facet/.test(noSubject.out),
+         `an own subject without its lineage row does not start, the subject named, and the remedy is the subject's own (exit ${noSubject.code}: ${noSubject.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${sub111.id}'::uuid`);
+  const reRecorded = await recordSubject();
+  assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
+         "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
+  await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger
@@ -3775,6 +3792,11 @@ else {
     const embedModelFix = fix((await run(SQL_ENV)).out, "workers");
     assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model\): pull the embedding model its log names \(OB1_EMBEDDING_MODEL\)/.test(embedModelFix) && !/OB1_JUDGE_MODEL/.test(embedModelFix),
       `…and on model, the embedding model's remedy, not the chat models' (${embedModelFix})`);
+    // Its own row waiting mid-pass for the provider (SMD-2679 PR 4a-2b): said as the provider's, not a pass running.
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", running: true, waitingMidPass: ["reembed"] }), 5);
+    const reembedWaitFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 waits for the provider mid-pass — it stopped answering: check it, and the embedding provider row here \(--deep calls it\)/.test(reembedWaitFix),
+      `a re-embed follower's own row waiting mid-pass is said as the provider's (${reembedWaitFix})`);
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:reembed:%'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
