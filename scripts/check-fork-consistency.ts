@@ -497,11 +497,14 @@
  *      default (SMD-3194); a disabled healthcheck is passed over. Its probe
  *      pins what it refuses and what it passes
  *  41. the brain's own code (server-portable/, mcp-server/, dashboard/,
- *      plugins/, db/; tests and benches aside) never reads `SELECT *` or
- *      `t.*` from a function the core migrations define: the statement is
- *      prepared, and a migration that adds a column to the function fails it
- *      with 0A000 until the process restarts (SMD-3302); comments blanked,
- *      strings read. Its probe pins what it refuses and what it passes
+ *      plugins/, db/; tests and benches aside) never reads `*`, `t.*` or
+ *      `(x).*`, anywhere in a select list, over a function, table or view the
+ *      core's or a plugin's migrations define, nor RETURNING *: the statement
+ *      is prepared, and a migration that adds a column to what it reads fails
+ *      it with 0A000 until the process restarts (SMD-3302). Each SELECT is
+ *      read alone, any FROM item counted, JS comments blanked, SQL comments
+ *      dropped, strings read. Its probe pins what it refuses and passes, and
+ *      that its walk reads the store
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -6813,49 +6816,146 @@ function checkHealthcheckStarts() {
 }
 checkHealthcheckStarts();
 
-// ── 41: the brain's code names the columns it reads from a core function, never `*` (SMD-3302) ──
+// ── 41: the brain's code names the columns it reads from its schema, never `*` (SMD-3302) ──
 /**
- * 41: a `SELECT *` (or `t.*`) over a function the core migrations define, in the brain's own code — a server, a db/
- * verb, a plugin, the dashboard. Bun prepares the statement, and a migration that adds a column to the function
- * (110 added two to list_supersession_proposals) changes `*`'s result type: Postgres then refuses the connection's
- * cached plan with 0A000, "cached plan must not change result type", on every call until the process restarts.
- * Named columns re-plan to the same type. Comments blanked, strings read (the SQL is in them); a subquery, a table
- * and a function no migration defines (unnest) pass. Tests and benches are not read: test-store-sql's control
- * prepares `*` to show the failure, and a bench times `SELECT *` so every column is computed.
+ * 41: a `*` — bare, `t.*` or `(x).*`, anywhere in a select list — over a function, table or view the core or a
+ * plugin's migrations define, or a `RETURNING *` on any table, in the brain's own code: a server, a db/ verb, a
+ * plugin, the dashboard. Bun prepares the statement, and a migration that adds a column to what it reads (110 added
+ * two to list_supersession_proposals; CLAUDE.md lets one add a column to thoughts) changes `*`'s result type:
+ * Postgres then refuses the connection's cached plan with 0A000, "cached plan must not change result type", on every
+ * call until the process restarts. Named columns re-plan to the same type.
+ *
+ * Each SELECT is read on its own — its list to the FROM at its own depth, its FROM clause to the clause's end, a
+ * subquery in it skipped (that SELECT is read in turn) — on the text with JS comments blanked and SQL comments
+ * dropped, strings read (the SQL is in them). Any FROM item counts: a join's, a LATERAL's, ROWS FROM's. A CTE's name,
+ * a function no migration defines (unnest) and count(*) pass. Text built at run time (an interpolated column list, a
+ * concatenated `.unsafe` string, compat/supabase-sql's rpc) is not seen. Tests and benches are not read:
+ * test-store-sql's control prepares `*` to show the failure, and a bench times `SELECT *` so every column is computed.
  */
-const STAR_FUNCTION_DIRS = ["server-portable", "mcp-server", "dashboard", "plugins", "db"];
-const STAR_FUNCTION_RE = /\bSELECT\s+(?:DISTINCT\s+)?(?:[A-Za-z_]\w*\.)?\*(?:\s*,(?:(?!\bFROM\b)[^;])*)?\s+FROM\s+(?:"?public"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gi;
-function starFunctionReads(text: string, owned: ReadonlySet<string>): string[] {
-  return [...blanked(text, false).matchAll(STAR_FUNCTION_RE)].map((m) => m[1].toLowerCase()).filter((n) => owned.has(n));
+const STAR_READ_DIRS = ["server-portable", "mcp-server", "dashboard", "plugins", "db"];
+type SchemaNames = { functions: ReadonlySet<string>; relations: ReadonlySet<string> };
+/** Every function, table and view the core's and the plugins' migrations create, by bare name, lowercased. */
+function schemaNamesIn(files: [string, string][]): SchemaNames {
+  const functions = new Set<string>(), relations = new Set<string>();
+  for (const [, text] of files) {
+    const sql = text.replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+    for (const m of sql.matchAll(/^\s*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?\s*\(/gim)) functions.add(m[1].toLowerCase());
+    for (const m of sql.matchAll(/^\s*CREATE(?:\s+OR\s+REPLACE)?(?:\s+UNLOGGED)?\s+(?:MATERIALIZED\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"?\w+"?\.)?"?([A-Za-z_]\w*)"?/gim)) relations.add(m[1].toLowerCase());
+  }
+  return { functions, relations };
 }
-function checkStarFunctionReads() {
-  const owned = new Set(OWNED_FUNCTIONS.keys());
-  const cases: [string, number][] = [
-    ["sql`SELECT * FROM list_supersession_proposals(${a}::text)`", 1], ["SELECT p.* FROM thought_changes(NULL) p", 1],
-    ["select *, 1 from list_proposal_writers(x)", 1], ["SELECT DISTINCT * FROM public.stale_entities(i, 50)", 1],
-    ["SELECT *\n  FROM \"thought_changes\" (x)", 1],
-    ["SELECT id FROM list_supersession_proposals(x)", 0], ["SELECT * FROM thoughts WHERE id = 1", 0],
-    ["SELECT * FROM (SELECT id FROM thought_changes(x)) s", 0], ["SELECT * FROM unnest(x)", 0],
-    ["// SELECT * FROM thought_changes(x)\nconst y = 1;", 0], ["SELECT count(*) FROM thought_changes(x)", 0],
-    ["SELECT *, a FROM t WHERE x IN (SELECT 1 FROM thought_changes(x))", 0],
-  ];
-  const wrong = cases.filter(([t, n]) => starFunctionReads(t, owned).length !== n);
-  if (wrong.length || !owned.has("thought_changes"))
-    fail(SELF, `check 41 no longer reads its probe as written (${JSON.stringify(wrong.map(([t]) => t))}): a \`*\` or \`t.*\` over a core function fails, bare, qualified or quoted, after DISTINCT or before more columns; named columns, a table, a subquery, an uncounted function, a comment and count(*) pass (SMD-3302)`);
+const STAR_STOP_WORDS = /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WINDOW|FOR|RETURNING|FETCH)$/i;
+/**
+ * From `from`, the text up to the first of: `;`, a backtick, a `)` closing a paren opened before `from`, or — at
+ * depth 0 — a word `stop` accepts. A paren opening a SELECT is skipped whole when `skipSubqueries`.
+ */
+function sqlSpan(t: string, from: number, stop: (word: string) => boolean, skipSubqueries: boolean): { text: string; end: number; word: string } {
+  let depth = 0, out = "", i = from;
+  while (i < t.length) {
+    const c = t[i];
+    if (c === ";" || c === "`") break;
+    if (c === "(") {
+      if (skipSubqueries && depth === 0 && /^\(\s*(?:SELECT|WITH|VALUES)\b/i.test(t.slice(i, i + 40))) {
+        let d = 0, j = i;
+        for (; j < t.length; j++) { if (t[j] === "(") d++; else if (t[j] === ")" && --d === 0) break; else if (t[j] === ";" || t[j] === "`") break; }
+        out += " "; i = j + 1; continue;
+      }
+      depth++;
+    } else if (c === ")") {
+      if (depth === 0) break;
+      depth--;
+    } else if (depth === 0 && /[A-Za-z_]/.test(c) && !/[\w$."]/.test(t[i - 1] ?? "")) {
+      const w = /^[A-Za-z_]\w*/.exec(t.slice(i, i + 64))![0];
+      if (stop(w)) return { text: out, end: i, word: w };
+      out += w; i += w.length; continue;
+    }
+    out += c; i++;
+  }
+  return { text: out, end: i, word: "" };
+}
+/** A select list's items at depth 0, ALL / DISTINCT [ON (…)] taken off the first. */
+function selectItems(list: string): string[] {
+  const items: string[] = [];
+  let depth = 0, cur = "";
+  for (const c of list) {
+    if (c === "(") depth++; else if (c === ")") depth--;
+    if (c === "," && depth === 0) { items.push(cur.trim()); cur = ""; } else cur += c;
+  }
+  items.push(cur.trim());
+  items[0] = items[0].replace(/^(?:ALL|DISTINCT(?:\s+ON\s*\((?:[^()]|\([^()]*\))*\))?)\s*/i, "");
+  return items;
+}
+const STAR_ITEM = /^(?:(?:"?[A-Za-z_]\w*"?|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))\s*\.\s*)?\*$/;
+const FUNCTION_CALL = /(?:"?\w+"?\s*\.\s*)?"?([A-Za-z_]\w*)"?\s*\(/g;
+const RELATION_NAME = /(?:^|[\s,(])(?:"?\w+"?\s*\.\s*)?"?([A-Za-z_]\w*)"?(?=$|[\s,)])/g;
+/** What each `*` in the text reads that a migration defines: `fn(…)`, a relation's name, or `RETURNING *`. */
+function starReads(text: string, names: SchemaNames): string[] {
+  const t = blanked(text, false).replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " ")).replace(/(^|[\s(,])--[^\n]*/g, (m, lead: string) => lead + " ".repeat(m.length - lead.length));
+  const hits: string[] = [];
+  for (const m of t.matchAll(/\bSELECT\b/gi)) {
+    const list = sqlSpan(t, m.index! + 6, (w) => /^FROM$/i.test(w), false);
+    const stars = selectItems(list.text).filter((it) => STAR_ITEM.test(it));
+    if (!stars.length) continue;
+    for (const s of stars) for (const f of s.matchAll(FUNCTION_CALL)) if (names.functions.has(f[1].toLowerCase())) hits.push(`${f[1].toLowerCase()}(…)`);
+    if (!/^FROM$/i.test(list.word)) continue;
+    const clause = sqlSpan(t, list.end + 4, (w) => STAR_STOP_WORDS.test(w), true).text;
+    const fns = [...clause.matchAll(FUNCTION_CALL)].map((f) => f[1].toLowerCase());
+    for (const f of fns) if (names.functions.has(f)) hits.push(`${f}(…)`);
+    for (const r of clause.matchAll(RELATION_NAME)) if (names.relations.has(r[1].toLowerCase()) && !fns.includes(r[1].toLowerCase())) hits.push(r[1].toLowerCase());
+  }
+  for (const m of t.matchAll(/\bRETURNING\b/gi)) {
+    if (selectItems(sqlSpan(t, m.index! + 9, () => false, false).text).some((it) => STAR_ITEM.test(it))) hits.push("RETURNING *");
+  }
+  return hits;
+}
+/** The files check 41 reads: STAR_READ_DIRS' code, tests and benches aside; null when git cannot list them. */
+function starReadFiles(): string[] | null {
   let names: string[];
   try {
-    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...STAR_FUNCTION_DIRS], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...STAR_READ_DIRS], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
   } catch (e) {
     console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 41 is skipped)`);
-    return;
+    return null;
   }
-  for (const f of names.filter((n) => /\.(?:[cm]?[jt]s|tsx)$/.test(n) && !/(?:^|\/)(?:test|bench)-[^/]*$/.test(n) && !n.includes("/node_modules/")).sort()) {
-    if (!existsSync(join(ROOT, f)) || !statSync(join(ROOT, f)).isFile()) continue;
-    for (const fn of starFunctionReads(readFileSync(join(ROOT, f), "utf8"), owned))
-      fail(f, `\`SELECT *\` from ${fn}(…) — name the columns read: a migration that adds one to the function fails this prepared statement with 0A000 ("cached plan must not change result type") until the process restarts (check 41, SMD-3302)`);
+  return names.filter((n) => /\.(?:[cm]?[jt]s|[jt]sx)$/.test(n) && !/(?:^|\/)(?:test|bench)-[^/]*$/.test(n) && !n.includes("/node_modules/"))
+    .filter((n) => existsSync(join(ROOT, n)) && statSync(join(ROOT, n)).isFile()).sort();
+}
+function checkStarReads() {
+  const pluginMigrations = existsSync(join(ROOT, "plugins")) ? readdirSync(join(ROOT, "plugins")).flatMap((p) => {
+    const dir = join(ROOT, "plugins", p, "migrations");
+    return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f): [string, string] => [`${p}/${f}`, readFileSync(join(dir, f), "utf8")]) : [];
+  }) : [];
+  const names = schemaNamesIn([...MIGRATION_TEXTS, ...pluginMigrations]);
+  const cases: [string, string][] = [
+    ["sql`SELECT * FROM list_supersession_proposals(${a}::text)`", "list_supersession_proposals(…)"], ["SELECT p.* FROM thought_changes(NULL) p", "thought_changes(…)"],
+    ["select *, 1 from list_proposal_writers(x)", "list_proposal_writers(…)"], ["SELECT DISTINCT * FROM public.stale_entities(i, 50)", "stale_entities(…)"],
+    ["sql`SELECT *\n  FROM \"thought_changes\" /* c */ (x)`", "thought_changes(…)"], ["SELECT 1 AS z, w.* FROM t2 p CROSS JOIN LATERAL list_proposal_writers(p.ids) w", "list_proposal_writers(…)"],
+    ["SELECT (x).* FROM thought_changes(1) x", "thought_changes(…)"], ["SELECT (thought_changes(1)).*", "thought_changes(…)"],
+    ["SELECT * FROM ROWS FROM (thought_changes(1))", "thought_changes(…)"], ["SELECT ALL * FROM thought_changes(1)", "thought_changes(…)"],
+    ["SELECT DISTINCT ON (id) * FROM thought_changes(1)", "thought_changes(…)"], ["SELECT * FROM (SELECT id, t.* FROM thought_changes(1) t) s", "thought_changes(…)"],
+    ["SELECT * -- every column\n FROM thought_changes(1)", "thought_changes(…)"], ["SELECT * FROM thoughts WHERE id = $1", "thoughts"],
+    ["SELECT t.* FROM supersession_proposals p JOIN thoughts t ON t.id = p.older_id", "supersession_proposals,thoughts"],
+    ["UPDATE thoughts SET content = $1 RETURNING *", "RETURNING *"], ["INSERT INTO x (a) VALUES (1) RETURNING id, x.*", "RETURNING *"],
+    ["SELECT id FROM list_supersession_proposals(x)", ""], ["SELECT * FROM unnest(x)", ""], ["SELECT * FROM counted", ""],
+    ["SELECT * FROM (SELECT id FROM thought_changes(x)) s", ""], ["// SELECT * FROM thought_changes(x)\nconst y = 1;", ""],
+    ["SELECT count(*) FROM thought_changes(x)", ""], ["SELECT *, a FROM t WHERE x IN (SELECT 1 FROM thought_changes(x))", ""],
+    ["SELECT extract(epoch FROM now()), * FROM w", ""], ["UPDATE thoughts SET a = 1 RETURNING id, a * 2", ""], ["i--; SELECT a FROM thoughts", ""], ["SELECT * FROM w WHERE thought_changes(1) IS NOT NULL", ""], ["SELECT * FROM w ORDER BY thoughts", ""],
+    ["SELECT * FROM w JOIN x ON x.limit = 1 JOIN thoughts t ON true", "thoughts"], ["sql`SELECT * FROM w` + sql`SELECT id FROM thought_changes(1)`", ""],
+  ];
+  const wrong = cases.filter(([t, want]) => starReads(t, names).join() !== want);
+  const files = starReadFiles();
+  // The walk too: it reads the store and consolidate.ts and leaves the tests, and a listing read put back to `*` in
+  // the store's own text is found.
+  const walked = files === null || (files.includes("server-portable/store-sql.ts") && files.includes("db/consolidate.ts") && !files.includes("server-portable/test-store-sql.ts")
+    && starReads(readFileSync(join(ROOT, "server-portable/store-sql.ts"), "utf8").replace(/SELECT id, status, verdict[\s\S]*?remaining\s+FROM list_supersession_proposals/, "SELECT * FROM list_supersession_proposals"), names).includes("list_supersession_proposals(…)"));
+  if (wrong.length || !walked || !names.functions.has("thought_changes") || !names.relations.has("thoughts"))
+    fail(SELF, `check 41 no longer reads its probe as written (${JSON.stringify(wrong.map(([t]) => t))}${walked ? "" : ", or its walk misses the store or reads the tests"}): a \`*\`, \`t.*\` or \`(x).*\` anywhere in a select list over a function, table or view a migration defines — bare, qualified, quoted, after ALL or DISTINCT [ON], in any FROM item, a subquery's own — and RETURNING * fail; named columns, a CTE, an uncounted function, a subquery's FROM, a comment and count(*) pass (SMD-3302)`);
+  for (const f of files ?? []) {
+    for (const what of new Set(starReads(readFileSync(join(ROOT, f), "utf8"), names)))
+      fail(f, `a \`*\` over ${what === "RETURNING *" ? "a RETURNING" : what} — name the columns: a migration that adds one fails this prepared statement with 0A000 ("cached plan must not change result type") until the process restarts (check 41, SMD-3302)`);
   }
 }
-checkStarFunctionReads();
+checkStarReads();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //

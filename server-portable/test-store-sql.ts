@@ -1816,7 +1816,7 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
   // One connection, so each read's second call meets the plan its first prepared. Each function is widened as a
   // migration would (110 added page_key and remaining): the real one renamed aside, one under its name and arguments
   // returning its columns and one more. A raw connection that prepared `SELECT *` first is the control: it fails 0A000,
-  // so the widening is the kind that breaks a running server's `*` (a parameter in each, so Bun prepares it).
+  // so the widening is the kind that breaks a running server's `*` (a tagged template, which Bun prepares).
   const one = new SqlStore(URL_, { max: 1 });
   const raw = new SQL({ url: URL_, max: 1 });
   const admin = new SQL({ url: URL_, max: 1 });
