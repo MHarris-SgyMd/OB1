@@ -39,9 +39,9 @@
  * first use (an empty answer is not kept); a column that appears is seen when
  * a filter, an order, a payload or a select list names it (the map is re-read
  * once) or when a row comes back carrying it (the next call's map is fresh);
- * one dropped is seen when the shim's own list names it (a 42703 that reads
- * the map again and runs the call once more, SMD-3329); one retyped is not
- * until the process restarts — PostgREST's own cache reloads on a signal, not
+ * one dropped is seen when the shim's own list names it (a 42703 placed in
+ * that list reads the map again and runs the call once more, SMD-3329); one
+ * retyped is not until the process restarts — PostgREST's own cache reloads on a signal, not
  * on its own.
  *
  * ── Resource embedding ───────────────────────────────────────────────────────
@@ -547,27 +547,33 @@ function toPostgrestError(e: unknown): PostgrestError {
 /** A caller bug — a bad identifier, a nested embed — thrown by the shim itself, not a database condition. */
 const isRefusal = (e: unknown) => e instanceof Error && e.message.startsWith("compat/supabase-sql:");
 
-/**
- * The column a 42703 names — Postgres's `column "x" does not exist` for a bare
- * name, `column t.x does not exist` for a qualified one — or null when the
- * message is not in that form (a server whose lc_messages is not English).
- */
-function missingColumn(message: string): string | null {
-  return /column (?:\S+\.)?"?([^"\s]+)"? does not exist/.exec(message)?.[1] ?? null;
-}
+/** A stretch of a statement's text, [start, end) in UTF-16 code units, that the shim filled with column names of its own. */
+type Span = [number, number];
 
 /**
- * Whether a 42703 is the shim's own list naming a column the schema no longer
- * has — a column of a `*` it spelled out from the catalog, or of a function's
- * declared shape — rather than one the caller named: the catalog is then stale,
- * and the call is run once more on a fresh read (SMD-3329). A message the shim
- * cannot read for its column counts as the shim's, as before SMD-3329 a 42703
- * on a spelled-out star always did.
+ * Whether a 42703 points into a span of the statement the shim filled with
+ * columns of its own — a `*` it spelled out from the catalog, a function's
+ * declared columns — rather than at a column the caller named: the catalog is
+ * then stale, and the call is run once more on a fresh read (SMD-3329).
+ * Postgres says where in the statement's text the column was written
+ * (`position`, 1-based, in characters), whatever language its messages are in.
+ * A payload key the table lacks is placed in the INSERT list or the SET, a
+ * filter's in the WHERE, an embed's inside the embed — never in the span. An
+ * error raised inside a function body or a trigger carries no `position` (its
+ * offset is into the body, `internalPosition`), so it is never the shim's,
+ * and the statement that raised it, which may have advanced a sequence, is not
+ * run again. Postgres refuses a column it cannot find before it executes the
+ * statement, so the call that is run again had done nothing.
  */
-function namedByShim(error: PostgrestError, listed: ReadonlySet<string>): boolean {
-  if (error.code !== "42703" || listed.size === 0) return false;
-  const name = missingColumn(error.message);
-  return name === null || listed.has(name);
+function inShimSpan(e: unknown, text: string, spans: readonly Span[]): boolean {
+  const err = e as { errno?: unknown; position?: unknown } | null;
+  if (spans.length === 0 || String(err?.errno) !== "42703") return false;
+  const pos = Number(err?.position);
+  if (!Number.isInteger(pos) || pos < 1) return false;
+  // Characters to code units: a column named with a character outside the BMP is two units and one character.
+  let at = 0;
+  for (let c = 1; c < pos && at < text.length; c++) at += (text.codePointAt(at) ?? 0) > 0xffff ? 2 : 1;
+  return spans.some(([a, b]) => at >= a && at < b);
 }
 
 // ── The select list ──────────────────────────────────────────────────────────
@@ -683,8 +689,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   private rowMode: "many" | "single" | "maybeSingle" = "many";
   /** The columns the filters, the order and the payload name — what the catalog's map must know (see columnsOf). */
   private named = new Set<string>();
-  /** The columns the last compile spelled a `*` out to from the map: a 42703 naming one means the map named a column since dropped. */
-  private spelled = new Set<string>();
+  /** Where in the last projection a `*` was spelled out from the map, relative to its start: a 42703 there is the map naming a column since dropped. */
+  private spelled: Span[] = [];
 
   constructor(private sql: SQL, private catalog: Catalog, private table: string) {}
 
@@ -1207,26 +1213,30 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * named list re-analyses to the one it had. `relnatts` is read beside the
    * rows, so the call after a column is added has it (execute compares the
    * count with the one the map was read at); a column dropped is a 42703
-   * naming one of these, and execute reads the map again and runs the call
-   * once more. A table the catalog cannot see keeps `*`, and the query reports
+   * placed in this list (inShimSpan), and execute reads the map again and runs
+   * the call once more. A table the catalog cannot see keeps `*`, and the query reports
    * what is missing. An embed's `(*)` stays a star: its rows reach the caller
    * as one json column, whose type a new column does not change.
    */
   private async projection(cols: Columns): Promise<string> {
     const parts: string[] = [];
-    this.spelled = new Set();
+    this.spelled = [];
+    let at = 0; // where the next part starts in the joined list
+    const push = (part: string) => { parts.push(part); at += part.length + 2; };
     const base = { table: this.table.trim(), alias: ident(this.table.trim(), "table") };
     for (const item of this.items) {
       if (item.kind === "star") {
-        if (cols.size === 0) { parts.push("*"); continue; }
-        for (const [name, info] of cols) { parts.push(this.columnSql(name, info)); this.spelled.add(name); }
-        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${base.alias}'))::int AS __natts`);
+        if (cols.size === 0) { push("*"); continue; }
+        const from = at;
+        for (const [name, info] of cols) push(this.columnSql(name, info));
+        push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${base.alias}'))::int AS __natts`);
+        this.spelled.push([from, at - 2]);
       }
-      else if (item.kind === "column") parts.push(this.columnSql(item.name, cols.get(item.name)));
+      else if (item.kind === "column") push(this.columnSql(item.name, cols.get(item.name)));
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
-      else parts.push(await this.embedSql(item, base, 1));
+      else push(await this.embedSql(item, base, 1));
     }
     return parts.join(", ") || "*";
   }
@@ -1238,7 +1248,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * OFFSET; `countText` is run only when the page comes back empty (an offset
    * past the end), where the window has no row to ride on (SMD-1602).
    */
-  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string }> {
+  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string; spans: Span[] }> {
     const table = this.table.trim();
     const t = ident(table, "table");
     for (const row of this.payload) for (const c of Object.keys(row)) this.names(c);
@@ -1252,17 +1262,20 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const where = { text: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", values: filters.values };
       // head: no rows, whether or not a count was asked for — supabase-js answers `data: null` to both; PostgREST runs
       // the query for its headers alone. One count query serves both forms; the count is answered only when asked.
-      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols };
+      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols, spans: [] };
       let projection = await this.projection(cols);
       if (this.wantCount) projection += ", count(*) OVER () AS __count";
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
       if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
       if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
       if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
-      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined };
+      // The projection follows "SELECT ": its spelled-out spans sit seven characters in.
+      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined, spans: this.spelled.map(([a, b]): Span => [a + 7, b + 7]) };
     }
 
     const returning = await this.projection(cols);
+    // A write's RETURNING list ends its text: its spelled-out spans are counted back from the end.
+    const spansIn = (text: string): Span[] => this.spelled.map(([a, b]): Span => [text.length - returning.length + a, text.length - returning.length + b]);
     // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
     const bind = (c: string, v: unknown, values: unknown[]): string => {
       const b = bound(cols.get(c), v);
@@ -1293,7 +1306,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         text += ` ON CONFLICT (${target}) DO ${this.ignoreDuplicates ? "NOTHING" : `UPDATE SET ${quoted.map((c) => `${c} = EXCLUDED.${c}`).join(", ")}`}`;
       }
       text += ` RETURNING ${returning}`;
-      return { text, values, cols };
+      return { text, values, cols, spans: spansIn(text) };
     }
 
     if (this.op === "update") {
@@ -1303,15 +1316,13 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const values: unknown[] = [];
       const sets = names.map((c) => `${ident(c, "column")} = ${bind(c, row[c], values)}`);
       const where = this.whereClause(cols, values.length);
-      return {
-        text: `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${returning}`,
-        values: [...values, ...where.values],
-        cols,
-      };
+      const text = `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${returning}`;
+      return { text, values: [...values, ...where.values], cols, spans: spansIn(text) };
     }
 
     const where = this.whereClause(cols, 0);
-    return { text: `DELETE FROM ${t}${where.text} RETURNING ${returning}`, values: where.values, cols };
+    const text = `DELETE FROM ${t}${where.text} RETURNING ${returning}`;
+    return { text, values: where.values, cols, spans: spansIn(text) };
   }
 
   /**
@@ -1332,11 +1343,11 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * resolves as `{ error }` the way supabase-js does.
    */
   private async execute(retried = false): Promise<Result<T>> {
-    let compiled = false;
+    let compiled: { text: string; spans: Span[] } | null = null;
     const table = this.table.trim();
     try {
-      const { text, values, cols, countText } = await this.compile();
-      compiled = true;
+      const { text, values, cols, countText, spans } = await this.compile();
+      compiled = { text, spans };
       const raw = (await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[];
       // The page's total (count(*) OVER (), the same on every row) and the map's attribute count ride on the rows and
       // are lifted off them before the caller sees a row.
@@ -1382,10 +1393,9 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       // other than "that column does not exist": the column is there now and the map is stale — forget it, so the
       // next call reads the table again (a 42703 confirms the absence and keeps the memo).
       if (compiled && error.code !== "42703" && this.catalog.skippedRefresh(table, this.named)) this.catalog.forget(table);
-      // A 42703 naming a column of a spelled-out `*` is the map's own naming of a column since dropped: forget it and
-      // run the call once more, spelled from the fresh set — a statement that failed leaves nothing written, so a write
-      // runs once (SMD-3329; the caller saw one failed call before).
-      if (compiled && namedByShim(error, this.spelled)) {
+      // A 42703 inside a spelled-out `*` is the map's own naming of a column since dropped: forget it and run the call
+      // once more, spelled from the fresh set (SMD-3329; the caller saw one failed call before). See inShimSpan.
+      if (compiled && inShimSpan(e, compiled.text, compiled.spans)) {
         this.catalog.forget(table);
         if (!retried) return this.execute(true);
       }
@@ -1490,8 +1500,9 @@ export class SupabaseSqlClient {
 
   /** rpc(), and the one call it runs again when the catalog it projected from is stale (`retried`). */
   private async call<T>(fn: string, args: Record<string, unknown>, retried: boolean): Promise<Result<T>> {
-    /** The OUT columns the call projects by name, and the overloads read: a 42703 naming one of them is a stale catalog. */
-    let listed = new Set<string>();
+    /** The statement and where in it the function's declared columns are named, and the overloads read: a 42703 there is a stale catalog. */
+    let text = "";
+    let spans: Span[] = [];
     let overloads: Overload[] = [];
     try {
       const f = ident(fn, "function");
@@ -1545,7 +1556,7 @@ export class SupabaseSqlClient {
       // the statement and keeps it: a `*` over a function a migration drops and makes again with one more OUT column
       // re-analyses to a different result type, which Postgres refuses on every call until the process restarts
       // (0A000); a named list re-analyses to the one it had (SMD-3329). A column dropped or renamed since the catalog
-      // was read is a 42703 naming one of these, and the call is run once more on a fresh read; one added is not seen
+      // was read is a 42703 placed among these, and the call is run once more on a fresh read (inShimSpan); one added is not seen
       // until the process restarts, like any catalog change but a table's (the code that reads a new column ships in a
       // new process). A scalar, and a shape the candidates disagree on, are read as they come — a scalar's result type
       // is the function's whichever way it is spelled. The call is aliased with the function's own name: a scalar
@@ -1553,11 +1564,12 @@ export class SupabaseSqlClient {
       // An unnamed OUT parameter (`OUT int`) has no name to project — Postgres calls its column `columnN` — so a
       // shape holding one is read as it comes.
       const named = outs !== undefined && outs.size > 0 && shapes.every((m) => m.columns) && !outs.has("");
-      if (named) listed = new Set(outs.keys());
       const projection = named
         ? [...outs].map(([name, info]) => (info.category === "A" ? `to_json(${f}.${quoteName(name)}) AS ${quoteName(name)}` : `${f}.${quoteName(name)}`)).join(", ")
         : "*";
-      const rows = ((await this.sql.unsafe(`SELECT ${projection} FROM ${call} AS ${f}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
+      text = `SELECT ${projection} FROM ${call} AS ${f}`;
+      if (named) spans = [[7, 7 + projection.length]];
+      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
 
       // What the function declares decides the shape, as it does for PostgREST (SMD-1602): a set-returning function
       // yields rows — one row of one column included, `[{ col: v }]`, where the old rule collapsed it to `v` and the
@@ -1586,9 +1598,14 @@ export class SupabaseSqlClient {
     } catch (e) {
       if (isRefusal(e)) throw e;
       const error = toPostgrestError(e);
-      if (namedByShim(error, listed)) {
-        // The function was dropped and made again since the catalog read it, or the table it returns rows of lost a
-        // column: read both again and call once more (a statement that failed leaves nothing written).
+      // A 42703 among the declared columns: the function was dropped and made again since the catalog read it, or the
+      // table it returns rows of lost a column (see inShimSpan). A 0A000: a function the catalog read as a scalar, or
+      // as overloads that disagree, so the call read `*`, has been made again with columns — the fresh read names
+      // them in a statement of its own. Postgres refuses either before it runs the function. Read both again and call
+      // once more; a 0A000 whose fresh read spells the same statement fails the same way, once. 0A000 is every "not
+      // supported", so only one the statement itself raised, with no function's context (`where`) on it: one raised
+      // in a function body may follow a write the body made outside the transaction, and is not run again.
+      if (text && (inShimSpan(e, text, spans) || (error.code === "0A000" && !(e as { where?: unknown }).where))) {
         this.catalog.forgetFunction(fn);
         for (const o of overloads) if (o.returns.table) this.catalog.forget(o.returns.table);
         if (!retried) return this.call<T>(fn, args, true);

@@ -989,19 +989,25 @@ try {
   // a different result type, and Postgres refuses the cached plan (0A000, "cached plan must not change result type")
   // on every call until the process restarts; a named list re-analyses to the same one. One client on one connection,
   // so the second call runs on the connection that prepared the first.
+  // Bun prepares a statement only when it has parameters, so every read here binds one.
   const admin = new SQL({ url: URL_, max: 1 });
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_trig()", "widen_first_fn(int)", "odd_out(int)", "odd_cols(int)"]) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+  for (const t of ["widen_t", "widen_log", "widen_first", "odd_names", "emoji_names"]) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+  await admin`DROP SEQUENCE IF EXISTS widen_seq`;
   await admin`CREATE TABLE widen_t (id serial PRIMARY KEY, name text NOT NULL)`;
   await admin`INSERT INTO widen_t (name) VALUES ('first')`;
   await admin`CREATE FUNCTION widen_fn(p_name text) RETURNS TABLE (id int, name text) LANGUAGE sql STABLE AS $$ SELECT id, name FROM widen_t WHERE name = p_name $$`;
+  await admin`CREATE FUNCTION widen_rows(p_name text) RETURNS SETOF widen_t LANGUAGE sql STABLE AS $$ SELECT * FROM widen_t WHERE name = p_name $$`;
+  await admin`CREATE FUNCTION widen_sc(p_name text) RETURNS int LANGUAGE sql STABLE AS $$ SELECT 1 $$`;
   const one = createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=smd3329`, "k", { max: 1 });
   assert(one.sql !== db.sql, "the widening client has a pool of its own");
   const reads = async (label: string) => ({
     fn: await one.rpc("widen_fn", { p_name: "first" }),
-    setof: await one.rpc("gizmos_all"),
+    setof: await one.rpc("widen_rows", { p_name: "first" }),
     star: await one.from("widen_t").select("*").eq("name", "first"),
     bare: await one.from("widen_t").select().eq("name", "first"),
     returning: await one.from("widen_t").update({ name: "first" }).eq("name", "first").select("*"),
-    embed: await one.from("widgets").select("id, gizmos(*)").limit(1),
+    embed: await one.from("widgets").select("id, gizmos(*)").gt("id", 0).limit(1),
     label,
   });
   const ok = (r: Awaited<ReturnType<typeof reads>>) => (["fn", "setof", "star", "bare", "returning", "embed"] as const).map((k) => `${k} ${r[k].error ? `${r[k].error?.code} ${r[k].error?.message}` : "ok"}`).join("; ");
@@ -1012,9 +1018,15 @@ try {
   await admin`CREATE FUNCTION widen_fn(p_name text) RETURNS TABLE (id int, name text, added int) LANGUAGE sql STABLE AS $$ SELECT id, name, 7 FROM widen_t WHERE name = p_name $$`;
   await admin`ALTER TABLE widen_t ADD COLUMN added int DEFAULT 7`;
   await admin`ALTER TABLE gizmos ADD COLUMN added int DEFAULT 7`;
+  // …and a function the catalog read as a scalar, so rpc() read `*`, made again with columns.
+  const scalarBefore = await one.rpc("widen_sc", { p_name: "first" });
+  await admin`DROP FUNCTION widen_sc(text)`;
+  await admin`CREATE FUNCTION widen_sc(p_name text) RETURNS TABLE (id int, name text) LANGUAGE sql STABLE AS $$ SELECT id, name FROM widen_t WHERE name = p_name $$`;
+  const scalarAfter = await one.rpc("widen_sc", { p_name: "first" });
+  assert(scalarBefore.data === 1 && scalarAfter.error === null && (scalarAfter.data as { name: string }[])?.[0]?.name === "first", `a scalar function made again with columns: its 0A000 reads the catalog again and the call answers with the rows (${scalarAfter.error?.message ?? JSON.stringify(scalarAfter.data)})`);
   const after = await reads("after");
   assert(after.fn.error === null && (after.fn.data as { name: string }[])?.[0]?.name === "first", `rpc() of a function a migration widened answers on the same client (${ok(after)})`);
-  assert(after.setof.error === null, `…and rpc() of a function returning rows of a table a migration widened (${ok(after)})`);
+  assert(after.setof.error === null && (after.setof.data as { name: string }[])?.[0]?.name === "first", `…and rpc() of a function returning rows of a table a migration widened (${ok(after)})`);
   assert(after.star.error === null && (after.star.data as { name: string }[])?.[0]?.name === "first", `.select("*") of a table a migration widened answers on the same client (${ok(after)})`);
   assert(after.bare.error === null && after.returning.error === null, `…and a bare .select(), and a write's RETURNING * (${ok(after)})`);
   assert(after.embed.error === null, `…and an embed's (*), whose rows reach the caller as one json column (${ok(after)})`);
@@ -1029,6 +1041,20 @@ try {
   const narrowed = await reads("narrowed");
   assert(narrowed.star.error === null && !("added" in ((narrowed.star.data as object[])?.[0] ?? {})), `a column dropped under the client: the next .select("*") answers without it (${ok(narrowed)})`);
   assert(narrowed.fn.error === null && (narrowed.fn.data as { title: string }[])?.[0]?.title === "first", `an OUT column renamed under the client: the next rpc() answers with the new name (${ok(narrowed)} ${JSON.stringify(narrowed.fn.data)})`);
+  // The first column of the list, too: the table's first column dropped, the function's first OUT column renamed.
+  await admin`CREATE TABLE widen_first (a int, b int)`;
+  await admin`INSERT INTO widen_first VALUES (1, 2)`;
+  await admin`CREATE FUNCTION widen_first_fn(p int) RETURNS TABLE (a int, b int) LANGUAGE sql STABLE AS $$ SELECT p, p + 1 $$`;
+  await one.from("widen_first").select("*").eq("b", 2);
+  await one.rpc("widen_first_fn", { p: 1 });
+  await admin`ALTER TABLE widen_first DROP COLUMN a`;
+  await admin`DROP FUNCTION widen_first_fn(int)`;
+  await admin`CREATE FUNCTION widen_first_fn(p int) RETURNS TABLE (aa int, b int) LANGUAGE sql STABLE AS $$ SELECT p, p + 1 $$`;
+  const firstStar = await one.from("widen_first").select("*").eq("b", 2);
+  const firstFn = await one.rpc("widen_first_fn", { p: 1 });
+  assert(JSON.stringify(firstStar.data) === '[{"b":2}]' && JSON.stringify(firstFn.data) === '[{"aa":1,"b":2}]', `the first column dropped and the first OUT column renamed: each next call answers (${firstStar.error?.message ?? JSON.stringify(firstStar.data)}; ${firstFn.error?.message ?? JSON.stringify(firstFn.data)})`);
+  await admin`DROP FUNCTION widen_first_fn(int)`;
+  await admin`DROP TABLE widen_first`;
   // A write whose RETURNING list names a dropped column runs again, and writes once: the failed statement wrote nothing.
   await admin`ALTER TABLE widen_t ADD COLUMN gone int`;
   await one.from("widen_t").select("*").limit(1); // the map learns `gone` from the attribute count…
@@ -1037,15 +1063,51 @@ try {
   const written = await one.from("widen_t").insert({ name: "second" }).select("*");
   const [{ n }] = await admin`SELECT count(*)::int AS n FROM widen_t WHERE name = 'second'`;
   assert(written.error === null && n === 1, `an insert whose RETURNING * named a dropped column answers, and the row is written once (${written.error?.code ?? "ok"}, ${n} row)`);
-  // A column the CALLER names and the table lacks is the caller's 42703, not a stale map: no re-read, no second call.
+  // A column the CALLER names and the table lacks is the caller's 42703, not a stale map: no re-read, no second call —
+  // in a filter, a payload, an update's SET, or an embed whose base table has a column of that name. Postgres places
+  // each outside the spelled-out `*` (its error's `position`).
   const pool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
   const realUnsafe = pool.unsafe;
-  let catalogReads = 0, calls = 0;
-  pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_attribute/.test(String(a[0]))) catalogReads++; else if (/FROM "widen_t"/.test(String(a[0]))) calls++; return realUnsafe.apply(this, a); };
-  const typos = [];
-  for (let i = 0; i < 5; i++) typos.push(await one.from("widen_t").select("*").eq("no_such_column", 1));
-  pool.unsafe = realUnsafe;
-  assert(typos.every((r) => r.error?.code === "42703") && catalogReads <= 1 && calls === 5, `five calls filtering on a column the table lacks: five 42703s, ${catalogReads} catalog read(s) and ${calls} queries — one each, not a retry`);
+  const counted = async (run: () => PromiseLike<{ error: { code?: string } | null }>) => {
+    let catalogReads = 0, queries = 0;
+    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_(attribute|proc)/.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
+    const codes: (string | undefined)[] = [];
+    try { for (let i = 0; i < 5; i++) codes.push((await run()).error?.code); } finally { pool.unsafe = realUnsafe; }
+    return { codes: codes.join(), catalogReads, queries };
+  };
+  for (const [what, run] of [
+    ["filtering on", () => one.from("widen_t").select("*").eq("no_such_column", 1)],
+    ["inserting into", () => one.from("widen_t").insert({ name: "x", no_such_key: 1 })],
+    ["updating", () => one.from("widen_t").update({ no_such_set: 1 }).eq("name", "first")],
+    ["embedding", () => one.from("widgets").select("*, gizmos(name)").gt("id", 0)],
+  ] as const) {
+    const c = await counted(run);
+    assert(c.codes === "42703,42703,42703,42703,42703" && c.catalogReads <= 1 && c.queries === 5, `five calls ${what} a column the table lacks: five 42703s, ${c.catalogReads} catalog read(s) and ${c.queries} queries — one each, not a retry (${c.codes})`);
+  }
+  // Postgres counts characters, JavaScript code units: columns named with characters outside the BMP, before the
+  // caller's bad column, must not move its place into the spelled-out list (45 such characters, more than the 27
+  // between the list's end and the filter's column; a name holds 63 bytes, 15 of them).
+  await admin.unsafe(`CREATE TABLE emoji_names (id int PRIMARY KEY, ${["a", "b", "c"].map((k) => `"${k}${"\u{1F642}".repeat(15)}" text`).join(", ")})`);
+  await one.from("emoji_names").select("*").eq("id", 1);
+  const emoji = await counted(() => one.from("emoji_names").select("*").eq("no_such_column", 1));
+  assert(emoji.queries === 5, `a filter on a missing column after a column named in astral characters is still the caller's: ${emoji.queries} queries for five calls`);
+  // A 42703 raised inside a function body or a trigger has no place in the statement: never the shim's, so the
+  // statement — whose sequence has advanced — is not run again, even when the column it names is an OUT column's.
+  await admin`CREATE SEQUENCE widen_seq`;
+  await admin.unsafe(`CREATE FUNCTION widen_body(p_name text) RETURNS TABLE (id int, title text) LANGUAGE plpgsql AS $$
+    BEGIN PERFORM nextval('widen_seq'); RETURN QUERY EXECUTE 'SELECT t.id, t.title FROM widen_t t'; END $$`);
+  await admin.unsafe(`CREATE FUNCTION widen_na(p_name text) RETURNS TABLE (id int, name text) LANGUAGE plpgsql AS $$
+    BEGIN PERFORM nextval('widen_seq'); RAISE EXCEPTION 'not supported' USING ERRCODE = '0A000'; END $$`);
+  await admin`CREATE TABLE widen_log (id int, name text)`;
+  await admin.unsafe(`CREATE FUNCTION widen_trig() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM nextval('widen_seq'); RAISE EXCEPTION 'column "name" does not exist' USING ERRCODE = '42703'; END $$`);
+  await admin`CREATE TRIGGER widen_trig AFTER INSERT ON widen_log FOR EACH ROW EXECUTE FUNCTION widen_trig()`;
+  await one.from("widen_log").select("*").eq("id", 0);
+  const body = await one.rpc("widen_body", { p_name: "first" });
+  const trig = await one.from("widen_log").insert({ id: 1, name: "a" }).select("*");
+  const na = await one.rpc("widen_na", { p_name: "first" });
+  const [{ last_value }] = await admin`SELECT last_value::int FROM widen_seq`;
+  assert(body.error?.code === "42703" && trig.error?.code === "42703" && na.error?.code === "0A000" && last_value === 3, `a 42703 from a function body and from a trigger, and a 0A000 from a function body, each ran once: the sequence at ${last_value} after the three calls, not 6 (${body.error?.message}; ${trig.error?.message}; ${na.error?.message})`);
   // Every column a `*` spells out is the catalog's, so any name a column can have is quoted as Postgres quotes it —
   // where a caller's own list keeps ident()'s rule — and an unnamed OUT parameter leaves the call reading `*`.
   await admin.unsafe(`CREATE TABLE odd_names (id int PRIMARY KEY, "my col" text, "naïve" int, "q""uote" int)`);
@@ -1062,7 +1124,11 @@ try {
   await admin`DROP TABLE odd_names`;
   await one.close();
   await admin`ALTER TABLE gizmos DROP COLUMN added`;
-  await admin`DROP FUNCTION widen_fn(text)`;
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)"]) await admin.unsafe(`DROP FUNCTION ${f}`);
+  await admin`DROP TABLE widen_log CASCADE`;
+  await admin`DROP FUNCTION widen_trig()`;
+  await admin`DROP SEQUENCE widen_seq`;
+  await admin`DROP TABLE emoji_names`;
   await admin`DROP TABLE widen_t CASCADE`;
   await admin.close();
 } catch (e) {

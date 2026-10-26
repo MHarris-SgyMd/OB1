@@ -111,7 +111,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`273 assertions: 273 passed, 0 failed` and `PASS`. A migrated file behaves
+`280 assertions: 280 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the seven MCP servers with
 a schema of their own — the extensions, forty-five tools — against those
@@ -185,13 +185,23 @@ from the catalog's map, array columns through `to_json`, with
 has it; a name read from the catalog is quoted as Postgres quotes it, so a
 column named `my col` reads too. `.rpc()` names the columns the function
 declares (`RETURNS TABLE`, OUT parameters, the table of `RETURNS SETOF
-<table>`), and reads `*` for an unnamed OUT parameter, which has no name. A
-42703 naming one of the shim's own columns — dropped, or an OUT column renamed
-— reads the catalog again and runs the call once more, so the caller sees no
-error; a 42703 on a column the caller named is the caller's, answered once. An
-embed's `(*)` stays a star: its rows reach the caller as one json column, whose
-type a new column does not change. A column retyped under a running client
-still fails 0A000 until it restarts.
+<table>`), and reads `*` for an unnamed OUT parameter, which has no name.
+
+A column dropped, or an OUT column renamed, is a 42703 that Postgres places
+(its error's `position`) inside the list the shim wrote: the shim reads the
+catalog again and runs the call once more, so the caller sees no error. Postgres
+refuses the column before it executes anything, so nothing runs twice. A 42703
+it places anywhere else — a filter's column, a payload key, an update's `SET`, a
+column inside an embed — is the caller's, answered once with no re-read; one
+raised inside a function body or a trigger carries no place in the statement
+and is never retried, so a body that advanced a sequence is not run again. A
+function the catalog read as a scalar, so the call read `*`, and that has since
+been made again with columns fails 0A000 once inside `.rpc()`, which reads the
+catalog again and calls once more, now by name. An embed's `(*)` stays a star:
+its rows reach the caller as one json column, whose type a new column does not
+change. A column retyped under a running client — or dropped and added again
+with another type — still fails 0A000 until it restarts: the shim's list is the
+same text, and Bun keeps the statement that fails.
 
 ## What is deliberately refused
 
@@ -252,9 +262,11 @@ form, so a JavaScript array reached a `text[]` column as its `String()` (`a,b`,
 `""` for `[]`) and was refused as malformed — while the same array into a `jsonb`
 column beside it was right. Value shape cannot decide that (`tags TEXT[]` and
 `instructions JSONB` take the same `string[]`); the column's declared type does.
-A table's columns are re-read when the caller names one the map lacks, when
-its attribute count moves, or when the shim's own list names one since
-dropped; a function's when one of its declared columns is gone. Anything else —
+A table's columns are re-read when the caller names one the map lacks, when a
+query that named a column remembered as absent then fails another way, when
+the attribute count read beside the rows moves (so a call that returns rows),
+or when the shim's own list names one since dropped; a function's when one of
+its declared columns is gone, or a call that read `*` fails 0A000. Anything else —
 a column retyped, a foreign key added, a function's new OUT column — is not
 seen until the process restarts, as with PostgREST's own cache. `toSQL()`
 reads the catalog too, so it is a promise.

@@ -2056,7 +2056,7 @@ the migration fails each listing on a connection that had already listed
 it restarts: its reads asked for `*`. Since SMD-3302 the brain's own code
 names the columns it reads from a function, table or view (check 41), so a
 statement re-plans to the same result type when a later migration adds a
-column; compat/supabase-sql names them too, at run time, since SMD-3329. DDL alone;
+column; compat/supabase-sql names the columns it can, at run time, since SMD-3329. DDL alone;
 no row moves; no grant is carried. Refuses by name without 016, 025 or 029; a
 re-apply is a no-op. test-schema [98] (230 rows walked in pages of 200 and of
 7, ties across page edges, a stale row re-judged under the cursor, the partial
