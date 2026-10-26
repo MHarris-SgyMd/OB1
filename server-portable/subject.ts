@@ -99,7 +99,7 @@ function ticketIn(text: string): string | null {
  * it names, when it names one, else a release's version, else the answer as a phrase. A ticket comes first because a
  * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. An answer naming several
  * PRs, a range or a list, is about something they share, so it is no PR: its release's version when it names one,
- * else a phrase (version 2; Verify item 1 read a digest "across PRs #10–#97" as PR 10). A phrase is the answer
+ * else a phrase (version 2; Verify item 1 read a digest of a range of PRs as its first). A phrase is the answer
  * lower-cased, every run of space, control or format characters one
  * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word. Read whole: the
  * answer kept on a recipe is cut, not this.

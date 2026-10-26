@@ -2632,7 +2632,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     ["Move to SHA-256 (SMD-1234)", "ticket:SMD-1234"], ["SHA-256 migration", "phrase:sha-256 migration"], ["UTF-8 handling", "phrase:utf-8 handling"], ["PR-502", "pr:502"],
     [`SMD-${"1".repeat(250)}`, `phrase:smd-${"1".repeat(196)}`],
     // Version 2: one PR, named once or more, is the PR; several, a range or a list, are about something they share.
-    ["OB1 fork — migration traps (digest across PRs #10–#97)", "phrase:ob1 fork — migration traps (digest across prs #10–#97)"], ["PR 12 and PR 13", "phrase:pr 12 and pr 13"],
+    ["Notes on the merge queue (across PRs #20–#45)", "phrase:notes on the merge queue (across prs #20–#45)"], ["PR 12 and PR 13", "phrase:pr 12 and pr 13"],
     ["PR 721 merged, PR #721's follow-up", "pr:721"], ["#5, #6 and #7, the v2.1.0 cut", "version:v2.1.0"], ["PR 012, then PR #12 again", "pr:12"],
     // Review pass 1: a range or a list after one PR mark is several too.
     ["PR 10–12", "phrase:pr 10–12"], ["PR 502 and 503", "phrase:pr 502 and 503"], ["PR 12/13", "phrase:pr 12/13"], ["PR 7, the fix", "pr:7"],
