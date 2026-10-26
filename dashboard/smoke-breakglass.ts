@@ -35,8 +35,9 @@
  *
  * With `--as-up`, run while the authorization server answers, it asserts
  * only that a sign-in through it starts on the origin (so it is up) and not on
- * the break-glass port, and that the key is offered there all the same: the
- * full run is with it down, where the start's refusal would prove nothing.
+ * the break-glass port, that no callback completes there (the origin's own
+ * sign-in brought to it), and that the key is offered there all the same: the
+ * full run is with it down, where those refusals would prove nothing.
  *
  * Exit 0 when every assertion holds, 1 otherwise.
  */
@@ -80,6 +81,13 @@ if (AS_UP) {
   assert(onOrigin.status === 303 && onOrigin.location.startsWith(`${ORIGIN}/auth/authorize?`), `with the authorization server up, a start on the origin goes to it (${onOrigin.status} → ${onOrigin.location.split("?")[0]})`);
   const onBg = await req(`${BG}/auth/start`, { method: "POST", headers: { origin: BG_ORIGIN } });
   assert(onBg.status === 303 && onBg.location === "/dashboard/signin", `…and none starts on the break-glass port (${onBg.status} → ${onBg.location.split("?")[0]})`);
+  // The origin's own sign-in, its cookie and state, brought to the break-glass port's callback: refused there before
+  // anything is read (stale), where without the guard it would reach the code's exchange (review pass 3).
+  const started = await fetch(`${MAIN}/auth/start`, { method: "POST", redirect: "manual", headers: { origin: ORIGIN } });
+  const binding = (started.headers.getSetCookie?.() ?? []).map((l) => /^ob1_dashboard_signin=([^;]+)/.exec(l)?.[1]).find(Boolean) ?? "";
+  const state = new URL(started.headers.get("location") ?? `${ORIGIN}/`).searchParams.get("state") ?? "";
+  const bgCallback = await req(`${BG}/auth/callback?state=${encodeURIComponent(state)}&code=not-a-code`, { headers: { cookie: `ob1_dashboard_signin=${binding}` } });
+  assert(binding.length > 20 && state.length > 20 && bgCallback.status === 303 && bgCallback.location === "/dashboard/signin?refused=stale", `…nor does a callback complete there, the origin's own sign-in cookie and state brought to it (${bgCallback.status} → ${bgCallback.location})`);
   const bgUp = await req(`${BG}/signin`);
   assert(bgUp.status === 200 && bgUp.html.includes('data-testid="breakglass"') && bgUp.html.includes('name="key"'), `…which offers the key all the same (${bgUp.status})`);
   console.log(`\n${pass} passed, ${fail} failed`);

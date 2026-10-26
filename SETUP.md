@@ -559,8 +559,9 @@ query log, its status (version, migrations, sizes, the workers' heartbeats),
 any thought, and the pages of the plugins `OB1_PLUGINS` turns on.
 A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
 or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
-or the sign-in form is refused as cross-site; once it is set, sign in there and
-not at `127.0.0.1`, where the form is refused the same way. A stack configured
+or the sign-in form is refused, the page naming the plain-HTTP address the
+dashboard takes it from instead; once it is set, sign in there and not at
+`127.0.0.1`, where the form is refused the same way, the page naming the origin. A stack configured
 with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
 sign-in: it signs the operator in through the authorization server, with the
 password `provision.ts --init` wrote, `OB1_AUTH_OPERATOR_PASSWORD` in

@@ -44,8 +44,8 @@ Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
 `https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
 `OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key — or, on a stack
 configured with the authorization server, through it ("Signing in", below). One or the
-other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
-cross-site ("The origin", below).
+other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused, the
+page naming the address that takes it ("The origin", below).
 
 ## Signing in
 
@@ -155,7 +155,7 @@ is Secure only on https. So the server must know the origin a browser sees:
 | `COMPOSE_PROFILES` | Key sign-in is off on the origin while it names `auth` |
 | `BREAKGLASS_PORT` | The break-glass port on the host, 8001 unless set: `http://127.0.0.1:<it>` is the one origin the GUI takes a form from on that listener, and its session cookie's name carries it. Changed, it needs `app` recreated as well as `breakglass` (a plain `compose up -d` does both) |
 | `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
-| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
+| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin, so not on the break-glass port, which routes the GUI alone. With neither, no link |
 | `PORT` | 8000 unless set |
 | `OB1_STOP_GRACE` | The stop's grace, as the servers read it: the GUI drains within it, less 2 s |
 

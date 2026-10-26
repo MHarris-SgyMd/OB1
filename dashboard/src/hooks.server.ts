@@ -27,7 +27,7 @@ const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/call
 // or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
 	const port = breakGlassPort(env.BREAKGLASS_PORT);
-	if (!originAllowed(event.request, event.url, port)) return guarded(originRefusal(event.request, port));
+	if (!originAllowed(event.request, event.url, port)) return guarded(originRefusal(event.request, event.url, port));
 	const breakglass = onBreakGlass(event.request);
 	event.locals.breakglass = breakglass;
 	event.locals.sessionCookie = sessionCookieName(breakglass, port);
@@ -48,8 +48,8 @@ function guarded(response: Response): Response {
 	// Nothing a page shows is the browser's to keep: a thought, the brain's facts.
 	response.headers.set('cache-control', 'no-store');
 	// No page's URL leaves the origin. Not `no-referrer`: under it a browser
-	// sends `Origin: null` with a plain form POST, which SvelteKit refuses as
-	// cross-site, so sign-out (a form with no script) failed in every browser
+	// sends `Origin: null` with a plain form POST, which the origin check
+	// refuses, so sign-out (a form with no script) failed in every browser
 	// (review pass 1, Chromium, Firefox and WebKit).
 	response.headers.set('referrer-policy', 'same-origin');
 	response.headers.set('x-content-type-options', 'nosniff');

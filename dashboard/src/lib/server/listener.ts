@@ -20,14 +20,15 @@ export const LISTENER_HEADER = 'x-ob1-listener';
 export const onBreakGlass = (request: Request) => request.headers.get(LISTENER_HEADER) === 'breakglass';
 
 /**
- * The break-glass port on the host (compose's BREAKGLASS_PORT, 8001 unless set), read as compose reads a published
- * port — `08317` is 8317 (review pass 2: refused here, it offered the key and took no post) — or null for a value
- * compose would not publish either.
+ * The break-glass port on the host (compose's BREAKGLASS_PORT, 8001 unless set), read as compose reads one published
+ * port — leading zeros and a `+` taken (review passes 2 and 3: refused here, `08317` and `+8317` offered the key and
+ * took no post) — or null for anything else: a value compose refuses, and the two it publishes that name no one port
+ * (`0`, any free one; a range), which leave the GUI no origin to take a form from.
  */
 export function breakGlassPort(value: string | undefined): number | null {
 	const v = value?.trim() || '8001';
-	if (!/^\d{1,5}$/.test(v)) return null;
-	const n = Number(v);
+	if (!/^\+?\d+$/.test(v)) return null;
+	const n = Number(v.replace(/^\+/, ''));
 	return n >= 1 && n <= 65535 ? n : null;
 }
 
@@ -57,13 +58,13 @@ export function originAllowed(request: Request, url: URL, port: number | null): 
  * answer was a parse error and a bare JSON one nothing at all; to another that asks for JSON, `{ message }`, as
  * SvelteKit's origin check answered; text otherwise.
  */
-export function originRefusal(request: Request, port: number | null): Response {
+export function originRefusal(request: Request, url: URL, port: number | null): Response {
 	const message = !onBreakGlass(request)
-		? 'This request must come from the dashboard itself.'
+		? `This request must come from the dashboard at ${url.origin}/dashboard/: open it at that address (behind TLS, OB1_PUBLIC_ORIGIN names it).`
 		: port === null
 			? "This break-glass port cannot take a sign-in: the dashboard's BREAKGLASS_PORT is not a port. Set it in deploy/.env and recreate app and breakglass."
 			: `The break-glass port takes a sign-in from http://127.0.0.1:${port}/dashboard/ alone (not localhost): open the dashboard at that address.`;
-	if (request.headers.get('x-sveltekit-action') === 'true') return Response.json({ type: 'failure', status: 403, data: JSON.stringify([{ error: 1 }, message]) });
+	if (request.headers.get('x-sveltekit-action') === 'true' && request.headers.get('accept') === 'application/json') return Response.json({ type: 'failure', status: 403, data: JSON.stringify([{ error: 1 }, message]) });
 	return request.headers.get('accept') === 'application/json' ? Response.json({ message }, { status: 403 }) : new Response(message, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 }
 
