@@ -14,17 +14,14 @@
  *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
- * The brain is awake while it is used: a read the server logged (query_log,
- * migration 034) or a write the audit recorded (thought_audit, 008) through a
- * key whose kind is not `ingested` (set_agent_kind, 046). It falls asleep
- * after --quiet seconds with neither, and wakes on the first. Every
- * comparison is on the database's clock, now().
- *  - Reads wake it only under the server's OB1_QUERY_LOG=on, off by default:
- *    with it off nothing logs a search. Nothing in the database says which,
- *    so a log with no row in 24 h is said once at the start. The owner can
- *    read query_log, and so can a role granted the `sleep` group (db/config.mjs,
- *    SMD-2678); any other --grant role is told once, and then only writes wake
- *    the brain.
+ * The brain is awake while it is written: a write the audit recorded
+ * (thought_audit, 008) through a key whose kind is not `ingested`
+ * (set_agent_kind, 046). It falls asleep after --quiet seconds with none, and
+ * wakes on the first. Every comparison is on the database's clock, now().
+ *  - A search neither wakes it nor holds it awake (SMD-3315): a running pass
+ *    costs a search 24–33 ms (SMD-3024's paired medians), so the passes go on
+ *    through one. It reads no query_log; before 2.0.0 a logged search woke it,
+ *    for a role granted the retired `sleep` group.
  *  - "Background" is the key's kind, not the work: board-sync's key is
  *    classified `ingested` on the stable brain, so its sync writes do not
  *    wake it; an unclassified key's do — reembed.ts's, ingest-records.ts's, a
@@ -42,6 +39,8 @@
  * would have slept 222 times, 93% of the time, a median sleep of 16.6 min
  * (p10 2.4); at 60 s, 98% and 12.6 min; at 900 s, 84% and 25.5 min. Counting
  * board-sync's writes as live halves the median sleep at 300 s (6.5 min).
+ * Those counted reads as live; on writes alone a sleep begins no later and
+ * lasts no shorter, so the figures are its floor.
  *
  * ── Asleep ──────────────────────────────────────────────────────────────────
  * First the re-derive pass (SMD-1794's order, SMD-2679): rebuild_derived's
@@ -308,8 +307,6 @@ const RESTART_EVERY_MS = 60_000;
 const WAKE_SLACK_S = 30;
 /** The longest --poll: the awake wait is at most a minute, the heartbeat's floor, and a poll past it would break that. */
 const MAX_POLL_S = 60;
-/** A query log with no row this recent is likely off (OB1_QUERY_LOG unset), and a search does not wake the brain. */
-const QUERY_LOG_QUIET_S = 86_400;
 /** The longest a sleep runs, its clock (the header's Budget): then the passes stop after the thought in hand, and the next sleep waits for a wake. 0 is none. */
 const DEFAULT_BUDGET_MIN = 60;
 /** A pass's statement_timeout: a statement past it is cancelled (57014), and the sleep stops on its budget. 0 is none. */
@@ -541,38 +538,21 @@ async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Prom
 }
 
 /**
- * The newest live event after `after` — a timestamp, or a number of seconds
- * before now() — and the database's now(). A read is a query_log row (when
- * `readsLog`); a write is a thought_audit row whose actor_kind is not
- * 'ingested' (NULL counts as live) and that no server's background work wrote
- * (actor_context.background — the vector mender's, SMD-2889), as these
- * passes' own writes are not live. Bounded below, so a brain whose newest
- * audit rows are all sync writes is not read back to its last live one.
+ * The newest live write after `after` — a timestamp, or a number of seconds
+ * before now() — and the database's now(). A live write is a thought_audit
+ * row whose actor_kind is not 'ingested' (NULL counts as live) and that no
+ * server's background work wrote (actor_context.background — the vector
+ * mender's, SMD-2889), as these passes' own writes are not live; a search is
+ * none (SMD-3315). Bounded below, so a brain whose newest audit rows are all
+ * sync writes is not read back to its last live one.
  */
-async function newestLive(sql: SQL, after: Date | number, readsLog: boolean): Promise<{ now: Date; read: Date | null; write: Date | null }> {
+async function newestLive(sql: SQL, after: Date | number): Promise<{ now: Date; write: Date | null }> {
   const since = typeof after === "number" ? sql`now() - make_interval(secs => ${after})` : sql`${after}::timestamptz`;
-  const read = readsLog ? sql`(SELECT max(logged_at) FROM query_log WHERE logged_at > ${since})` : sql`NULL::timestamptz`;
   const [r] = await sql`
-    SELECT now() AS now, ${read} AS read,
+    SELECT now() AS now,
            (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested'
               AND (actor_context->>'background') IS NULL) AS write`;
-  return { now: new Date(r.now), read: r.read ? new Date(r.read) : null, write: r.write ? new Date(r.write) : null };
-}
-
-const newer = (a: Date | null, b: Date | null): Date | null => (a && b ? (a > b ? a : b) : a ?? b);
-
-/** Whether this role can read query_log: its owner can, and a role granted the `sleep` group (db/config.mjs). */
-async function readsQueryLog(sql: SQL): Promise<"yes" | "denied" | "missing"> {
-  try {
-    await sql`SELECT 1 FROM query_log LIMIT 0`;
-    return "yes";
-  } catch (e) {
-    const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
-    if (code === "42501") return "denied";
-    // A brain before migration 034 has no log to read.
-    if (code === "42P01") return "missing";
-    throw e;
-  }
+  return { now: new Date(r.now), write: r.write ? new Date(r.write) : null };
 }
 
 /**
@@ -768,25 +748,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The CLI passes no signal (its handlers come after these reads): a wait then ends only with the database. */
   const startWake = opts.signal ?? new AbortController().signal;
   const atStart = <T>(read: () => Promise<T>) => throughOutage(read, { wake: startWake, said: startSaid, out, err });
-  const logState = await atStart(() => readsQueryLog(sql));
-  if (logState === null) { err(STOPPED_EARLY); return 130; }
   /** The database's clock as this run began: a claim older than it is no pass of this run's (poolOf's `mineSince`). */
   const startedAt = await atStart(async () => new Date((await sql`SELECT now() AS now`)[0].now));
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
-  const readsLog = logState === "yes";
-  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background)${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
+  out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background); a search does not wake it`);
   out(`  budget: ${budgetWords({ minutes: n.budget, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${BUDGET_MS ? ` — then the passes stop after the thought in hand${opts.follow === true ? ", and the next sleep waits for a live call" : ""}` : ""}`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
-  if (logState === "denied") err("  query_log: this role cannot read it — only writes wake the brain; grant it the sleep group (bun db/migrate.ts --grant <role> --groups sleep) or run as the owner for reads to wake it");
-  else if (logState === "missing") err("  query_log: no such table (migration 034 not applied) — only writes wake the brain");
-  else {
-    // The log is written only under the server's OB1_QUERY_LOG=on, off by
-    // default, and nothing in the database says which: a log with no recent
-    // row is said once, since a search then never wakes the brain.
-    const recent = await atStart(async () => (await sql`SELECT EXISTS (SELECT 1 FROM query_log WHERE logged_at > now() - make_interval(secs => ${QUERY_LOG_QUIET_S})) AS recent`)[0].recent === true);
-    if (recent === null) { err(STOPPED_EARLY); return 130; }
-    if (!recent) err("  query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off on the server (its default), and then a search is not logged and does not wake the brain; only writes do");
-  }
   const outside = await atStart(() => followersOutside(sql));
   if (outside === null) { err(STOPPED_EARLY); return 130; }
   // Followers outside the scheduler do not yield to a live call, so a sleep
@@ -820,7 +787,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const endAtStart = async (refused?: StartRefusal): Promise<void> => {
     if (!FOLLOW) return;
     const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
-    once.watching?.(logState);
     const last = await lastSlept(sql).catch(() => null);
     if (last) once.slept?.(last);
     // The start refusal that ended it, when a pass's start was the cause:
@@ -869,13 +835,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     const [{ now }] = await sql`SELECT now() AS now`;
     const at = new Date(now);
     const [last] = await sql`
-      SELECT ${readsLog ? sql`(SELECT max(logged_at) FROM query_log)` : sql`NULL::timestamptz`} AS read,
-             (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' AND (actor_context->>'background') IS NULL ORDER BY created_at DESC LIMIT 1) AS write`;
-    const read = last.read ? new Date(last.read) : null;
+      SELECT (SELECT created_at FROM thought_audit WHERE actor_kind IS DISTINCT FROM 'ingested' AND (actor_context->>'background') IS NULL ORDER BY created_at DESC LIMIT 1) AS write`;
     const write = last.write ? new Date(last.write) : null;
-    const newest = newer(read, write);
-    const left = newest ? QUIET - (at.getTime() - newest.getTime()) / 1000 : 0;
-    out(`  last read: ${readsLog ? ago(at, read) : "not readable"}; last write: ${ago(at, write)}`);
+    const left = write ? QUIET - (at.getTime() - write.getTime()) / 1000 : 0;
+    out(`  last write: ${ago(at, write)}`);
     out(left <= 0 ? "  a sleep would begin now" : `  awake: a sleep would begin in ${Math.ceil(left)} s with no live call`);
     for (const pass of PASSES) {
       const p = await poolOf(sql, pass, JOBS[pass], SIG);
@@ -952,9 +915,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const stamper: PassStamper = FOLLOW
     ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
-  // What wakes it, on its own row: preflight's `sleep` row reads this, not its
-  // own role's privileges (SMD-2678, review pass 1).
-  stamper.watching?.(logState);
   /** The sleeps stopped on the budget since this process began, on the row with the budget in force (SMD-2679). */
   let budgetStops = 0;
   const sayBudget = (): void => stamper.budget?.({ minutes: n.budget, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: budgetStops });
@@ -1294,9 +1254,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let stampedAt = 0;
     while (!stopping) {
       if (await outsideNow()) return null;
-      const r = await reading(() => newestLive(sql, QUIET, readsLog));
+      const r = await reading(() => newestLive(sql, QUIET));
       if (r === null) return null;
-      const newest = newer(r.read, r.write);
+      const newest = r.write;
       if (newest === null) return r.now;
       if (Date.now() - stampedAt >= everyMs) {
         // On heldAt, not this wait's stamp: a wake's own read is a moment old (review pass 2).
@@ -1395,10 +1355,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         ended = await Promise.race([run, sleepUnless(POLL * 1000, onStop.signal).then(() => null)]);
         if (ended !== null) break;
         // Null only when a stop ended an outage's wait.
-        const live = stopping ? null : await reading(() => newestLive(sql, from, readsLog));
+        const live = stopping ? null : await reading(() => newestLive(sql, from));
         if (live !== null) sleptUntil = live.now;
-        const woken = live === null ? null : newer(live.read, live.write);
-        if (live !== null && woken !== null) wokeBy = `${live.read && woken === live.read ? "read" : "write"} at ${woken.toISOString()}`;
+        const woken = live === null ? null : live.write;
+        if (woken !== null) wokeBy = `write at ${woken.toISOString()}`;
         why = stopping || live === null ? "stopping" : woken !== null ? "woke" : BUDGET_MS > 0 && Date.now() - began >= BUDGET_MS ? "spent" : null;
         if (why === null) continue;
         halt.abort();
@@ -1589,7 +1549,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     }
     for (;;) {
       if (stopping) return stopped();
-      const live = await reading(() => newestLive(sql, from, readsLog));
+      const live = await reading(() => newestLive(sql, from));
       if (live === null) return stopped();
       sleptUntil = live.now;
       // A thought held back finished in this sleep is not named until the next wake otherwise.
@@ -1629,9 +1589,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
         return { pass: ended.name, code, started: ended.stop !== null, refused: ended.start && !ended.start.ok ? ended.start.refused : undefined };
       }
-      const woke = newer(live.read, live.write);
+      const woke = live.write;
       if (woke !== null) {
-        out(`  awake: a live ${live.read && woke === live.read ? "read" : "write"} at ${woke.toISOString()} — the passes stop now, their leases returned`);
+        out(`  awake: a live write at ${woke.toISOString()} — the passes stop now, their leases returned`);
         // The tail move is a courtesy to the next sleep: a read that fails
         // (a statement timeout) leaves the claims where they are, and the
         // wake goes on.
@@ -1819,9 +1779,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let stampedAt = Date.now();
     while (!stopping) {
       if (await outsideNow()) return false;
-      const r = await reading(() => newestLive(sql, after, readsLog));
+      const r = await reading(() => newestLive(sql, after));
       if (r === null) return false;
-      if (newer(r.read, r.write) !== null) return true;
+      if (r.write !== null) return true;
       if (Date.now() - stampedAt >= everyMs) {
         if (Date.now() - heldAt >= everyMs) await sayHeld();
         await stamper.alive();

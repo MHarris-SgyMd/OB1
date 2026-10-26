@@ -1292,11 +1292,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `a sleep mark is carried only when of the shape, and its row counts either way (${JSON.stringify(marked.heartbeats.map((h) => h.slept ?? null))})`);
   const otherMark = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify({ ...good, slept: { from: at, to: null } }), at, age_s: 1 }]);
   assert(otherMark.heartbeats.length === 1 && otherMark.heartbeats[0].slept === undefined, "…and another worker's row carries none");
-  // Its word on reading the query log (review pass 1): one of three, else left off; never another worker's.
-  const readsOf = (key: string, reads: unknown) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, reads }), at, age_s: 1 }]).heartbeats[0]?.reads;
-  assert(readsOf("heartbeat:sleep", "yes") === "yes" && readsOf("heartbeat:sleep", "denied") === "denied" && readsOf("heartbeat:sleep", "missing") === "missing"
-      && readsOf("heartbeat:sleep", "maybe") === undefined && readsOf("heartbeat:sleep", true) === undefined && readsOf("heartbeat:board-sync", "yes") === undefined,
-    "the scheduler's reads word is carried when one of three, and never off another worker's row");
+  // A scheduler before 2.0.0 said whether its role read the query log (`reads`):
+  // a search wakes none since (SMD-3315), so its row still counts and the word is left off.
+  const older = parseHeartbeats(["yes", "denied", "missing"].map((reads) => ({ key: "heartbeat:sleep", value: JSON.stringify({ ...good, reads }), at, age_s: 1 })));
+  assert(older.heartbeats.length === 3 && older.ignored === 0 && older.heartbeats.every((h) => !("reads" in h)),
+    `an older scheduler's reads word is left off its row, which still counts (${JSON.stringify(older.heartbeats)})`);
   // Its waiting passes and its refusal (SMD-2752): carried when of the shape, else left off; never another worker's.
   const markOf = (key: string, extra: Record<string, unknown>) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, ...extra }), at, age_s: 1 }]).heartbeats[0];
   const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
