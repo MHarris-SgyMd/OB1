@@ -26,6 +26,8 @@ const back = (why: string): never => {
 export const GET: RequestHandler = async ({ cookies, url, request, locals }) => {
 	const s = oauthSettings(env);
 	if (!s) back('not_configured');
+	// Never on the break-glass port, as the start never is: the AS answers at the origin alone, and a session opened here would be the origin's under the port's cookie (review pass 2).
+	if (locals.breakglass) back('stale');
 	const state = url.searchParams.get('state');
 	const held = signInFrom(cookies.get(SIGNIN_COOKIE));
 	// The cookie goes only with its own answer: a stray or stale callback leaves a sign-in in flight alone (review pass 1).

@@ -19,12 +19,16 @@ export const LISTENER_HEADER = 'x-ob1-listener';
 /** Whether the proxy says this request came in by the break-glass port. */
 export const onBreakGlass = (request: Request) => request.headers.get(LISTENER_HEADER) === 'breakglass';
 
-/** The break-glass port on the host (compose's BREAKGLASS_PORT, 8001 unless set), or null for a value that is no port. */
+/**
+ * The break-glass port on the host (compose's BREAKGLASS_PORT, 8001 unless set), read as compose reads a published
+ * port — `08317` is 8317 (review pass 2: refused here, it offered the key and took no post) — or null for a value
+ * compose would not publish either.
+ */
 export function breakGlassPort(value: string | undefined): number | null {
 	const v = value?.trim() || '8001';
-	if (!/^[1-9]\d{0,4}$/.test(v)) return null;
+	if (!/^\d{1,5}$/.test(v)) return null;
 	const n = Number(v);
-	return n <= 65535 ? n : null;
+	return n >= 1 && n <= 65535 ? n : null;
 }
 
 /** The methods a browser's form or script can send that change something: each is checked for its origin. */
@@ -43,6 +47,24 @@ export function originAllowed(request: Request, url: URL, port: number | null): 
 	if (origin === null) return false;
 	if (onBreakGlass(request)) return port !== null && origin === `http://127.0.0.1:${port}`;
 	return origin === url.origin;
+}
+
+/**
+ * The origin check's refusal, on the break-glass port naming the one address it takes a form from, since
+ * `localhost` is the likeliest wrong one (review pass 2). To a form under `use:enhance` (SvelteKit's action post,
+ * `x-sveltekit-action`), the failure SvelteKit's own `fail(403, { error })` makes — HTTP 200, the result's status
+ * 403, its data devalue's encoding of `{ error }` — so the sign-in page says it under the key field, where a text
+ * answer was a parse error and a bare JSON one nothing at all; to another that asks for JSON, `{ message }`, as
+ * SvelteKit's origin check answered; text otherwise.
+ */
+export function originRefusal(request: Request, port: number | null): Response {
+	const message = !onBreakGlass(request)
+		? 'This request must come from the dashboard itself.'
+		: port === null
+			? "This break-glass port cannot take a sign-in: the dashboard's BREAKGLASS_PORT is not a port. Set it in deploy/.env and recreate app and breakglass."
+			: `The break-glass port takes a sign-in from http://127.0.0.1:${port}/dashboard/ alone (not localhost): open the dashboard at that address.`;
+	if (request.headers.get('x-sveltekit-action') === 'true') return Response.json({ type: 'failure', status: 403, data: JSON.stringify([{ error: 1 }, message]) });
+	return request.headers.get('accept') === 'application/json' ? Response.json({ message }, { status: 403 }) : new Response(message, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 }
 
 /**

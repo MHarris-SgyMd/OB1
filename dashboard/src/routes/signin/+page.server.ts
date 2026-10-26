@@ -57,7 +57,7 @@ export const actions: Actions = {
 		if (!who.operations.includes(FIRST_READ)) {
 			return fail(403, { error: 'This key cannot read: the dashboard needs a read- or write-scoped key. A capture-only key may add thoughts and nothing else.' });
 		}
-		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach. This listener's own (locals.session): on a shared host the cookie may name the other's.
+		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach. This listener's own (locals.session, under its own cookie name).
 		closeSession(locals.session?.id);
 		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought'), breakglass: locals.breakglass });
 		cookies.set(locals.sessionCookie, id, { ...cookieOptions(url, locals.breakglass), maxAge: SESSION_MAX_AGE });

@@ -1,7 +1,7 @@
 import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { env } from '$env/dynamic/private';
-import { breakGlassPort, onBreakGlass, originAllowed, sessionCookieName } from '$lib/server/listener';
+import { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } from '$lib/server/listener';
 import { revocations } from '$lib/server/rest';
 import { closeSession, cookieOptions, onTokensEnded, readSession } from '$lib/server/session';
 
@@ -27,7 +27,7 @@ const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/call
 // or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
 	const port = breakGlassPort(env.BREAKGLASS_PORT);
-	if (!originAllowed(event.request, event.url, port)) return new Response('This request must come from the dashboard itself.', { status: 403 });
+	if (!originAllowed(event.request, event.url, port)) return guarded(originRefusal(event.request, port));
 	const breakglass = onBreakGlass(event.request);
 	event.locals.breakglass = breakglass;
 	event.locals.sessionCookie = sessionCookieName(breakglass, port);
@@ -40,7 +40,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.cookies.delete(event.locals.sessionCookie, cookieOptions(event.url, breakglass));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);
-	const response = await resolve(event);
+	return guarded(await resolve(event));
+};
+
+/** Every answer's headers, the origin check's refusal's too (review pass 2). */
+function guarded(response: Response): Response {
 	// Nothing a page shows is the browser's to keep: a thought, the brain's facts.
 	response.headers.set('cache-control', 'no-store');
 	// No page's URL leaves the origin. Not `no-referrer`: under it a browser
@@ -51,4 +55,4 @@ export const handle: Handle = async ({ event, resolve }) => {
 	response.headers.set('x-content-type-options', 'nosniff');
 	response.headers.set('x-frame-options', 'DENY');
 	return response;
-};
+}

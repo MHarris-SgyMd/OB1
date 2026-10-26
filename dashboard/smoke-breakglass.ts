@@ -4,11 +4,12 @@
  * ADR decision 15), on a stack configured with the authorization server whose
  * authorization server is down, driven as a browser would: the origin through
  * the forwarder's port, and the break-glass port the `breakglass` service
- * publishes on 127.0.0.1. CI's deploy-stack-auth job runs it after it has
- * removed the authorization server:
+ * publishes on 127.0.0.1. CI's deploy-stack-auth job runs it on BREAKGLASS_PORT
+ * 8002, first with --as-up while the authorization server answers (below),
+ * then, the server removed, in full:
  *
  *   OB1_SMOKE_KEY=… bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard \
- *     --breakglass http://127.0.0.1:8001/dashboard --origin https://brain.example.test
+ *     --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test
  *
  * The key, a read or write key, is read from the environment, never the
  * command line. It asserts:
@@ -120,6 +121,10 @@ const crossPosts = await Promise.all([
   req(`${BG}/signout`, { method: "POST", headers: { origin: "http://127.0.0.1:3000", cookie: `${BG_COOKIE}=${sid}` } }),
 ]);
 assert(crossPosts.every((r) => r.status === 403 && !sessionOf(r.setCookie)), `on the break-glass port, a post from another loopback port, localhost, the configured origin or no origin is refused, a sign-out too (${crossPosts.map((r) => r.status).join(", ")})`);
+// A form under use:enhance gets SvelteKit's own failure shape, its error naming the one address that works, which the page shows (review pass 2).
+const enhanced = await fetch(`${BG}/signin`, { method: "POST", redirect: "manual", headers: { origin: `http://localhost:${BG_PORT}`, accept: "application/json", "x-sveltekit-action": "true", "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ key: KEY }).toString() });
+const said = (await enhanced.json().catch(() => null)) as { type?: unknown; status?: unknown; data?: unknown } | null;
+assert(enhanced.status === 200 && said?.type === "failure" && said.status === 403 && typeof said.data === "string" && said.data.includes(`http://127.0.0.1:${BG_PORT}/dashboard/`) && enhanced.headers.get("x-frame-options") === "DENY", `…and to the sign-in form's own post (use:enhance) from localhost, SvelteKit's failure, its error naming http://127.0.0.1:${BG_PORT}/dashboard/ for the page to show, with the pages' headers (${enhanced.status}, ${String(said?.type)} ${String(said?.status)})`);
 const start = await req(`${BG}/auth/start`, { method: "POST", headers: { origin: BG_ORIGIN } });
 assert(start.status === 303 && start.location === "/dashboard/signin", `no sign-in through the authorization server starts there (${start.status} → ${start.location})`);
 const others = await Promise.all(["/mcp", "/auth/authorize", "/health", "/", "/api/v1/whoami"].map(async (p) => [p, await fetch(`${BG_ORIGIN}${p}`, { redirect: "manual" })] as const));
