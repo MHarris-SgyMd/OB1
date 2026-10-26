@@ -3984,7 +3984,7 @@ once for a model gone missing or a call no probe answers): "asleep,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a wake. A follower's own row
-(`heartbeat:extract:…`, `heartbeat:consolidate:…`) carries the word with its
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
 own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins.
@@ -5446,11 +5446,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3048 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1677 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1703 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 291 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 317 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5606,7 +5606,7 @@ classifies a provider error into thought / transient / fatal for both workers
 (extract adds the `max_tokens`→fatal rule as an option), and `consolidate.ts`,
 `reembed.ts` and `ingest-records.ts` build their audit actors through
 `actorPayload` rather than by hand. **Outages** (SMD-2599): a `--follow`
-worker of either kind waits a database outage out — `databaseUnavailable`
+worker of either kind, and `reembed.ts`'s follower (SMD-2679), waits a database outage out — `databaseUnavailable`
 names the errors that mean the database is not answering (a connection
 refused, closed or timed out; SQLSTATE class 08, 57P01–57P03, 53300), and
 `waitOut` checks again after 5 s, doubling to 5 min, until it answers or a stop
@@ -5621,19 +5621,28 @@ refused for as long as the brain is at `max_connections`, so that one is still
 warned about. The sleep scheduler's own reads go through `throughOutage` too. It waits a provider outage
 out the same way.
 - **Outages:** a transient error past the pauses, the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
-- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not.
-- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering. With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text.
+- **The thought's own fault:** `ProviderOutage` records failed a thought that fails again within 15 minutes of a probe answering; re-embed's follower never on a 429, a 503 or the model not served, and its probe tells a thought's 400 (answered) from the request's (refused too). With several workers, which co-held thought is blamed for a provider crash is a race, and a provider that crashes again within the window can fail re-claimed thoughts. SMD-2641 retries suspects one at a time.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
+- **Re-embed's follower** reads each thought's error by `followClassify`: the thought's only when it names the thought (its length, the egress gate, its data) or the provider answers the probe's text right after; else the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one). It has no pauses: one 5xx, 408, 429 or timeout is an outage, one coming back within a minute and a poll interval of the probe answering, nothing re-embedded since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.
 
 A run without `--follow` keeps every exit and failure it had. The module returns its outcome rather than
 exiting, so an engine's `run()` returns it as a code — `extract-entities.ts`'s,
 `consolidate.ts`'s and `reembed.ts`'s (SMD-2304).
 `test-worker-bootstrap.ts` holds the egress wording, the drop-the-gate mutant,
-the `classifyError` rules, the identity cases that refuse before connecting and
-the outage rules and schedule, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
-[10] and [16] each follower outlasting a database cut through a relay and a
+the `classifyError` rules and every `followClassify` cell, the identity cases
+that refuse before connecting and the outage rules and schedule, the schedule
+carried across outages included, and the probe against a stub; `test-live.ts` [24b] the capped resolve, and
+[10], [16] and [9f] each follower outlasting a database cut through a relay and a
 provider outage (a 503, and in [10] the model missing, a hung provider, a
-thought that fails every time, and the refusal at start); and `test-cli.ts`'s census checks that
+thought that fails every time, and the refusal at start; in [9f] a 503 at the
+start and mid-pass, the check during one, the model missing mid-pass, a
+thought that fails every time, a 429 under three workers and one the probe
+passes, a key revoked mid-wait, a deadlock and a statement timeout at the
+write, a 401, a length 400 and a content filter's 400 mid-pass, a probe the egress gate refuses, a poll
+past statement_timeout, a deadlock at a pool, and the cut at the start's
+reads, at its first pool, under a thought in hand, mid-follow and under a
+stop); and `test-cli.ts`'s census checks that
 no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 
