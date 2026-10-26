@@ -2059,7 +2059,8 @@ later migration adds is re-planned to the same result type;
 compat/supabase-sql's `rpc()` still reads `*`. DDL alone; no row moves; no
 grant is carried. Refuses by name without 016, 025 or 029; a re-apply is a
 no-op. test-schema [98] (230 rows walked in pages of 200 and of 7, ties across
-page edges, a stale row re-judged under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade
+page edges, a stale row re-judged under the cursor, the partial cursor, 109
+re-applied beside it), test-upgrade
 [20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,
 the store, e2e and REST suites.
 
