@@ -4956,12 +4956,14 @@ if (want("10")) {
     const b = JSON.parse(value ?? "{}") as { ended?: boolean; running?: boolean; outcome?: string | null };
     return b.ended !== true && b.running === false && typeof b.outcome === "string";
   };
+  /** This key's own heartbeat row: once the probe cases below run, another model's row stands beside it. */
+  const ownBeat = async (): Promise<string | undefined> => (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value;
   assert((await beatsOf("extract")).length === 0, "no one-shot extraction run left a heartbeat row");
   // --follow: a capture made while the worker is polling is extracted without a
   // new run, and the first signal ends the process with exit 0.
   const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
   // Polling once its first pass has stamped its row (SMD-3196: a 1.5 s sleep stood in for it).
-  await pollUntil(async () => polling((await beatsOf("extract"))[0]?.value), 15_000);
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const sam = await seed("Sam adopted grafana for the on-call dashboards.");
   let extracted = false;
   for (let i = 0; i < 40 && !extracted; i++) {
@@ -5001,7 +5003,7 @@ if (want("10")) {
       // Polling once its first pass has stamped the row the follower before it
       // ended, and the cut met once it says so, where 1.5 s and 2.5 s sleeps
       // stood in for both (SMD-3196).
-      await pollUntil(async () => polling((await beatsOf("extract"))[0]?.value), 15_000);
+      await pollUntil(async () => polling(await ownBeat()), 15_000);
       await relay.cut();
       idle = await seed("Quinn moved the alert rules to grafana while the database was away.");
       await pollUntil(async () => /the database is not answering/.test(cutSaid()), 15_000);
@@ -5720,8 +5722,9 @@ if (want("10")) {
     // never stamps it so fails the assertion below after 15 s.
     let asleep: { outcome?: string | null; running?: boolean; ended?: boolean } = {};
     await pollUntil(async () => {
-      asleep = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
-      return asleep.ended !== true && asleep.running === false && asleep.outcome === "ok";
+      const value = await ownBeat();
+      asleep = JSON.parse(value ?? "{}");
+      return polling(value) && asleep.outcome === "ok";
     }, 15_000);
     await Bun.sleep(300);
     const at = Date.now();
@@ -5933,7 +5936,7 @@ if (want("10")) {
   // together, not dropped one poll at a time.
   const alarmFollower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
   // Polling once its first pass has stamped the row the run before it ended (SMD-3196: a 1.5 s sleep stood in for it).
-  await pollUntil(async () => polling((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value), 15_000);
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const failedNow = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0].c);
   for (const half of [0, 24]) {
     for (let i = half; i < half + 24; i++) await seed(`A followed reference-list page, number ${i}.`);
@@ -5941,7 +5944,7 @@ if (want("10")) {
     await Bun.sleep(1500);
   }
   // The poll after the second half stamps the tripped block (SMD-3196: a 2.5 s sleep stood in for it).
-  await pollUntil(async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}").malformed?.alarm === true, 15_000);
+  await pollUntil(async () => JSON.parse((await ownBeat()) ?? "{}").malformed?.alarm === true, 15_000);
   // Every row failed, but on documents the model cannot read, not a down
   // provider: the passes are ok, and the alarm rides the poll's stamp, which
   // is what preflight warns on (review pass 2: rows failed against rows done
@@ -14495,8 +14498,9 @@ if (want("38")) {
     // the transaction (the follower before stopping): the sleep then begins at
     // once, and the lead is 0 or less.
     lines.length = 0;
+    const lateQuiet = 5;
     const ac2 = new AbortController();
-    const late = sleepRun({ follow: true, quiet: 5, signal: ac2.signal });
+    const late = sleepRun({ follow: true, quiet: lateQuiet, signal: ac2.signal });
     const tx = await sql.reserve();
     let txBegan = "";
     let sleptFrom: string | undefined;
@@ -14519,7 +14523,7 @@ if (want("38")) {
     ac2.abort();
     await late;
     const lead = sleptFrom === undefined ? NaN : (Date.parse(sleptFrom) - Date.parse(txBegan)) / 1000;
-    assert(lateWoke && lead > 0 && lead < 5, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its 5 s quiet${sleptFrom === undefined ? "; no open sleep mark within 5 s" : ""}; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    assert(lateWoke && lead > 0 && lead < lateQuiet, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its ${lateQuiet} s quiet${sleptFrom === undefined ? "; no open sleep mark within 5 s" : ""}; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
     // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
     // A lineage row whose windows a raw delete took is swept before
