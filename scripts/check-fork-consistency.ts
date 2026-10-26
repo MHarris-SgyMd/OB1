@@ -65,8 +65,10 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the forwarder (SMD-2583), and n8n under its opt-in profile
- *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
+ *      compose.yaml publishes the forwarder (SMD-2583), the break-glass
+ *      listener under the auth profile on a literal 127.0.0.1 and no knob, the
+ *      one named exception (LOOPBACK_LITERAL, SMD-3307), and n8n under its
+ *      opt-in profile (SMD-2210); the database, Ollama and the typed-decision tier (jev)
  *      publish through compose.host-ports.yaml, a second -f, and the
  *      observability profile's Grafana through compose.grafana-port.yaml
  *      (SMD-1849); and
@@ -77,7 +79,7 @@
  *      read the stack's project through a stub carrying compose.yaml's own
  *      `name:` on one code line that reads an env file, and name it nowhere
  *      else in code but a short list (SMD-2873).
- *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
+ *      The files are parsed with Bun.YAML (SMD-1844); no other exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
  *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
@@ -2306,7 +2308,8 @@ function checkSupabaseIsms() {
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
 // publishes the server (since SMD-1846 the proxy in front of it, on the same
-// knobs), plus n8n under the opt-in `orchestration` profile
+// knobs), the break-glass listener under the `auth` profile on a literal
+// 127.0.0.1 (SMD-3307), plus n8n under the opt-in `orchestration` profile
 // since SMD-2210; the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
@@ -7042,8 +7045,8 @@ const MCP_SERVICE = {
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
- * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin and the configured
- * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so dropping or
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin, the break-glass port and the configured
+ * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off but on the break-glass port, ADR decision 16, so dropping or
  * pinning it would reopen that door), and the authorization server's secret for its `gui` client, the one secret it
  * holds, which signs the operator in through the AS while the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its
  * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:

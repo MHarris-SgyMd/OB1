@@ -1321,7 +1321,7 @@ services:
   # at it: every one dials the origin's port. Under the auth profile alone, so
   # a stack that is not configured, which offers key sign-in on the origin,
   # publishes no second port, and two stacks on one machine clash on it only
-  # when both are configured (BREAKGLASS_PORT, 8001 unless set).
+  # when both run that profile (BREAKGLASS_PORT, 8001 unless set).
   breakglass:
     image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373
     profiles: ["auth"]

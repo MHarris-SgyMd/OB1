@@ -5,7 +5,7 @@ An architecture decision record. **The direction was decided 2026-10-09 by the m
 The decision table marks which rows are that direction, which follow from it, which are proposals a child ticket settles, and which are built. SMD-2873 to SMD-2875 carry the direction out. The open questions are worked in SMD-2876 to SMD-2878 and recorded here as each is answered. An answer that amends a row (listed under the table) goes back to the maintainer.
 
 Each Open Brain is a self-contained stack:
-- with default profiles, a forwarder (SMD-2583) holds the stack's one published port, in front of the stack's own proxy. The `orchestration` profile adds n8n's port, and the host-ports overlay adds more, all bound to loopback by default;
+- with default profiles, a forwarder (SMD-2583) holds the stack's one published port, in front of the stack's own proxy. The `auth` profile adds the break-glass port (SMD-3307), the `orchestration` profile n8n's, and the host-ports overlay more, all bound to loopback by default;
 - its networks, Postgres and volumes are its own, and so (row 10, proposed) are its access keys. Its networks include its `mesh`, the internal network on which its proxy reaches its servers;
 - no Docker network is shared with any other brain.
 

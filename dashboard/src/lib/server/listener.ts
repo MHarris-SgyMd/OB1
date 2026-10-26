@@ -10,8 +10,8 @@
 // a browser at http://127.0.0.1:<port> never sends, so the GUI checks it here instead (hooks.server.ts) — on the
 // origin, the origin alone; on the break-glass listener, that port's own http://127.0.0.1 origin alone (review
 // pass 1: a page on the public origin posted a key there, and `localhost` could be another process on ::1, the
-// port being published on 127.0.0.1 alone). Each listener's session rides a cookie of its own name. Pure but
-// for the env.
+// port being published on 127.0.0.1 alone). Each listener's session rides a cookie of its own name. Pure: the
+// caller reads BREAKGLASS_PORT and passes it.
 
 /** The header the proxy's break-glass router sets, and its `web` entrypoint deletes. */
 export const LISTENER_HEADER = 'x-ob1-listener';
@@ -60,7 +60,7 @@ export function originAllowed(request: Request, url: URL, port: number | null): 
  */
 export function originRefusal(request: Request, url: URL, port: number | null): Response {
 	const message = !onBreakGlass(request)
-		? `This request must come from the dashboard at ${url.origin}/dashboard/: open it at that address (behind TLS, OB1_PUBLIC_ORIGIN names it).`
+		? `This request must come from the dashboard at ${url.origin}/dashboard/: open it at that address, or behind TLS set OB1_PUBLIC_ORIGIN to the address you use and recreate app.`
 		: port === null
 			? "This break-glass port cannot take a sign-in: the dashboard's BREAKGLASS_PORT is not a port. Set it in deploy/.env and recreate app and breakglass."
 			: `The break-glass port takes a sign-in from http://127.0.0.1:${port}/dashboard/ alone (not localhost): open the dashboard at that address.`;

@@ -1924,7 +1924,7 @@ jobs:
       # its public origin offers no key sign-in, whether or not the
       # authorization server answers — no key field, and a post of the write
       # key from the origin it is configured for refused with no cookie, by
-      # the GUI's own words (not SvelteKit's cross-site refusal). With the
+      # the GUI's own words (SvelteKit's own origin check is off). With the
       # authorization server not running, its page says sign-in is unavailable
       # (SMD-3307: the GUI holds the `gui` client's secret from .env, so this
       # is the AS's absence, not the GUI's settings).
