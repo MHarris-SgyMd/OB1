@@ -4321,6 +4321,62 @@ all three, with an unanswered pair counted as wrong:
   invoked it. The link step now has its own guard, which answers F, so a steered pair is capped; decide version 4 asks
   with it.
 
+**Round 3 (SMD-3299): the link step asked another way.** On the canary, version 4's cap missed PR 3's precision bar
+(0.686 against 0.7; `docs/subject-anchored-claims.md`). Round 3 asks the same test's link step, its text unchanged, and
+scores the cap alone: an H or F link caps a pair, as does an answer read as none.
+* `control` is version 4's own question, asked again.
+* `walk` is one call whose answer walks the test in order: each thought's own subject and deliverable, the names both
+  share and whose each is, then D, H and F as yes or no. The link is the first yes (`walkLink`).
+* `names` is the walk with up to ten names both texts contain (`sharedNames`), each where it first appears in each.
+
+```bash
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen3.8:27b bun eval-mediated-pairs.ts --pairs … --ask walk --out …/walk-set1.jsonl
+bun eval-mediated-pairs.ts --pairs …/set1.jsonl --key …/key.json --labels …/r1 --labels …/r2 --set 1 --links control=… --links walk=…
+bun eval-mediated-pairs.ts --pairs …/set2.jsonl --labels …/r1 --labels …/r2 --set 2 --strata …/pr3-key.json --links control=… --links walk=…
+```
+
+Set 1 is item 3's 79 agreed pairs; set 2 is PR 3's 77, with precision and miss weighted to the canary's population by
+`--strata`, the draw's key. The bars, fixed on SMD-3203 before any pair was asked (comment be3a4672):
+* on set 1, κ ≥ 0.6 and at least the control's, precision ≥ 0.7 and miss ≤ 0.3;
+* on set 2, precision ≥ 0.7 and miss ≤ 0.3.
+
+| Ask | Set 1: κ | precision | miss | Set 2: precision | miss | Median per pair (sets 1, 2) | The bar |
+|---|---|---|---|---|---|---|---|
+| control | 0.666 | 0.826 | 0.152 | 0.686 | 0.297 | 11.6 s, 11.4 s | the floor |
+| walk | 0.523 | 0.712 | 0.050 | 0.720 | 0.000 | 18.7 s, 17.6 s | misses set 1 |
+| names | 0.582 | 0.755 | 0.115 | 0.697 | 0.063 | 18.0 s, 18.4 s | misses both |
+
+* **Neither qualifies.** Both trade wrong caps for misses: they find third subjects version 4 called N, but call D less
+  often. The walk's answers often name the shared file as one thought's deliverable and still call it a third subject.
+* **The link step is deterministic:** asked again, the control gives the canary's recorded link on all 77 of set 2's pairs.
+* **Next, round 4:** the link step as narrower questions (the maintainer, SMD-3299).
+
+**Round 4: the link step as narrower questions.** `narrow` asks three things:
+1. each thought alone, its own subject and deliverables, once per thought (`ownMessages`, cached beside `--out`);
+2. a plain match finds whether either thought names the other's (`hitsOf`);
+3. one question: on a hit, D or H (`dhMessages`); with none, F or N (`fnMessages`).
+
+Each question quotes only the test's own lines for its choice (`testSpan`, `testLine`). Pre-registered as comment
+b3eed1b6, on round 3's sets and bars. It misses both sets: on set 1 κ 0.478, precision 0.717, miss 0.192; on set 2
+precision 0.662, miss 0.259. The hit finds the link (39 of set 2's 42 direct pairs), but the D-or-H question answers "only
+names it" on 16 of those 39.
+
+**Round 5: the test's version 3.** The maintainer said where D ends for the other thought's deliverable. `testV3` builds
+version 3 from version 2 with three edits (`V3_EDITS`, `V3_RULE`), each held to the ADR's words. The pass keeps asking
+version 2. Two fresh blind raters per set re-labelled both sets under version 3: κ 0.949 and 0.826. `link3` asks version
+4's question around version 3's text; `narrow3` asks the narrow questions over version 3's lines. Pre-registered as comment
+2fb7b75e, against the version-3 gold:
+
+| Ask | Set 1: κ | precision | miss | Set 2: precision | miss | Median per pair (sets 1, 2) | The bar |
+|---|---|---|---|---|---|---|---|
+| control | 0.739 | 0.886 | 0.147 | 0.710 | 0.314 | 11.4 s, 11.3 s | the floor |
+| link3 | 0.768 | 0.927 | 0.162 | 0.733 | 0.329 | 15.3 s, 13.6 s | misses set 2's miss |
+| narrow3 | 0.415 | 0.720 | 0.286 | 0.674 | 0.337 | 22.2 s, 23.2 s | misses both |
+
+* **No candidate qualifies, so version 4 stays** (the maintainer, 2026-10-25). Evolves moves to work threads built from
+  each thought's own subject (SMD-3306). Asked of one thought alone, the 27B names the ticket blind raters agree on for
+  98.8% of the thoughts whose own subject is a ticket (post hoc).
+
 The pairs, the answers and the labels hold the brain's text, so they stay out of the repo.
 
 ## The query-log replay loop — measuring against real use (SMD-1295)

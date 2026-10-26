@@ -18,7 +18,7 @@
  */
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
-import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { ProviderError, providerDown, refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -344,6 +344,67 @@ export function missingModelIs(e: unknown, model: string): boolean {
 }
 
 /**
+ * Whose one thought's error is, for a --follow worker with no pauses before
+ * an outage (db/reembed.ts's, SMD-2679 PR 4a-2b review pass 4): an error is
+ * the thought's only when it names the thought, or when the provider answers
+ * a probe's constant text right after it (`probe-decides`, the caller's
+ * probe); anything else is the database's state or the provider's.
+ * - `db-wait`: the database not answering — the worker stops, recording
+ *   nothing, and the follower waits it out (databaseUnavailable).
+ * - `db-end`: a privilege or a function gone, a feature the server lacks
+ *   (0A000), the database dropped (57P04), or a statement cancelled (57014:
+ *   past its statement_timeout, or an operator's pg_cancel_backend) — the
+ *   follower ends, its row failed: the sleep scheduler reads the timeout as
+ *   its budget's.
+ * - `db-moment`: a moment's database state, a closed list — a deadlock or a
+ *   serialisation retry (class 40), resources (53), a lock not available
+ *   (55P03), a read-only or aborted transaction (25006, 25P02) — not the
+ *   thought's: it goes back to the pool unrecorded (a poll: costs the poll).
+ * - `backpressure`: the provider busy or rate-limited (503, 429) or loading
+ *   the model (modelMissing) — an outage that makes no suspect: it says
+ *   nothing about the thought in hand.
+ * - `maybe-poison`: any other 5xx, a 408, a timeout, no connection — an
+ *   outage whose thought in hand is a suspect, as a document that crashes the
+ *   provider gives.
+ * - `thought`: the error names the thought — its length (refusesLength), the
+ *   egress gate's refusal of it, its data (22xxx, 23xxx, 54xxx) — or is any
+ *   other database error: a function's own guard (P0001), an invariant
+ *   (OB00x), an internal error. Recorded failed, as a one-shot run records
+ *   it, so a write that always fails is seen, not cycled through the pool
+ *   (review pass 5). At a pool no thought is in hand: the caller reads it as
+ *   a moment (a thought deleted under the pool's insert: 23503).
+ * - `probe-decides`: any other 4xx, a body not of the shape, a width
+ *   mismatch, an error the rules do not know — Bun's client-side refusals
+ *   (a TypeError, a SyntaxError) among them.
+ * Pure, the worker's state apart: a stop is the caller's. Each verdict here
+ * was met by a real error, Bun's SQL client's and embed.ts's (review pass 5).
+ */
+export type FollowVerdict = "db-wait" | "db-end" | "db-moment" | "backpressure" | "maybe-poison" | "thought" | "probe-decides";
+export function followClassify(e: unknown): FollowVerdict {
+  if (databaseUnavailable(e)) return "db-wait";
+  const { name, errno } = (e ?? {}) as { name?: string; errno?: unknown };
+  if ((name === "PostgresError" || name === "SQLError") && typeof errno === "string") {
+    if (databasePermanent(e) || ["57014", "0A000", "57P04"].includes(errno)) return "db-end";
+    if (/^(40|53)/.test(errno) || ["55P03", "25006", "25P02"].includes(errno)) return "db-moment";
+    return "thought";
+  }
+  if (e instanceof ProviderError) {
+    if (e.kind === "egress") return "thought";
+    if (e.kind === "timeout") return "maybe-poison";
+    if (e.kind === "http") {
+      const s = e.status ?? 0;
+      if (s === 429 || s === 503 || modelMissing(e)) return "backpressure";
+      if (s >= 500 || s === 408) return "maybe-poison";
+      if (refusesLength(s, e.body)) return "thought";
+    }
+    return "probe-decides";
+  }
+  // A runtime error with a connection's code: the provider not reached.
+  if (providerDown(e)) return "maybe-poison";
+  return "probe-decides";
+}
+
+/**
  * Whether two model names are one model: equal, or one the other with
  * Ollama's implied `:latest` tag. Compared whole — `qwen3` is not
  * `qwen3:32b`, which a substring test read as one (review pass 3).
@@ -509,8 +570,9 @@ export function isOut(p: Probe): p is Extract<Probe, { why: string }> {
  * anything but out, so a model the provider turns out not to serve, once it
  * answers, is refused there rather than waited on for ever (review pass 2).
  */
-export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless): Promise<Probe | null> {
-  for (let step = 0; ; step++) {
+export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal, settles: (p: Probe) => boolean, sleep: (ms: number, wake: AbortSignal) => Promise<void> = sleepUnless, from = 0): Promise<Probe | null> {
+  // `from`: the schedule's first step — an outage that comes back at once carries on from the last one's (reembed.ts's, SMD-2679).
+  for (let step = from; ; step++) {
     await sleep(outageWait(step), wake);
     if (wake.aborted) return null;
     const p = await probe();
@@ -562,10 +624,26 @@ export class ProviderOutage {
     return "outage";
   }
 
-  /** A probe answered. */
-  end(): void {
+  /** Where the last outage's probe schedule ended, and the thoughts settled when it did: resumeFrom's. */
+  private reached = 0;
+  private settledAtEnd = -1;
+
+  /** A probe answered — at step `reached` of its schedule, with `settled` thoughts recorded either way (resumeFrom's; extract passes neither). */
+  end(reached = 0, settled = -1): void {
     this.reason = null;
     this.endedAt = this.now();
+    this.reached = reached;
+    this.settledAtEnd = settled;
+  }
+
+  /**
+   * The probe schedule's first step for an outage beginning now: where the
+   * last one's ended, when it ended within `windowMs` and no thought settled
+   * since — a limit the probe passes and no row gets past, whose waits then
+   * keep growing to the cap; else 0, the first wait (SMD-2679 PR 4a-2b).
+   */
+  resumeFrom(settled: number, windowMs: number): number {
+    return this.settledAtEnd >= 0 && settled === this.settledAtEnd && this.now() - this.endedAt < windowMs ? this.reached : 0;
   }
 
   /** A thought finished — succeeded, or recorded failed — and is a suspect no longer. */

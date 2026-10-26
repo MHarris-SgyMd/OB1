@@ -175,7 +175,7 @@ const entries = sources.filter((f) => {
   ok(entries.length >= 20, `the entry-point census finds the scripts (${entries.length}: ${entries.join(", ")})`);
   for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
     ok(entries.includes(must), `the census counts ${must} as an entry point`);
-  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts"])
+  for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts", "subject-sweep.ts"])
     ok(!entries.includes(lib), `the census does not count the library ${lib}`);
   for (const f of entries) ok(/from "\.\/cli\.ts"/.test(readFileSync(join(HERE, f), "utf8")), `${f} imports ./cli.ts`);
   for (const f of sources.filter((s) => s !== "cli.ts"))
@@ -250,6 +250,18 @@ const entries = sources.filter((f) => {
   ok(hex.code === 2 && /--workers must be a decimal integer >= 1 and <= 2147483647$/m.test(hex.err), `extract-entities.ts refuses a hex --workers, which Number() read as 16 (exit ${hex.code})`);
   const dump = run("extract-entities.ts", "--dump");
   ok(dump.code === 2 && /^--dump needs a value/m.test(dump.err), `extract-entities.ts refuses a bare --dump, which read as no dump (exit ${dump.code})`);
+  // The subject sweep (SMD-3306): --subjects takes "rules" or nothing, and a pass's flag beside it is refused, not dropped.
+  const subjectsWord = run("extract-entities.ts", "--url", DEAD, "--subjects", "s3cret");
+  ok(subjectsWord.code === 2 && /^extract-entities\.ts: --subjects takes "rules" or no value/m.test(subjectsWord.err) && !subjectsWord.err.includes("s3cret"),
+    `extract-entities.ts refuses a --subjects value but "rules", without repeating it (exit ${subjectsWord.code})`);
+  const subjectsPass = run("extract-entities.ts", "--url", DEAD, "--subjects", "--workers", "2", "--follow");
+  ok(subjectsPass.code === 2 && /goes with --url, --limit, --timeout and --dry-run alone, not --workers, --follow\.$/m.test(subjectsPass.err),
+    `extract-entities.ts refuses a pass's flags beside --subjects, naming them (exit ${subjectsPass.code}: ${subjectsPass.err.split("\n")[0].slice(0, 120)})`);
+  // The sweep's own flags pass --subjects' check and reach the sweep, which says what it will do before it dials
+  // (review pass 1: without a URL the case stopped at databaseUrl, before the check it named).
+  const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9");
+  ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:rules@r1), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
+    `--subjects rules with --dry-run, --limit and --timeout passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
   for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
     const bare = run(script, ...argv);

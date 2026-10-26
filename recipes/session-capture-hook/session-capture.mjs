@@ -66,7 +66,11 @@
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
  *   ${XDG_CONFIG_HOME:-~/.config}/open-brain/session-capture.json
  *   { "url": "http://127.0.0.1:8010/mcp", "key": "<the raw capture key>" }
+ * or several brains, each its own url and capture key (SMD-3313):
+ *   { "brains": [{ "name": "stable", "url": "…/mcp", "key_file": "…" }, { "name": "canary", … }] }
  * State and log: ${XDG_STATE_HOME:-~/.local/state}/open-brain/session-capture/
+ * (the first brain's; each brain after it under brains/<name>/, its own queue,
+ * chains and log: a brain away delays no other).
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync } from "node:fs";
@@ -84,10 +88,25 @@ export const CONFIG_PATH = process.env.OB1_SESSION_CAPTURE_CONFIG
   || join(process.env.XDG_CONFIG_HOME || join(HOME, ".config"), "open-brain", "session-capture.json");
 /** The config's shape, as the messages that ask for it write it. */
 const CONFIG_SHAPE = '{"url": "http://127.0.0.1:8010/mcp", "key": "<capture key>"}';
+/** The several-brain shape (SMD-3313): each brain its own url and key, the first's state where a one-brain config keeps it. */
+const BRAINS_SHAPE = '{"brains": [{"name": "stable", "url": "http://127.0.0.1:8010/mcp", "key_file": "<path>"}, {"name": "canary", "url": "http://127.0.0.1:8011/mcp", "key_file": "<path>"}]}';
+/** A brain's name: it names a directory and prefixes every line said of that brain. */
+const BRAIN_NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 /** Where the url came from, as a message names it: the variable wins over the file, as loadConfig reads them. */
 const urlSource = () => (process.env.OB1_BRAIN_URL ? "OB1_BRAIN_URL" : CONFIG_PATH);
-export const STATE_DIR = process.env.OB1_SESSION_CAPTURE_STATE
+export const STATE_BASE = process.env.OB1_SESSION_CAPTURE_STATE
   || join(process.env.XDG_STATE_HOME || join(HOME, ".local", "state"), "open-brain", "session-capture");
+/**
+ * The state root every queue, chain and log below is read from: STATE_BASE for
+ * the first brain (where a one-brain config has always kept it), and
+ * STATE_BASE/brains/<name> for each brain after it (SMD-3313), set by
+ * useStateRoot before a brain's run — so each brain has its own pending,
+ * inflight and dead queues, its own chain per session (the id an episode
+ * supersedes is that brain's own) and its own log, and a brain away delays no
+ * other.
+ */
+export let STATE_DIR = STATE_BASE;
+export function useStateRoot(dir) { STATE_DIR = dir; }
 const LOG_PATH = () => join(STATE_DIR, "log");
 const PENDING_DIR = () => join(STATE_DIR, "pending");
 const DEAD_DIR = () => join(STATE_DIR, "dead");
@@ -367,12 +386,17 @@ export function splitUserinfo(raw) {
 }
 
 /**
- * The endpoint and the key. From the config file (the shipped shape), or from
- * OB1_BRAIN_URL / OB1_CAPTURE_KEY in the environment (a test, a container). The
- * key never appears in a hook's command line, where it would sit in a settings
- * file every tool on the machine can read.
+ * The brains a run delivers to, each its own endpoint, key and state root
+ * (SMD-3313), and the settings they share (the opt-in model summary). From the
+ * config file — the one-brain shape `{"url", "key"|"key_file"}`, or a `brains`
+ * list `[{"name", "url", "key"|"key_file"}, …]` whose first brain keeps the
+ * state a one-brain config keeps, and each after it STATE_BASE/brains/<name> —
+ * or from OB1_BRAIN_URL / OB1_CAPTURE_KEY in the environment (a test, a
+ * container), which is one brain and wins over the file's. The key never
+ * appears in a hook's command line, where it would sit in a settings file
+ * every tool on the machine can read. Returns [{ name, root, cfg }].
  */
-export function loadConfig() {
+export function loadBrains() {
   let cfg = {};
   if (existsSync(CONFIG_PATH)) {
     // A BOM, which a Windows editor writes, is not the config's. The parser's
@@ -387,15 +411,57 @@ export function loadConfig() {
       if (mode !== 0 && process.platform !== "win32") console.error(`session-capture: ${CONFIG_PATH} is readable by others — chmod 600 it`);
     } catch { /* unreadable stat: the read above already succeeded */ }
   }
-  const url = process.env.OB1_BRAIN_URL || cfg.url;
-  let key = process.env.OB1_CAPTURE_KEY || cfg.key;
-  if (!key && cfg.key_file) key = readFileSync(cfg.key_file, "utf8").trim();
-  // Before the missing-key error: a connector URL pasted with its ?key= and no
-  // `key` is told where the key goes, not to write a url it already has.
-  const endpoint = url ? endpointOf(url, urlSource()) : undefined;
-  if (!endpoint || !key) {
-    throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
+  const shared = sharedSettings(cfg);
+  const keyOf = (b) => { const k = b.key || (b.key_file ? readFileSync(b.key_file, "utf8").trim() : ""); return k ? String(k) : ""; };
+  // One brain: the environment's url, or the file's one-brain shape. A brains
+  // list beside OB1_BRAIN_URL is passed over for the variable's one brain, as the
+  // variable has always won over the file's url.
+  if (process.env.OB1_BRAIN_URL || cfg.brains === undefined) {
+    const url = process.env.OB1_BRAIN_URL || cfg.url;
+    const key = process.env.OB1_CAPTURE_KEY || keyOf(cfg);
+    // Before the missing-key error: a connector URL pasted with its ?key= and no
+    // `key` is told where the key goes, not to write a url it already has.
+    const endpoint = url ? endpointOf(url, urlSource()) : undefined;
+    if (!endpoint || !key) {
+      throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
+    }
+    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...shared } }];
   }
+  // Several brains (SMD-3313). Each is named, once, as a directory may be; its
+  // url and key are its own, never the file's top-level ones, which beside a
+  // list would be a second answer to which brain is meant.
+  const list = cfg.brains;
+  if (!Array.isArray(list) || !list.length) throw new Error(`${CONFIG_PATH}'s "brains" is not a list of brains — write it as ${BRAINS_SHAPE}`);
+  for (const k of ["url", "key", "key_file"]) if (cfg[k] !== undefined) throw new Error(`${CONFIG_PATH} sets "${k}" beside "brains" — set each brain's url and key inside its own entry, as ${BRAINS_SHAPE}`);
+  const seen = new Set();
+  return list.map((b, i) => {
+    if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error(`${CONFIG_PATH}'s brain ${i + 1} is not an object — write it as {"name", "url", "key" or "key_file"}`);
+    const name = typeof b.name === "string" ? b.name : "";
+    if (!BRAIN_NAME_RE.test(name)) throw new Error(`${CONFIG_PATH}'s brain ${i + 1} needs a "name" of lower-case letters, digits and hyphens (it names a directory under ${STATE_BASE})`);
+    if (seen.has(name)) throw new Error(`${CONFIG_PATH} names brain "${name}" twice — each brain's name is its own`);
+    seen.add(name);
+    const where = `${CONFIG_PATH} (brain "${name}")`;
+    const endpoint = b.url ? endpointOf(b.url, where) : undefined;
+    const key = keyOf(b);
+    if (!endpoint || !key) throw new Error(`brain "${name}" in ${CONFIG_PATH} has no url or key — give it both (a capture key minted on that brain: bun server-portable/keygen.ts --name session-hook --scope capture)`);
+    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...shared } };
+  });
+}
+
+/**
+ * One brain's settings: the named brain's, or the first (the one a one-brain
+ * config is). Throws as loadBrains does, and on a name the config lacks.
+ */
+export function loadConfig(name) {
+  const brains = loadBrains();
+  if (name === undefined) return brains[0].cfg;
+  const b = brains.find((x) => x.name === name);
+  if (!b) throw new Error(`no brain named "${name}" in ${CONFIG_PATH} (its brains: ${brains.map((x) => x.name).join(", ")})`);
+  return b.cfg;
+}
+
+/** The settings every brain shares: the opt-in model summary's (SMD-2014), read from the file and the environment. */
+function sharedSettings(cfg) {
   // The opt-in model summary (SMD-2014). Off unless `summary` is "model"; then a
   // local model rewrites the derived summary into what was decided. The endpoint
   // is the OB1_LLM shape (OpenAI /chat/completions). "Local" is DECLARED
@@ -435,7 +501,6 @@ export function loadConfig() {
   const modelTimeoutMax = CLAIM_MAX_AGE_MS - 6 * POST_TIMEOUT_MS - 30_000;
   const modelTimeout = Number.isFinite(modelTimeoutRaw) && modelTimeoutRaw > 0 ? Math.min(modelTimeoutRaw, modelTimeoutMax) : undefined;
   return {
-    url: endpoint, key: String(key),
     summary,
     // The base the OpenAI path hangs off: trailing slashes stripped, and a
     // trailing `/chat/completions` a user pasted from a full endpoint removed,
@@ -2254,10 +2319,10 @@ export async function postPending(cfg, own) {
 }
 
 /** Hand the network half to a child that outlives this process; stdout/stderr go to the log. */
-function detachPost(payloadPaths) {
+function detachPost(payloadPaths, brain) {
   ensureDirs();
   const fd = openSync(LOG_PATH(), "a", 0o600);
-  const child = spawn(process.execPath, [SELF, ...payloadPaths.flatMap((p) => ["--post", p])], {
+  const child = spawn(process.execPath, [SELF, ...(brain ? ["--brain", brain] : []), ...payloadPaths.flatMap((p) => ["--post", p])], {
     detached: true,
     stdio: ["ignore", fd, fd],
     env: { ...process.env },
@@ -2265,6 +2330,44 @@ function detachPost(payloadPaths) {
   child.unref();
   closeSync(fd);
   return child.pid;
+}
+
+/** --check for one brain: its endpoint, its key's surface, the deprecated routes (SMD-2686, SMD-3057); `tag` prefixes each line ("[canary] "). Returns the exit code. */
+async function checkBrain(cfg, tag, onSecret) {
+  // An answer from the root through the proxy's legacy route worked until
+  // v2.0.0 closed it (SMD-2532), so on an older stack it is a warning, not a failure.
+  // A tier's route through stable's proxy closes then too (SMD-3057), and
+  // its /mcp is stable's: the tier itself is the url to set. Each route's
+  // Deprecation date is its own, stamped by a release and never moved
+  // (RFC 9745: when the deprecation began), so it says which answered:
+  // the tiers' @1792108800, the root's @1790899200. Another date falls
+  // back to the Link's anchor, and with no deprecation Link to the url's
+  // tier path, in case as the routers match it. Said on a refused answer
+  // too: a tier route with no tier behind it is a 404, and its client is
+  // the one to tell.
+  const warnDeprecated = () => {
+    if (!cfg.deprecation) return;
+    const u = new URL(cfg.url); // endpointOf made it, so it parses
+    const link = cfg.deprecationLink ?? "";
+    const tierRoute = cfg.deprecation === "@1792108800" || (cfg.deprecation !== "@1790899200" && (/rel="deprecation"/.test(link) ? /#a-canary-beside-the-stack>/.test(link) : /^\/(canary|working)\/mcp(\/|$)/.test(u.pathname)));
+    if (tierRoute) {
+      console.error(`${tag}warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${cfg.where ?? urlSource()} to the tier itself, a canary's own port (deploy/canary.sh), never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
+    } else {
+      let to = "its /mcp";
+      if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);
+      console.error(`${tag}warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${cfg.where ?? urlSource()} (deploy/README.md, "Moving a client to /mcp")`);
+    }
+  };
+  let tools;
+  try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${tag}${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); warnDeprecated(); return 1; }
+  // The summary mode, and whether a configured model would run — read from the
+  // config, the model endpoint not called (SMD-2014).
+  if (cfg.summary === "model") console.log(`${tag}${modelStatusLine(cfg)}`);
+  warnDeprecated();
+  if (tools.join() === "capture_thought") { console.log(`${tag}ok: ${shownUrl(cfg.url)} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
+  if (!tools.includes("capture_thought")) { console.error(`session-capture: ${tag}the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
+  console.error(`${tag}warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
+  return 0;
 }
 
 // ── Hook JSON to paste ───────────────────────────────────────────────────────
@@ -2407,43 +2510,18 @@ export async function main(argv) {
     return 0;
   }
   if (has(args, "--check")) {
-    let cfg;
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
-    try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
-    // An answer from the root through the proxy's legacy route worked until
-    // v2.0.0 closed it (SMD-2532), so on an older stack it is a warning, not a failure.
-    // A tier's route through stable's proxy closes then too (SMD-3057), and
-    // its /mcp is stable's: the tier itself is the url to set. Each route's
-    // Deprecation date is its own, stamped by a release and never moved
-    // (RFC 9745: when the deprecation began), so it says which answered:
-    // the tiers' @1792108800, the root's @1790899200. Another date falls
-    // back to the Link's anchor, and with no deprecation Link to the url's
-    // tier path, in case as the routers match it. Said on a refused answer
-    // too: a tier route with no tier behind it is a 404, and its client is
-    // the one to tell.
-    const warnDeprecated = () => {
-      if (!cfg.deprecation) return;
-      const u = new URL(cfg.url); // endpointOf made it, so it parses
-      const link = cfg.deprecationLink ?? "";
-      const tierRoute = cfg.deprecation === "@1792108800" || (cfg.deprecation !== "@1790899200" && (/rel="deprecation"/.test(link) ? /#a-canary-beside-the-stack>/.test(link) : /^\/(canary|working)\/mcp(\/|$)/.test(u.pathname)));
-      if (tierRoute) {
-        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh), never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
-      } else {
-        let to = "its /mcp";
-        if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);
-        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated legacy route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url to ${to} in ${urlSource()} (deploy/README.md, "Moving a client to /mcp")`);
-      }
-    };
-    let tools;
-    try { tools = ((await rpc(cfg, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name).sort(); } catch (e) { console.error(`session-capture: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); warnDeprecated(); return 1; }
-    // The summary mode, and whether a configured model would run — read from the
-    // config, the model endpoint not called (SMD-2014).
-    if (cfg.summary === "model") console.log(modelStatusLine(cfg));
-    warnDeprecated();
-    if (tools.join() === "capture_thought") { console.log(`ok: ${shownUrl(cfg.url)} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
-    if (!tools.includes("capture_thought")) { console.error(`session-capture: the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
-    console.error(`warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
-    return 0;
+    let brains;
+    try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
+    // Each brain checked, and named when there are several (SMD-3313); the
+    // run's exit is the worst brain's.
+    let code = 0;
+    for (const b of brains) {
+      useStateRoot(b.root);
+      const c = await checkBrain(b.cfg, brains.length > 1 ? `[${b.name}] ` : "", onSecret);
+      code = Math.max(code, c);
+    }
+    return code;
   }
   if (has(args, "--dry-run")) {
     const path = flag(args, "--dry-run");
@@ -2499,8 +2577,18 @@ export async function main(argv) {
   }
   if (has(args, "--post")) {
     const files = flagAll(args, "--post").filter(Boolean); // none: drain pending/ alone
+    // `--brain <name>`: the brain whose queue this drains, as the hook's child
+    // is told (SMD-3313); none, the first.
+    const brainName = flag(args, "--brain");
+    if (brainName === "") { console.error("--brain <name> (a brain the config names)"); return 2; }
     let cfg;
-    try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 2; }
+    try {
+      const brains = loadBrains();
+      const b = brainName === undefined ? brains[0] : brains.find((x) => x.name === brainName);
+      if (!b) throw new Error(`no brain named "${brainName}" in ${CONFIG_PATH} (its brains: ${brains.map((x) => x.name).join(", ")})`);
+      useStateRoot(b.root);
+      cfg = b.cfg;
+    } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 2; }
     const outcomes = await postPending(cfg, files.length ? files : undefined);
     // Each outcome is already a timestamped line in the log, where this
     // process's stdout also lands when the hook spawned it; say it again only
@@ -2536,25 +2624,42 @@ export async function main(argv) {
   // the config is written would otherwise queue one payload per session end
   // for as long as the config is missing, and post them all, stale, when it
   // appears (fifth review pass).
-  let cfg;
-  try { cfg = loadConfig(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  let brains;
+  try { brains = loadBrains(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  // Each brain prepares from its own state and posts in a child of its own
+  // (SMD-3313): its chains supersede its own ids, its queue waits for it alone,
+  // and one away delays no other. One brain says what it always said; several
+  // name theirs on every line. The exit is the worst brain's.
+  const several = brains.length > 1;
+  let code = 0;
+  for (const b of brains) {
+    useStateRoot(b.root);
+    code = Math.max(code, await hookForBrain(hook, b, several, { minIntervalMin, harness, onSecret }));
+  }
+  return code;
+}
+
+/** The hook's run for one brain, its state root set: prepare, then post in sync or in a detached child. Returns the exit code. */
+async function hookForBrain(hook, brain, several, { minIntervalMin, harness, onSecret }) {
+  const tag = several ? `[${brain.name}] ` : "";
+  const cfg = brain.cfg;
   let prepared;
-  try { prepared = prepare(hook, { minIntervalMin, harness, onSecret, summary: cfg.summary }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  try { prepared = prepare(hook, { minIntervalMin, harness, onSecret, summary: cfg.summary }); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${tag}${e.message}`); return 1; }
   // A refused episode exits 1 once the others are on their way (SMD-2013): the
   // secret's episode is not sent, the rest of the session still is.
   const paths = prepared.payloadPaths ?? [];
-  if (!paths.length) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); return prepared.code; }
-  if (prepared.code) { log(prepared.message); console.error(`session-capture: ${prepared.message}`); } // the refusal first, then what posts
+  if (!paths.length) { log(prepared.message); console.error(`session-capture: ${tag}${prepared.message}`); return prepared.code; }
+  if (prepared.code) { log(prepared.message); console.error(`session-capture: ${tag}${prepared.message}`); } // the refusal first, then what posts
   if (process.env.OB1_SESSION_CAPTURE_SYNC === "1") {
     // The run's own outcomes, by file — oldest-first posting puts stranded
     // payloads before them (third review pass: `[o]` read the first outcome).
     const outcomes = await postPending(cfg, paths);
     const own = paths.map((p) => outcomes.find((x) => x.file === p));
-    if (own.every((o) => !o)) { console.error(`session-capture: another run took ${paths.length === 1 ? "this payload" : "these payloads"} (to post them, or as obsolete beside a newer one)`); return prepared.code; } // two runs at once (fourth review pass)
-    for (const o of own) if (o) console.error(`session-capture: ${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : o.deferred ? o.error : `not captured: ${o.error}`}`);
+    if (own.every((o) => !o)) { console.error(`session-capture: ${tag}another run took ${paths.length === 1 ? "this payload" : "these payloads"} (to post them, or as obsolete beside a newer one)`); return prepared.code; } // two runs at once (fourth review pass)
+    for (const o of own) if (o) console.error(`session-capture: ${tag}${o.ok ? `captured ${o.id}` : o.obsolete ? `skip: ${o.error}` : o.deferred ? o.error : `not captured: ${o.error}`}`);
     return prepared.code || (own.every((o) => !o || o.ok || o.obsolete || o.deferred) ? 0 : 1);
   }
-  const pid = detachPost(paths);
+  const pid = detachPost(paths, several ? brain.name : undefined);
   log(`${prepared.code ? `posting the rest` : prepared.message} → posting in pid ${pid}`);
   return prepared.code;
 }

@@ -2608,12 +2608,13 @@ database, and recreates the servers, its proxy and forwarder on its own
 networks. It is refused on a canary with no database to keep: no volume
 (changing nothing), or one whose database holds no relations. Either form
 builds its images while the canary serves, then stops its writers before its
-Postgres is touched, its servers and a running `sleep` worker, and brings the
-worker back on the new build once the smoke has passed, unless its env file
-holds no `OB1_WORKER_KEY` (then it stays stopped, `up` says how to start it,
-and exits 1). A run that fails after the stop says what it left stopped and
-how to go on. A running writer of another profile (the workers, board-sync,
-the import runner) is refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
+Postgres is touched, its servers, a running `sleep` worker and a running
+board-sync, and brings the worker back on the new build once the smoke has
+passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
+`up` says how to start it, and exits 1), and board-sync as step 5 below says.
+A run that fails after the stop says what it left stopped and how to go on.
+A running writer of another profile (the workers, the import runner) is
+refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
 is the guard.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
@@ -2648,9 +2649,10 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
-  the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
-  `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
-  comment; SMD-2882);
+  the workers' `OB1_WORKER_KEY`, and every Linear key, `LINEAR_*` in any
+  letter case (`LINEAR_COMMENT_API_KEY` can comment; SMD-2882). The canary's
+  own board-sync reads with a `LINEAR_API_KEY` of its own, never stable's
+  (step 5, SMD-3312);
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
@@ -2890,12 +2892,59 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke.
-5. With `--connect` it registers the Claude Code connector named for the
+5. It (re)starts the canary's board-sync on the new build whenever the
+   canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
+   upgraded in place (`--no-refresh`) is never refreshed, and a refresh was
+   what brought it stable's ticket rows, so without its own board-sync its
+   copy of the board stays as it was at its last refresh. A running
+   board-sync stops with the other writers before the canary's Postgres is
+   touched (3), as the sleep worker does.
+   - **The key is the canary's alone:** a Linear personal API key made for it
+     with Read access alone, one line in its env file (`.env.canary.local`
+     beside stable's for open-brain-canary):
+
+     ```bash
+     LINEAR_API_KEY=lin_api_…   # the canary's own, Read access alone
+     ```
+
+     Never stable's: a personal key can write unless it was made read-only,
+     and board-sync runs the checkout's `db/` (an unreleased build's, on the
+     canary; keep the tree `up` ran from while the canary runs it, as the
+     sleep worker's). **Making the key read-only is what keeps the canary off
+     the board's writes**; canary.sh cannot tell a key's access, and what it
+     checks guards against accidents, not against a write key it has never
+     seen:
+     - the file never gets stable's;
+     - every `up` clears from it a `LINEAR_API_KEY` that is one of stable's
+       Linear keys (its comment key included, stable's file read with and
+       without the shell's variables, and any exported in canary.sh's own
+       shell), said;
+     - it refuses a key set on two lines with a value each (compose reads only
+       the last), and one that reads otherwise with the shell's variables
+       (`${X:-…}`);
+     - canary.sh unsets every Linear key from its own shell, so a shell
+       exporting stable's does not reach the canary.
+   - **It never posts a finding to the board.** Every `up` clears any other
+     Linear key from the file (`LINEAR_COMMENT_API_KEY` pasted in, say), and
+     canary.sh holds `LINEAR_COMMENT_API_KEY` empty for every compose call it
+     makes besides.
+   - **Turning it on** in a canary that holds rows of its own: set the file's
+     `LINEAR_API_KEY` line (one line; a clearing leaves it as
+     `LINEAR_API_KEY=`, to fill in), then `up --no-refresh` (a plain `up`
+     refreshes from stable, replacing those rows). **Checking it syncs:** the
+     canary's `brain_info` shows a `heartbeat:board-sync` alive and a
+     board-sync watermark that keeps up with stable's.
+   - **Turning it off:** empty the line (or take it out) and re-run
+     `up --no-refresh`: every board-sync container of the canary's is removed,
+     said. With no key and none standing, the run says the canary runs no
+     board-sync.
+6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
 
-`down` removes the canary's containers and its own networks. It
+`down` removes the canary's containers, its sleep worker and board-sync
+among them, and its own networks. It
 deregisters the connector only when `claude` has it at user scope and at a
 URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 `localhost`), with any path and any `?key=`. A connector at stable's own
@@ -3446,7 +3495,9 @@ the three discovery paths outside it to it while it answers, and answers them
 its tokens (SMD-2286, "Tokens at the REST core" below). `mcp-server/` is
 its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
-since SMD-2287 PR 5b; the GUI becomes one with SMD-2280. The
+since SMD-2287 PR 5b; the operator GUI signs the operator in through it as
+the confidential `gui` client, code and PKCE with a refresh token, with
+`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`). The
 MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3462,7 +3513,7 @@ started with. It assumes the stack of step 1: compose reads the whole of
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth mcp server proxy   # builds and starts it, recreates the MCP servers on the new .env (they advertise OAuth only when configured), and waits
+compose up -d --wait --wait-timeout 60 auth api mcp app proxy   # builds and starts it, recreates the REST core, the MCP server and the GUI on the new .env (each reads the switch; the GUI signs in through it, and its sessions start again), and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
@@ -3568,9 +3619,10 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
-  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The
-  operator's page of grants is SMD-2280's; until then, the compromise steps
-  under "Custody and backups" below end every grant.
+  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
+  the GUI's sign-out does its own. The operator's page of grants is SMD-3307's
+  third PR; until then, the compromise steps under "Custody and backups" below
+  end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
@@ -3713,7 +3765,11 @@ and the client secrets; a kept password would be hashed again as it was),
 run `--init` for new ones, hand each client its new secret, and drop the store
 (`compose rm -sf auth`, then `podman volume rm <project>_auth-data`, or
 `docker volume rm`; `open-brain_auth-data` for the stack of step 1) before
-`compose up -d --wait auth`: every client signs in again. Both shapes were measured:
+`compose up -d --wait auth api mcp app`, which hands the MCP server and the
+GUI their new secrets (without them every GUI sign-in is refused, the GUI's
+log saying `invalid_client`) and has the REST core drop the old signing key at
+once (it keeps a key set ten minutes, and ten more while the AS is away):
+every client signs in again. Both shapes were measured:
 the backup above restored into a fresh volume brings a registered client back
 with its registration token, and the fresh volume alone does not.
 
@@ -3735,7 +3791,7 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the GUI as this server's client (SMD-2280). The release overlay does not pin an image for it yet,
+SMD-2286), and the GUI's break-glass key sign-in and page of grants (SMD-3307's second and third PRs). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover

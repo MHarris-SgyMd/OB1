@@ -5,7 +5,9 @@ GUI: a SvelteKit server of its own that reads and writes the brain only through 
 REST core (`server-portable/api.ts`), the brain's contract. This directory is that GUI
 (SMD-2280). Every page is a call on the REST core through
 [`../rest-client`](../rest-client/README.md), the client the MCP server uses, under the
-signed-in visitor's own key. It holds no store, no key list and no key of its own.
+signed-in visitor's own key, or the authorization server's token for them (SMD-3307). It
+holds no store, no key list and no brain key of its own; its one secret is the AS's `gui`
+client's.
 
 It replaces the three dashboards under `dashboards/`, which retire as this one takes
 over what each did (SMD-2280's plan: read views first, then plugin pages, then
@@ -15,14 +17,17 @@ sign-in through the authorization server, then the old dashboards' retirement).
 |---|---|
 | `serve.ts` | The entry, `bun serve.ts`: the SvelteKit server `bun run build` writes to `build/`, on PORT (8000), with the origin set (below) |
 | `src/hooks.server.ts` | Every request: the session, the sign-in wall, and the headers that keep a page out of caches and frames |
-| `src/lib/server/session.ts` | The sessions, held in the server's memory |
+| `src/lib/server/session.ts` | The sessions, held in the server's memory (a key or the authorization server's tokens), and the sign-in answers already taken |
+| `src/lib/server/oauth.ts` | Sign-in through the authorization server as its `gui` client: the authorization request, the code's exchange, a refresh, a revocation, a session's renewal |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key (a core operation's or a plugin's) |
 | `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
-| `src/lib/server/signin.ts` | Whether key sign-in is offered, and whoami's answer |
+| `src/lib/server/signin.ts` | Whether key sign-in is offered, whoami's answer, and a refused sign-in's words |
 | `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
 | `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
 | `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
+| `smoke-oauth.ts` | The sign-in through the authorization server, driven the same way on a configured stack |
+| `test-oauth.ts` | `oauth.ts` offline, against a fake token endpoint |
 
 ## In the stack
 
@@ -35,7 +40,8 @@ nothing for it. A release's compose overlay runs the release's server image here
 
 Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
 `https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
-`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key. One or the
+`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key — or, on a stack
+configured with the authorization server, through it ("Signing in", below). One or the
 other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
 cross-site ("The origin", below).
 
@@ -55,8 +61,41 @@ cross-site ("The origin", below).
 - **While the stack is configured with the authorization server** (`COMPOSE_PROFILES`
   names `auth`, ADR decision 16), key sign-in is off on the public origin, whether or
   not the authorization server answers: knocking it over must not open a weaker door.
-  Sign-in by code and PKCE, and break-glass key sign-in on a loopback-only port, are
-  SMD-2280's fourth PR; until then a configured stack's GUI signs no one in.
+  The GUI signs the operator in through it instead (SMD-3307), as its confidential
+  `gui` client, with `OB1_AUTH_SECRET_GUI` from `deploy/.env` (recreate `app` after
+  turning the profile on, as `deploy/README.md`'s "Authorization server" does): the
+  sign-in page's button starts a code-and-PKCE request for the REST core
+  (`resource=<origin>/api`, `offline_access` with `prompt=login consent`, so the AS
+  asks for the password every time and a sign-out of the GUI is one); the AS sends the
+  browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
+  an access token (600 s) and a refresh token, held in the session like a key and never
+  sent to the browser. A URL can drop `prompt=login`, and the AS's own session (a day,
+  which the GUI's sign-out leaves) would then skip the password, so the AS asks the
+  `gui` client the password on every authorization whatever its request says, and the
+  callback takes the tokens only if the ID token's `auth_time` is no earlier than the
+  sign-in's start. Each sign-in is a grant of its own at the AS, so revoking one
+  session's refresh token, which ends its grant, ends no other. A
+  sign-in in flight holds nothing on the server: its state and PKCE verifier are
+  derived from a binding in its cookie that no URL carries, so a callback URL seen
+  elsewhere completes no sign-in this browser started (one the operator completed for
+  a sign-in someone else started is that person's, OAuth's own residual). Start and
+  sign-out refuse a post from another origin. Every page calls the REST core with the access
+  token, renewed with the refresh token a minute before it lapses, from the session as
+  it is now (one renewal per session at a time); a renewal the AS refuses ends the
+  session, and one it does not answer, or an AS its probe finds down, is the page's 503
+  — for up to 30 s after the AS is back, while the probe's answer is kept — (should the
+  AS have spent the token before its answer was lost, the next try is a reuse it
+  refuses, which ends the session). Sign-out revokes the refresh token at the AS, and a
+  session that ends any other way while the GUI runs — evicted, replaced, found
+  expired, refused by the REST core, a sign-in that failed after its exchange, a
+  renewal that landed after its session ended — has its revoked too; one the AS does
+  not answer is tried again every 30 s until it does (for the token's 14 days, a
+  thousand at most). A restart forgets its sessions, and what is still due, before it
+  could. The access token itself stays good at the REST core until it lapses (600 s at
+  most), as the core checks it without asking the AS; it never left the GUI. With the
+  AS not answering, the page says sign-in is unavailable; break-glass key sign-in on a
+  loopback-only port is SMD-3307's second PR. With no secret or no sound origin, it
+  says so, and signs no one in.
 - **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
   the server holds 1,000 in all. A sign-in over a live session ends the old one.
 - **The origin is shared.** The cookie rides `/dashboard` alone, but any page served
@@ -76,7 +115,7 @@ https. So the server must know the origin a browser sees:
   a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. It is
   then the only origin the GUI takes a form from, as it is the one the authorization
   server and every redirect name: sign in there, not at `127.0.0.1`. (A loopback sign-in
-  beside a public origin is the break-glass listener of SMD-2280's fourth PR.) An
+  beside a public origin is SMD-3307's break-glass listener.) An
   unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a

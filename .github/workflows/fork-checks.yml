@@ -228,6 +228,16 @@ jobs:
         working-directory: dashboard
         run: bun run check
 
+      # SMD-3307: the GUI's sign-in through the authorization server, offline:
+      # dashboard/src/lib/server/oauth.ts against a fake token endpoint — the
+      # authorization request, the code's exchange, a refresh and a revocation
+      # as the `gui` client, and a session's renewal (once per session at a
+      # time; a refused one ends it, an unanswered one leaves it). The real AS
+      # is driven in deploy-stack-auth's GUI step.
+      - name: The operator GUI's sign-in through the authorization server, offline
+        working-directory: dashboard
+        run: bun test-oauth.ts
+
       - name: The MCP server over the REST core
         working-directory: mcp-server
         run: bun test-mcp.ts
@@ -701,9 +711,9 @@ jobs:
       matrix:
         shard: [rest, sleep, long, extract]
 
-    # A service container, not with-postgres.sh — the runner provides the database
-    # and Actions handles readiness. The local script exists for developers, who
-    # mostly run podman.
+    # A service container, not with-postgres.sh — the runner provides the
+    # database, and "Wait for the service Postgres" below waits for it. The
+    # local script exists for developers, who mostly run podman.
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -712,11 +722,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -730,6 +735,30 @@ jobs:
       - name: Install
         working-directory: db
         run: bun install --frozen-lockfile
+
+      # The service carries no health check, so the runner starts these steps
+      # as soon as its container does — with the 5 s pg_isready check it
+      # carried before, it held them until the check first passed, about 6 s
+      # later — and the checkout and install overlap Postgres's start
+      # (SMD-3196). This waits for it before the first suite, as
+      # db/with-postgres.sh does: over TCP inside the container, since over the
+      # socket the entrypoint's initialising server, which listens on no TCP
+      # address, reads as ready for a moment before the real one is up; and a
+      # container that has exited ends the wait at once.
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
@@ -765,11 +794,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
       # The upgrade and preflight pair's own Postgres, which the start step's
       # two legs reach on 5433: its comment has why (SMD-3195).
       pair-postgres:
@@ -779,11 +803,6 @@ jobs:
           POSTGRES_DB: ob1upgrade
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -797,6 +816,24 @@ jobs:
       - name: Install
         working-directory: server-portable
         run: bun install --frozen-lockfile
+
+      # The services carry no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"; ready "$PAIR_PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
+          PAIR_PG: ${{ job.services.pair-postgres.id }}
 
       # Two suites side by side, each against its own database (SMD-2219), on
       # the second service, pair-postgres, which they have to themselves:
@@ -1882,7 +1919,10 @@ jobs:
       # its public origin offers no key sign-in, whether or not the
       # authorization server answers — no key field, and a post of the write
       # key from the origin it is configured for refused with no cookie, by
-      # the GUI's own words (not SvelteKit's cross-site refusal).
+      # the GUI's own words (not SvelteKit's cross-site refusal). With the
+      # authorization server not running, its page says sign-in is unavailable
+      # (SMD-3307: the GUI holds the `gui` client's secret from .env, so this
+      # is the AS's absence, not the GUI's settings).
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |
@@ -1890,6 +1930,7 @@ jobs:
           docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps api mcp app
           page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
           grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
+          grep -q 'data-testid="unavailable"' <<<"$page" || { echo "the configured GUI, its authorization server not running, does not say sign-in is unavailable" >&2; exit 1; }
           if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
           code=$(curl -s -o /tmp/gui-signin -D /tmp/gui-signin-headers -w '%{http_code}' --max-time 15 -X POST \
             -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' -H 'origin: https://brain.example.test' \
@@ -2870,13 +2911,17 @@ jobs:
           docker network create --label com.docker.compose.project=open-brain-canary --label com.docker.compose.network=default open-brain-canary_default > /dev/null
           [ ! -e .env.canary.local ] || { echo ".env.canary.local exists before the canary's first up" >&2; exit 1; }
           # SMD-2882: both of board-sync's Linear keys in stable's file, as
-          # dummies (nothing here runs board-sync), so the check below has a
-          # Linear secret to catch: an exact LINEAR_API_KEY in canary.sh let
-          # SMD-2681's LINEAR_COMMENT_API_KEY through to the canary's file.
+          # dummies, so the check below has a Linear secret to catch: an exact
+          # LINEAR_API_KEY in canary.sh let SMD-2681's LINEAR_COMMENT_API_KEY
+          # through to the canary's file. SMD-3312: none is carried, the read
+          # key included (LINEAR_OTHER_KEY too): the canary's board-sync reads
+          # with a key of its own, given below. Its dummy key Linear refuses,
+          # and its supervisor holds it running (SMD-3214); nothing here reads
+          # its rows.
           # SMD-1849 PR 3a and 3b: the observability profile's Grafana and
           # database-monitor passwords too, dummies (nothing here runs the
           # profile).
-          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nLINEAR_OTHER_KEY=ci-dummy-linear-other-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
           # SMD-3032 and SMD-2874 PR 2: the plugin role's password and the
           # webhook secrets, dummies too (no plugin runs here), which the
           # canary's file must not hold as stable's; taken out of .env again
@@ -2943,7 +2988,13 @@ jobs:
           grep -q '^LINEAR_COMMENT_API_KEY=' .env || { echo "no LINEAR_COMMENT_API_KEY line in .env to leave out" >&2; exit 1; }
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
-          if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          grep -q '^LINEAR_OTHER_KEY=' .env || { echo "no LINEAR_OTHER_KEY line in .env to leave out" >&2; exit 1; }
+          if grep -qiE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          # SMD-3312: with no Linear key of its own the canary runs no
+          # board-sync, said.
+          grep -F 'note: the canary runs no board-sync' /tmp/canary-up.out
+          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "the canary started a board-sync with no key of its own" >&2; exit 1; fi
+          board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync | head -n 1)"; }
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
@@ -3061,7 +3112,22 @@ jobs:
           # longer answers: the legacy route that handed a POST there to the
           # canary went with v2.0.0, and the root is the proxy's own 404
           # (SMD-2532).
-          FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
+          # SMD-3312: a read key of the canary's own, and two Linear keys an
+          # operator pasted in (the comment key, and one in lower case): the up
+          # clears the two, said, and starts board-sync on the canary's key with
+          # the comment key empty. Its shell exports a Linear read and comment
+          # key besides, as one that sourced stable's .env would: canary.sh
+          # unsets them, so neither reaches board-sync (review pass 2).
+          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\nLINEAR_COMMENT_API_KEY=ci-pasted-comment-key\nlinear_other_key=ci-pasted-other-key\n' >> .env.canary.local
+          LINEAR_API_KEY=ci-shell-linear-key LINEAR_COMMENT_API_KEY=ci-shell-comment-key FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
+          grep -F 'cleared LINEAR_COMMENT_API_KEY (a Linear key the canary never holds' /tmp/canary-root.out
+          grep -F 'cleared linear_other_key (a Linear key the canary never holds' /tmp/canary-root.out
+          if grep -F 'cleared LINEAR_API_KEY' /tmp/canary-root.out; then echo "the up cleared the canary's own read key" >&2; exit 1; fi
+          if grep -qE '^(LINEAR_COMMENT_API_KEY|linear_other_key)=.' .env.canary.local || grep -qF ci-pasted- .env.canary.local; then echo "the canary's env file still holds a pasted Linear key" >&2; exit 1; fi
+          grep -qxF 'LINEAR_API_KEY=ci-canary-own-linear-key' .env.canary.local || { echo "the canary's env file lost its own read key" >&2; exit 1; }
+          grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
+          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
+          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
@@ -3072,6 +3138,10 @@ jobs:
           # left there named.
           FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh --port 8012 up --no-smoke | tee /tmp/canary-moved.out
           grep -F "wrote to the canary's env file, $PWD/.env.canary.local: SERVER_PORT=\"8012\" (it said 8011)" /tmp/canary-moved.out
+          # SMD-3312 review pass 2: an upgrade's own path, board-sync running
+          # since the root up, stopped for the refresh and recreated after it.
+          grep -F 'canary board-sync stopped for the refresh' /tmp/canary-moved.out
+          grep -F 'canary board-sync, on the new build' /tmp/canary-moved.out
           [ "$(grep -c '^SERVER_PORT=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one SERVER_PORT line after the move" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, a port this canary no longer answers on: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-moved.out
           [ "$(stat -c %a .env.canary.local)" = 600 ] || { echo ".env.canary.local is not mode 600 after the port was written: $(stat -c %a .env.canary.local)" >&2; exit 1; }
@@ -3139,10 +3209,33 @@ jobs:
             docker run -d --init --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
               --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600; }
           standin > /dev/null
+          # SMD-3312 review pass 2: LINEAR_API_KEY on two lines (compose reads
+          # the last) is refused before anything changes, board-sync still
+          # running after it.
+          printf 'LINEAR_API_KEY=ci-dummy-linear-key\n' >> .env.canary.local
+          refused 'LINEAR_API_KEY is set on more than one line' up --no-refresh --no-smoke
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ] || { echo "the refused up stopped board-sync" >&2; exit 1; }
+          # SMD-3312: the canary's board-sync, recreated by the edited up, is
+          # stopped for the migration too; with stable's read key in the
+          # canary's file in place of its own, padded with spaces (compared as
+          # compose reads it, spaces aside), the up clears it, said, and turns
+          # board-sync off, its container removed, said.
+          sed -i '/^LINEAR_API_KEY=/d' .env.canary.local
+          printf 'LINEAR_API_KEY=" %s "\n' "$(sed -n 's/^LINEAR_API_KEY=//p' .env | tr -d "\"'")" >> .env.canary.local
           rc=0; FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke > /tmp/canary-nokey.out 2>&1 || rc=$?
+          { grep -qF "cleared LINEAR_API_KEY (stable's LINEAR_API_KEY)" /tmp/canary-nokey.out && grep -qF 'canary board-sync stopped for the migration' /tmp/canary-nokey.out \
+            && grep -qF 'canary board-sync off, its container removed' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with stable's LINEAR_API_KEY did not clear it, stop board-sync and remove it, said" >&2; exit 1; }
+          if grep -qF ci-dummy-linear-key .env.canary.local; then echo "the canary's env file still holds stable's read key" >&2; exit 1; fi
+          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "up --no-refresh left a board-sync container with no key of the canary's own" >&2; exit 1; fi
           { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
           if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
+          # SMD-3312: the canary's own read key back, so board-sync comes back.
+          # Below the empty LINEAR_API_KEY= line the clearing left, as an
+          # operator adding the key after it would: an empty line is no second
+          # key (review pass 3).
+          grep -qx 'LINEAR_API_KEY=' .env.canary.local || { echo "the clearing left no empty LINEAR_API_KEY= line" >&2; exit 1; }
+          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\n' >> .env.canary.local
           # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
           # canary's next upgrade: its write key alone, no forward key. The up
           # mints the forward key, adding its entry to MCP_ACCESS_KEYS beside
@@ -3168,6 +3261,10 @@ jobs:
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
+          grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ] || { echo "up --no-refresh did not bring board-sync back running" >&2; exit 1; }
+          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
+          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
@@ -3581,6 +3678,41 @@ jobs:
           got=$(at_api /v1/whoami "$api_w")
           check "$got" 503 '.code == "BUSY" and .credential == "token"' "whoami, the authorization server stopped and no keys read,"
           [ "$(cut -d' ' -f2 <<<"$got")" = 30 ] || { echo "the 503 for a token with no keys read says Retry-After \"$(cut -d' ' -f2 <<<"$got")\", not 30"; exit 1; }
+          auth rm -sfv auth
+
+      # SMD-3307: the operator GUI signs the operator in through the
+      # authorization server. The AS's side first: the `gui` client signed in
+      # as the GUI does (restart-check.ts --gui-refresh) gets a refresh token,
+      # a refresh rotates it, and once revoked, as the GUI's sign-out revokes
+      # it, it is refused; a second sign-in in that browser without
+      # prompt=login is asked the password all the same, on a grant of its
+      # own that the first one's revocation leaves, and prompt=none is
+      # login_required. Then the GUI itself, recreated on the configured
+      # .env (its OB1_AUTH_SECRET_GUI, the origin) beside a REST core that
+      # takes the AS's tokens, driven through the proxy as a browser would
+      # (dashboard/smoke-oauth.ts): the start, the password and consent at
+      # the AS, the callback opening a session, the views under the token, no
+      # token in any page, header, navigation data, script or cookie (the
+      # Verify line), a replayed, forged, stolen or other browser's callback
+      # refused, a post from another origin refused, sign-out, the next
+      # visitor asked the password, and a denied consent. Every sign-in the
+      # step makes ends revoked, so the AS's store holds no refresh token of
+      # the `gui` client after it: sign-out revoked the GUI's. The password
+      # goes by name, never on a command line.
+      - name: The operator GUI signs in through the authorization server
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
+          # The REST core and the GUI after it, so their first calls look each name up afresh (as the step above does).
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api app
+          OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          export OB1_AUTH_OPERATOR_PASSWORD
+          auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
+          (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test)
+          left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
+          [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
+          # Gone again, as the steps above leave it: the next step meets no authorization server.
           auth rm -sfv auth
 
       # SMD-1846. What the proxy itself owes, beside the smoke:
@@ -4101,11 +4233,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -4123,6 +4250,23 @@ jobs:
       - name: Typecheck
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
+
+      # The service carries no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
