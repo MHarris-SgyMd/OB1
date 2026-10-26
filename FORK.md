@@ -61,6 +61,9 @@ remembered:
   - A shipped table, column or index a client can see is dropped or renamed.
   - The MCP tool surface changes incompatibly: a tool removed, or an argument's
     meaning changed.
+  - A command a shipped image runs loses a flag or a named value, or one changes
+    meaning: `ob1-migrate`'s `migrate.ts` flags and its `--groups` names, for
+    example (SMD-3325 retires `--baseline` this way).
   - A URL, route, port, transport or setting stops answering, where something
     inside the version contract (below) gives it to a configured client. The
     origin root that the proxy's `/mcp` replaced closed this way with 2.0.0
@@ -93,6 +96,10 @@ release ships, and for nothing else:
   - the four opt-in overlays: `compose.api-public.yaml` (`/api`),
     `compose.hooks-public.yaml`, `compose.grafana-port.yaml` and
     `compose.grafana-public.yaml`.
+
+The authorization server (`deploy/auth/`) is inside through `compose.yaml`'s
+`auth` profile. It ships as source, not as an image, so that profile needs a
+checkout until SMD-3328 publishes one.
 
 A URL, route, port or setting that any of these gives a client falls under the
 MAJOR rule. Outside the contract nothing is a MAJOR: a removal there is a
