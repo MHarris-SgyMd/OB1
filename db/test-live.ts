@@ -15794,8 +15794,8 @@ if (want("38b")) {
   };
   const lines: string[] = [];
   /**
-   * A --follow scheduler (quiet and poll 1 s, scaled) woken 3.5 s scaled into
-   * every sleep by a logged search, until `done` holds or `cap` sleeps have
+   * A --follow scheduler (quiet and poll 1 s, scaled) woken 3.5 s, scaled,
+   * into every sleep by a logged search, until `done` holds or `cap` sleeps have
    * begun: the sleeps it took, and its exit code once stopped — bounded, so a
    * scheduler that never gets there fails its assertion rather than hanging
    * the suite.
@@ -15839,8 +15839,8 @@ if (want("38b")) {
   try {
     // The ticket's reproduction (review pass 2 of SMD-1794): one thought
     // longer than every sleep — six windows of a second each against sleeps
-    // of 3.5 s, both scaled — captured first, so it is the first claim; six short ones; a
-    // pair for consolidation to judge, days apart on one axis.
+    // of 3.5 s, both scaled — captured first, so it is the first claim; six
+    // short ones; a pair for consolidation to judge, days apart on one axis.
     const longText = Array.from({ length: 6 }, (_, p) => `The longdoc chapter ${p}. ${Array.from({ length: 24 }, (__, i) => `Line ${p}.${i} of the longdoc.`).join(" ")}`).join("\n\n");
     const long = await capture(longText, 0, 5);
     const shorts: string[] = [];
