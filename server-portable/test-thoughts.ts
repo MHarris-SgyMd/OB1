@@ -2726,21 +2726,25 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   // Each version's three hashes, kept as a version is retired: the text must be the current version's, and a version's
   // pins are never rewritten, so a changed word needs SUBJECT_PROMPT_VERSION moved too (review pass 1: re-pinning the
   // hash under the same version passed). Version 1 is SMD-3299's round 4 own question, PR 2's. Version 2's were set
-  // again once before it shipped, when review pass 2 had it ask for one subject.
+  // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a digest, a
+  // closing message's ticket and a session's last message their words.
   const PINNED: Record<number, string[]> = {
     1: ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"],
-    2: ["a7a925ea8a3626cad6a22b95bc3cfd6b525b93cb8ba3d10b6f8774542d489fde", "d57799f1e8582fc6182f3a0a75404226613ef54b364fa9cdea25ef9ab2a7ea55", "074d9cdba3809b3f3dfc2a065cc0f6a706733f05a4cfc88b63623bcd7cd0f174"],
+    2: ["f69b6daaaca60cacd6b4d5e7e14c75a1ad3b31a862fb61d55d47e7c9a7109bbb", "7842c76795e54d24e805cadad249c6f5185a05522ab19f3072b3594c79ee4dc3", "fe2148e5b4304b4c8ebc7a6781f3ad93d2a1c6b3883b5dc639e8585ae15d99b4"],
   };
   assert(SUBJECT_PROMPT_VERSION === Math.max(...Object.keys(PINNED).map(Number)), `the question's version is the newest pinned (${SUBJECT_PROMPT_VERSION})`);
   sides.forEach((s, i) => {
     const m = ownSubjectMessages(s);
     assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === PINNED[SUBJECT_PROMPT_VERSION]?.[i], `the question is version ${SUBJECT_PROMPT_VERSION}'s, word for word (thought ${i + 1})`);
   });
-  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "8d1348e16b7c845cc548c64fb6694f451bab157fcdd276cbe43e03b363d2ca1e", "…and the fixed text a recipe's prompt_hash names");
+  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "dbf0ad8722d04a62a680587c4710b53c308d1b6409e2b7f3de58f07345b795c5", "…and the fixed text a recipe's prompt_hash names");
   const q = ownSubjectMessages(sides[0])[0].content;
   assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket does not change its subject")
       && OWN_RULES.includes("**A thought is mainly about a component") && !q.includes("Step 2") && !q.includes("third subject") && !MEDIATED_TEST.includes("A follow-up the session files"),
     "the subject's own rules: a session's work, where its header's ticket comes from, the component rule; no pair test, no step 2");
+  assert(OWN_RULES.includes("show together, not its last message alone") && OWN_RULES.includes("nor does a ticket its closing message offers or asks about")
+      && OWN_RULES.includes("**a note reporting several separate things, such as a digest or a board review:** the note itself, not one of the things it reports"),
+    "a session's last message alone, a ticket its closing message offers, and a note reporting several things each have their words (review pass 5)");
   assert(OWN_ANSWER.includes("one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_RULES.includes("take the one the session mainly worked on") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
     "the answer's shape: one thing, a ticket by its id alone, a PR only for no ticket's work, one ticket of several (review pass 2); the prompt's fixed text, which the recipe hashes, holds no thought");
 

@@ -190,7 +190,7 @@ import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egr
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
-import { recordSubject, sweepSubjects } from "./subject-sweep.ts";
+import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -1251,7 +1251,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // Read after the call: every worker in hand may try at once.
         if (!subjecting) return;
         subjecting = false;
-        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own INSERT on thought_facets and the writes on derivations; a running follower takes it up once restarted`);
+        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own ${DOOR_GRANTS}; a running follower takes it up once restarted`);
         return;
       }
       if (saidSubject.passing) return;

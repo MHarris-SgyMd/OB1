@@ -3059,8 +3059,9 @@ at a time without a lease, the door's lock and fingerprint check making a sweep
 beside the pass safe. An answer naming nothing records nothing, so the next
 sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
 its thought is asked again at every sweep, and counted in the summary, until
-SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` takes
-thoughts in id order, so such a thought is taken first again. A run's summary
+SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` counts
+each thought taken, in id order from the first, so such a thought is taken first
+again, as is one a `--subjects rules` run leaves to the model. A run's summary
 counts the subjects it recorded in place of a standing one, and how many of those
 took a new key. One that is not
 JSON with a subject records nothing either, is said, and exits 1, as the pass
@@ -3068,7 +3069,8 @@ fails a malformed answer. A changed judge model leaves its predecessor's
 subjects standing, current at the same question: nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
 been measured on the question (the stable brain's, today). On a brain upgraded
-from version 1 it leaves every thought the model must answer under its old
+from version 1 it finds every filed ticket again, unchanged, under the metadata
+rule's own key, and leaves every thought the model must answer under its old
 subject, out of date and counted, until a run with the model. There the
 extraction pass, too, finds an edited thought's subject only when a rule keys it:
 an edited note version 1 keyed by its first line keeps its old subject at its old
@@ -3078,7 +3080,8 @@ refuses the sweep before any; the rules alone send nothing. On a brain before
 111, or under a role without the door's grants, the pass records no subject and
 says so once, its entities standing; the sweep refuses either by name before
 any question, exit 2. A dry run reads on through a signal, as the pass's does.
-Sleep does not run the sweep yet (SMD-3306).
+Sleep does not run the sweep yet: each run reads every thought, its count and its
+pages, whatever is left to do, which SMD-3306 PR 4 bounds first.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,

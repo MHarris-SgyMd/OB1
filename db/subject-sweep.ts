@@ -17,11 +17,17 @@
  * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
  * whose text moved since their subject was found, and those whose subject a rule or question found that has changed since.
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
- * pass key, so a changed rule finds again the subjects it found, and those alone.
+ * pass key, so a changed rule finds again the subjects it found, and those alone. Version 1's one key for both rules
+ * is taken whole, once: its filed tickets are found again unchanged, under the metadata rule's own key (review pass 5).
  * It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
+ *
+ * Each run reads every thought, its count and its pages, whatever is left to do: a run by hand, at a brain's size
+ * today. PR 4 bounds that before sleep runs the sweep (review pass 5: the count took 5.9 s over a million thoughts on
+ * PGlite, so at a billion it alone would outrun sleep's statement timeout). `--limit` counts each thought taken, in
+ * id order from the first, so one a run leaves, to the model or unanswered, is taken first again by the next.
  *
  * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
@@ -50,8 +56,8 @@ import { databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 /** 111's door, by its signature: the sweep's one write. */
 const DOOR = "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)";
 
-/** What the door needs of the role that calls it (111's comment), and where each grant comes from. */
-const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT and UPDATE on derivations (the capture group's)";
+/** What the door needs of the role that calls it (111's comment), and where each grant comes from: the sweep's refusals and the pass's say this. */
+export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT and UPDATE on derivations (the capture group's)";
 
 /** What record_thought_subject answers. */
 export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; id?: string; stale?: boolean; gone?: boolean };

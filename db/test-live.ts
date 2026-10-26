@@ -6856,8 +6856,8 @@ if (want("10h")) {
         await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-10", "as the role reads it: smd-10")})`;
         const rolePass = await extractRun({}, sUrl, sEnv);
         const saidRole = rolePass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
-        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]),
-          `…and the pass under it extracts, its entities standing, and says once that it records no subject (exit ${rolePass.code}, ${saidRole.length} line(s))`);
+        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]) && /UPDATE on thoughts \(its row lock\)/.test(saidRole[0]),
+          `…and the pass under it extracts, its entities standing, and says once that it records no subject, naming every grant the door needs (exit ${rolePass.code}, ${saidRole.length} line(s))`);
         const structure = await migrateInProcess({ grant: SROLE, groups: "structure" });
         assert(structure.code === 0, `the role is granted structure too (exit ${structure.code})`);
         await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
