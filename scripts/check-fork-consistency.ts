@@ -7474,14 +7474,24 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
   // `code`, where comments are blanked, and must open an object entry, right after `{` or `,`, so a ternary's `:`, a
   // label or a call's argument is not one; an env's `ORIGIN` or a `cors({ origin })` is not a header.
   const withStrings = blanked(text, false);
+  /** The last code character at or before `i` that is not a space. */
+  const back = (i: number) => {
+    while (i >= 0 && /\s/.test(code[i])) i--;
+    return i;
+  };
+  /** The word ending at `end` in `code`, and the code character before it, with where that sits. */
+  const wordBefore = (end: number) => {
+    let w = end;
+    while (w >= 0 && /[\w$]/.test(code[w])) w--;
+    const p = back(w);
+    return { word: code.slice(w + 1, end + 1), prev: code[p] ?? "", prevAt: p };
+  };
   const headerKey = (m: RegExpMatchArray & { index: number }): boolean => {
     let q = m.index;
     while (q > 0 && code[q] === " ") q--; // back to the string's opening quote or backtick
-    let k = q - 1;
-    while (k >= 0 && /\s/.test(code[k])) k--;
+    const k = back(q - 1);
     if (code[k] !== ":") return false;
-    let e = k - 1;
-    while (e >= 0 && /\s/.test(code[e])) e--;
+    const e = back(k - 1);
     let start = e;
     let key = "";
     if (code[e] === '"' || code[e] === "'") {
@@ -7492,8 +7502,7 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
       while (start >= 0 && /[\w$]/.test(code[start])) start--;
       key = withStrings.slice(++start, e + 1);
     }
-    let b = start - 1;
-    while (b >= 0 && /\s/.test(code[b])) b--;
+    const b = back(start - 1);
     if (code[b] !== "{" && code[b] !== ",") return false;
     const named = /^(?:origin|referer)$/i.test(key) || (/^host$/i.test(key) && !withStrings.slice(q, m.index).includes("://"));
     if (!named) return false;
@@ -7505,26 +7514,13 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
       o = (code[o] === ")" || code[o] === "]" || code[o] === "}") && match[o] >= 0 ? match[o] - 1 : o - 1;
     }
     if (o < 0) return false;
-    let before = o - 1;
-    while (before >= 0 && /\s/.test(code[before])) before--;
-    // The word ending at `end` in `code`, and the code character before it.
-    const wordBefore = (end: number) => {
-      let w = end;
-      while (w >= 0 && /[\w$]/.test(code[w])) w--;
-      let p = w;
-      while (p >= 0 && /\s/.test(code[p])) p--;
-      return { word: code.slice(w + 1, end + 1), prev: code[p] ?? "", prevAt: p };
-    };
+    const before = back(o - 1);
     if (code[before] === "(") {
-      let ce = before - 1;
-      while (ce >= 0 && /\s/.test(code[ce])) ce--;
-      const callee = wordBefore(ce);
+      const callee = wordBefore(back(before - 1));
       return callee.word === "Headers" && wordBefore(callee.prevAt).word === "new" && callee.prev !== ".";
     }
     if (code[before] !== ":") return false;
-    let ke = before - 1;
-    while (ke >= 0 && /\s/.test(code[ke])) ke--;
-    const key2 = wordBefore(ke);
+    const key2 = wordBefore(back(before - 1));
     return key2.word === "headers" && (key2.prev === "{" || key2.prev === ",");
   };
   for (const m of withStrings.matchAll(/\blocalhost:(?:\$\{|["'`]\s*\+)/gi)) {
