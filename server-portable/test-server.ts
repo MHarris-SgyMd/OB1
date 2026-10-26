@@ -4660,7 +4660,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
       && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
     `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
   // Through the operation, on a store answering as 088 does — and as a database before it does.
-  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), logActions: async () => {} } as never), door: "test" });
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
   const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
   const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
   const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);

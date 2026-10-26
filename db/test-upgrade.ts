@@ -551,8 +551,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 107 (the listing caps the walks it runs, SMD-3036), 108 (a keyed
   // rebuild of 071's mirror for a status-set change, SMD-3160), 109
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
-  // listing pages, SMD-3249) and 111 (a thought's own subject
-  // recorded, SMD-3306)
+  // listing pages, SMD-3249), 111 (a thought's own subject
+  // recorded, SMD-3306) and 112 (a thought's client_key, one thought
+  // per key, SMD-3314)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -698,13 +699,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // key's shape, its write, two indexes, a drop trigger and the lineage
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
-  // ([20bc]) — all
+  // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
+  // refusing by name rows that share one ([20bd]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 82, `030 is among the last eighty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 83, `030 is among the last eighty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4981,6 +4983,42 @@ console.log("\n[20bc] Migration 111: refused by name without 016, 042, 061, 084 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the111 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === before,
     "a re-apply is a no-op: every facet, lineage row and thought as it was");
+  await sql.close();
+}
+
+console.log("\n[20bd] Migration 112: onto a populated brain at the file before it — thoughts with metadata, a caller's client_key among them, standing as they were, and one thought per key after it; rows a caller left sharing a key refused by name, nothing built, then applied once they are cleared; a re-apply a no-op (SMD-3314)");
+{
+  const the112 = MIGRATIONS.find((f) => f.endsWith("_thought_client_key.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the112 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const key = "0d3f4e1a-2b3c-4d5e-8f60-718293a4b5c6";
+  // A brain before 112: a caller's metadata could set client_key like any key of its own (SMD-2014).
+  for (const [i, meta] of [{ source: "mcp" }, { source: "mcp", client_key: key }, { source: "mcp", note: "kept" }].entries())
+    await sql`SELECT upsert_thought(${`upgrade 112: thought ${i}`}::text, ${{ metadata: meta, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const index = async () => String((await sql`SELECT pg_get_indexdef(to_regclass('thoughts_client_key_unique')) AS d`)[0].d ?? "");
+
+  // A second row sharing the key: refused by name, nothing built, nothing recorded.
+  await sql`SELECT upsert_thought('upgrade 112: a second caller''s copy of the key'::text, ${{ metadata: { source: "mcp", client_key: key }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`;
+  const shared = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 }).then(() => "applied", (e: Error) => e.message);
+  assert(/^migration 112: 1 metadata\.client_key value\(s\) are kept by more than one thought \(the first: 0d3f4e1a-/.test(shared) && (await index()) === "",
+    `rows sharing a key: refused by name, no index built (${shared.slice(0, 100)})`);
+  await sql`UPDATE thoughts SET metadata = metadata - 'client_key' WHERE content = 'upgrade 112: a second caller''s copy of the key'`;
+
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
+  assert((await rows()) === before && (await audits()) === auditBefore && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()),
+    "cleared, the file builds the index and moves nothing it finds: every thought and audit row as it was, the caller's key kept");
+  const dup = await sql`SELECT upsert_thought('upgrade 112: a third copy'::text, ${{ metadata: { source: "mcp", client_key: key }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector) AS r`.then(() => "admitted", (e: Error) => e.message);
+  assert(/thoughts_client_key_unique/.test(dup), `after it, one thought per key (${dup.slice(0, 80)})`);
+  const moved = await sql`UPDATE thoughts SET metadata = metadata || ${{ client_key: "0d3f4e1a-2b3c-4d5e-8f60-718293a4b5c7" }}::jsonb WHERE content = 'upgrade 112: thought 1'`.then(() => "applied", (e: Error) => e.message);
+  assert(/^client_key is set once: thought /.test(moved), `…and the caller's key, kept from before, is set once: a write moving it refused (${moved.slice(0, 80)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
+  assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
   await sql.close();
 }
 
