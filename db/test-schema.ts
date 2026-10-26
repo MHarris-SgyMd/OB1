@@ -15876,6 +15876,63 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
 
+console.log("\n[100] Migration 112: a thought's client_key — a unique btree on thoughts ((metadata->>'client_key')), partial on the value being there, its comment and sentinel naming it; one thought per key, rows without one never colliding; a re-apply a no-op; rows already sharing a key refused by name before the build; another shape, another table or an INVALID index under the name refused by name (SMD-3314)");
+{
+  const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_client_key_unique')) AS d`)).rows[0].d ?? "";
+  const d = await def();
+  assert(/^CREATE UNIQUE INDEX thoughts_client_key_unique ON public\.thoughts USING btree \(\(\(metadata ->> 'client_key'::text\)\)\) WHERE \(\(metadata ->> 'client_key'::text\) IS NOT NULL\)$/.test(d),
+    `thoughts_client_key_unique is a unique btree on the key, partial on its being there (${d || "absent"})`);
+  const c = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass('thoughts_client_key_unique'), 'pg_class') AS c`)).rows[0].c ?? "";
+  const file = files.find((f) => f.endsWith("_thought_client_key.sql")) ?? "no _thought_client_key.sql";
+  const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
+  assert(/Migration 112 \/ SMD-3314/.test(c) && /ob1:client-key-one-thought/.test(src), `…its comment naming the migration, and the file its sentinel (${c.slice(0, 60)})`);
+
+  // One thought per key; rows with no key, or a non-object metadata, never collide.
+  const k = "0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a";
+  await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] keyed', $1::jsonb), ('[100] plain one', '{}'), ('[100] plain two', '{}'), ('[100] null meta', NULL)`, [JSON.stringify({ client_key: k })]);
+  let dup = "";
+  try { await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] the same key again', $1::jsonb)`, [JSON.stringify({ client_key: k })]); } catch (e) { dup = (e as Error).message; }
+  assert(/thoughts_client_key_unique/.test(dup), `a second thought with the key is refused (${dup.slice(0, 80) || "accepted"})`);
+  // A table this small is read whole by choice: sequential scans off, the plan says whether the index can serve.
+  await db.exec(`SET enable_seqscan = off`);
+  const plans = (await db.query<Record<string, string>>(`EXPLAIN SELECT id FROM thoughts WHERE metadata->>'client_key' = '${k}'`)).rows.map((r) => Object.values(r)[0]).join(" ");
+  await db.exec(`RESET enable_seqscan`);
+  assert(/thoughts_client_key_unique/.test(plans), `the servers' read of a key can walk the index — an equality implies its predicate (${plans.slice(0, 120)})`);
+
+  // Re-applied, nothing moves.
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  assert(again.endsWith("_thought_client_key.sql") && (await def()) === d, `112 applied again changes nothing (${again.slice(0, 80)})`);
+
+  const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
+  // Rows already sharing a key — a caller's metadata could set it before 112 — refused by name before the build.
+  await db.exec(`DROP INDEX thoughts_client_key_unique`);
+  await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] a caller''s copy of the key', $1::jsonb)`, [JSON.stringify({ client_key: k })]);
+  const shared = await refusal();
+  assert(/migration 112: 1 metadata\.client_key value\(s\) are kept by more than one thought \(the first: 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a\) — a caller's metadata set them before 112 reserved the key\. Keep one thought per value/.test(shared) && (await def()) === "",
+    `rows sharing a key: refused by name, no index built (${shared.slice(0, 140)})`);
+  await db.exec(`UPDATE thoughts SET metadata = metadata - 'client_key' WHERE content = '[100] a caller''s copy of the key'`);
+  await reapply(file);
+  assert((await def()) === d, "the duplicate cleared, the file builds the index in its shape");
+
+  // Anything else under the name is refused (100's rule).
+  await db.exec(`DROP INDEX thoughts_client_key_unique; CREATE INDEX thoughts_client_key_unique ON thoughts ((metadata->>'client_key')) WHERE (metadata->>'client_key') IS NOT NULL`);
+  const notUnique = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is not a unique btree on thoughts \(\(metadata->>'client_key'\)\) WHERE that value IS NOT NULL — CREATE INDEX thoughts_client_key_unique/.test(notUnique),
+    `the shape without UNIQUE: refused, naming what it is (${notUnique.slice(0, 140)})`);
+  await db.exec(`DROP INDEX thoughts_client_key_unique; CREATE TABLE tu_keyed (metadata jsonb); CREATE UNIQUE INDEX thoughts_client_key_unique ON tu_keyed ((metadata->>'client_key')) WHERE (metadata->>'client_key') IS NOT NULL`);
+  const other = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is not a unique btree on thoughts .+ ON public\.tu_keyed /.test(other), `the shape on another table: refused, naming it (${other.slice(0, 140)})`);
+  await db.exec(`DROP TABLE tu_keyed`);
+  await reapply(file);
+  // Last, and put back in place: a DROP after this catalog write fails inside PGlite ([90]).
+  await db.exec(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
+  const invalid = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is INVALID — a CONCURRENTLY build or drop that did not finish/.test(invalid), `an INVALID index in the shape: refused, naming it (${invalid.slice(0, 120)})`);
+  await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

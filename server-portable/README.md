@@ -816,6 +816,39 @@ one told to use the operator's own key — and a database before 086 is named in
 fault; the REST core answers the code and its status. `thought_changes` reads the event
 as "reset by <key>", and a decline's line names the reset as the way out.
 
+## A write copied to another brain: `client_key` (SMD-3314)
+
+A thought captured on two brains separately gets two ids, while an edit, a delete or a
+`supersedes` names a thought by the id the brain that made it gave it. A client that
+repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`** on
+`capture_thought`: a UUID, by convention the thought's id on the brain where it was
+first written. The copy keeps it as `metadata.client_key`, one thought per key
+(migration 112's unique index), and every name a write takes resolves to **the thought
+with that id, else the one keeping it as its key**: `update_thought`'s and
+`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
+second brain the same ids it sent the first. A thought a refresh copied has the same id
+on both brains, and a key equal to it names that thought.
+
+- **A key that names a thought already** (as its id or its key) returns that thought
+  and writes nothing, with no model call: `Already captured — id …`, `clientKey:
+  "matched"` beside it. A retried copy, or copies racing under one key, make one
+  thought; the loser of a race is answered the same way.
+- **A key that names nothing** is kept on the new row (`clientKey: "recorded"`), and on
+  a re-capture of text already a thought it is merged onto that row, as 080's merge
+  takes a write key's metadata. A row already keeping another key keeps it
+  (`clientKey: "held"`, with `heldKey` when it is a key's shape): the reply says the
+  key given was not recorded and names nothing here.
+- **Only a key that can read** sends one. A capture-only key is refused
+  (`REFUSED_CLIENT_KEY_SCOPE`, 403 over REST), as the match would tell it whether an id
+  exists (SMD-1298), and its names stay ids. A key that is not a UUID is
+  `REFUSED_CLIENT_KEY_SHAPE` (400).
+- **The key is set once.** `metadata.client_key` in a capture's `metadata`, or a
+  `metadata_patch` naming it, is `REFUSED_METADATA_SHAPE` (`reserved_key`). A deleted
+  thought's key goes with it, and is free again.
+- An edit or a delete that reached its thought by a key says so (`, named by its
+  client_key …`, `byClientKey` beside it); one by the thought's own id says nothing.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the

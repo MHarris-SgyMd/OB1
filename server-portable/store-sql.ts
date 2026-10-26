@@ -940,6 +940,30 @@ export class SqlStore implements ThoughtStore {
     return new Set((rows as { id: string }[]).map((r) => String(r.id).toLowerCase()));
   }
 
+  async thoughtsNamed(names: string[]): Promise<Map<string, string>> {
+    const valid = idList(names);
+    if (valid.length === 0) return new Map();
+    // The id first: a thought a refresh copied has its source's id, and a key
+    // equal to it names that thought. The key's arm reads 112's partial
+    // unique index (an equality implies its IS NOT NULL predicate).
+    const rows = await this.sql`
+      SELECT n.name, COALESCE(
+        (SELECT t.id::text FROM thoughts t WHERE t.id = n.name::uuid),
+        (SELECT t.id::text FROM thoughts t WHERE t.metadata->>'client_key' = n.name)) AS id
+      FROM unnest(${this.sql.array(valid, "TEXT")}::text[]) AS n(name)`;
+    const named = new Map<string, string>();
+    for (const r of rows as { name: string; id: string | null }[]) if (r.id) named.set(r.name, String(r.id).toLowerCase());
+    return named;
+  }
+
+  async keyAtText(content: string): Promise<{ id: string; clientKey: string | null } | null> {
+    const rows = await this.sql`
+      SELECT id::text AS id, metadata->>'client_key' AS client_key FROM thoughts
+      WHERE content_fingerprint = content_fingerprint_of(${content}::text) LIMIT 1`;
+    const r = rows[0] as { id: string; client_key: string | null } | undefined;
+    return r ? { id: String(r.id).toLowerCase(), clientKey: r.client_key ?? null } : null;
+  }
+
   async traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]> {
     if (!UUID_RE.test(opts.id)) return [];
     // Migration 025. NULLs pass the function's own defaults (and its clamps).

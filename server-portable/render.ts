@@ -61,7 +61,7 @@ const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto)$|Id$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -1202,7 +1202,9 @@ function metadataShape(r: Extract<Refusal, { code: "REFUSED_METADATA_SHAPE" }>):
   switch (r.problem) {
     case "too_many_keys": return `Refused: \`metadata\` carries ${r.count} keys — at most ${META_KEYS_MAX}.`;
     case "bad_key": return `Refused: the \`metadata\` key "${k.slice(0, 40)}" must be lower-case letters, digits and underscores, 2–40 characters, starting with a letter.`;
-    case "reserved_key": return `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
+    case "reserved_key": return k === "client_key"
+      ? "Refused: `client_key` is set once, by capture_thought's own `client_key` argument — not through `metadata`, and no patch moves it."
+      : `Refused: \`metadata.${k}\` is set by the server, not the caller — use the \`source\` argument for the origin label; drop the rest.`;
     case "ticket_key": return `Refused: \`metadata.${k}\` is one of the keys a ticket's lifecycle is read from, which a capture-only key may not set (${TICKET_META_KEYS_TEXT}) — drop it, or capture with a key that can write.`;
     case "bad_value": return `Refused: \`metadata.${k}\` must be a string, number or boolean.`;
     case "value_too_long": return `Refused: \`metadata.${k}\` is ${r.length} characters — at most ${META_VALUE_MAX}.`;
@@ -1215,6 +1217,8 @@ function captureRefusal(r: Refusal): string {
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
     case "REFUSED_DERIVED_FROM_SHAPE": return `Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${r.value.slice(0, 40)}".`;
     case "REFUSED_METADATA_SHAPE": return metadataShape(r);
+    case "REFUSED_CLIENT_KEY_SHAPE": return `Refused: \`client_key\` must be a UUID — by convention the thought's id on the brain the write was first made on — not "${r.value.slice(0, 40)}".`;
+    case "REFUSED_CLIENT_KEY_SCOPE": return "Refused: `client_key` needs a key that can read — a capture-only key cannot send one. Capture without it.";
     case "SUPERSEDES_UNJUDGED":
       return r.cause === "check_failed"
         ? `Error: this key's \`supersedes\` could not be checked against the target's capture record (${r.detail})${r.noPrivilege ? " — the server role needs SELECT on thought_audit and thoughts: cd db && bun migrate.ts --grant <role> --url $DATABASE_URL" : ""}.`
@@ -1243,10 +1247,14 @@ const safeCapture: Safe<Captured> = (v) => ({
   // The outcome, and for a settle by a restamp whether the label is the
   // caller's — "settled" alone cannot say (review pass 1).
   ...(v.label ? { label: v.label.outcome, ...(v.label.outcome === "settled" && v.label.by === "restamp" ? { labelMine: v.label.mine } : {}) } : {}),
+  // What became of a client_key (SMD-3314): a reader's alone, as only a reader may send one.
+  ...(v.keyed ? { clientKey: v.keyed, ...(v.heldKey ? { heldKey: v.heldKey } : {}) } : {}),
 });
 
 export function renderCapture(o: Outcome<Captured>): Reply {
   return render(o, (v) => {
+    // A key that names a thought already (SMD-3314): that thought, nothing written.
+    if (v.keyed === "matched") return `Already captured — id ${v.id}: a thought there already has the \`client_key\` given as its id or its key, so nothing was written and no model was called.`;
     const meta = v.tags;
     const { existed, reader, embeddings, chat, chunks, contextFailures } = v;
     // The id, because update_thought and delete_thought take one. Without it
@@ -1301,6 +1309,8 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     }
 
     confirmation += explainRecaptureLabel(v);
+    // The text's row keeps another key (SMD-3314): this one names nothing here.
+    if (v.keyed === "held") confirmation += `\n\nNote: this text was already a thought keeping a \`client_key\` of its own${v.heldKey ? ` (${v.heldKey})` : ""}, which it keeps; the key given here was not recorded, so it names no thought on this brain — name this one by its id, ${v.id}.`;
 
     // A chunk whose situating blurb could not be generated is embedded bare
     // and stored with a NULL context, which is a legitimate state and a
@@ -1405,6 +1415,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
 function mutationRefusalText(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_NOTHING_TO_UPDATE": return "Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.";
+    case "REFUSED_METADATA_SHAPE": return metadataShape(r);
     case "REFUSED_SUPERSEDES_SHAPE": return supersedesShape(r.value, r.orNull);
     case "NOT_FOUND":
       return `No thought with id ${r.id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
@@ -1465,7 +1476,7 @@ function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): s
 
 /** update_thought's value: what moved, and the pointers and pair it reports — ids, flags and counts. */
 const safeUpdate: Safe<Updated> = (v) => ({
-  id: v.id, updatedAt: v.updatedAt ?? null, contentChange: v.contentChange, metadataMerged: v.metadataMerged,
+  id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), updatedAt: v.updatedAt ?? null, contentChange: v.contentChange, metadataMerged: v.metadataMerged,
   // The keys alone: the values are the row's, a name not a token.
   ...(v.kept?.length ? { kept: v.kept.map((k) => k.key) } : {}),
   ...(v.supersedes !== undefined ? { supersedes: v.supersedes } : {}),
@@ -1533,7 +1544,7 @@ export function renderUpdate(o: Outcome<Updated>): Reply {
       // sentence rather than a silent partial rewrite.
       v.contextFailures ? `${v.contextFailures} chunks without context` : null,
     ].filter(Boolean).join(", ");
-    return `Updated ${v.id} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${explainKept(v)}${
+    return `Updated ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} (${what}).\nupdated_at: ${v.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(v)}${explainHeadWindow(v.headWindow)}${explainKept(v)}${
       v.noVectorReason !== undefined
         ? `\n\nNote: saved WITHOUT a vector — ${v.noVectorReason}. It is findable by exact text, and joins semantic search once the egress policy allows the call (a changed policy takes effect when the server restarts): the server then embeds it by itself (SMD-2889).`
         : ""}`;
@@ -1553,8 +1564,8 @@ function explainDetached(r: Deleted): string {
 }
 
 export function renderDelete(o: Outcome<Deleted>): Reply {
-  return render(o, (v) => `Deleted ${v.id}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
-    mutationRefusalText, (v) => ({ id: v.id, detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
+  return render(o, (v) => `Deleted ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""}. Its previous content is preserved in the audit trail.${explainDetached(v)}`,
+    mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
 
 /**
