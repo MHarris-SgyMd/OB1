@@ -24,7 +24,7 @@
 	{/if}
 
 	{#if data.state === 'unreachable'}
-		<p class="text-sm text-amber-300" role="alert" data-testid="unreachable">The authorization server did not answer, so its grants cannot be shown. Start it again on the brain’s machine (<code>compose up -d --wait auth</code>, with the stack’s other files); a server built before this page has no listener for it, and is rebuilt with <code>compose up -d --build --wait auth</code>.</p>
+		<p class="text-sm text-amber-300" role="alert" data-testid="unreachable">The authorization server did not answer, so its grants cannot be shown (a server just started again shows within 30 seconds). Start it again on the brain’s machine (<code>compose up -d --wait auth</code>, with the stack’s other files); a server built before this page has no listener for it, and is rebuilt with <code>compose up -d --build --wait auth</code>.</p>
 	{:else if data.state === 'locked'}
 		<p class="text-sm text-amber-300" role="alert" data-testid="locked">The authorization server is turning the dashboard away for now, after refusing its credentials too often: <code>OB1_AUTH_SECRET_GUI</code> in <code>deploy/.env</code> may not match the server’s. Set it and recreate <code>auth</code> and <code>app</code>; otherwise the server takes the dashboard again within 15 minutes.</p>
 	{:else if data.state === 'refused'}

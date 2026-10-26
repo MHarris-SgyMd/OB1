@@ -48,7 +48,7 @@
  *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --hold-grant > held.json
  *   compose exec -T auth bun restart-check.ts --admin
  *   compose exec -T auth bun restart-check.ts --refused < held.json
- *   compose exec -T auth bun restart-check.ts --admin-lockout   # last: it locks 127.0.0.1 out for 15 min
+ *   compose exec -T auth bun restart-check.ts --admin-lockout   # locks the container's own address out for 15 min
  *
  * The page of grants (SMD-3307 PR 3). `--hold-grant` registers a public
  * client that may refresh, signs the operator in for it with
@@ -59,13 +59,12 @@
  * client's own and a wrong secret are 401, the GUI's lists the grants, and the
  * routes refuse other methods and shapes. `--refused` refreshes with the held
  * token and passes only on 400 `invalid_grant`, which the grant's revocation
- * makes. `--admin-lockout` sends wrong secrets from 127.0.0.1 until it is
- * turned away, which must come by the 21st failure (--admin's own refusals
- * count), after at least one 401, and then holds the GUI's own credentials
- * from that address to 429 too, with a Retry-After: the failure limit
- * (review pass 1). It leaves the
- * address locked out for the window, so it runs after everything else that
- * calls the listener from inside the container.
+ * makes. `--admin-lockout` dials the container's own address on the mesh,
+ * not 127.0.0.1, so the listener sees an address --admin never used: 20
+ * wrong secrets each 401, the 21st 429 with a Retry-After, and the GUI's own
+ * credentials from that address 429 too — the failure limit, 20 in the window
+ * (review passes 1 and 2). It leaves that address locked out for the window;
+ * nothing else dials it.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -429,29 +428,26 @@ if (process.argv.includes("--register")) {
   console.log(`the admin listener: ${rows.length} rules hold (${listed.body?.grants?.length} grant(s) listed)`);
 } else if (process.argv.includes("--admin-lockout")) {
   const guiSecret = process.env.OB1_AUTH_SECRET_GUI ?? "";
-  if (!guiSecret) {
-    console.error("--admin-lockout needs OB1_AUTH_SECRET_GUI in its environment");
+  // The container's own address on its networks: a source no other mode uses, so its count starts at none.
+  const own = Object.values((await import("node:os")).networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+  if (!guiSecret || !own) {
+    console.error(`--admin-lockout needs OB1_AUTH_SECRET_GUI in its environment and an address of its own (${own ?? "none found"})`);
     process.exit(2);
   }
-  const at = (secret: string) => fetch("http://127.0.0.1:3001/grants", { headers: { authorization: `Basic ${btoa(`gui:${encodeURIComponent(secret)}`)}` } }).then(async (r) => {
+  const at = (secret: string) => fetch(`http://${own}:3001/grants`, { headers: { authorization: `Basic ${btoa(`gui:${encodeURIComponent(secret)}`)}` } }).then(async (r) => {
     await r.body?.cancel();
     return { status: r.status, retry: r.headers.get("retry-after") };
   });
-  // Wrong secrets until the address is turned away: at most 21, since --admin's refusals from this address count too.
   const refused: number[] = [];
-  let past = { status: 0, retry: null as string | null };
-  for (let i = 0; i < 21 && past.status !== 429; i++) {
-    past = await at(`${guiSecret}-wrong-${i}`);
-    if (past.status !== 429) refused.push(past.status);
-  }
-  const again = await at(`${guiSecret}-wrong`);
+  for (let i = 0; i < 20; i++) refused.push((await at(`${guiSecret}-wrong-${i}`)).status);
+  const past = await at(`${guiSecret}-wrong`);
   const right = await at(guiSecret);
-  const holds = refused.length > 0 && refused.every((c) => c === 401) && past.status === 429 && Number(past.retry) > 0 && again.status === 429 && right.status === 429;
+  const holds = refused.every((c) => c === 401) && past.status === 429 && Number(past.retry) > 0 && right.status === 429;
   if (!holds) {
-    console.error(`the admin listener's failure limit: wrong secrets answered ${refused.join(",") || "nothing"} then ${past.status} (Retry-After ${past.retry ?? "none"}), the next ${again.status}, the right one after them ${right.status}: not 401s, then 429 for the address by the 21st failure`);
+    console.error(`the admin listener's failure limit from ${own}: 20 wrong secrets answered ${[...new Set(refused)].join("/")}, the 21st ${past.status} (Retry-After ${past.retry ?? "none"}), the right one after them ${right.status}: not 401 x20, then 429 for the address`);
     process.exit(1);
   }
-  console.log(`the admin listener: ${refused.length} wrong secret(s) 401, then the address turned away (429, Retry-After ${past.retry} s), the GUI's own credentials from it too`);
+  console.log(`the admin listener: 20 wrong secrets 401, the 21st turned away (429, Retry-After ${past.retry} s), the GUI's own credentials from that address too`);
 } else {
   console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope> | --gui-refresh | --hold-grant | --refused | --admin | --admin-lockout");
   process.exit(2);

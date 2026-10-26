@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/private';
 import { base } from '$app/paths';
 import type { Actions, PageServerLoad } from './$types';
 import { oneLine, when } from '$lib/format';
-import { GRANT_ID, grantClient, grantsGate, listGrants, revokeGrant } from '$lib/server/grants';
+import { GRANT_ID, grantClient, grantsGate, grantsState, listGrants, revokeGrant } from '$lib/server/grants';
 import type { OAuthSettings } from '$lib/server/oauth';
 import { read } from '$lib/server/rest';
 import { whoAmI } from '$lib/server/signin';
@@ -17,8 +17,9 @@ import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 // load: a 404 without the AS, a 403 for a session that cannot write, checked at
 // the REST core each time (a session whose grant was revoked ends at its next
 // renewal here as on any page, review pass 1). The AS's reachability is the
-// sign-in page's 30 s probe: with the AS down the page says so at once, not
-// after a call's 10 s timeout.
+// sign-in page's probe, cached 30 s: an AS that stopped is said without a
+// call, one that hangs costs the probe's 2 s rather than a call's 10, and one
+// just started again shows once the cache lapses (review pass 2).
 
 /** The gate, before anything the request says: the AS's settings, or the page's error. */
 async function gate(event: RequestEvent): Promise<OAuthSettings> {
@@ -35,9 +36,9 @@ export const load: PageServerLoad = async (event) => {
 	const said = event.url.searchParams;
 	const notice = said.has('revoked') ? 'revoked' : said.has('gone') ? 'gone' : null;
 	const answer = (await authReachability().reachable()) ? await listGrants(s) : ({ ok: false, unreachable: true } as const);
-	if (!answer.ok) return { state: 'unreachable' in answer ? ('unreachable' as const) : answer.refused === 429 ? ('locked' as const) : ('refused' as const), grants: [], more: false, notice };
+	if (!answer.ok) return { state: grantsState(answer), grants: [], more: false, notice };
 	return {
-		state: 'ok' as const,
+		state: grantsState(answer),
 		notice,
 		more: answer.more,
 		grants: answer.grants.map((g) => ({
@@ -67,7 +68,11 @@ export const actions: Actions = {
 		}
 		if (!GRANT_ID.test(id)) return fail(400, { error: 'That is not a grant this page listed.' });
 		const done = (await authReachability().reachable()) ? await revokeGrant(s, id) : 'unreachable';
-		if (done === 'revoked') throw redirect(303, `${base}/grants?revoked=1`);
+		if (done === 'revoked') {
+			// Who revoked what: the AS's log names the grant and its client, this one the session (review pass 2).
+			console.log(`[dashboard] grant ${id} revoked on the page of grants by ${event.locals.session!.name} on the ${event.locals.breakglass ? 'break-glass port' : 'origin'}`);
+			throw redirect(303, `${base}/grants?revoked=1`);
+		}
 		if (done === 'gone') throw redirect(303, `${base}/grants?gone=1`);
 		if (done === 'refused' || done === 'locked') {
 			console.error(`[dashboard] grants revoke: the authorization server ${done === 'locked' ? 'turned the GUI away after too many refused credentials' : 'refused the GUI’s credentials'}`);

@@ -695,8 +695,10 @@ const admin = serve((req, res) => {
   const route = adminRoute(req.method ?? "", target.path);
   if (route.kind === "list") return answer(res, 200, store.grants());
   if (route.kind === "revoke") {
-    if (!store.dropGrant(route.id)) return answer(res, 404, { error: "not_found", error_description: "no live grant has that id" });
-    console.log(`grant ${route.id} revoked on the operator's page of grants`);
+    const client = store.dropGrant(route.id);
+    if (client === null) return answer(res, 404, { error: "not_found", error_description: "no live grant has that id" });
+    // The client it was for, by what the AS checked (its id); the GUI's log names the session (review pass 2).
+    console.log(`grant ${route.id} of client ${JSON.stringify(client)} revoked on the operator's page of grants`);
     res.writeHead(204, { "cache-control": "no-store" });
     return res.end();
   }

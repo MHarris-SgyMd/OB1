@@ -31,7 +31,7 @@ const session = await import('./src/lib/server/session.ts');
 const { keySignInOffered } = await import('./src/lib/server/signin.ts');
 const { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } = await import('./src/lib/server/listener.ts');
 const { grafanaUrl } = await import('./src/lib/server/grafana.ts');
-const { grantClient, grantsGate, grantsOffered, listGrants, revokeGrant } = await import('./src/lib/server/grants.ts');
+const { grantClient, grantsGate, grantsOffered, grantsState, listGrants, revokeGrant } = await import('./src/lib/server/grants.ts');
 
 let pass = 0;
 let fail = 0;
@@ -308,13 +308,13 @@ console.log('▸ the page of grants (SMD-3307 PR 3)');
 	const failing = (async () => {
 		throw new TypeError('fetch failed');
 	}) as unknown as typeof fetch;
-	const row = { id: 'Gr4nt_id-1', clientId: 'https://client.example/meta.json', clientName: null, accountId: 'operator', scope: 'openid brain:read', resources: [`${ORIGIN}/mcp`], createdAt: 1, renewedAt: 2, expiresAt: 3 };
+	const row = { id: 'Gr4nt_id-1', clientId: 'https://client.example/meta.json', clientName: null, accountId: 'operator', scope: 'openid brain:read', resources: [`${ORIGIN}/mcp`], createdAt: 1, renewedAt: 2, expiresAt: 3, refreshTokens: 2 };
 	const listed = await listGrants(s, answering(200, { grants: [row, { id: 'bad id/../x' }, { id: 7 }, null], more: true }));
 	const sentAuth = new Headers(calls[0]?.init.headers).get('authorization') ?? '';
 	const [id, secret] = Buffer.from(sentAuth.replace(/^Basic /, ''), 'base64').toString().split(':').map((h) => decodeURIComponent(h.replace(/\+/g, ' ')));
 	assert(calls[0]?.url === 'http://auth.ob1.internal.:3001/grants' && id === 'gui' && secret === SECRET, "the listing is the admin listener's on the mesh, port 3001, under the gui client's own credentials as Basic");
-	assert(listed.ok && listed.grants.length === 1 && listed.grants[0].id === row.id && listed.grants[0].resources[0] === `${ORIGIN}/mcp` && listed.more, "…each row read as a grant, one with an id the AS never makes (a path, a number, none) dropped, and `more` kept");
-	assert(JSON.stringify(await listGrants(s, answering(401))) === JSON.stringify({ ok: false, refused: 401 }) && JSON.stringify(await listGrants(s, answering(503))) === JSON.stringify({ ok: false, unreachable: true }) && JSON.stringify(await listGrants(s, failing)) === JSON.stringify({ ok: false, unreachable: true }), '…the GUI\'s credentials refused said as refused; a 503, or no answer at all, as unreachable');
+	assert(listed.ok && listed.grants.length === 1 && listed.grants[0].id === row.id && listed.grants[0].resources[0] === `${ORIGIN}/mcp` && listed.grants[0].refreshTokens === 2 && listed.more, "…each row read as a grant, its live refresh tokens counted, one with an id the AS never makes (a path, a number, none) dropped, and `more` kept");
+	assert(JSON.stringify(await listGrants(s, answering(401))) === JSON.stringify({ ok: false, refused: 401 }) && JSON.stringify(await listGrants(s, answering(503))) === JSON.stringify({ ok: false, unreachable: true }) && JSON.stringify(await listGrants(s, answering(500))) === JSON.stringify({ ok: false, unreachable: true }) && JSON.stringify(await listGrants(s, failing)) === JSON.stringify({ ok: false, unreachable: true }), '…the GUI\'s credentials refused said as refused; a 500 or 503, or no answer at all, as unreachable');
 	assert(JSON.stringify(await listGrants(s, answering(429))) === JSON.stringify({ ok: false, refused: 429 }), '…and a 429, the listener turning the GUI\'s address away after refusing its credentials 20 times, as refused, not as a server down (review pass 1)');
 	calls.length = 0;
 	assert((await revokeGrant(s, row.id, answering(204))) === 'revoked' && calls[0]?.url === `http://auth.ob1.internal.:3001/grants/${row.id}/revoke` && calls[0]?.init.method === 'POST', 'a revoke is a POST to the grant\'s own revoke path: 204 is revoked');
@@ -338,10 +338,12 @@ console.log('▸ the page of grants (SMD-3307 PR 3)');
 	assert(!stale.ok && stale.status === 403 && !downgraded.ok && downgraded.status === 403 && asked === 2, '…and every time, the session itself asked at the REST core: one it no longer answers for, or that can no longer write, is a 403, not trusted on its sign-in\'s flag (review pass 1: a revoked session kept the page for its day)');
 	const passed = await grantsGate(env, { canCapture: true }, who(['thought_stats', 'capture_thought']));
 	assert(passed.ok && passed.settings.secret === SECRET && asked === 3, '…one that still writes passes, with the settings the listener\'s calls need');
+	assert(grantsState({ ok: true, grants: [], more: false }) === 'ok' && grantsState({ ok: false, unreachable: true }) === 'unreachable' && grantsState({ ok: false, refused: 429 }) === 'locked' && grantsState({ ok: false, refused: 401 }) === 'refused', 'the page\'s state for each answer: the grants, the AS down, the GUI turned away (429), its credentials refused (review pass 2)');
 	const g = (over: Record<string, unknown>) => grantClient({ ...row, refreshTokens: 1, ...over } as Parameters<typeof grantClient>[0]);
-	assert(g({ clientId: 'gui' }).label === 'This dashboard' && g({ clientId: 'gui', refreshTokens: 0 }).label === 'This dashboard, unfinished', 'a GUI grant is this dashboard\'s sign-in; one with no refresh token alive, a sign-in never finished, says so (review pass 1: abandoned ones read as live sessions)');
+	assert(g({ clientId: 'gui' }).label === 'This dashboard' && g({ clientId: 'gui', refreshTokens: 0 }).label === 'This dashboard, no refresh token', 'a GUI grant is this dashboard\'s sign-in; one holding no live refresh token, which renews no session (never finished, or idle past 14 days), says so (review passes 1 and 2)');
 	assert(g({}).label === 'client.example' && g({ clientId: 'cid', clientName: 'Claude Code' }).label === '“Claude Code”, as it calls itself' && g({ clientId: 'cid', clientName: '  ' }).label === 'a registered client with no name', '…a metadata-document client by its host, a registered one by the name it gave itself, said as its own');
 	assert(g({ clientId: 'cid', clientName: '\u202eedoc edualC' }).label === '“edoc edualC”, as it calls itself' && !/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/.test(JSON.stringify(g({ clientId: 'c\u2067id', clientName: 'a\u2066b\u200fc' }))), '…without the bidirectional controls that could turn the words around it back to front (review pass 1)');
+	assert(g({ clientId: 'cid', clientName: 'Claude\u200bCode\u00ad\u3164\u3164' }).label === '“ClaudeCode”, as it calls itself' && g({ clientId: 'cid', clientName: 'Z\u0489\u0489\u0489\u0489\u0489' }).label === '“Z\u0489\u0489”, as it calls itself', '…nor the zero-width or format characters and blank fillers that hide what is said, and no more than two marks stacked on a character (review pass 2)');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

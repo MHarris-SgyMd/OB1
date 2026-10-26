@@ -119,17 +119,26 @@ export async function grantsGate(env: Record<string, string | undefined>, sessio
 	return { ok: true, settings };
 }
 
-/** The bidirectional controls, which can turn the words around them back to front (review pass 1: `‮edoc edualC` read as `Claude code`). */
-const BIDI = /[؜‎‏‪-‮⁦-⁩]/g;
+/**
+ * What a client's own words may not carry onto the page: every format character (the bidirectional controls, which
+ * turned `\u202eedoc edualC` into `Claude code`, review pass 1; zero-width ones, the soft hyphen, the BOM), and the
+ * fillers that render blank (review pass 2). Combining marks are kept, at most two on a character: a name may be
+ * accented, not drawn over the rows around it.
+ */
+const HIDDEN = /[\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+const STACKED = /(\p{M}{2})\p{M}+/gu;
+const shown = (v: string) => v.replace(HIDDEN, '').replace(STACKED, '$1');
 
 /**
- * Who a grant is for, in the page's words: this dashboard's sign-ins (one with no refresh token alive is a sign-in
- * never finished, a consent abandoned or an answer the GUI refused, which holds no session); a client named by a
- * metadata document's URL, by its host, which the AS fetched it from; a registered one by its id and the name it gave
- * itself, its own word and said as such, without the controls that could reorder what is said around it.
+ * Who a grant is for, in the page's words: this dashboard's sign-ins (one holding no live refresh token can renew no
+ * session: an answer the GUI never exchanged, or a session idle past the refresh token's 14 days, its grant living on
+ * to 30; review pass 2); a client named by a metadata document's URL, by its host, which the AS fetched it from; a
+ * registered one by its id and the name it gave itself, its own word and said as such, without the characters that
+ * could hide or reorder what is said around it. A look-alike name still reads like the one it copies: the id under it
+ * is what the AS checked.
  */
 export function grantClient(g: Grant): { label: string; detail: string | null } {
-	if (g.clientId === CLIENT_ID) return g.refreshTokens > 0 ? { label: 'This dashboard', detail: 'a sign-in to the operator GUI' } : { label: 'This dashboard, unfinished', detail: 'a sign-in never finished: it holds no session' };
+	if (g.clientId === CLIENT_ID) return g.refreshTokens > 0 ? { label: 'This dashboard', detail: 'a sign-in to the operator GUI' } : { label: 'This dashboard, no refresh token', detail: 'a sign-in that can renew no session: never finished, or idle past 14 days' };
 	if (/^https:\/\//.test(g.clientId)) {
 		let host = g.clientId;
 		try {
@@ -137,8 +146,12 @@ export function grantClient(g: Grant): { label: string; detail: string | null } 
 		} catch {
 			// shown as the AS listed it
 		}
-		return { label: oneLine(host.replace(BIDI, ''), 120), detail: `client metadata document ${oneLine(g.clientId.replace(BIDI, ''), 200)}` };
+		return { label: oneLine(shown(host), 120), detail: `client metadata document ${oneLine(shown(g.clientId), 200)}` };
 	}
-	const name = g.clientName?.replace(BIDI, '');
-	return { label: name?.trim() ? `“${oneLine(name, 80)}”, as it calls itself` : 'a registered client with no name', detail: `registered client ${oneLine(g.clientId.replace(BIDI, ''), 120)}` };
+	const name = g.clientName === null ? '' : shown(g.clientName);
+	return { label: name.trim() ? `“${oneLine(name, 80)}”, as it calls itself` : 'a registered client with no name', detail: `registered client ${oneLine(shown(g.clientId), 120)}` };
 }
+
+/** What the page shows for the listing's answer: the grants, or which of its three refusals. */
+export type GrantsState = 'ok' | 'unreachable' | 'locked' | 'refused';
+export const grantsState = (answer: GrantsAnswer): GrantsState => (answer.ok ? 'ok' : 'unreachable' in answer ? 'unreachable' : answer.refused === 429 ? 'locked' : 'refused');

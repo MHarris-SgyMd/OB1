@@ -40,7 +40,9 @@
  * With `--as-up`, run while the authorization server answers, it asserts
  * only that a sign-in through it starts on the origin (so it is up) and not on
  * the break-glass port, that no callback completes there (the origin's own
- * sign-in brought to it), and that the key is offered there all the same: the
+ * sign-in brought to it), that the key is offered there all the same, and,
+ * with OB1_SMOKE_READ_KEY, that a read key's revoke on the page of grants is
+ * refused by the action's own gate (the AS down, the load's would answer): the
  * full run is with it down, where those refusals would prove nothing.
  *
  * Exit 0 when every assertion holds, 1 otherwise.
@@ -95,6 +97,16 @@ if (AS_UP) {
   assert(binding.length > 20 && state.length > 20 && bgCallback.status === 303 && bgCallback.location === "/dashboard/signin?refused=stale", `…nor does a callback complete there, the origin's own sign-in cookie and state brought to it (${bgCallback.status} → ${bgCallback.location})`);
   const bgUp = await req(`${BG}/signin`);
   assert(bgUp.status === 200 && bgUp.html.includes('data-testid="breakglass"') && bgUp.html.includes('name="key"'), `…which offers the key all the same (${bgUp.status})`);
+  // The revoke's own gate, with the AS answering: a read key's revoke of a made-up grant is the action's 403. Without
+  // that gate it would reach the listener and come back 303 to ?gone=1; with the AS down the page's load answered 403
+  // for it, which is why this row runs here (review pass 2).
+  if (READ_KEY) {
+    const asRead = await req(`${BG}/signin`, { form: { key: READ_KEY }, headers: { origin: BG_ORIGIN } });
+    const cookie = `${BG_COOKIE}=${sessionOf(asRead.setCookie)}`;
+    const readRevoke = await req(`${BG}/grants?/revoke`, { form: { grant: "NoSuchGrantId" }, headers: { origin: BG_ORIGIN, cookie } });
+    assert(asRead.status === 303 && readRevoke.status === 403, `…and a read key's revoke there is refused by the action's own gate (${asRead.status}, ${readRevoke.status} → ${readRevoke.location || "no redirect"})`);
+    await req(`${BG}/signout`, { method: "POST", headers: { origin: BG_ORIGIN, cookie } });
+  }
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 }

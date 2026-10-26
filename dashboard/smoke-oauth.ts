@@ -189,9 +189,12 @@ assert(views.every(([, r]) => r.status === 200), `…and so do the status, brows
 const grantsOf = (html: string) => html.split('data-testid="grant"').slice(1).map((li) => ({ id: /data-grant="([^"]+)"/.exec(li)?.[1] ?? "", text: li.slice(0, li.indexOf("</li>")) }));
 const grants = await go(jar, `${BASE}/grants`);
 const listed = grantsOf(grants.html);
-assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && listed.some((g) => g.text.includes("This dashboard")), `the nav offers the page of grants, which lists this dashboard's own sign-in (${grants.status}, ${listed.length} grant(s))`);
+// The label exactly: a GUI grant holding no refresh token reads "This dashboard, no refresh token", and this sign-in holds one.
+assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && listed.some((g) => g.text.includes(">This dashboard<")), `the nav offers the page of grants, which lists this dashboard's own sign-in (${grants.status}, ${listed.length} grant(s))`);
 const revokeElsewhere = await fetch(`${BASE}/grants?/revoke`, { method: "POST", redirect: "manual", headers: { origin: "https://elsewhere.example", "content-type": "application/x-www-form-urlencoded", cookie: cookieFor(jar, "/dashboard/grants") }, body: new URLSearchParams({ grant: listed[0]?.id ?? "x" }).toString() });
 assert(revokeElsewhere.status === 403, `…a revoke posted from another origin is refused (${revokeElsewhere.status})`);
+const notAForm = await fetch(`${BASE}/grants?/revoke`, { method: "POST", redirect: "manual", headers: { origin: ORIGIN, "content-type": "text/plain", accept: "text/html", cookie: cookieFor(jar, "/dashboard/grants") }, body: "grant=x" });
+assert(notAForm.status === 400, `…and one whose body is not a form is a 400, not the server's fault (${notAForm.status})`);
 if (REVOKE_CLIENT) {
   const theirs = listed.find((g) => g.text.includes(`registered client ${REVOKE_CLIENT}`));
   const revoked = theirs ? await go(jar, `${BASE}/grants?/revoke`, { form: { grant: theirs.id } }) : { status: 0, location: "", html: "", headers: new Headers() };

@@ -3711,10 +3711,10 @@ jobs:
       # took (--hold-grant); the smoke revokes its grant on the page, and its
       # refresh token is refused at once (--refused; its access token lapses
       # within 600 s, the maintainer's choice). Last, the listener's failure
-      # limit: 20 wrong secrets from inside its container, then the address
-      # turned away, the GUI's own credentials from it too (--admin-lockout,
-      # which leaves 127.0.0.1 locked out, so nothing after it calls the
-      # listener from there). Every sign-in the step makes ends revoked, so the AS's store
+      # limit: 20 wrong secrets from the container's own address (one no
+      # other call uses), each 401, then the address turned away, the GUI's
+      # own credentials from it too (--admin-lockout, which leaves that
+      # address locked out for the window; nothing else dials it). Every sign-in the step makes ends revoked, so the AS's store
       # holds no refresh token of the `gui` client after it: sign-out revoked
       # the GUI's. The password goes by name, never on a command line, and the
       # held refresh token sits in a file of the runner's own, removed after.
@@ -3750,7 +3750,9 @@ jobs:
       # GUI is recreated on it. dashboard/smoke-breakglass.ts first with the
       # authorization server up (--as-up): a sign-in through it starts on the
       # origin and not on the break-glass port, which offers the key all the
-      # same. Then the server is removed, as the steps after expect, and the GUI
+      # same, and a read key's revoke on the page of grants is the action's
+      # own 403 (with the server down, the page's load would answer it).
+      # Then the server is removed, as the steps after expect, and the GUI
       # recreated again, so its 30 s answer from the server's probe is not one
       # from before the server went; the full run holds the Verify lines: on
       # the origin no key is offered or taken — a forged X-OB1-Listener (the
