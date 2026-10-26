@@ -290,6 +290,10 @@ export function parseItem(value: unknown, line: number, label: string = "--items
   // `source` is the pipeline's and is overwritten with the system (the contract says so); the two actor keys are 050's trigger's and the pipeline deletes them before the INSERT — refused rather than dropped without a word (fifth review pass, cold read).
   for (const k of PIPELINE_META_KEYS) if (k !== "source" && k in value.facets) return refuse(`facets.${k}`, `the pipeline's own metadata key — 050's trigger (073's for trust) stamps it from the ingester's envelope, and a facet under it would be dropped; a source's author belongs under another name`);
   for (const k of CROSS_SOURCE_FACETS) if (k in value.facets) return refuse(`facets.${k}`, `names another source's ticket — node_state, source_thought and the board sync read a row carrying it as that ticket's, whatever its source; name the ticket as a link or a mention`);
+  // SMD-3314 review pass 2: a write copied from another brain keeps its first brain's id under this key, one thought per
+  // key (migration 112), and every write tool resolves a name to the thought keeping it — an item setting it would take
+  // that name, and two items one value would stop the run on the index.
+  if ("client_key" in value.facets) return refuse("facets.client_key", "the key a write copied from another brain keeps (migration 112) — set only by capture_thought's client_key; a source's own id belongs under another name");
 
   // createdAt — `null` is absent, as a Python emitter spells None.
   const createdAt = value.createdAt ?? undefined;
@@ -497,6 +501,7 @@ export const MALFORMED: readonly [label: string, line: string, field: string, re
   ["a facet naming a Linear ticket", JSON.stringify({ ...SAMPLE_ITEM, facets: { issue: "SMD-2212" } }), "facets.issue", /another source's ticket/],
   ["a facet naming a fork ticket", JSON.stringify({ ...SAMPLE_ITEM, facets: { ticket: "SMD-2212" } }), "facets.ticket", /another source's ticket/],
   ["a facet under Linear's clock", JSON.stringify({ ...SAMPLE_ITEM, facets: { linear_updated_at: "9999-01-01T00:00:00Z" } }), "facets.linear_updated_at", /another source's ticket/],
+  ["a facet taking a copied write's key", JSON.stringify({ ...SAMPLE_ITEM, facets: { client_key: "0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a" } }), "facets.client_key", /set only by capture_thought's client_key/],
   ["createdAt a rolled-over date", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-02-30T00:00:00Z" }), "createdAt", /ISO-8601 instant/],
   ["createdAt with no offset", JSON.stringify({ ...SAMPLE_ITEM, createdAt: "2026-09-01T10:00:00" }), "createdAt", /ISO-8601 instant/],
   ["createdAt a number", JSON.stringify({ ...SAMPLE_ITEM, createdAt: 1700000000 }), "createdAt", /ISO-8601 instant/],

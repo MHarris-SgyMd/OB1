@@ -3962,6 +3962,137 @@ console.log("\n[23] A search the provider does not answer for is answered by the
   }
 }
 
+console.log("\n[24] A client_key names a thought on every brain: a keyed capture keeps it, the same key again returns that thought and writes nothing, a key equal to a thought's id names that thought; update_thought, delete_thought, supersedes and derived_from take the key where no id matches; metadata and a patch cannot set it; a capture-only key is refused it and its names stay ids; a text's row keeping another key keeps it; one thought per key (SMD-3314, migration 112)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const rawAs = (key: string) => async (name: string, args: Record<string, unknown>) => {
+    const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    const res = (b.result ?? {}) as { content?: { text: string }[]; isError?: boolean; structuredContent?: Record<string, any> };
+    return { text: (res.content ?? []).map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
+  };
+  const asCapture = rawAs(CAPTURE_KEY);
+  const keyOf = async (id: string) => (await sql`SELECT metadata->>'client_key' AS k FROM thoughts WHERE id = ${id}::uuid`)[0]?.k as string | null | undefined;
+  const rows24 = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE '[24]%'`)[0].c);
+  // Keys led by a digit: render.ts's guard holds a field's string to its name's shape, and a uuid led by a letter would
+  // pass as an enum token under any name — so a key field missing from ID_KEY reads null here every run, not by chance.
+  const digitLed = () => `0${crypto.randomUUID().slice(1)}`;
+  const K1 = digitLed(), K2 = digitLed(), K3 = digitLed(), K4 = digitLed();
+  try {
+    // A keyed capture keeps the key, lower-cased, and says so.
+    const first = await result("capture_thought", { content: "[24] the release plan, as stable wrote it", client_key: K1.toUpperCase() });
+    const a = first.sc?.id as string;
+    assert(!first.isError && first.sc?.keyed === "recorded" && (await keyOf(a)) === K1, `a keyed capture keeps its key, lower-cased (${first.sc?.keyed}, ${await keyOf(a)})`);
+
+    // The same key again, another text: that thought, nothing written, no model call.
+    const before = await rows24();
+    const again = await result("capture_thought", { content: "[24] a retried copy whose text moved on", client_key: K1 });
+    assert(!again.isError && again.sc?.id === a && again.sc?.keyed === "matched" && again.sc?.embeddingCall === false && /^Already captured — id .+ and holds other text than the one sent/.test(again.text) && (await rows24()) === before,
+      `the same key returns its thought and writes nothing (${again.text.slice(0, 100)}, rows ${before} → ${await rows24()})`);
+
+    // The same key and the same text: a re-capture of that thought, merged as the first brain's was — not dropped.
+    const recap = await result("capture_thought", { content: "[24] the release plan, as stable wrote it", client_key: K1, metadata: { reviewed: "yes" } });
+    const [recapRow] = await sql`SELECT metadata->>'reviewed' AS r FROM thoughts WHERE id = ${a}::uuid`;
+    assert(!recap.isError && recap.sc?.id === a && recap.sc?.keyed === "recaptured" && recapRow?.r === "yes" && (await keyOf(a)) === K1 && (await rows24()) === before,
+      `the same key and text: a re-capture, its metadata merged, the key kept, no new row (${recap.sc?.keyed}, ${recapRow?.r})`);
+
+    // A key equal to a thought's id (a copy a refresh made) names that thought.
+    const plainId = (await result("capture_thought", { content: "[24] a thought a refresh copied, same id on both brains" })).sc?.id as string;
+    const byId = await result("capture_thought", { content: "[24] its copy sent again under its id", client_key: plainId });
+    assert(!byId.isError && byId.sc?.id === plainId && byId.sc?.keyed === "matched" && (await keyOf(plainId)) === null, `a key equal to a thought's id names that thought, and keys nothing (${byId.sc?.id === plainId}, ${await keyOf(plainId)})`);
+
+    // supersedes and derived_from by key.
+    const next = await result("capture_thought", { content: "[24] the release plan, revised", supersedes: K1, derived_from: [K1, plainId] });
+    const c = next.sc?.id as string;
+    const [crow] = await sql`SELECT supersedes::text AS s, derived_from AS d FROM thoughts WHERE id = ${c}::uuid`;
+    assert(!next.isError && crow?.s === a && JSON.stringify([...((crow?.d ?? []) as string[])].sort()) === JSON.stringify([a, plainId].sort()), `supersedes and derived_from take the key (${crow?.s}, ${JSON.stringify(crow?.d)}; ${next.text.slice(0, 80)})`);
+
+    // update_thought by key, and its supersedes by key.
+    const upd = await result("update_thought", { id: K1, metadata_patch: { note: "edited by key" } });
+    const [arow] = await sql`SELECT metadata->>'note' AS note FROM thoughts WHERE id = ${a}::uuid`;
+    assert(!upd.isError && upd.sc?.id === a && upd.sc?.byClientKey === K1 && /^Updated [0-9a-f-]{36}, named by its client_key /.test(upd.text) && arow.note === "edited by key" && (await keyOf(a)) === K1,
+      `update_thought takes the key, says so, and the key stays (${upd.text.slice(0, 100)})`);
+    const updSup = await result("update_thought", { id: plainId, supersedes: K1 });
+    assert(!updSup.isError && (await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${plainId}::uuid`)[0].s === a, `update_thought's supersedes takes the key (${updSup.text.slice(0, 80)})`);
+    await result("update_thought", { id: plainId, supersedes: null });
+    // An id that is a thought's own is not said to be a key.
+    const own = await result("update_thought", { id: a, metadata_patch: { note: "edited by id" } });
+    assert(!own.isError && own.sc?.byClientKey === undefined && !/named by its client_key/.test(own.text), "an edit by the thought's own id says nothing of a key");
+
+    // The key is capture_thought's to set: not through metadata, not by a patch.
+    const viaMeta = await result("capture_thought", { content: "[24] a key smuggled in metadata", metadata: { client_key: K2 } });
+    assert(viaMeta.isError && viaMeta.sc?.code === "REFUSED_METADATA_SHAPE" && viaMeta.sc?.problem === "reserved_key" && /set once, by capture_thought's own `client_key` argument/.test(viaMeta.text), `metadata.client_key is refused (${viaMeta.text.slice(0, 100)})`);
+    const viaPatch = await result("update_thought", { id: a, metadata_patch: { client_key: K2 } });
+    assert(viaPatch.isError && viaPatch.sc?.code === "REFUSED_METADATA_SHAPE" && viaPatch.sc?.key === "client_key" && (await keyOf(a)) === K1, `a patch naming client_key is refused, the key unmoved (${viaPatch.text.slice(0, 100)})`);
+    const badShape = await result("capture_thought", { content: "[24] not a uuid key", client_key: "release-plan" });
+    assert(badShape.isError && badShape.sc?.code === "REFUSED_CLIENT_KEY_SHAPE" && /must be a UUID/.test(badShape.text), `a key that is not a UUID is refused (${badShape.text.slice(0, 80)})`);
+
+    // A capture-only key: refused the key, and its names are ids alone.
+    const capKeyed = await asCapture("capture_thought", { content: "[24] a hook's summary with a key", client_key: K2 });
+    assert(capKeyed.isError && capKeyed.sc?.code === "REFUSED_CLIENT_KEY_SCOPE" && capKeyed.sc?.retryable === false, `a capture-only key is refused a client_key (${capKeyed.text.slice(0, 80)})`);
+    const capNamed = await asCapture("capture_thought", { content: "[24] a hook's summary naming a key as its source", derived_from: [K1] });
+    const capId = /id ([0-9a-f-]{36})/.exec(capNamed.text)?.[1];
+    assert(!capNamed.isError && capId !== undefined && (await sql`SELECT derived_from FROM thoughts WHERE id = ${capId}::uuid`)[0].derived_from === null,
+      `a capture-only key's derived_from naming a key is trimmed, not resolved (${capNamed.text.slice(0, 80)})`);
+
+    // A text's row keeping another key keeps it; a row with none takes the key.
+    const t = "[24] one text, two brains' ids";
+    const r0 = (await result("capture_thought", { content: t })).sc?.id as string;
+    const k2 = await result("capture_thought", { content: t, client_key: K2 });
+    assert(!k2.isError && k2.sc?.id === r0 && k2.sc?.keyed === "recorded" && (await keyOf(r0)) === K2, `a re-capture onto a row with no key records it (${k2.sc?.keyed}, ${await keyOf(r0)})`);
+    const k3 = await result("capture_thought", { content: t, client_key: K3 });
+    const k3Missing = await result("update_thought", { id: K3, metadata_patch: { note: "x" } });
+    assert(!k3.isError && k3.sc?.id === r0 && k3.sc?.keyed === "held" && k3.sc?.heldKey === K2 && (await keyOf(r0)) === K2 && /keeping a `client_key` of its own/.test(k3.text) && k3Missing.sc?.code === "NOT_FOUND",
+      `a row keeping another key keeps it, and the new key names nothing (${k3.sc?.keyed}, ${k3.sc?.heldKey}, ${await keyOf(r0)}, ${k3Missing.sc?.code})`);
+
+    // One thought per key, whatever the writer.
+    let dup = "";
+    try { await sql`INSERT INTO thoughts (content, metadata) VALUES ('[24] a raw row taking a key', ${{ client_key: K2 }}::jsonb)`; } catch (e) { dup = String((e as Error).message); }
+    assert(/thoughts_client_key_unique/.test(dup), `a second row with the key is refused by 112's index (${dup.slice(0, 80) || "accepted"})`);
+
+    // delete_thought by key; the key is free after.
+    await result("delete_thought", { id: c });
+    const del = await result("delete_thought", { id: K1 });
+    assert(!del.isError && del.sc?.id === a && del.sc?.byClientKey === K1 && /^Deleted [0-9a-f-]{36}, named by its client_key /.test(del.text) && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${a}::uuid`)[0].c === 0,
+      `delete_thought takes the key (${del.text.slice(0, 100)})`);
+    const reborn = await result("capture_thought", { content: "[24] the key free again after its thought went", client_key: K1 });
+    assert(!reborn.isError && reborn.sc?.keyed === "recorded" && reborn.sc?.id !== a, `a deleted thought's key is free again (${reborn.sc?.keyed})`);
+    const nothing = await result("delete_thought", { id: K4 });
+    assert(nothing.isError && nothing.sc?.code === "NOT_FOUND", `a key no thought keeps is NOT_FOUND (${nothing.sc?.code})`);
+    // Copies racing under one key (a retry while the first is in flight): one thought, every reply naming it, none an
+    // error — a loser of the race between the key's read and the write meets 112's index and is answered as a match.
+    const raced = await Promise.all(Array.from({ length: 6 }, (_, i) => result("capture_thought", { content: `[24] a raced copy ${i}`, client_key: K4 })));
+    const racedIds = new Set(raced.map((r) => r.sc?.id));
+    assert(raced.every((r) => !r.isError) && racedIds.size === 1 && raced.filter((r) => r.sc?.keyed === "recorded").length === 1 && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'client_key' = ${K4}`)[0].c) === 1,
+      `copies racing under one key make one thought (${raced.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")})`);
+    // Copies of one new text racing under one key (review pass 2): they serialise on the fingerprint lock and land on
+    // one row keeping the key, each merged — never "matched", which would drop what it merged, and never an error.
+    const K7 = digitLed();
+    const same = await Promise.all(Array.from({ length: 6 }, () => result("capture_thought", { content: "[24] one text sent six times at once", client_key: K7 })));
+    const sameRows = await sql`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[24] one text sent six times at once'`;
+    assert(same.every((r) => !r.isError && r.sc?.id === same[0].sc?.id && (r.sc?.keyed === "recorded" || r.sc?.keyed === "recaptured")) && sameRows.length === 1 && sameRows[0].k === K7,
+      `copies of one text racing under one key: one row keeping it, each recorded or a re-capture (${same.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")})`);
+    // Two keys racing for one new text (review pass 2): the first to land keeps its key, and the other is told held,
+    // naming it — never both "recorded" with the first key moved off its thought by the second's merge.
+    const K5 = digitLed(), K6 = digitLed();
+    const pair = await Promise.all([K5, K6].map((k) => result("capture_thought", { content: "[24] one new text, two keys at once", client_key: k })));
+    const pairRow = (await sql`SELECT id::text AS id, metadata->>'client_key' AS k FROM thoughts WHERE content = '[24] one new text, two keys at once'`)[0] as { id: string; k: string };
+    const winner = pair.find((r) => r.sc?.keyed === "recorded"), loser = pair.find((r) => r.sc?.keyed === "held");
+    const loserKey = loser === winner ? undefined : pair[0] === loser ? K5 : K6;
+    const loserNames = loserKey ? await result("update_thought", { id: loserKey, metadata_patch: { note: "x" } }) : undefined;
+    assert(pair.every((r) => !r.isError && r.sc?.id === pairRow.id) && winner !== undefined && loser !== undefined && loser.sc?.heldKey === pairRow.k && pairRow.k === (pair[0] === winner ? K5 : K6) && loserNames?.sc?.code === "NOT_FOUND",
+      `two keys racing for one text: one recorded and kept, the other held naming it (${pair.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")}; row ${pairRow.k === K5 ? "K5" : pairRow.k === K6 ? "K6" : pairRow.k})`);
+    // A name that is no uuid names no thought (review pass 2): NOT_FOUND, not the database's cast error.
+    const notUuidU = await result("update_thought", { id: " not-a-uuid ", metadata_patch: { note: "x" } });
+    const notUuidD = await result("delete_thought", { id: "release-plan" });
+    assert(notUuidU.sc?.code === "NOT_FOUND" && notUuidD.sc?.code === "NOT_FOUND" && !/invalid input syntax/.test(notUuidU.text + notUuidD.text), `a name that is no uuid is NOT_FOUND for update and delete (${notUuidU.sc?.code}, ${notUuidD.sc?.code})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE content LIKE '[24]%'`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

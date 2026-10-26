@@ -12,9 +12,10 @@
 // a sound OB1_PUBLIC_ORIGIN) it trades each OAuth token at the hop as the
 // `mcp` client, its secret OB1_AUTH_SECRET_MCP (exchange.ts, SMD-2286).
 
+import { networkInterfaces } from "node:os";
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
-import { routable } from "../server-portable/auth.ts";
+import { listenHostFrom, routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, markTelemetry, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
@@ -32,6 +33,13 @@ const env = process.env;
 const forwarderKey = env.OB1_FORWARDER_KEY?.trim();
 if (import.meta.main && !forwarderKey) {
   console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts --name <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
+  process.exit(2);
+}
+
+// Every address, or the one OB1_LISTEN_HOST names, as the REST core's (SMD-3323).
+const listen = listenHostFrom(env.OB1_LISTEN_HOST, Object.values(networkInterfaces()).flatMap((list) => (list ?? []).map((a) => a.address)));
+if (import.meta.main && listen.problem) {
+  console.error(listen.problem);
   process.exit(2);
 }
 
@@ -114,6 +122,7 @@ export const IDLE_TIMEOUT_S = 255;
 export default {
   // An empty PORT is unset, not port 0 (SMD-1799).
   port: Number(env.PORT || 8000),
+  ...(listen.hostname ? { hostname: listen.hostname } : {}),
   // Its job polls and mirrors are GETs that wait on the REST core: Bun's 10 s default cuts such a GET (review pass 3).
   idleTimeout: IDLE_TIMEOUT_S,
   fetch: (req: Request, server?: unknown) => {
