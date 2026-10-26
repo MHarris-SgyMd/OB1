@@ -6847,6 +6847,7 @@ checkHealthcheckStarts();
  */
 const STAR_READ_DIRS = ["server-portable", "mcp-server", "dashboard", "plugins", "db", "deploy"];
 type SchemaNames = { functions: ReadonlySet<string>; relations: ReadonlySet<string> };
+/** A character that can open a SQL comment (`--`, `/*`), literal (`'`, `$tag$`) or quoted name: sqlMasked copies the text between them whole. */
 const SQL_SPECIAL = /[-\/'"$]/g;
 /** `s` with each SQL comment, string literal (plain, E'…') and dollar-quoted body blanked — a literal left as `''` — in one left-to-right pass; quoted identifiers kept. Length and newlines kept. */
 function sqlMasked(s: string): string {
@@ -6933,6 +6934,13 @@ const SQL_NAME = String.raw`(?:"[^"]*"|[A-Za-z_]\w*|\$_)`;
 const SQL_PATH = new RegExp(String.raw`^\s*((?:${SQL_NAME}\s*\.\s*)*${SQL_NAME})`);
 /** A name as Postgres compares it: unquoted folded to lower case, quoted kept. */
 const sqlName = (n: string) => (n.startsWith('"') ? n.slice(1, -1) : n.toLowerCase());
+/** A dotted path's last name, as sqlName compares it, and whether a schema (or more) qualifies it. */
+function pathName(path: string): { name: string; qualified: boolean } {
+  const parts = path.split(/\s*\.\s*/);
+  return { name: sqlName(parts[parts.length - 1]), qualified: parts.length > 1 };
+}
+/** A call: its name, then its paren. */
+const SQL_CALL = new RegExp(String.raw`(${SQL_NAME})\s*\(`, "g");
 /** The index just past the paren that closes the one at `open`. */
 function closeParen(m: string, open: number): number {
   let d = 0;
@@ -6947,14 +6955,15 @@ const LIST_STOPS = /^(?:SELECT|UNION|INTERSECT|EXCEPT|WHERE|GROUP|HAVING|ORDER|L
 const RETURNING_STOPS = /^(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|VALUES|TABLE|UNION|INTERSECT|EXCEPT|RETURNING)$/i;
 /** A list's stop word is a column label after AS (`1 AS offset`), and GROUP after WITHIN (`mode() WITHIN GROUP (…)`): neither ends it. */
 const listStop = (stops: RegExp) => (w: string, before: string) => stops.test(w) && !/\bAS\s*$/i.test(before) && !(/^GROUP$/i.test(w) && /\bWITHIN\s*$/i.test(before));
+const LIST_ENDS = listStop(LIST_STOPS), RETURNING_ENDS = listStop(RETURNING_STOPS);
 /** Words never a FROM item's alias — what may follow one — so only an item's own name and alias are read, never its condition. */
 const SQL_KEYWORDS = /^(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WINDOW|FOR|RETURNING|FETCH|SELECT|ON|USING|JOIN|NATURAL|LEFT|RIGHT|FULL|INNER|OUTER|CROSS|TABLESAMPLE|LATERAL|WITH|ORDINALITY)$/i;
 /** A paren that opens a subquery, tried at the paren itself (sticky), whatever whitespace or comment follows it. */
 const SUBQUERY = /\(\s*(?:SELECT|WITH|VALUES)\b/iy;
 /**
  * From `from` in masked SQL, the text up to `;`, a `)` closing a paren opened before `from`, or a word `stop`
- * accepts at depth 0 (one after `.`, `"` or a word character is no word); a subquery — `(` then SELECT, WITH or
- * VALUES — becomes ` $q `, read as its own SELECT elsewhere.
+ * accepts at depth 0, given the text before it (one after `.`, `"` or a word character is no word); a subquery —
+ * `(` then SELECT, WITH or VALUES — becomes ` $q `, read as its own SELECT elsewhere.
  */
 function sqlSpan(m: string, from: number, stop: (word: string, before: string) => boolean): { text: string; end: number; word: string } {
   let depth = 0, out = "", i = from;
@@ -7007,8 +7016,7 @@ function starOf(item: string): { qual?: string | null; expr?: string } | null {
   }
   const path = SQL_PATH.exec(it);
   if (!path || path[0].length !== it.length) return null;
-  const parts = path[1].split(/\s*\.\s*/);
-  return { qual: sqlName(parts[parts.length - 1]) };
+  return { qual: pathName(path[1]).name };
 }
 type FromItem = { name: string; fn: boolean; alias: string | null; qualified?: boolean };
 /** A FROM clause's items: name, whether it is a call, alias, whether schema-qualified. Only each item's leading name and alias are read (no keyword is an alias), so its ON or USING condition is passed over; a parenthesised join is read through (its alias, if it has one, each item's); ROWS FROM's calls are each an item. */
@@ -7024,7 +7032,7 @@ function fromItems(clause: string): FromItem[] {
     const rows = /^ROWS\s+FROM\s*\(/i.exec(piece);
     if (rows) {
       const end = closeParen(piece, rows[0].length - 1), alias = aliasAfter(piece.slice(end));
-      for (const f of piece.slice(rows[0].length, end - 1).matchAll(new RegExp(String.raw`(${SQL_NAME})\s*\(`, "g"))) items.push({ name: sqlName(f[1]), fn: true, alias });
+      for (const f of piece.slice(rows[0].length, end - 1).matchAll(SQL_CALL)) items.push({ name: sqlName(f[1]), fn: true, alias });
       continue;
     }
     if (piece.startsWith("(")) {
@@ -7034,8 +7042,8 @@ function fromItems(clause: string): FromItem[] {
     }
     const path = SQL_PATH.exec(piece);
     if (!path) continue;
-    const parts = path[1].split(/\s*\.\s*/), rest = piece.slice(path[0].length), fn = /^\s*\(/.test(rest);
-    items.push({ name: sqlName(parts[parts.length - 1]), fn, alias: aliasAfter(fn ? rest.slice(closeParen(rest, rest.indexOf("("))) : rest), qualified: parts.length > 1 });
+    const rest = piece.slice(path[0].length), fn = /^\s*\(/.test(rest);
+    items.push({ ...pathName(path[1]), fn, alias: aliasAfter(fn ? rest.slice(closeParen(rest, rest.indexOf("("))) : rest) });
   }
   return items;
 }
@@ -7047,8 +7055,7 @@ function starReadsInSql(sql: string, names: SchemaNames): { what: string; at: nu
     if (it.fn ? names.functions.has(it.name) : names.relations.has(it.name) && (it.qualified || !ctes.has(it.name))) hits.push({ what: it.fn ? `${it.name}(…)` : it.name, at });
   };
   for (const s of m.matchAll(/\bSELECT\b/gi)) {
-    const listEnds = listStop(LIST_STOPS);
-    const list = sqlSpan(m, s.index! + 6, (w, before) => (/^FROM$/i.test(w) && !/\bIS\s+(?:NOT\s+)?DISTINCT\s*$/i.test(before)) || listEnds(w, before));
+    const list = sqlSpan(m, s.index! + 6, (w, before) => (/^FROM$/i.test(w) && !/\bIS\s+(?:NOT\s+)?DISTINCT\s*$/i.test(before)) || LIST_ENDS(w, before));
     // PL/pgSQL's `SELECT * INTO v FROM …`: the targets are not the list.
     const items = splitTop(splitTop(list.text, /^INTO\b/i)[0], /^,/);
     items[0] = items[0].replace(/^\s*ALL\b/i, "").replace(/^\s*DISTINCT\b\s*/i, "");
@@ -7060,21 +7067,20 @@ function starReadsInSql(sql: string, names: SchemaNames): { what: string; at: nu
     for (const star of stars) {
       let qual = star.qual;
       if (star.expr !== undefined) {
-        for (const f of star.expr.matchAll(new RegExp(String.raw`(${SQL_NAME})\s*\(`, "g"))) read({ name: sqlName(f[1]), fn: true, alias: null }, s.index!);
+        for (const f of star.expr.matchAll(SQL_CALL)) read({ name: sqlName(f[1]), fn: true, alias: null }, s.index!);
         const p = SQL_PATH.exec(star.expr);
         if (!p || p[0].length !== star.expr.length) continue;
-        qual = sqlName(p[1].split(/\s*\.\s*/).pop()!);
+        qual = pathName(p[1]).name;
       }
       for (const it of from) if (qual === null || (it.alias ?? it.name) === qual) read(it, s.index!);
     }
   }
   for (const r of m.matchAll(/\bRETURNING\b/gi))
-    if (splitTop(sqlSpan(m, r.index! + 9, listStop(RETURNING_STOPS)).text, /^,/).some((it) => starOf(it) !== null)) hits.push({ what: "RETURNING *", at: r.index! });
+    if (splitTop(sqlSpan(m, r.index! + 9, RETURNING_ENDS).text, /^,/).some((it) => starOf(it) !== null)) hits.push({ what: "RETURNING *", at: r.index! });
   // TABLE x: at a statement's start, after a WITH list or a set operator, and ending as a statement or a set's arm
   // does — so prose that starts "Table jobs are…" is not one.
   for (const t of m.matchAll(new RegExp(String.raw`(?:^|[;()]|\b(?:UNION|INTERSECT|EXCEPT)(?:\s+(?:ALL|DISTINCT))?\b)\s*TABLE\s+(?:ONLY\s+)?((?:${SQL_NAME}\s*\.\s*)*${SQL_NAME})(?=\s*(?:$|[;)]|\$_|(?:ORDER|LIMIT|OFFSET|FETCH|FOR|UNION|INTERSECT|EXCEPT)\b))`, "gi"))) {
-    const parts = t[1].split(/\s*\.\s*/);
-    read({ name: sqlName(parts[parts.length - 1]), fn: false, alias: null, qualified: parts.length > 1 }, t.index!);
+    read({ ...pathName(t[1]), fn: false, alias: null }, t.index!);
   }
   return hits;
 }
