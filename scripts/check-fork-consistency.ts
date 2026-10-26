@@ -522,10 +522,11 @@
  *      LISTEN_EVERY_ADDRESS names the exceptions, one site each, with why
  *  43. no workflow under .github/workflows/ gives a container a secret's
  *      value on the command line: an `-e` or `--env` naming a secret-shaped
- *      variable (a KEY, SECRET, PASSWORD, PW, TOKEN or CREDENTIAL word in its
- *      name) with a `$` in its value fails, since the runner's process list
- *      shows it; pass it by name (`-e NAME`) from the shell's environment
- *      (SMD-3351). Its probe pins what it refuses and passes
+ *      variable (a KEY, SECRET, PASSWORD, PASSWD, PW, TOKEN or CREDENTIAL
+ *      word in its name, or a plural) with a `$` in its value fails, since
+ *      the runner's process list shows it; pass it by name (`-e NAME`) from
+ *      the shell's environment (SMD-3351). It reads that flag alone, not a
+ *      curl header or a URL. Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -7651,13 +7652,15 @@ checkLoopbackListeners();
 
 // ── 43: a workflow gives a container a secret by name, never its value on the command line (SMD-3351) ──
 /**
- * 43: in each workflow, an `-e` or `--env` flag (docker run, compose exec or run) that gives a secret-shaped
- * variable a value with a `$` in it puts what that expands to in the docker process's argv, which the runner's
- * process list shows for as long as it runs. Set the variable in the shell's environment and pass it by name,
- * `-e NAME`. A secret-shaped name has KEY, SECRET, PASSWORD, PASSWD, PW, TOKEN or CREDENTIAL (or a plural) as
- * one of its `_`-separated words. A literal value passes (a stand-in a step declares), as do a single-quoted one,
- * which expands nothing, and a comment line. It reads the name alone: `-e ROLE_URL="$url"` passes, whatever the
- * URL carries.
+ * 43: in each workflow, an `-e` or `--env` flag that gives a secret-shaped variable a value with a `$` in it puts
+ * what that expands to in the process's argv (docker run's, compose exec's or run's), which the runner's process
+ * list shows for as long as it runs. Set the variable in the shell's environment and pass it by name, `-e NAME`.
+ * A secret-shaped name has KEY, SECRET, PASSWORD, PASSWD, PW, TOKEN or CREDENTIAL (or a plural) as one of its
+ * `_`-separated words, in any case. It reads any `-e` on a line, so another tool's `-e` with such a word is
+ * refused too; none does today, and passing by name clears one. A literal value passes (a stand-in a step
+ * declares), as do a single-quoted one, which expands nothing, and a comment line. It reads the name alone:
+ * `-e ROLE_URL="$url"` passes, whatever the URL carries. It reads that flag alone: the smoke keys a curl header
+ * or a `?key=` URL carries are on argv still, per-run stand-ins on a throwaway runner.
  */
 const SECRET_NAME_WORD = /^(?:KEYS?|SECRETS?|PASSWORDS?|PASSWD|PW|TOKENS?|CREDENTIALS?)$/;
 function secretsOnArgv(text: string): { line: number; name: string }[] {
@@ -7683,6 +7686,9 @@ function checkSecretsOnArgv() {
     ['args=(-e "PLUGIN_PW=$p")', 1],
     ["docker run -e OB1_GUI_SECRET=${{ secrets.GUI }} img", 1],
     ['docker run -e A_KEY="$a" -e B_TOKEN="$b" img', 2],
+    ['docker run -e OB1_HOOK_SECRETS="example=$s" img', 1],
+    ['docker run -e api_key="$x" img', 1],
+    ["docker run -e OB1_X_SECRET='$literal' img", 0],
     ['oneshot -e ROLE_URL="$good" orchestration-runner-role', 0],
     ['auth exec -T -e PUB="$pub" auth bun x', 0],
     ["docker run -e KEYBOARD=$k img", 0],
