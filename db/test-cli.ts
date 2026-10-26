@@ -101,7 +101,7 @@ const refusal = (argv: string[], positionals = 0): string => { const r = scan(ar
   ok("error" in three && /one subject at a time; got 3/.test(three.error), "graph-centrality counts three subjects as three");
 
   ok(flagList(SPEC) === "  flags: --url <value>, --compare <a> <b>, --follow [value], --ids <value> …, --query <value> (repeatable), --dry-run", "the flag list shows what each flag takes");
-  ok(flagList({ url: "one", force: "none", query: "repeated" }, { url: "<postgres://…>", force: "(with --baseline)", query: "<q>" }) === "  flags: --url <postgres://…>, --force (with --baseline), --query <q> (repeatable)", "…with a script's hints, a repeated flag still said to repeat");
+  ok(flagList({ url: "one", exact: "none", query: "repeated" }, { url: "<postgres://…>", exact: "(with --grant)", query: "<q>" }) === "  flags: --url <postgres://…>, --exact (with --grant), --query <q> (repeatable)", "…with a script's hints, a repeated flag still said to repeat");
   ok(flagList({}) === "  flags: none", "…and says none for a script that takes none");
 }
 

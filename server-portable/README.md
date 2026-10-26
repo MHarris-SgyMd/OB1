@@ -532,8 +532,8 @@ cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.sup
 cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
 ```
 
-Or record the ones the dashboard already applied with `--baseline` and apply the
-rest; `db/README.md` §4 covers both routes.
+A schema the dashboard applied, with no ledger yet, is brought under it the same
+way: every file is idempotent and runs again over what is there (`db/README.md` §4).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing

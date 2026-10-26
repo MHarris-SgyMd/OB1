@@ -728,7 +728,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
-           /schema_migrations records 021 as\n\s+applied \(--baseline\?\) but the schema installed is older\. Re-apply the recorded migrations with the migrator/.test(status.out) &&
+           /schema_migrations records 021 as\n\s+applied but the schema installed is older\. Re-apply the recorded migrations with the migrator/.test(status.out) &&
            /cd db && bun migrate\.ts --url … --reapply\s*$/m.test(status.out) && !/re-run the body/.test(status.out),
          `reembed.ts --status on the brain whose ledger is ahead names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
 
@@ -904,7 +904,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
 
   // Refused, nothing written: a value beside the flag (the old shape, or a
-  // typo); a flag the runner does not have; --baseline beside it; a recorded
+  // typo); a flag the runner does not have; the retired --baseline beside it; a recorded
   // file changed since it was applied — before anything runs.
   const value = await migrate("--reapply", "021");
   assert(value.code === 2 && /unknown argument 4: a value where no flag takes one/.test(value.out), `--reapply takes no value; one beside it is refused, not dropped (exit ${value.code})`);
@@ -913,7 +913,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   const joined = await migrate("--url=postgres://u:s3cret@h/d");
   assert(joined.code === 2 && /argument 3 joins a value to --url with "="/.test(joined.out) && !/s3cret/.test(joined.out), `a value joined with "=" is refused without echoing it — a URL carries a password (exit ${joined.code})`);
   const both = await migrate("--reapply", "--baseline");
-  assert(both.code === 2 && /One or the other/.test(both.out), `--reapply beside --baseline is refused (exit ${both.code})`);
+  assert(both.code === 2 && /--baseline was retired \(SMD-3325\)/.test(both.out), `--reapply beside the retired --baseline is refused (exit ${both.code})`);
   await sql`UPDATE schema_migrations SET sha256 = 'edited-after-apply' WHERE name LIKE '024%'`;
   const drift = await migrate("--reapply");
   assert(drift.code === 1 && /refusing --reapply: 024_thought_stats_summary\.sql \(was edited-after-apply, now [0-9a-f]{12}\) changed after being applied/.test(drift.out),
@@ -5072,85 +5072,67 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   await applyMigrations(URL_, OPTS);
 }
 
-console.log("\n[22] --baseline on an empty database refuses, naming public.thoughts, the plain run and --force; --force records the ledger over it (SMD-2237)");
+console.log("\n[22] --baseline and --force are retired: each is refused by name, on an empty database and over a schema with no ledger alike, changing nothing; a plain run brings that schema under the ledger (SMD-3325)");
 {
   await dropSchema(URL_);
-  // A fresh database with no fork schema. --baseline would record every migration
-  // as applied without running one, leaving a ledger the next plain run reads as
-  // done — so it refuses (exit 2), naming what is missing, the plain run and the
-  // override, and before the ledger table is even created: nothing is written.
-  const refused = await migrate("--baseline");
-  assert(refused.code === 2 &&
-         /--baseline refused: public\.thoughts does not exist/.test(refused.out) &&
-         /Apply the migrations instead: cd db && bun migrate\.ts/.test(refused.out) &&
-         /pass --force/.test(refused.out),
-         `--baseline on an empty database refuses, naming public.thoughts, the plain run and --force (exit ${refused.code})`);
-
-  const sql = new SQL({ url: URL_, max: 1 });
-  const [{ present: ledger }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[];
-  await sql.close();
-  assert(ledger === false, "…and creates no schema_migrations table — the refusal is before any write");
-
-  // Another tool's thoughts, in a schema of its own, is not public.thoughts: the
-  // guard reads public alone (pg_class, nspname='public'), so --baseline still
-  // refuses over an empty public. A probe that dropped the schema qualifier would
-  // read the stray table as "present" and let --baseline record the ledger over an
-  // empty public — the exact bricking SMD-2237 prevents. Plant it, prove the
-  // refusal, drop it.
-  const stray = new SQL({ url: URL_, max: 1 });
-  let strayRefused: { code: number; out: string };
-  try {
-    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE; CREATE SCHEMA tu_stray; CREATE TABLE tu_stray.thoughts (id int)");
-    strayRefused = await migrate("--baseline");
-  } finally {
-    await stray.unsafe("DROP SCHEMA IF EXISTS tu_stray CASCADE");
-    await stray.close();
-  }
-  assert(strayRefused.code === 2 && /--baseline refused: public\.thoughts does not exist/.test(strayRefused.out),
-         `--baseline reads public alone: another schema's thoughts over an empty public still refuses (exit ${strayRefused.code})`);
-
-  // --force is the operator's override: it records every migration over the empty
-  // schema, exactly as --baseline does over a hand-built one.
-  const forced = await migrate("--baseline", "--force");
-  assert(forced.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(forced.out),
-         `--baseline --force records every migration over an empty database (exit ${forced.code})`);
-
-  // --force without --baseline is refused, not a silent plain run — it exits at
-  // the flag-combo check, before any database connection, whatever the DB holds.
+  const ledgerHere = async () => {
+    const probe = new SQL({ url: URL_, max: 1 });
+    try {
+      return ((await probe`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[])[0].present;
+    } finally {
+      await probe.close();
+    }
+  };
+  const retiredBaseline = /--baseline was retired \(SMD-3325\): it recorded every migration as applied without running one/;
+  const retiredForce = /--force was retired with --baseline \(SMD-3325\)/;
+  // An empty database: before SMD-3325 --baseline refused here and --force
+  // recorded the ledger over nothing anyway (SMD-2237). Now each is refused by
+  // name before the run reads anything, so no ledger is created.
+  const empty = await migrate("--baseline");
+  assert(empty.code === 2 && retiredBaseline.test(empty.out) && /run it plainly/.test(empty.out) && /Nothing was changed\./.test(empty.out) && !retiredForce.test(empty.out),
+         `--baseline on an empty database is refused as retired, naming the plain run (exit ${empty.code})`);
+  assert((await ledgerHere()) === false, "…and creates no schema_migrations table");
   const forceAlone = await migrate("--force");
-  assert(forceAlone.code === 2 && /--force overrides --baseline's empty-database guard/.test(forceAlone.out),
-         `--force without --baseline is refused (exit ${forceAlone.code})`);
+  assert(forceAlone.code === 2 && retiredForce.test(forceAlone.out) && !retiredBaseline.test(forceAlone.out) && (await ledgerHere()) === false,
+         `--force alone is refused as retired, not run as a plain run (exit ${forceAlone.code})`);
+  const both = await migrate("--baseline", "--force");
+  assert(both.code === 2 && retiredBaseline.test(both.out) && retiredForce.test(both.out) && (await ledgerHere()) === false,
+         `--baseline --force, which recorded every migration over an empty database, is refused naming both (exit ${both.code})`);
 
-  // Protective direction of the public-qualified guard: a hand-built public
-  // schema present but OFF the migrator role's search_path must still be found
-  // (pg_class, not to_regclass), so --baseline adopts it rather than refusing.
-  // Build a minimal public.thoughts and a separate schema, then run --baseline
-  // with search_path set to that other schema: the guard finds public.thoughts
-  // and records the ledger — in public, which the migrator puts first on its
-  // session's path (SMD-2247), where it went into the off-path schema before.
-  // A to_regclass spelling —
-  // the "obvious" refactor — would miss public.thoughts here and wrongly refuse,
-  // reintroducing the search_path-hiding the pg_class probe exists to avoid
-  // (SMD-2237, and SMD-2062's restricted-role deployments).
-  const offPathSql = new SQL({ url: URL_, max: 1 });
-  let offPathBaseline: { code: number; out: string };
-  try {
-    // --force's ledger above is in public, where this run now records its
-    // own: cleared, so adoption starts from none, as it did in tu_offpath.
-    await offPathSql.unsafe("DROP TABLE IF EXISTS public.schema_migrations; CREATE TABLE IF NOT EXISTS public.thoughts (id int); DROP SCHEMA IF EXISTS tu_offpath CASCADE; CREATE SCHEMA tu_offpath");
-    const sep = URL_.includes("?") ? "&" : "?";
-    offPathBaseline = await runMigrator(`${URL_}${sep}options=-csearch_path%3Dtu_offpath`, MIGRATOR_ENV, "--baseline");
-  } finally {
-    await offPathSql.unsafe("DROP SCHEMA IF EXISTS tu_offpath CASCADE; DROP TABLE IF EXISTS public.thoughts");
-    await offPathSql.close();
+  // The schema --baseline was for: applied without the migrator, no ledger.
+  // Still refused, still nothing written, whatever it is beside.
+  await applyMigrations(URL_, OPTS);
+  // ([7] refuses it beside --reapply.)
+  const beside = [["--baseline", "--dry-run"], ["--baseline", "--grant", "tu_nobody"]] as const;
+  for (const flags of beside) {
+    const r = await migrate(...flags);
+    assert(r.code === 2 && retiredBaseline.test(r.out) && (await ledgerHere()) === false,
+           `${flags.join(" ")} over a schema with no ledger is refused as retired, no ledger written (exit ${r.code})`);
   }
-  assert(offPathBaseline.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(offPathBaseline.out),
-         `--baseline finds public.thoughts by pg_class even with public off the role's search_path — adoption holds off-path (exit ${offPathBaseline.code})`);
-  const ledgerSql = new SQL({ url: URL_, max: 1 });
-  const [{ inPublic }] = (await ledgerSql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS "inPublic"`) as { inPublic: boolean }[];
-  await ledgerSql.close();
-  assert(inPublic && /search_path: public put first for this run only \(it was tu_offpath\)/.test(offPathBaseline.out),
-         "…and records the ledger in public, put first on the migrator's path, not in the off-path schema");
+  // The remedy the refusal names: a plain run over that schema runs every file
+  // again, each idempotent, and records it. Every file applies, none fails.
+  const plain = await migrate();
+  assert(plain.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(plain.out) && (await ledgerHere()) === true,
+         `a plain run over a schema with no ledger applies every file again and records it (exit ${plain.code})${plain.code === 0 ? "" : `:\n${plain.out}`}`);
+  const again = await migrate();
+  assert(again.code === 0 && new RegExp(`applied 0, skipped ${MIGRATIONS.length}`).test(again.out), `…and the next plain run finds every file recorded (exit ${again.code})`);
+  // The schema the guide built, older: the files through 007 applied bare, a
+  // thought in it, no ledger. The same plain run runs every file in order over
+  // it, the first seven again, and the thought comes through (review pass 1:
+  // only the whole-schema case was driven).
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "008" });
+  const older = new SQL({ url: URL_, max: 1 });
+  try {
+    await older`INSERT INTO thoughts (content, metadata) VALUES ('written before any ledger', '{}'::jsonb)`;
+    const fromOlder = await migrate();
+    assert(fromOlder.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(fromOlder.out) && (await ledgerHere()) === true,
+           `a plain run over the schema through 007 with no ledger applies every file and records it (exit ${fromOlder.code})${fromOlder.code === 0 ? "" : `:\n${fromOlder.out}`}`);
+    const [{ c }] = (await older`SELECT count(*)::int AS c FROM thoughts WHERE content = 'written before any ledger'`) as { c: number }[];
+    assert(c === 1, `…and the thought written before it is there once (${c})`);
+  } finally {
+    await older.close();
+  }
 
   // Leave the database clean and migrated, as the blocks before this one do.
   await dropSchema(URL_);
@@ -5235,15 +5217,9 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     // path is not a brain to refuse over: the run goes on in public.
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_copy CASCADE; CREATE SCHEMA tu_copy; CREATE TABLE tu_copy.schema_migrations (name text PRIMARY KEY, sha256 text)");
     const alongside = await runMigrator(withPath("tu_copy,public"), MIGRATOR_ENV);
-    // --baseline adopts a brain built by hand: public's thoughts with no
-    // ledger yet is the brain there, as --baseline's own guard reads it.
-    await admin.unsafe("DROP TABLE public.schema_migrations");
-    const adopted = await runMigrator(withPath("tu_copy,public"), MIGRATOR_ENV, "--baseline");
     await admin.unsafe("DROP SCHEMA tu_copy CASCADE");
     assert(alongside.code === 0 && current.test(alongside.out),
            `…while with the brain in public, another schema's ledger of this shape on the path refuses nothing (exit ${alongside.code})`);
-    assert(adopted.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(adopted.out) && (await schemasOf("schema_migrations")) === "public",
-           `…nor stops --baseline adopting public's thoughts, with no ledger yet, as the brain there (exit ${adopted.code})`);
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE; ALTER SCHEMA public RENAME TO tu_brain; CREATE SCHEMA public");
     try {
       const second = await runMigrator(withPath("tu_brain,public"), MIGRATOR_ENV);

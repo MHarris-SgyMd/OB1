@@ -13160,8 +13160,8 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
   const freeOnly = plan039({ pairs: [pairOf(T, null)], dim: W }).steps;
   const renameOnly = plan039({ pairs: [pairOf(T, null, stageIx(T))], dim: W }).steps;
   assert(freeOnly === `${RUN}${SIZE}On any brain, first — on thoughts (${FREE(T)}): 1) \`${CREATE(N, T)}\`. ` && renameOnly === `${RUN}On any brain, first — on thoughts (${N} is missing and ${S}, of 039's shape, is built): 1) \`ALTER INDEX ${S} RENAME TO ${N};\`. `
-         && apply039({ state: "none" }) === "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
-    "the memory goes ahead of any CREATE INDEX, an any-brain one alone included, and not ahead of a rename alone; with no ledger, the plain run that records every file, not the --baseline the ledger row offers");
+         && apply039({ state: "none" }) === "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each.",
+    "the memory goes ahead of any CREATE INDEX, an any-brain one alone included, and not ahead of a rename alone; with no ledger, the plain run that records every file");
   assert([walkPlain, walkRecorded, walkUnread, walkHole, walkLocked, leadRecorded].every((t) => !/file alone|direct connection|074_min_trust|\{\{/.test(t))
          && leadRecorded.includes(apply039({ state: "recorded" })) && walkRecorded.includes(apply039({ state: "recorded" })) && apply039({ state: "unread" }).includes("(this role cannot read schema_migrations)") && apply039() === PENDING,
     "no branch has a file applied by hand, 074 after it or a placeholder left in; both rows say 039's apply in apply039's words, an unread reason defaulting to the refusal's and no ledger state to the pending run");

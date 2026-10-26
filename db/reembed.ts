@@ -373,7 +373,7 @@
  * row under a key naming a model — it predates acceptance and, applied, is
  * never edited — so a brain that accepted rows before 021 would have them
  * labelled at a model whose pass never wrote their vector. A re-run of 021's
- * body — the remedy for a --baseline'd brain whose schema is older, below —
+ * body — the remedy for a brain whose schema is older than its ledger, below —
  * does the same to an accepted row whose thought is unlabelled, and a paste of
  * the file alone did, for anyone who followed the remedy this tool printed
  * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
@@ -972,8 +972,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // could carry (a pass against 013's update_thought fails every legacy twin for
   // ever — see the header). And the column the pass reads and writes,
   // thoughts.embedding_model (021). The ledger decides the remedy: a brain
-  // adopted with --baseline records the migration as applied while the body is
-  // older, and "apply it" would be a no-op there. Read here so --dry-run can
+  // whose body was removed or replaced from outside the migrations records the
+  // migration as applied while the body is older, and "apply it" would be a
+  // no-op there. Read here so --dry-run can
   // report the refusal a run would make; --status is answered whatever the
   // schema, since it never calls update_thought.
   const fnRead = await atStart(() => sql`
@@ -1015,7 +1016,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the eleven-argument update_thought\n" +
       "  (061, carrying 046's event, 032's envelope and 018's rule — without which a pair from before the fingerprint fails on every run — and taking the lineage envelope this pass sends). " +
       (fn.ledgered
-        ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
+        ? `schema_migrations records ${missingMigration} as\n  applied but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
         : `Apply the pending migrations first (every file through ${fn.labelled ? "061" : "021"}, in order — a plain run does exactly that; ${missingMigration} alone would not):\n    cd db && bun migrate.ts --url …`);
   /**
    * What a run would refuse on, in the order a run judges them — the job, the

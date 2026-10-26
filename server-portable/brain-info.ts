@@ -986,7 +986,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
     // table is resolved (to_regclass: this role's search path and USAGE) or
     // merely present somewhere (pg_class) — the two apart, so a table this
     // role cannot see is never called absent (review pass 2: preflight then
-    // recommends --baseline, which marks pending migrations applied).
+    // offered to record the ledger over the schema, pending migrations unrun).
     const [cat] = await tx`
       SELECT current_setting('server_version') AS postgres,
              (SELECT e.extversion::text FROM pg_extension e WHERE e.extname = 'vector') AS vec_version,

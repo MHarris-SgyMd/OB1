@@ -7,7 +7,7 @@
  * reach, and all three have already hidden a defect:
  *
  *   1. The migration runner. migrate.ts speaks to a server over TCP with Bun.sql.
- *      PGlite is not a server, so the ledger, --dry-run, --baseline and drift
+ *      PGlite is not a server, so the ledger, --dry-run and drift
  *      detection were entirely untested until this file existed.
  *
  *   2. Driver-level parameter binding. The double-encoding bug that migration 005

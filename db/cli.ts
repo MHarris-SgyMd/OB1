@@ -69,7 +69,7 @@ export type FlagSpec<K extends string = string> = Readonly<Record<K, Takes>>;
 export interface ScanOptions<K extends string = string> {
   /** How many values may stand where no flag takes one (default 0). */
   positionals?: number;
-  /** A word shown after a flag in the list: `<postgres://…>` for a value, `(with --baseline)` for a switch. */
+  /** A word shown after a flag in the list: `<postgres://…>` for a value, `(with --grant)` for a switch. */
   hints?: Partial<Record<K, string>>;
 }
 
