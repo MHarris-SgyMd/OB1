@@ -31,7 +31,7 @@ const session = await import('./src/lib/server/session.ts');
 const { keySignInOffered } = await import('./src/lib/server/signin.ts');
 const { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } = await import('./src/lib/server/listener.ts');
 const { grafanaUrl } = await import('./src/lib/server/grafana.ts');
-const { grantsOffered, listGrants, revokeGrant } = await import('./src/lib/server/grants.ts');
+const { grantClient, grantsGate, grantsOffered, listGrants, revokeGrant } = await import('./src/lib/server/grants.ts');
 
 let pass = 0;
 let fail = 0;
@@ -315,12 +315,33 @@ console.log('▸ the page of grants (SMD-3307 PR 3)');
 	assert(calls[0]?.url === 'http://auth.ob1.internal.:3001/grants' && id === 'gui' && secret === SECRET, "the listing is the admin listener's on the mesh, port 3001, under the gui client's own credentials as Basic");
 	assert(listed.ok && listed.grants.length === 1 && listed.grants[0].id === row.id && listed.grants[0].resources[0] === `${ORIGIN}/mcp` && listed.more, "…each row read as a grant, one with an id the AS never makes (a path, a number, none) dropped, and `more` kept");
 	assert(JSON.stringify(await listGrants(s, answering(401))) === JSON.stringify({ ok: false, refused: 401 }) && JSON.stringify(await listGrants(s, answering(503))) === JSON.stringify({ ok: false, unreachable: true }) && JSON.stringify(await listGrants(s, failing)) === JSON.stringify({ ok: false, unreachable: true }), '…the GUI\'s credentials refused said as refused; a 503, or no answer at all, as unreachable');
+	assert(JSON.stringify(await listGrants(s, answering(429))) === JSON.stringify({ ok: false, refused: 429 }), '…and a 429, the listener turning the GUI\'s address away after refusing its credentials 20 times, as refused, not as a server down (review pass 1)');
 	calls.length = 0;
 	assert((await revokeGrant(s, row.id, answering(204))) === 'revoked' && calls[0]?.url === `http://auth.ob1.internal.:3001/grants/${row.id}/revoke` && calls[0]?.init.method === 'POST', 'a revoke is a POST to the grant\'s own revoke path: 204 is revoked');
-	assert((await revokeGrant(s, row.id, answering(404))) === 'gone' && (await revokeGrant(s, row.id, answering(401))) === 'refused' && (await revokeGrant(s, row.id, answering(500))) === 'unreachable' && (await revokeGrant(s, row.id, failing)) === 'unreachable', '…404 is no live grant of that id, 401 refused, a 500 or no answer unreachable');
+	assert((await revokeGrant(s, row.id, answering(404))) === 'gone' && (await revokeGrant(s, row.id, answering(401))) === 'refused' && (await revokeGrant(s, row.id, answering(429))) === 'locked' && (await revokeGrant(s, row.id, answering(500))) === 'unreachable' && (await revokeGrant(s, row.id, failing)) === 'unreachable', '…404 is no live grant of that id, 401 refused, 429 turned away for now, a 500 or no answer unreachable');
 	calls.length = 0;
 	assert((await revokeGrant(s, '../../auth/token', answering(204))) === 'gone' && calls.length === 0, '…and an id the AS never makes is sent nowhere');
-	assert(grantsOffered({ canCapture: true }, s) && !grantsOffered({ canCapture: false }, s) && !grantsOffered(null, s) && !grantsOffered({ canCapture: true }, null), 'the page is offered to a session that may write on a configured stack, and to no read session, no visitor, and on no stack without the AS');
+	assert(grantsOffered({ canCapture: true }, env) && !grantsOffered({ canCapture: false }, env) && !grantsOffered(null, env) && !grantsOffered({ canCapture: true }, { ...env, COMPOSE_PROFILES: 'observability' }) && grantsOffered({ canCapture: true }, { ...env, OB1_AUTH_SECRET_GUI: undefined }), 'the nav names the page to a session that signed in able to write on a stack whose COMPOSE_PROFILES names auth — as every sign-in rule reads it, secret or none — and to no read session, no visitor, no other stack (review pass 1)');
+	let asked = 0;
+	const who = (operations: string[] | null) => async () => {
+		asked++;
+		return operations ? { name: 'oauth:operator', scope: 'write', operations } : null;
+	};
+	const gate = await grantsGate({ ...env, COMPOSE_PROFILES: '' }, { canCapture: true }, who(['capture_thought']));
+	assert(!gate.ok && gate.status === 404 && asked === 0, 'the page\'s gate: no auth profile, a 404, the REST core never asked');
+	const readGate = await grantsGate(env, { canCapture: false }, who(['capture_thought']));
+	assert(!readGate.ok && readGate.status === 403 && asked === 0 && !(await grantsGate(env, null, who(['capture_thought']))).ok, '…a session that signed in unable to write, or none, a 403, the REST core never asked');
+	const noSecret = await grantsGate({ ...env, OB1_AUTH_SECRET_GUI: '' }, { canCapture: true }, who(['capture_thought']));
+	assert(!noSecret.ok && noSecret.status === 503 && noSecret.message.includes('OB1_AUTH_SECRET_GUI') && asked === 0, '…configured but holding no secret, a 503 that names it, not a 404 saying the stack has no AS (review pass 1)');
+	const stale = await grantsGate(env, { canCapture: true }, who(null));
+	const downgraded = await grantsGate(env, { canCapture: true }, who(['thought_stats']));
+	assert(!stale.ok && stale.status === 403 && !downgraded.ok && downgraded.status === 403 && asked === 2, '…and every time, the session itself asked at the REST core: one it no longer answers for, or that can no longer write, is a 403, not trusted on its sign-in\'s flag (review pass 1: a revoked session kept the page for its day)');
+	const passed = await grantsGate(env, { canCapture: true }, who(['thought_stats', 'capture_thought']));
+	assert(passed.ok && passed.settings.secret === SECRET && asked === 3, '…one that still writes passes, with the settings the listener\'s calls need');
+	const g = (over: Record<string, unknown>) => grantClient({ ...row, refreshTokens: 1, ...over } as Parameters<typeof grantClient>[0]);
+	assert(g({ clientId: 'gui' }).label === 'This dashboard' && g({ clientId: 'gui', refreshTokens: 0 }).label === 'This dashboard, unfinished', 'a GUI grant is this dashboard\'s sign-in; one with no refresh token alive, a sign-in never finished, says so (review pass 1: abandoned ones read as live sessions)');
+	assert(g({}).label === 'client.example' && g({ clientId: 'cid', clientName: 'Claude Code' }).label === '“Claude Code”, as it calls itself' && g({ clientId: 'cid', clientName: '  ' }).label === 'a registered client with no name', '…a metadata-document client by its host, a registered one by the name it gave itself, said as its own');
+	assert(g({ clientId: 'cid', clientName: '\u202eedoc edualC' }).label === '“edoc edualC”, as it calls itself' && !/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/.test(JSON.stringify(g({ clientId: 'c\u2067id', clientName: 'a\u2066b\u200fc' }))), '…without the bidirectional controls that could turn the words around it back to front (review pass 1)');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

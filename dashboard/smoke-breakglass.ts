@@ -31,6 +31,10 @@
  *     refused;
  *   - the break-glass port routes the GUI alone: /mcp, /auth, /health and the
  *     root are the proxy's 404;
+ *   - the write session's nav names the page of grants, which says at once
+ *     that the authorization server is down; with OB1_SMOKE_READ_KEY set (CI
+ *     sets it), a read key signed in there has no such link, and the page and
+ *     its revoke are refused 403 (SMD-3307 PR 3, review pass 1);
  *   - sign-out there ends the session and deletes its cookie, not Secure.
  *
  * With `--as-up`, run while the authorization server answers, it asserts
@@ -48,6 +52,7 @@ const MAIN = flag("url")?.replace(/\/$/, "");
 const BG = flag("breakglass")?.replace(/\/$/, "");
 const ORIGIN = flag("origin")?.replace(/\/$/, "");
 const KEY = process.env.OB1_SMOKE_KEY ?? "";
+const READ_KEY = process.env.OB1_SMOKE_READ_KEY ?? "";
 if (!MAIN || !BG || !ORIGIN || !KEY) {
   console.error("usage: OB1_SMOKE_KEY=… bun smoke-breakglass.ts --url <origin's port>/dashboard --breakglass <break-glass port>/dashboard --origin <configured origin>");
   process.exit(2);
@@ -137,6 +142,26 @@ const start = await req(`${BG}/auth/start`, { method: "POST", headers: { origin:
 assert(start.status === 303 && start.location === "/dashboard/signin", `no sign-in through the authorization server starts there (${start.status} → ${start.location})`);
 const others = await Promise.all(["/mcp", "/auth/authorize", "/health", "/", "/api/v1/whoami"].map(async (p) => [p, await fetch(`${BG_ORIGIN}${p}`, { redirect: "manual" })] as const));
 assert(others.every(([, r]) => r.status === 404), `the break-glass port routes the GUI alone (${others.map(([p, r]) => `${p} ${r.status}`).join(", ")})`);
+
+// The page of grants (SMD-3307 PR 3; review pass 1): the write session's, the AS's absence said at once from the
+// sign-in page's 30 s probe, not after a call's 10 s timeout; a read key's, refused, its revoke too, since an action
+// runs before any load.
+const t0 = performance.now();
+const grants = await req(`${BG}/grants`, { headers: { cookie: `${BG_COOKIE}=${sid}` } });
+const tookMs = Math.round(performance.now() - t0);
+assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && grants.html.includes('data-testid="unreachable"') && tookMs < 5000, `the write session's nav names the page of grants, which says the authorization server is down at once (${grants.status}, ${tookMs} ms)`);
+if (READ_KEY) {
+  const asRead = await req(`${BG}/signin`, { form: { key: READ_KEY }, headers: { origin: BG_ORIGIN } });
+  const readSid = sessionOf(asRead.setCookie);
+  const cookie = `${BG_COOKIE}=${readSid}`;
+  const [readHome, readPage, readRevoke] = await Promise.all([
+    req(`${BG}/`, { headers: { cookie } }),
+    req(`${BG}/grants`, { headers: { cookie } }),
+    req(`${BG}/grants?/revoke`, { form: { grant: "AnyGrantId" }, headers: { origin: BG_ORIGIN, cookie } }),
+  ]);
+  assert(asRead.status === 303 && readSid.length > 20 && readHome.status === 200 && !readHome.html.includes('href="/dashboard/grants"') && readPage.status === 403 && readRevoke.status === 403, `a read key there: no page of grants in its nav, the page 403 and its revoke 403 (${asRead.status}, ${readPage.status}, ${readRevoke.status})`);
+  await req(`${BG}/signout`, { method: "POST", headers: { origin: BG_ORIGIN, cookie } });
+}
 
 // Sign-out.
 const out = await req(`${BG}/signout`, { method: "POST", headers: { origin: BG_ORIGIN, cookie: `${BG_COOKIE}=${sid}` } });

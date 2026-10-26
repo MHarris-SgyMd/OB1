@@ -671,9 +671,11 @@ const server = serve((req, res) => {
 
 // The admin listener (admin.ts; SMD-3307 PR 3): the operator GUI's page of
 // grants, on the mesh, routed by no proxy rule. The GUI client's credentials
-// are checked before the path is read; failures are counted per address, as
-// the token endpoint's are, and an address past them is refused for the rest
-// of the window. The address is the socket's: no proxy stands in front.
+// are checked before the path is read. Every failure counts against the
+// socket's address (no proxy stands in front), on the token endpoint's
+// numbers, though that endpoint counts per address and client, and only
+// behind a trusted proxy; an address past them is refused for the rest of the
+// window, the GUI's own included, so a wrong secret ends in 429 there.
 const adminFailures = new WindowLimit(TOKEN_FAILURES.limit, TOKEN_FAILURES.windowMs);
 const GUI_SECRETS: Record<string, string | undefined> = Object.fromEntries([...GUI_CLIENTS].map((id) => [id, C.secrets[id]]));
 function answer(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {

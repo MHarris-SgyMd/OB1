@@ -3,7 +3,6 @@ import type { LayoutServerLoad } from './$types';
 import { grafanaUrl } from '$lib/server/grafana';
 import { pluginNav } from '$lib/server/plugins';
 import { grantsOffered } from '$lib/server/grants';
-import { oauthSettings } from '$lib/server/oauth';
 
 // The key itself stays in locals: the page learns whose it is and what it may do.
 export const load: LayoutServerLoad = async (event) => {
@@ -18,8 +17,8 @@ export const load: LayoutServerLoad = async (event) => {
 		canCapture: session?.canCapture ?? false,
 		// A path on this origin is the public origin's route (compose.grafana-public.yaml): the break-glass port routes the GUI alone, so none there (review pass 2).
 		grafana: session ? grafanaUrl(env, event.locals.breakglass) : null,
-		// The page of grants (SMD-3307 PR 3): a configured stack's, for a session that may write.
-		grantsPage: grantsOffered(session, oauthSettings(env)),
+		// The page of grants (SMD-3307 PR 3): a configured stack's, for a session that signed in able to write; the page checks the session again.
+		grantsPage: grantsOffered(session, env),
 		// The enabled plugins' pages this key may use (SMD-2280 PR 3), each its href and label alone.
 		pluginPages: session ? await pluginNav(event) : [],
 	};

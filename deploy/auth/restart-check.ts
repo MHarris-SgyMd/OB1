@@ -48,15 +48,24 @@
  *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --hold-grant > held.json
  *   compose exec -T auth bun restart-check.ts --admin
  *   compose exec -T auth bun restart-check.ts --refused < held.json
+ *   compose exec -T auth bun restart-check.ts --admin-lockout   # last: it locks 127.0.0.1 out for 15 min
  *
  * The page of grants (SMD-3307 PR 3). `--hold-grant` registers a public
  * client that may refresh, signs the operator in for it with
- * `offline_access`, and prints its id and refresh token as JSON, for CI to
- * revoke its grant on the GUI's page. `--admin` holds the admin listener
- * (admin.ts, on 3001) to its rules: no credential, another client's own and
- * a wrong secret are 401, the GUI's lists the grants, and the routes refuse
- * other methods and shapes. `--refused` refreshes with the held token and
- * passes only on 400 `invalid_grant`, which the grant's revocation makes.
+ * `offline_access`, refreshes once (so the token it holds is one the server
+ * took: `--refused` has its control), and prints its id and refresh token as
+ * JSON, for CI to revoke its grant on the GUI's page. `--admin` holds the
+ * admin listener (admin.ts, on 3001) to its rules: no credential, another
+ * client's own and a wrong secret are 401, the GUI's lists the grants, and the
+ * routes refuse other methods and shapes. `--refused` refreshes with the held
+ * token and passes only on 400 `invalid_grant`, which the grant's revocation
+ * makes. `--admin-lockout` sends wrong secrets from 127.0.0.1 until it is
+ * turned away, which must come by the 21st failure (--admin's own refusals
+ * count), after at least one 401, and then holds the GUI's own credentials
+ * from that address to 429 too, with a Retry-After: the failure limit
+ * (review pass 1). It leaves the
+ * address locked out for the window, so it runs after everything else that
+ * calls the listener from inside the container.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -373,7 +382,11 @@ if (process.argv.includes("--register")) {
   const t = await fetch(`${BASE}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: verifier, client_id: client_id!, resource: `${origin}/mcp` }) });
   const tokens = (await t.json()) as { refresh_token?: string; error?: string };
   if (t.status !== 200 || !tokens.refresh_token) fail(`the code answered ${t.status} ${tokens.error ?? ""}, ${tokens.refresh_token ? "with" : "without"} a refresh token`);
-  console.log(JSON.stringify({ client_id, refresh_token: tokens.refresh_token, resource: `${origin}/mcp` }));
+  // Refreshed once before it is held: the token printed is one the server has just taken, so its refusal after the revoke is the revoke's.
+  const r = await fetch(`${BASE}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: client_id!, resource: `${origin}/mcp` }) });
+  const rotated = (await r.json()) as { refresh_token?: string; error?: string };
+  if (r.status !== 200 || !rotated.refresh_token) fail(`the held grant's first refresh answered ${r.status} ${rotated.error ?? ""}: it was never a working grant`);
+  console.log(JSON.stringify({ client_id, refresh_token: rotated.refresh_token, resource: `${origin}/mcp` }));
 } else if (process.argv.includes("--refused")) {
   const { client_id, refresh_token, resource } = JSON.parse(await Bun.stdin.text()) as { client_id: string; refresh_token: string; resource: string };
   const r = await fetch(`${BASE}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token, client_id, resource }) });
@@ -404,7 +417,8 @@ if (process.argv.includes("--register")) {
   rows.push(["the GUI's credentials list the grants", listed.status === 200 && Array.isArray(listed.body?.grants) && typeof listed.body?.more === "boolean"]);
   const wrong = await call("/grants", { method: "POST", headers: { authorization: gui } });
   rows.push(["another method on the listing is 405, naming GET", wrong.status === 405 && wrong.allow === "GET"]);
-  rows.push(["a revoke by GET is 405, naming POST", (await call("/grants/x/revoke", { headers: { authorization: gui } })).allow === "POST"]);
+  const byGet = await call("/grants/x/revoke", { headers: { authorization: gui } });
+  rows.push(["a revoke by GET is 405, naming POST", byGet.status === 405 && byGet.allow === "POST"]);
   rows.push(["a revoke of no live grant is 404", (await call("/grants/no-such-grant/revoke", { method: "POST", headers: { authorization: gui } })).status === 404]);
   rows.push(["an unknown path is 404", (await call("/auth/token", { headers: { authorization: gui } })).status === 404]);
   const bad = rows.filter(([, ok]) => !ok).map(([name]) => name);
@@ -413,7 +427,32 @@ if (process.argv.includes("--register")) {
     process.exit(1);
   }
   console.log(`the admin listener: ${rows.length} rules hold (${listed.body?.grants?.length} grant(s) listed)`);
+} else if (process.argv.includes("--admin-lockout")) {
+  const guiSecret = process.env.OB1_AUTH_SECRET_GUI ?? "";
+  if (!guiSecret) {
+    console.error("--admin-lockout needs OB1_AUTH_SECRET_GUI in its environment");
+    process.exit(2);
+  }
+  const at = (secret: string) => fetch("http://127.0.0.1:3001/grants", { headers: { authorization: `Basic ${btoa(`gui:${encodeURIComponent(secret)}`)}` } }).then(async (r) => {
+    await r.body?.cancel();
+    return { status: r.status, retry: r.headers.get("retry-after") };
+  });
+  // Wrong secrets until the address is turned away: at most 21, since --admin's refusals from this address count too.
+  const refused: number[] = [];
+  let past = { status: 0, retry: null as string | null };
+  for (let i = 0; i < 21 && past.status !== 429; i++) {
+    past = await at(`${guiSecret}-wrong-${i}`);
+    if (past.status !== 429) refused.push(past.status);
+  }
+  const again = await at(`${guiSecret}-wrong`);
+  const right = await at(guiSecret);
+  const holds = refused.length > 0 && refused.every((c) => c === 401) && past.status === 429 && Number(past.retry) > 0 && again.status === 429 && right.status === 429;
+  if (!holds) {
+    console.error(`the admin listener's failure limit: wrong secrets answered ${refused.join(",") || "nothing"} then ${past.status} (Retry-After ${past.retry ?? "none"}), the next ${again.status}, the right one after them ${right.status}: not 401s, then 429 for the address by the 21st failure`);
+    process.exit(1);
+  }
+  console.log(`the admin listener: ${refused.length} wrong secret(s) 401, then the address turned away (429, Retry-After ${past.retry} s), the GUI's own credentials from it too`);
 } else {
-  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope> | --gui-refresh | --hold-grant | --refused | --admin");
+  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope> | --gui-refresh | --hold-grant | --refused | --admin | --admin-lockout");
   process.exit(2);
 }

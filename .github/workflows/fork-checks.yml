@@ -3707,10 +3707,14 @@ jobs:
       # GUI's listing); the REST core reaches it on the mesh and is refused
       # without the GUI's credentials, the forwarder, off the mesh, reaches
       # nothing, and the proxy routes nothing to it. A third-party client is
-      # signed in with a refresh token (--hold-grant); the smoke revokes its
-      # grant on the page, and its refresh token is refused at once
-      # (--refused; its access token lapses within 600 s, the maintainer's
-      # choice). Every sign-in the step makes ends revoked, so the AS's store
+      # signed in with a refresh token, refreshed once so it is one the server
+      # took (--hold-grant); the smoke revokes its grant on the page, and its
+      # refresh token is refused at once (--refused; its access token lapses
+      # within 600 s, the maintainer's choice). Last, the listener's failure
+      # limit: 20 wrong secrets from inside its container, then the address
+      # turned away, the GUI's own credentials from it too (--admin-lockout,
+      # which leaves 127.0.0.1 locked out, so nothing after it calls the
+      # listener from there). Every sign-in the step makes ends revoked, so the AS's store
       # holds no refresh token of the `gui` client after it: sign-out revoked
       # the GUI's. The password goes by name, never on a command line, and the
       # held refresh token sits in a file of the runner's own, removed after.
@@ -3733,6 +3737,7 @@ jobs:
           (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test --revoke-client "$(jq -r .client_id "$held")")
           auth exec -T auth bun restart-check.ts --refused < "$held"
           rm -f "$held"
+          auth exec -T auth bun restart-check.ts --admin-lockout
           left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
           [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
           # The step below removes the authorization server, after its break-glass check with it up.
@@ -3754,8 +3759,10 @@ jobs:
       # key signs in with the server down, under a cookie of its own name, its
       # session opening nothing on the origin; a post there from another
       # loopback port, localhost, the configured origin or none is refused, and
-      # nothing but the GUI is routed. The key goes by name, never on a command
-      # line. `breakglass` is removed after.
+      # nothing but the GUI is routed; the page of grants says at once that the
+      # server is down, and a read key there has no such page (403, its revoke
+      # too). The keys go by name, never on a command line. `breakglass` is
+      # removed after.
       - name: The break-glass port takes a key while the authorization server is down
         working-directory: deploy
         run: |
