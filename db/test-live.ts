@@ -6617,8 +6617,9 @@ if (want("10h")) {
       `Outcome (the assistant's last message):\n${outcome}`, "Brain: no thoughts read or written this session."].join("\n\n");
   const filed = await seed("The ticket row's own text, its id in its metadata alone.", { issue: "SMD-7" });
   const session = await seed(summary("SMD-8", "start smd-8"));
-  const release = await seed("OB1 release notes: what shipped this week.");
-  const pr = await seed("Reviewed and merged pull work for the dashboard.");
+  // Each names what the stub answers for it: a model's PR or release counts only when its thought names it (review pass 4).
+  const release = await seed("OB1 release notes: what shipped in 2.0.0 this week.");
+  const pr = await seed("Reviewed and merged pull request 727 for the dashboard.");
   // A session whose prompts name no ticket: its header's is its branch's, and its work may be another's (version 2's
   // rule 1), so it is the model's. Version 1 took the header's ticket.
   const none = await seed(summary("SMD-11", "a passing remark", "Nothing here to name."));
@@ -6730,7 +6731,7 @@ if (want("10h")) {
 
     // A moved text the model names the same: the facet kept, its lineage moved to the text read now.
     const relBefore = (await standingOf(release))!;
-    await sql`SELECT update_thought(${release}::uuid, ${"OB1 release notes: what shipped this week, and one fix."})`;
+    await sql`SELECT update_thought(${release}::uuid, ${"OB1 release notes: what shipped in 2.0.0 this week, and one fix."})`;
     const moved = await sweep();
     const relAfter = (await standingOf(release))!;
     assert(/^0 subject\(s\) recorded; 1 kept, at the text read now/.test(tally(moved)) && relAfter.id === relBefore.id && relAfter.fp === relAfter.current && relAfter.fp !== relBefore.fp,

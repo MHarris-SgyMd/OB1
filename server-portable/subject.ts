@@ -6,7 +6,7 @@
  * same work: a property of each thought's own subject, not of a pair (SMD-3299). The subject is found in this order:
  *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (the fields
  *      node_state reads, 068), when it is a ticket id;
- *   2. `first_line`: a session summary's header ticket, when the session's title or listed prompts name it too
+ *   2. `first_line`: a session summary's header ticket, when one of the session's listed prompts names it too
  *      (sessionHeaderTicket). The capture hook's header lists the tickets a session's prompts named, and the
  *      branch's or directory's only when they named none: that one is the session's work only when it says so;
  *   3. `model`: the judge model, asked the subject's own question about the thought alone (OWN_RULES), its answer
@@ -40,26 +40,26 @@ export type SubjectBy = "metadata" | "first_line" | "model";
 const TICKETS_IN_TEXT = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9_])/g;
 /** A value that is a ticket id and nothing else. */
 const TICKET_ID = /^[A-Z][A-Z0-9]+-[0-9]+$/;
-/** A pull request's number, each in a text: `PR 12`, `PR #12`, `PR-12`, `pull request 12`, `…/pull/12`, or a bare `#12`. */
-const PR_NUMBERS = /(?:\bPR\s*[#-]?\s*|\bpull request\s*#?\s*|\/pull\/|(?<![\w&#])#)([0-9]{1,9})(?![0-9])/gi;
-/** An answer naming pull requests outright, in the plural. */
-const SEVERAL_PRS = /\b(?:PRs|pull requests)\b/i;
+/** A ticket where it stands in an answer, with a possessive after it (`SMD-12's`), which goes with it when it is dropped. */
+const TICKET_MENTIONS = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+-[0-9]+)(?:['’]s)?(?![A-Za-z0-9_])/g;
 /**
- * What follows a PR's number when an unmarked one goes with it, a range or a list (a second marked number, `#12` or
- * `PR 12`, is a second match of PR_NUMBERS already):
- *   - a bare number right after a range mark (`PR 10–12`, `PR 12/13`, `PR 10…12`), or after an arrow (`PR 10 → 12`);
- *   - a bare number that ends a list after `and`, `or`, `plus`, `&`, `+` or a comma (`PR 502 and 503`, `PR 10 (and 12)`,
- *     `PR 12 & 13`, `PR 12, 13`: review pass 3).
- * Not a date, a decimal or an ordinal, nor a count of something (review pass 2: `PR 727, 2026-10-20`,
- * `PR 727 to 2.0.0`, `PR 12 - 2nd attempt` and `PR #12, 2 commits` are each one PR).
+ * An answer that is one pull request: at most two words before it (`client PR 780`, `OB1 PR #502`), then `PR 12`,
+ * `PR #12`, `PR-12`, `pull request 12` or a bare `#12`, then nothing but words with no digit (`PR 727, merged`); or a
+ * pull request's URL alone (`…/pull/88`). An answer naming a PR among other numbers is no PR, its version or a phrase.
+ * Review pass 4 replaced three passes of reading ranges and lists of PRs out of free text, each broken by the next
+ * (`PR 10–12`, then `PR 727, 2026-10-20`, then `PR #12, 23 commits`). Every PR answer the model gave on the canary was
+ * one PR alone: 16 of version 1's, 7 of version 2's.
  */
-const ANOTHER_NUMBER = new RegExp([
-  String.raw`^(?:[-–/…]|\.\.\.?)[0-9]+(?![0-9]*[-.][0-9]|st\b|nd\b|rd\b|th\b)`,
-  String.raw`^\s*→\s*[0-9]+(?![0-9]*[-.][0-9])`,
-  String.raw`^\s*\(?\s*(?:\b(?:and|or|plus)\b|[&+,])\s*[0-9]+(?![0-9]*[-.][0-9])(?!\s*[A-Za-z])`,
-].join("|"), "i");
+const PR_ANSWER = /^(?:\S*[^\d\s]\S*\s+){0,2}(?:PR\s*[#-]?\s*|pull request\s*#?\s*|#)([0-9]{1,9})(?:[\s,;:.!?—–'’-]+[^\d]*)?$/i;
+const PR_URL = /^\S*\/pull\/([0-9]{1,9})\/?$/i;
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
+/** The same, each in an answer, for the guard's drops. */
+const VERSIONS = new RegExp(VERSION.source, "gi");
+/** A version's numbers as a key writes them, without leading zeros. */
+const versionOf = (v: string): string => v.split(".").map((n) => String(Number(n))).join(".");
+/** The words a dropped reference's leftovers may be and still name nothing (`SMD-998 and SMD-999` both dropped). */
+const CONNECTIVES = /\b(?:and|or|plus|with|of|for|the|a|an|to|in|on|its)\b/giu;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
 const PHRASE_MAX = 200;
 
@@ -74,7 +74,7 @@ export function subjectKeyValid(key: string): boolean {
 
 /**
  * Ticket-shaped words that are not tickets, by their prefix: encodings, hashes, ciphers, protocols, standards,
- * licences, model names and dated periods, and `PR`, which PR_NUMBERS reads. A fixed list, so a thought's key is the
+ * licences, model names and dated periods, and `PR`, which PR_ANSWER reads. A fixed list, so a thought's key is the
  * same on every brain and every run: review pass 2 replaced pass 1's reading of the prefixes a brain files, which
  * depended on what the brain held when the rule ran and left a team not yet synced split between ticket and phrase.
  * On SMD-3299's canary thoughts every other prefix in a text was SMD (UTF 11, FSL 6, AGPL 3, RFC 1, README 1).
@@ -95,41 +95,42 @@ function ticketIn(text: string): string | null {
   return null;
 }
 
+/** A reference the thought itself names, by kind and value: askOwnSubject's guard over the thought's own text. */
+export type NamedIn = (kind: "ticket" | "pr" | "version", value: string) => boolean;
+
 /**
- * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket; with `named`, one the
- * thought names, askOwnSubject's guard), else the pull request
- * it names, when it names one, else a release's version, else the answer as a phrase. A ticket comes first because a
- * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. An answer naming several
- * PRs, a range or a list, is about something they share, so it is no PR: its release's version when it names one,
- * else a phrase (version 2; Verify item 1 read a digest of a range of PRs as its first). A phrase is the answer
- * lower-cased, every run of space, control or format characters one
- * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word. Read whole: the
- * answer kept on a recipe is cut, not this.
+ * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket), else the pull request
+ * it is (PR_ANSWER), else a release's version, else the answer as a phrase. A ticket comes first because a thread is
+ * the ticket's: a PR named beside its ticket is one step of that ticket's work. With `named` (askOwnSubject's), a
+ * ticket or a release the thought itself does not name is dropped from the answer first, and an answer that is a PR
+ * the thought does not name names nothing: the model's invention, or its copy of one of the question's examples
+ * (review passes 3 and 4). A phrase is the answer lower-cased, every run of space, control or format characters one
+ * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word; an answer of
+ * marks alone names nothing. Read whole: the answer kept on a recipe is cut, not this.
  */
-export function subjectKey(answer: string, named?: (id: string) => boolean): string | null {
+export function subjectKey(answer: string, named?: NamedIn): string | null {
   let text = oneLine(answer);
-  // With `named`, a ticket the thought itself does not name is dropped from the answer: the model's invention, or its
-  // copy of the question's example (review pass 3). What is left is read as before; nothing but marks left, none.
+  let dropped = false;
   if (named) {
-    let dropped = false;
-    text = text.replace(TICKETS_IN_TEXT, (id) => (isTicket(id) && !named(id) ? ((dropped = true), " ") : id));
-    // The marks a dropped ticket leaves at either end (`SMD-999: the review` is `the review`).
-    if (dropped) text = oneLine(text).replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, "");
+    text = text.replace(TICKET_MENTIONS, (m, id: string) => (isTicket(id) && !named("ticket", id) ? ((dropped = true), " ") : m));
+    text = oneLine(text.replace(VERSIONS, (m, v: string) => (named("version", versionOf(v)) ? m : ((dropped = true), " "))));
   }
   if (!text || !/[\p{L}\p{N}]/u.test(text)) return null;
   const ticket = ticketIn(text);
   if (ticket) return `ticket:${ticket}`;
-  // Each PR named, and a mark for a number a range or a list adds after one (review pass 1: `PR 10–12` read as PR 10).
-  if (!SEVERAL_PRS.test(text)) {
-    const prs = new Set<string>();
-    for (const m of text.matchAll(PR_NUMBERS)) {
-      prs.add(String(Number(m[1])));
-      if (ANOTHER_NUMBER.test(text.slice((m.index ?? 0) + m[0].length))) prs.add("and another");
-    }
-    if (prs.size === 1) return `pr:${[...prs][0]}`;
+  const pr = PR_ANSWER.exec(text) ?? PR_URL.exec(text);
+  if (pr) {
+    const n = String(Number(pr[1]));
+    return !named || named("pr", n) ? `pr:${n}` : null;
   }
   const version = VERSION.exec(text);
-  if (version) return `version:v${version[1].split(".").map((n) => String(Number(n))).join(".")}`;
+  if (version) return `version:v${versionOf(version[1])}`;
+  // The phrase. The marks a dropped reference left at either end are trimmed here, after the reads above, where a
+  // leading mark can belong to what is read (`SMD-999 #727` is PR 727: review pass 4); connectives alone name nothing.
+  if (dropped) {
+    text = text.replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, "");
+    if (!/[\p{L}\p{N}]/u.test(text.replace(CONNECTIVES, ""))) return null;
+  }
   let phrase = text.toLowerCase().replace(/[\p{Lu}\p{Lt}]/gu, "").replace(/[\s\p{C}\p{Z}]+/gu, " ").trim();
   if ([...phrase].length > PHRASE_MAX) {
     const cut = cutByCodePoint(phrase, PHRASE_MAX + 1);
@@ -322,8 +323,8 @@ export function subjectCurrent(by: string | null, judge: string | null): boolean
  * The judge model's own subject for one thought: one call at the chat endpoint, as decide mode's writer is asked,
  * through providerCall, which refuses before the request when the egress gate says the row may not leave (kind
  * `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the subject at most 200 code points, for a recipe, null when
- * the answer gave no subject string; `key` is read from the subject whole (subjectKey), a ticket only when the thought's
- * own text names it, and null when it named nothing a key holds.
+ * the answer gave no subject string; `key` is read from the subject whole (subjectKey), a ticket, a PR or a release only
+ * when the thought's own text names it, and null when it named nothing a key holds.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answer: string | null; key: string | null }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
@@ -331,7 +332,12 @@ export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: E
   }, subject, signal);
   const raw = d?.choices?.[0]?.message?.content ?? "";
   const whole = ownSubjectOf(raw, SUBJECT_READ_MAX);
-  // A ticket counts when the thought names it, in any case: a branch's lower-case id is the thought's own name for it.
-  const named = (id: string) => new RegExp(`(?<![A-Za-z0-9_])${id}(?![A-Za-z0-9_])`, "i").test(side.content);
+  // A reference counts when the thought names it: a ticket in any case (a branch's lower-case id is the thought's own
+  // name for it), a PR's number as a number, a version's numbers with or without their leading zeros.
+  const has = (re: RegExp) => re.test(side.content);
+  const named: NamedIn = (kind, value) =>
+    kind === "ticket" ? has(new RegExp(`(?<![A-Za-z0-9_])${value}(?![A-Za-z0-9_])`, "i"))
+    : kind === "pr" ? has(new RegExp(`(?<![0-9])0*${value}(?![0-9])`))
+    : has(new RegExp(`(?<![0-9.])${value.split(".").map((d) => `0*${d}`).join("\\.")}(?![0-9]|\\.[0-9])`));
   return { raw, answer: whole === null ? null : cutByCodePoint(whole, 200), key: whole === null ? null : subjectKey(whole, named) };
 }

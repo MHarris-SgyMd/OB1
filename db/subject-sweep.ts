@@ -392,7 +392,11 @@ async function sweep(
       }
       throw e;
     }
-    if (w.stale) n.stale++;
+    if (w.stale) {
+      n.stale++;
+      // The text moved mid-sweep: a subject out of date still stands (review pass 4).
+      if (row.standing_key !== null) n.leftOutOfDate++;
+    }
     else if (w.gone) n.gone++;
     else if (w.action === "kept") n.kept++;
     else if (w.action === "added" || w.action === "replaced") {

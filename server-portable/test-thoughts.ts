@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectRuleKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -2631,19 +2631,14 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     // Review pass 1: a ticket-shaped encoding, hash or licence is no ticket; PR-502 is a PR; a ticket too long for 111's key is none.
     ["Move to SHA-256 (SMD-1234)", "ticket:SMD-1234"], ["SHA-256 migration", "phrase:sha-256 migration"], ["UTF-8 handling", "phrase:utf-8 handling"], ["PR-502", "pr:502"],
     [`SMD-${"1".repeat(250)}`, `phrase:smd-${"1".repeat(196)}`],
-    // Version 2: one PR, named once or more, is the PR; several, a range or a list, are about something they share.
+    // Review pass 4: an answer is a PR only when it is one, at most two words before it and no number after it.
+    ["PR 7, the fix", "pr:7"], ["PR #12 - the fix", "pr:12"], ["PR 5 to main", "pr:5"], ["client PR 780 merge", "pr:780"], ["PR 727's review", "pr:727"],
     ["Notes on the merge queue (across PRs #20–#45)", "phrase:notes on the merge queue (across prs #20–#45)"], ["PR 12 and PR 13", "phrase:pr 12 and pr 13"],
-    ["PR 721 merged, PR #721's follow-up", "pr:721"], ["#5, #6 and #7, the v2.1.0 cut", "version:v2.1.0"], ["PR 012, then PR #12 again", "pr:12"],
-    // Review pass 1: a range or a list after one PR mark is several too.
-    ["PR 10–12", "phrase:pr 10–12"], ["PR 502 and 503", "phrase:pr 502 and 503"], ["PR 12/13", "phrase:pr 12/13"], ["PR 7, the fix", "pr:7"],
-    ["PR 10 plus 12", "phrase:pr 10 plus 12"], ["PR 10 (and 12)", "phrase:pr 10 (and 12)"], ["PR 10 → 12", "phrase:pr 10 → 12"], ["PR 10…12", "phrase:pr 10…12"],
-    ["PRs 502 and 503", "phrase:prs 502 and 503"], ["PR 10 and PR 12", "phrase:pr 10 and pr 12"], ["PR 10, #12", "phrase:pr 10, #12"],
-    // Review pass 2: a date, a decimal, an ordinal or a count after one PR is that PR's.
-    ["PR 727, 2026-10-20", "pr:727"], ["PR 727 — 2026-10-20 merge", "pr:727"], ["PR 502 — 3 review passes", "pr:502"], ["PR #12, 2 commits", "pr:12"], ["PR 12 - 2nd attempt", "pr:12"],
-    ["PR 727 to 2.0.0", "pr:727"], ["PR #12 - the fix", "pr:12"], ["PR 5 to main", "pr:5"], ["PR 727: 2 fixes", "pr:727"], ["PR 727, then v2.0.0", "pr:727"], ["PR 12 and 2 commits", "pr:12"],
-    ["PR 12-2nd try", "pr:12"], ["PR 727/2.1 notes", "pr:727"], ["PR 727-2026-10-20", "pr:727"], ["the PRs behind #727", "phrase:the prs behind #727"],
-    // Review pass 3: `&`, `+` and a comma end a list too.
-    ["PR 12 & 13", "phrase:pr 12 & 13"], ["PR 12 + 13", "phrase:pr 12 + 13"], ["PR 12, 13", "phrase:pr 12, 13"],
+    ["PR 10–12", "phrase:pr 10–12"], ["PR 502 and 503", "phrase:pr 502 and 503"], ["PR 12/13", "phrase:pr 12/13"], ["PR 10 → 12", "phrase:pr 10 → 12"], ["PRs 502 and 503", "phrase:prs 502 and 503"],
+    ["PR 12 & 13", "phrase:pr 12 & 13"], ["PR 12, and 13", "phrase:pr 12, and 13"], ["PR 12 and/or 13", "phrase:pr 12 and/or 13"],
+    ["PR #12, 23 commits", "phrase:pr #12, 23 commits"], ["PR 727, 2026-10-20", "phrase:pr 727, 2026-10-20"], ["PR 012, then PR #12 again", "phrase:pr 012, then pr #12 again"],
+    ["the merge of PR 727", "phrase:the merge of pr 727"], ["the PRs behind #727", "phrase:the prs behind #727"],
+    ["PR 727, then v2.0.0", "version:v2.0.0"], ["#5, #6 and #7, the v2.1.0 cut", "version:v2.1.0"],
     ["", null], ["   ", null], ["ϒ", null],
   ];
   for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);
@@ -2659,7 +2654,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(metadataTicket({ ticket: 5 }) === null && metadataTicket({ ticket: "SMD-1 and SMD-2" }) === null && metadataTicket({ ticket: "smd-1" }) === null && metadataTicket(null) === null && metadataTicket({}) === null,
     "…and nothing that is not a ticket id alone");
   // Version 2: a first line's ticket is a session summary's header ticket, when the header names that one alone and
-  // the session's title or listed prompts name it too, in any case, as the capture hook reads a prompt's tickets (its
+  // one of the session's listed prompts names it too, in any case, as the capture hook reads a prompt's tickets (its
   // header lists those, else the branch's). The fixtures are the hook's layout as renderSummary writes it
   // (recipes/session-capture-hook): the header's parts joined by " — ", then each part a blank line apart — `Title: …`,
   // `Asked (N prompts):` with a `- …` line a prompt, the outcome — so the blank lines between them are read as the
@@ -2775,15 +2770,16 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}'];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}'];
   const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
     const subject = { kind: "extraction" as const, content: sides[1].content };
-    const a = await askOwnSubject(cfg, sides[1], subject);
-    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key (${JSON.stringify(a)})`);
+    const names727 = { content: "Merged PR 727 today.", createdAt: null, metadata: {}, writer: null };
+    const a = await askOwnSubject(cfg, names727, subject);
+    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key, the PR one the thought names (${JSON.stringify(a)})`);
     const b0 = bodies[0] as { model?: string; response_format?: { type?: string }; temperature?: number; messages?: { content: string }[] };
-    assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(sides[1])[0].content,
+    assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(names727)[0].content,
       "asked of the judge model, JSON, at the metadata temperature, with the question");
     const none = await askOwnSubject(cfg, sides[1], subject);
     assert(none.answer === "" && none.key === null, "an empty subject: no key");
@@ -2797,13 +2793,20 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     // Review pass 3: a ticket the thought never names is the model's invention, or its copy of the question's example.
     const copied = await askOwnSubject(cfg, sides[1], subject);
     assert(copied.answer === "SMD-123" && copied.key === null, `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
-    assert(subjectKey("SMD-999: the dashboard review", (id) => id !== "SMD-999") === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (id) => id === "SMD-2") === "ticket:SMD-2"
-        && subjectKey("SMD-999", () => false) === null && subjectKey("SMD-999 — PR 12", () => false) === "pr:12",
-      "…the rest of the answer read as before: a phrase, the ticket it does name, a PR; the marks a dropped id leaves trimmed");
+    const cut = await askOwnSubject(cfg, { content: "Cut v02.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(cut.key === "version:v2.0.0", `a release the thought names, its leading zeros aside, is its key (${cut.key})`);
+    /** A thought naming references of these kinds alone. */
+    const only = (...kinds: string[]): NamedIn => (kind) => kinds.includes(kind);
+    assert(subjectKey("SMD-999: the dashboard review", only("pr", "version")) === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (k, v) => k !== "ticket" || v === "SMD-2") === "ticket:SMD-2"
+        && subjectKey("SMD-999", only()) === null && subjectKey("SMD-999 — PR 12", only("pr")) === "pr:12" && subjectKey("SMD-999 #727", only("pr")) === "pr:727",
+      "…the rest of the answer read as before: a phrase, the ticket it does name, a PR, its # kept (review pass 4); the marks a dropped id leaves trimmed");
+    assert(subjectKey("SMD-999's sleep budget", only()) === "phrase:sleep budget" && subjectKey("SMD-998 and SMD-999", only()) === null
+        && subjectKey("v1.2.3", only()) === null && subjectKey("PR 123", only("ticket", "version")) === null && subjectKey("PR 123", only("pr")) === "pr:123",
+      "…a possessive goes with its ticket, connectives alone name nothing, and a release or a PR the thought does not name is dropped too: the question's v1.2.3 copied (review pass 4)");
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
-    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 5, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 6, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
   }

@@ -139,7 +139,8 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
  * A thought's own subject's recipe (111, SMD-3306): a rule's, deterministic,
  * naming the rule and its version; or the judge model's, naming the
  * model, the question's version and hash, the temperature and the subject it
- * answered, which the key was read from (subject.ts's subjectKey), so a
+ * answered, which the key was read from (subject.ts's subjectKey, its guard
+ * reading the thought's text at the fingerprint the lineage names), so a
  * changed reading can be checked against what the model said.
  */
 export function subjectRecipe(found: { by: "metadata" | "first_line" } | { by: "model"; model: string; temperature: number; answer: string }): Recipe {
