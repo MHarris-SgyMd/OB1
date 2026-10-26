@@ -2478,13 +2478,13 @@ networks:
   #          the stack's own Ollama and Jev, which fetch their weights there
   #          and are called there by name.
   #   auth-egress  outward, the authorization server's alone.
-  #   front  internal: the forwarder and the proxy alone, where the forwarder
-  #          reaches the proxy as proxy.ob1.internal.
+  #   front  internal: the forwarder, the break-glass listener and the proxy
+  #          alone, where each reaches the proxy as proxy.ob1.internal.
   #   telemetry  internal: the observability profile's collector and
   #          pg-exporter alone, where the collector scrapes it (SMD-1849
   #          PR 3b).
-  #   edge   outward, the forwarder's alone: where the stack's port is
-  #          published. The proxy is on internal networks alone, so a name it
+  #   edge   outward, the forwarder's and the break-glass listener's alone:
+  #          where their ports are published. The proxy is on internal networks alone, so a name it
   #          looks up that nothing holds never reaches the host's resolvers.
   # An internal network has no route out and does not forward a name it does
   # not hold to the host's resolvers (measured on podman 6); it also

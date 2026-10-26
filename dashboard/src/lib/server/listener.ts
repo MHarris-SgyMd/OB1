@@ -1,12 +1,17 @@
 // Which listener a request came in by (SMD-3307; ADR decision 15): the origin's, or the break-glass port the
 // `breakglass` service publishes on 127.0.0.1 alone. The proxy's `breakglass` entrypoint sets X-OB1-Listener:
 // breakglass on its one router, and its `web` entrypoint deletes that header from every request on the origin
-// (deploy/compose.yaml), so the header's presence is the proxy's word, not a client's. While the stack is
-// configured with the authorization server, key sign-in is offered there alone (signin.ts keySignInOffered).
+// (deploy/compose.yaml), so off the mesh the header's presence is the proxy's word, not a client's; on the mesh,
+// the stack's own servers can reach the GUI or the proxy's break-glass entrypoint directly, and each holds or
+// can call the REST core with a key already. While the stack is configured with the authorization server, key
+// sign-in is offered on the break-glass listener alone (signin.ts keySignInOffered).
 //
 // The origin a form is posted from: SvelteKit's own check compares it with the configured public origin, which
-// a browser at http://127.0.0.1:<port> never sends, so the GUI checks it here instead (hooks.server.ts) — the
-// public origin always, and the break-glass port's own origin only on that listener. Pure but for the env.
+// a browser at http://127.0.0.1:<port> never sends, so the GUI checks it here instead (hooks.server.ts) — on the
+// origin, the origin alone; on the break-glass listener, that port's own http://127.0.0.1 origin alone (review
+// pass 1: a page on the public origin posted a key there, and `localhost` could be another process on ::1, the
+// port being published on 127.0.0.1 alone). Each listener's session rides a cookie of its own name. Pure but
+// for the env.
 
 /** The header the proxy's break-glass router sets, and its `web` entrypoint deletes. */
 export const LISTENER_HEADER = 'x-ob1-listener';
@@ -28,14 +33,24 @@ const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 /**
  * Whether a request may be taken from where the browser says it was posted. A safe method always; an unsafe one
  * — whatever its body, so one with none (a bare POST to start a sign-in or sign out) is checked too, which
- * SvelteKit's check passes — only from the origin itself, or, on the break-glass listener alone, from that port's
- * own loopback origin: not any port on 127.0.0.1, where another local page would be same-site, its cookies the
- * same host's.
+ * SvelteKit's check passes — only from its own listener's origin: the configured one on the origin, and
+ * `http://127.0.0.1:<port>` on the break-glass listener, exactly: not another port on 127.0.0.1, where another
+ * local page would be same-site, its cookies the same host's.
  */
 export function originAllowed(request: Request, url: URL, port: number | null): boolean {
 	if (!UNSAFE.has(request.method)) return true;
 	const origin = request.headers.get('origin');
 	if (origin === null) return false;
-	if (origin === url.origin) return true;
-	return onBreakGlass(request) && port !== null && (origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`);
+	if (onBreakGlass(request)) return port !== null && origin === `http://127.0.0.1:${port}`;
+	return origin === url.origin;
+}
+
+/**
+ * The session cookie's name on a listener: the origin's `ob1_dashboard_session`, and on the break-glass listener
+ * one of its own with the port in it, so the two never overwrite each other where they share a host (an origin of
+ * http://127.0.0.1:…), nor two brains' break-glass ports on one machine, whose cookies 127.0.0.1 shares across
+ * ports (review pass 1).
+ */
+export function sessionCookieName(breakglass: boolean, port: number | null): string {
+	return breakglass ? `ob1_dashboard_breakglass_${port ?? 'unset'}` : 'ob1_dashboard_session';
 }

@@ -22,13 +22,20 @@
  *   - on the break-glass port, the page offers the key and says it is the
  *     break-glass port; the key signs in, its cookie on /dashboard, httpOnly,
  *     not Secure (plain HTTP there), and the overview renders under it;
- *   - that session opens nothing on the origin, its cookie sent there;
- *   - a post on the break-glass port from another loopback port, or from no
- *     origin, is refused; a sign-in through the authorization server is not
- *     started there;
+ *   - its cookie has a name of its own, with the port in it, so the origin's
+ *     never overwrites it; that session opens nothing on the origin, its id
+ *     sent there under the origin's cookie name;
+ *   - a post on the break-glass port from another loopback port, `localhost`
+ *     (another process can hold ::1), the configured origin, or no origin, is
+ *     refused;
  *   - the break-glass port routes the GUI alone: /mcp, /auth, /health and the
  *     root are the proxy's 404;
- *   - sign-out there ends the session.
+ *   - sign-out there ends the session and deletes its cookie, not Secure.
+ *
+ * With `--as-up`, run while the authorization server answers, it asserts
+ * only that a sign-in through it starts on the origin (so it is up) and not on
+ * the break-glass port, and that the key is offered there all the same: the
+ * full run is with it down, where the start's refusal would prove nothing.
  *
  * Exit 0 when every assertion holds, 1 otherwise.
  */
@@ -43,9 +50,12 @@ if (!MAIN || !BG || !ORIGIN || !KEY) {
   console.error("usage: OB1_SMOKE_KEY=… bun smoke-breakglass.ts --url <origin's port>/dashboard --breakglass <break-glass port>/dashboard --origin <configured origin>");
   process.exit(2);
 }
-const MAIN_ORIGIN = new URL(MAIN).origin;
 const BG_ORIGIN = new URL(BG).origin;
+const BG_PORT = new URL(BG).port;
+/** The origin's session cookie, and the break-glass port's own (listener.ts sessionCookieName). */
 const COOKIE = "ob1_dashboard_session";
+const BG_COOKIE = `ob1_dashboard_breakglass_${BG_PORT}`;
+const AS_UP = args.includes("--as-up");
 
 let pass = 0;
 let fail = 0;
@@ -55,12 +65,25 @@ async function req(url: string, init: { method?: string; headers?: Record<string
   const headers: Record<string, string> = { accept: "text/html", ...init.headers };
   if (init.form) headers["content-type"] = "application/x-www-form-urlencoded";
   const r = await fetch(url, { method: init.method ?? (init.form ? "POST" : "GET"), redirect: "manual", headers, body: init.form ? new URLSearchParams(init.form).toString() : undefined });
-  const setCookie = (r.headers.getSetCookie?.() ?? []).find((l) => l.startsWith(`${COOKIE}=`)) ?? "";
+  const cookies = r.headers.getSetCookie?.() ?? [];
+  const setCookie = cookies.find((l) => l.startsWith(`${BG_COOKIE}=`) || l.startsWith(`${COOKIE}=`)) ?? "";
   return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), setCookie };
 }
-const sessionOf = (line: string) => /^ob1_dashboard_session=([^;]+)/.exec(line)?.[1] ?? "";
+const sessionOf = (line: string) => /^ob1_dashboard_(?:session|breakglass_\d+)=([^;]+)/.exec(line)?.[1] ?? "";
 
-console.log(`▸ the origin ${MAIN}, the break-glass port ${BG}, configured at ${ORIGIN}`);
+console.log(`▸ the origin ${MAIN}, the break-glass port ${BG}, configured at ${ORIGIN}${AS_UP ? ", the authorization server up" : ""}`);
+
+if (AS_UP) {
+  // The authorization server answering: a start on the origin goes to it, and on the break-glass port does not.
+  const onOrigin = await req(`${MAIN}/auth/start`, { method: "POST", headers: { origin: ORIGIN } });
+  assert(onOrigin.status === 303 && onOrigin.location.startsWith(`${ORIGIN}/auth/authorize?`), `with the authorization server up, a start on the origin goes to it (${onOrigin.status} → ${onOrigin.location.split("?")[0]})`);
+  const onBg = await req(`${BG}/auth/start`, { method: "POST", headers: { origin: BG_ORIGIN } });
+  assert(onBg.status === 303 && onBg.location === "/dashboard/signin", `…and none starts on the break-glass port (${onBg.status} → ${onBg.location.split("?")[0]})`);
+  const bgUp = await req(`${BG}/signin`);
+  assert(bgUp.status === 200 && bgUp.html.includes('data-testid="breakglass"') && bgUp.html.includes('name="key"'), `…which offers the key all the same (${bgUp.status})`);
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail === 0 ? 0 : 1);
+}
 
 // The origin: no key, whatever a client says of its listener.
 const page = await req(`${MAIN}/signin`);
@@ -80,30 +103,32 @@ const bgPage = await req(`${BG}/signin`);
 assert(bgPage.status === 200 && bgPage.html.includes('data-testid="breakglass"') && bgPage.html.includes('name="key"') && !bgPage.html.includes('data-testid="oauth"'), `on the break-glass port the page offers the key and says it is the break-glass port (${bgPage.status})`);
 const signedIn = await req(`${BG}/signin`, { form: { key: KEY }, headers: { origin: BG_ORIGIN } });
 const sid = sessionOf(signedIn.setCookie);
-assert(signedIn.status === 303 && signedIn.location === "/dashboard/" && sid.length > 20 && /Path=\/dashboard/i.test(signedIn.setCookie) && /HttpOnly/i.test(signedIn.setCookie) && !/;\s*Secure/i.test(signedIn.setCookie), `…the key signs in there with the authorization server down: a session cookie on /dashboard, httpOnly, not Secure on plain HTTP (${signedIn.status} → ${signedIn.location}; ${signedIn.setCookie.replace(/=[^;]*/, "=…")})`);
-const home = await req(`${BG}/`, { headers: { cookie: `${COOKIE}=${sid}` } });
+assert(signedIn.status === 303 && signedIn.location === "/dashboard/" && signedIn.setCookie.startsWith(`${BG_COOKIE}=`) && sid.length > 20 && /Path=\/dashboard/i.test(signedIn.setCookie) && /HttpOnly/i.test(signedIn.setCookie) && !/;\s*Secure/i.test(signedIn.setCookie), `…the key signs in there with the authorization server down: its own cookie, ${BG_COOKIE}, on /dashboard, httpOnly, not Secure on plain HTTP (${signedIn.status} → ${signedIn.location}; ${signedIn.setCookie.replace(/=[^;]*/, "=…")})`);
+const home = await req(`${BG}/`, { headers: { cookie: `${BG_COOKIE}=${sid}` } });
 assert(home.status === 200 && home.html.includes('data-testid="who"'), `…and the overview renders under it (${home.status})`);
 const elsewhere = await req(`${MAIN}/`, { headers: { cookie: `${COOKIE}=${sid}` } });
-assert(elsewhere.status === 303 && elsewhere.location === "/dashboard/signin", `that session opens nothing on the origin, its cookie sent there (${elsewhere.status} → ${elsewhere.location})`);
-const stillHome = await req(`${BG}/`, { headers: { cookie: `${COOKIE}=${sid}` } });
+assert(elsewhere.status === 303 && elsewhere.location === "/dashboard/signin", `that session opens nothing on the origin, its id sent there under the origin's cookie name (${elsewhere.status} → ${elsewhere.location})`);
+const stillHome = await req(`${BG}/`, { headers: { cookie: `${BG_COOKIE}=${sid}` } });
 assert(stillHome.status === 200, `…and is still the break-glass port's after (${stillHome.status})`);
 
 // What the break-glass port refuses.
 const crossPosts = await Promise.all([
   req(`${BG}/signin`, { form: { key: KEY }, headers: { origin: "http://127.0.0.1:3000" } }),
+  req(`${BG}/signin`, { form: { key: KEY }, headers: { origin: `http://localhost:${BG_PORT}` } }),
+  req(`${BG}/signin`, { form: { key: KEY }, headers: { origin: ORIGIN } }),
   req(`${BG}/signin`, { form: { key: KEY } }),
-  req(`${BG}/signout`, { method: "POST", headers: { origin: "http://127.0.0.1:3000", cookie: `${COOKIE}=${sid}` } }),
+  req(`${BG}/signout`, { method: "POST", headers: { origin: "http://127.0.0.1:3000", cookie: `${BG_COOKIE}=${sid}` } }),
 ]);
-assert(crossPosts.every((r) => r.status === 403 && !sessionOf(r.setCookie)), `on the break-glass port, a post from another loopback port or from no origin is refused, a sign-out too (${crossPosts.map((r) => r.status).join(", ")})`);
+assert(crossPosts.every((r) => r.status === 403 && !sessionOf(r.setCookie)), `on the break-glass port, a post from another loopback port, localhost, the configured origin or no origin is refused, a sign-out too (${crossPosts.map((r) => r.status).join(", ")})`);
 const start = await req(`${BG}/auth/start`, { method: "POST", headers: { origin: BG_ORIGIN } });
 assert(start.status === 303 && start.location === "/dashboard/signin", `no sign-in through the authorization server starts there (${start.status} → ${start.location})`);
 const others = await Promise.all(["/mcp", "/auth/authorize", "/health", "/", "/api/v1/whoami"].map(async (p) => [p, await fetch(`${BG_ORIGIN}${p}`, { redirect: "manual" })] as const));
 assert(others.every(([, r]) => r.status === 404), `the break-glass port routes the GUI alone (${others.map(([p, r]) => `${p} ${r.status}`).join(", ")})`);
 
 // Sign-out.
-const out = await req(`${BG}/signout`, { method: "POST", headers: { origin: BG_ORIGIN, cookie: `${COOKIE}=${sid}` } });
-const after = await req(`${BG}/`, { headers: { cookie: `${COOKIE}=${sid}` } });
-assert(out.status === 303 && out.location === "/dashboard/signin" && after.status === 303 && after.location === "/dashboard/signin", `sign-out there ends the session (${out.status}; then / → ${after.status} ${after.location})`);
+const out = await req(`${BG}/signout`, { method: "POST", headers: { origin: BG_ORIGIN, cookie: `${BG_COOKIE}=${sid}` } });
+const after = await req(`${BG}/`, { headers: { cookie: `${BG_COOKIE}=${sid}` } });
+assert(out.status === 303 && out.location === "/dashboard/signin" && out.setCookie.startsWith(`${BG_COOKIE}=;`) && /Max-Age=0/i.test(out.setCookie) && !/;\s*Secure/i.test(out.setCookie) && after.status === 303 && after.location === "/dashboard/signin", `sign-out there ends the session and deletes its cookie, not Secure, so a browser takes the delete (${out.status}, ${out.setCookie.replace(/=[^;]*/, "=…")}; then / → ${after.status} ${after.location})`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

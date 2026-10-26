@@ -3,11 +3,11 @@ import { env } from '$env/dynamic/private';
 import { HOME } from '$lib/paths';
 import type { Actions, PageServerLoad } from './$types';
 import { codeOf, rest } from '$lib/server/rest';
-import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
+import { closeSession, cookieOptions, openSession, SESSION_MAX_AGE } from '$lib/server/session';
 import { FIRST_READ, keySignInOffered, REFUSED_WORDS, whoAmI } from '$lib/server/signin';
 import { oauthSettings } from '$lib/server/oauth';
 import { authReachability, configuredIn } from '../../../../server-portable/oauth-edge.ts';
-import { breakGlassPort, onBreakGlass } from '$lib/server/listener';
+import { breakGlassPort } from '$lib/server/listener';
 
 /**
  * The page's state (ADR decision 16, SMD-2382): not configured, key sign-in;
@@ -24,7 +24,7 @@ export const load: PageServerLoad = async ({ locals, request, url }) => {
 	// Its own words alone: `constructor` or `__proto__` in the address is no word of it (review pass 1: an inherited key was a 500).
 	const word = url.searchParams.get('refused') ?? '';
 	const refused = Object.hasOwn(REFUSED_WORDS, word) ? REFUSED_WORDS[word] : null;
-	if (keySignInOffered(request)) return { mode: configuredIn(env.COMPOSE_PROFILES) && onBreakGlass(request) ? ('breakglass' as const) : ('key' as const), refused };
+	if (keySignInOffered(request)) return { mode: configuredIn(env.COMPOSE_PROFILES) && locals.breakglass ? ('breakglass' as const) : ('key' as const), refused };
 	const breakglassPort = breakGlassPort(env.BREAKGLASS_PORT);
 	if (!oauthSettings(env)) return { mode: 'misconfigured' as const, refused, breakglassPort };
 	return { mode: (await authReachability().reachable()) ? ('oauth' as const) : ('unavailable' as const), refused, breakglassPort };
@@ -59,8 +59,8 @@ export const actions: Actions = {
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach. This listener's own (locals.session): on a shared host the cookie may name the other's.
 		closeSession(locals.session?.id);
-		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought'), breakglass: onBreakGlass(request) });
-		cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url, onBreakGlass(request)), maxAge: SESSION_MAX_AGE });
+		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought'), breakglass: locals.breakglass });
+		cookies.set(locals.sessionCookie, id, { ...cookieOptions(url, locals.breakglass), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);
 	},
 };

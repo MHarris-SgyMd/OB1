@@ -5,7 +5,7 @@ import type { RequestHandler } from './$types';
 import { HOME } from '$lib/paths';
 import { exchangeCode, oauthSettings, signedInSince, signInFrom } from '$lib/server/oauth';
 import { revocations, rest } from '$lib/server/rest';
-import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
+import { closeSession, cookieOptions, openSession, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
 import { FIRST_READ, whoAmI } from '$lib/server/signin';
 
 // The authorization server's answer (SMD-3307): the redirect URI the AS
@@ -73,6 +73,6 @@ export const GET: RequestHandler = async ({ cookies, url, request, locals }) => 
 	// A sign-in over a live session replaces it, as a key's does; it, and any the store ends for room, have their tokens revoked (session.ts onTokensEnded).
 	closeSession(locals.session?.id);
 	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought'), breakglass: false });
-	cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
+	cookies.set(locals.sessionCookie, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 	throw redirect(303, HOME);
 };

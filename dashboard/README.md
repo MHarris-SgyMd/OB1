@@ -107,9 +107,14 @@ cross-site ("The origin", below).
   sets it. On that port the page offers key sign-in whatever the AS's state — the
   operator's way in on the brain's machine when the AS is down, misconfigured or
   locked out — and starts no sign-in through the AS. A session made there opens pages
-  there alone, and one made on the origin opens none there, where the two share a
-  host (an origin of `http://127.0.0.1:…`); its cookie is never Secure, the port
-  being plain HTTP.
+  there alone, and one made on the origin opens none there; each rides a cookie of its
+  own name (`ob1_dashboard_breakglass_<port>` there), so where the two share a host
+  (an origin of `http://127.0.0.1:…`), or two brains' break-glass ports share
+  127.0.0.1, neither overwrites the other; it is never Secure, the port being plain
+  HTTP. What reaches the port is this machine: its browsers, and its containers too,
+  through the engine's name for the host (`host.docker.internal`,
+  `host.containers.internal`), as they reach any loopback port; the stack's own
+  servers reach the GUI on the mesh besides.
 - **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
   the server holds 1,000 in all. A sign-in over a live session ends the old one.
 - **The origin is shared.** The cookie rides `/dashboard` alone, but any page served
@@ -130,10 +135,11 @@ is Secure only on https. So the server must know the origin a browser sees:
   server's rules: https, or http on a loopback host, and an origin alone). Set it when
   a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. It is
   then the only origin the GUI takes a form from, as it is the one the authorization
-  server and every redirect name: sign in there, not at `127.0.0.1` — but for the
-  break-glass port's own origin, `http://127.0.0.1:${BREAKGLASS_PORT}` (or `localhost`
-  at that port), taken on that listener alone. An unsound one is warned of and passed
-  over.
+  server and every redirect name: sign in there, not at `127.0.0.1`. The break-glass
+  port takes its own origin alone, `http://127.0.0.1:${BREAKGLASS_PORT}` — not
+  `localhost`, which another process may answer on `::1` (the port is published on
+  127.0.0.1 alone), nor the configured origin, from whose pages a key could otherwise
+  be posted there. An unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a
   LAN address signs in as it is reached through the stack's port. Reached without
@@ -147,7 +153,7 @@ is Secure only on https. So the server must know the origin a browser sees:
 | `OB1_REST_URL` | The REST core; `http://api.ob1.internal.:8000` on the mesh unless set |
 | `OB1_PUBLIC_ORIGIN` | The origin behind TLS (above) |
 | `COMPOSE_PROFILES` | Key sign-in is off on the origin while it names `auth` |
-| `BREAKGLASS_PORT` | The break-glass port on the host, 8001 unless set: the one loopback origin the GUI takes a form from, on that listener alone |
+| `BREAKGLASS_PORT` | The break-glass port on the host, 8001 unless set: `http://127.0.0.1:<it>` is the one origin the GUI takes a form from on that listener, and its session cookie's name carries it. Changed, it needs `app` recreated as well as `breakglass` (a plain `compose up -d` does both) |
 | `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
 | `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
 | `PORT` | 8000 unless set |

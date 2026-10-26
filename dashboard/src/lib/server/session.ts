@@ -15,7 +15,7 @@
 import { base } from '$app/paths';
 import type { Tokens } from './oauth';
 
-export const SESSION_COOKIE = 'ob1_dashboard_session';
+// The cookie's name is its listener's: listener.ts sessionCookieName (SMD-3307).
 /** A day, as the SvelteKit dashboard's cookie. */
 export const SESSION_MAX_AGE = 60 * 60 * 24;
 /** The most sessions held at once: the oldest goes when a sign-in would pass it, so a flood of sign-ins holds at most this many keys in memory. */

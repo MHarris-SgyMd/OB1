@@ -1,8 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import type { RequestHandler } from './$types';
-import { onBreakGlass } from '$lib/server/listener';
-import { closeSession, cookieOptions, SESSION_COOKIE } from '$lib/server/session';
+import { closeSession, cookieOptions } from '$lib/server/session';
 
 // POST, from the header's form: a GET that signs out is a link any page could
 // plant; and from this origin, which hooks.server.ts checks of every unsafe
@@ -13,8 +12,8 @@ import { closeSession, cookieOptions, SESSION_COOKIE } from '$lib/server/session
 // has its refresh token revoked there (session.ts onTokensEnded), ending the
 // grant's chain — by the revoker, not waited on: an AS that hangs, or a queue
 // left by an outage, would otherwise hold the sign-out (review pass 4).
-export const POST: RequestHandler = async ({ cookies, request, url, locals }) => {
+export const POST: RequestHandler = async ({ cookies, url, locals }) => {
 	closeSession(locals.session?.id);
-	cookies.delete(SESSION_COOKIE, cookieOptions(url, onBreakGlass(request)));
+	cookies.delete(locals.sessionCookie, cookieOptions(url, locals.breakglass));
 	throw redirect(303, `${base}/signin`);
 };

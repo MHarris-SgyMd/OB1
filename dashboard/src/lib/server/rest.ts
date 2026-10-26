@@ -13,9 +13,8 @@ import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
 import { createRenewer, createRevoker, oauthSettings, refreshTokens, RenewalFailed, revokeRefresh } from './oauth';
-import { closeSession, cookieOptions, liveTokens, SESSION_COOKIE, storeTokens, type Session } from './session';
+import { closeSession, cookieOptions, liveTokens, storeTokens, type Session } from './session';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
-import { onBreakGlass } from './listener';
 
 /** The longest one call may take: a page waits on it, so well under a minute. */
 export const REST_TIMEOUT_MS = 30_000;
@@ -111,7 +110,7 @@ export async function credentialOf(event: RequestEvent, session: Session): Promi
 function signOutHere(event: RequestEvent): never {
 	// Its tokens are revoked as it ends (session.ts onTokensEnded): a 401 from the REST core leaves a refresh token no session holds (review pass 2).
 	closeSession(event.locals.session?.id);
-	event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url, onBreakGlass(event.request)));
+	event.cookies.delete(event.locals.sessionCookie, cookieOptions(event.url, event.locals.breakglass));
 	throw redirect(303, `${base}/signin`);
 }
 
