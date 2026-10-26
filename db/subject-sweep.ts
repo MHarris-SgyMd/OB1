@@ -25,9 +25,10 @@
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * Each run reads every thought, its count and its pages, whatever is left to do: a run by hand, at a brain's size
- * today. PR 4 bounds that before sleep runs the sweep (review pass 5: the count took 5.9 s over a million thoughts on
- * PGlite, so at a billion it alone would outrun sleep's statement timeout). `--limit` counts each thought taken, in
- * id order from the first, so one a run leaves, to the model or unanswered, is taken first again by the next.
+ * today. PR 4 bounds that before sleep runs the sweep (review pass 5: a PGlite run timed the count at 5.9 s over a
+ * million synthetic thoughts, so at a billion it alone would outrun sleep's 300 s statement timeout). `--limit` counts
+ * each thought taken, in id order from the first, so one a run leaves, to the model or unanswered, is taken first
+ * again by the next.
  *
  * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without

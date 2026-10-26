@@ -43,19 +43,21 @@ const TICKET_ID = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 /** A ticket where it stands in an answer, with a possessive after it (`SMD-12's`), which goes with it when it is dropped. */
 const TICKET_MENTIONS = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+-[0-9]+)(?:['’]s)?(?![A-Za-z0-9_])/g;
 /**
- * An answer that is one pull request: at most two words before it (`client PR 780`, `OB1 PR #502`), then `PR 12`,
- * `PR #12`, `PR-12`, `pull request 12` or a bare `#12`, then nothing but words with no digit (`PR 727, merged`); or a
+ * An answer that is one pull request: at most two words before it (`client PR 780`, `OB1 PR #502`), each with a letter
+ * and none a PR of its own, or marks alone (the dash a dropped ticket leaves: `SMD-999 — PR 12`); then `PR 12`,
+ * `PR #12`, `PR-12`, `pull request 12` or a bare `#12`; then nothing but words with no digit (`PR 727, merged`). Or a
  * pull request's URL alone (`…/pull/88`). An answer naming a PR among other numbers is no PR, its version or a phrase.
  * Review pass 4 replaced three passes of reading ranges and lists of PRs out of free text, each broken by the next
- * (`PR 10–12`, then `PR 727, 2026-10-20`, then `PR #12, 23 commits`). Every PR answer the model gave on the canary was
- * one PR alone: 16 of version 1's, 7 of version 2's.
+ * (`PR 10–12`, then `PR 727, 2026-10-20`, then `PR #12, 23 commits`); review pass 6 found `PR #12, PR #13` read as its
+ * last PR, the first taken for a word before it. Every PR answer the model gave on the canary was one PR alone, with no
+ * word before it: 16 of version 1's, 7 of version 2's.
  */
-const PR_ANSWER = /^(?:\S*[^\d\s]\S*\s+){0,2}(?:PR\s*[#-]?\s*|pull request\s*#?\s*|#)([0-9]{1,9})(?:[\s,;:.!?—–'’-]+[^\d]*)?$/i;
+const PR_ANSWER = /^(?:(?:(?!\S*#\d)(?!PR[#-]?\d)\S*\p{L}\S*|[\p{P}\p{S}]+)\s+){0,2}(?:PR\s*[#-]?\s*|pull request\s*#?\s*|#)([0-9]{1,9})(?:[\s,;:.!?—–'’-]+[^\d]*)?$/iu;
 const PR_URL = /^\S*\/pull\/([0-9]{1,9})\/?$/i;
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
-/** The same, each in an answer, for the guard's drops. */
-const VERSIONS = new RegExp(VERSION.source, "gi");
+/** The same, each in an answer, for the guard's drops: a dropped one takes its possessive with it, as a ticket does (review pass 6). */
+const VERSIONS = new RegExp(`${VERSION.source}(?:['’]s(?![A-Za-z0-9_]))?`, "gi");
 /** A version's numbers as a key writes them, without leading zeros. */
 const versionOf = (v: string): string => v.split(".").map((n) => String(Number(n))).join(".");
 /** The words a dropped reference's leftovers may be and still name nothing (`SMD-998 and SMD-999` both dropped). */
@@ -228,15 +230,17 @@ export function ruleSubject(row: { content: string; metadata?: Record<string, un
  * The model's question, version 2: the subject's own rules, then the thought as prompt 4 renders thought A, then the
  * answer's shape. Version 1 was SMD-3299's round 4 own question, step 1 of the mediated-pair test and its version 2's
  * rules 3 and 4 quoted word for word. Version 2 is its own text, written after Verify item 1's misses (Linear
- * a91712e5): it keeps step 1's four kinds of thought and the component rule, adds a fifth kind, and changes four things.
+ * a91712e5): it keeps step 1's four kinds of thought and the component rule, and changes four things.
  *   - Rule 1 says where a session header's ticket comes from, the prompts' or else the branch's, and that a follow-up
  *     the session files, or a ticket its closing message offers (review pass 5), does not change its subject. The
  *     model had named the header's ticket on 49 of 50 sessions, the first-line rule's own answer, and the raters had
  *     read a filed follow-up as the session's subject.
- *   - A session's subject is its work, which its prompts and outcome show together, not its last message alone (the
- *     rules' own words since review pass 5: the raters had read "outcome" as the last message).
- *   - The fifth kind: a note reporting several separate things, a digest or a board review, is about itself, not one
- *     of them (review pass 5: such a note has no main topic for "any other note" to name).
+ *   - A session's subject is its work, which its prompts and outcome show together. The rules do not add "not its
+ *     last message alone": review pass 5 did, and on a session whose prompts named no ticket and whose outcome named
+ *     its own, the 27B then answered an id it built from a file name instead, three runs of three (review pass 6). A
+ *     follow-up, or a ticket the closing message offers, is rule 1's. Nor do they name a fifth kind, a note reporting
+ *     several separate things: review pass 5 did, and the 27B then named a column for a note whose own ticket it had
+ *     named before, three runs of three (review pass 6). Such a note's subject is the raters' reading.
  *   - A subject is named as specifically as the thought allows, not as the system or project it belongs to.
  *   - The answer names one thing: a ticket by its id alone, in its usual form, and a pull request only when the work
  *     is no ticket's. A session naming several tickets is keyed by the one it mainly worked on (review pass 2: the
@@ -248,9 +252,8 @@ export const OWN_RULES = `### A thought's own subject
 
 A thought's own subject is the specific thing it is about:
 - **a ticket row:** the ticket it is;
-- **a session summary:** the work the session did, which its prompts and its outcome show together, not its last message alone. That is usually the ticket its header names. If the header names several, take the one the session mainly worked on;
+- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, take the one the session mainly worked on;
 - **a change record:** the ticket it records;
-- **a note reporting several separate things, such as a digest or a board review:** the note itself, not one of the things it reports;
 - **any other note:** its main topic, such as a ticket, a PR, a release, a deployed brain, a metric, a document or a piece of work.
 
 A component, file, function, table, corpus, test suite, check or setting is not a thought's own subject, unless the thought is mainly about that thing. This holds even when the thought's work changes, uses or measures it.

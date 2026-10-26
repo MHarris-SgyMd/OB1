@@ -2639,7 +2639,10 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     ["PR #12, 23 commits", "phrase:pr #12, 23 commits"], ["PR 727, 2026-10-20", "phrase:pr 727, 2026-10-20"], ["PR 012, then PR #12 again", "phrase:pr 012, then pr #12 again"],
     ["the merge of PR 727", "phrase:the merge of pr 727"], ["the PRs behind #727", "phrase:the prs behind #727"],
     ["PR 727, then v2.0.0", "version:v2.0.0"], ["#5, #6 and #7, the v2.1.0 cut", "version:v2.1.0"],
-    ["", null], ["   ", null], ["ϒ", null],
+    // Review pass 6: a word before the PR has a letter and is no PR of its own, so a list of PRs is no PR.
+    ["PR #12, PR #13", "phrase:pr #12, pr #13"], ["#12, #13", "phrase:#12, #13"], ["PR#12 PR#13", "phrase:pr#12 pr#13"], ["12, PR 13", "phrase:12, pr 13"],
+    ["the client PR 780", "pr:780"], ["OB1 PR 509", "pr:509"],
+    ["", null], ["   ", null], ["ϒ", null], ["—", null],
   ];
   for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);
   const long = subjectKey("word ".repeat(80));
@@ -2683,8 +2686,9 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(sessionHeaderTicket(hook("SMD-3306", ["pasted log\u0085then start smd-3306"], "", "x")) === "SMD-3306",
     "…a prompt read whole past a NEL inside it, which the hook keeps on the prompt's line (review pass 2)");
   assert(sessionHeaderTicket("Session summary: SMD-2125\n- Open: filed SMD-2125's follow-up") === null && sessionHeaderTicket("Session summary: SMD-2125\n\nTitle: start smd-2125") === null
-      && sessionHeaderTicket("Session summary — SMD-2125 — claude-code — x — 2026-10-01\n\n- smd-2125, in a list no Asked heads") === null,
-    "…none from a summary the hook did not write, even one whose title names its ticket, nor from `- ` lines no `Asked (N prompts):` heads (review pass 1)");
+      && sessionHeaderTicket("Session summary — SMD-2125 — claude-code — x — 2026-10-01\n\n- smd-2125, in a list no Asked heads") === null
+      && sessionHeaderTicket("Forwarded: Session summary — SMD-5 — claude-code — x — 2026-10-01\n\nAsked (1 prompt):\n- smd-5") === null,
+    "…none from a summary the hook did not write, even one whose title names its ticket, nor from `- ` lines no `Asked (N prompts):` heads (review pass 1), nor from a header that does not open its line (review pass 6)");
   assert(sessionHeaderTicket("SMD-2125 session summary\nTitle: smd-2125") === null && sessionHeaderTicket("OB1 process note (SMD-1933): Title: SMD-1933") === null && sessionHeaderTicket("") === null
     && sessionHeaderTicket(hook("UTF-8", ["utf-8"])) === null && sessionHeaderTicket("Session summary — claude-code — OB1 (michaelharris/smd-1156-x) — 2026-09-24\n\nTitle: smd-1156") === null,
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
@@ -2700,7 +2704,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   const branchOnly = renderSummary(hookSession("michaelharris/smd-55-x", ["continue"], [], "Continue SMD-55 work"));
   assert(sessionHeaderTicket(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && sessionHeaderTicket(branchOnly) === null,
     `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
-  assert(JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
+  // Review pass 6: the precedence case is a session the header rule keys, so a header read first would answer it.
+  assert(JSON.stringify(ruleSubject({ content: named, metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
     && JSON.stringify(ruleSubject({ content: named, metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2125", by: "first_line" })
     && ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } }) === null && ruleSubject({ content: "no ticket", metadata: null }) === null,
     "the metadata's ticket before the session header's; a note's first-line ticket, or none, the model's to find");
@@ -2726,25 +2731,25 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   // Each version's three hashes, kept as a version is retired: the text must be the current version's, and a version's
   // pins are never rewritten, so a changed word needs SUBJECT_PROMPT_VERSION moved too (review pass 1: re-pinning the
   // hash under the same version passed). Version 1 is SMD-3299's round 4 own question, PR 2's. Version 2's were set
-  // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a digest, a
-  // closing message's ticket and a session's last message their words.
+  // again before it shipped: when review pass 2 had it ask for one subject, and when review pass 5 gave a closing
+  // message's ticket its words, with two more that review pass 6 took back on the 27B's answers.
   const PINNED: Record<number, string[]> = {
     1: ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"],
-    2: ["f69b6daaaca60cacd6b4d5e7e14c75a1ad3b31a862fb61d55d47e7c9a7109bbb", "7842c76795e54d24e805cadad249c6f5185a05522ab19f3072b3594c79ee4dc3", "fe2148e5b4304b4c8ebc7a6781f3ad93d2a1c6b3883b5dc639e8585ae15d99b4"],
+    2: ["6230109e71743caad2c3536ad7b6b8532b8c36f5ea9782a268c9d84e890d62ca", "16fe05607579a76d8fe1a44682506c045e2a6ef16f2c760302ba6ec760893d2c", "32b152d4ea475087133e8aad17a9fe49dc5216c9336bda452c5ef3bc8c8c8077"],
   };
   assert(SUBJECT_PROMPT_VERSION === Math.max(...Object.keys(PINNED).map(Number)), `the question's version is the newest pinned (${SUBJECT_PROMPT_VERSION})`);
   sides.forEach((s, i) => {
     const m = ownSubjectMessages(s);
     assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === PINNED[SUBJECT_PROMPT_VERSION]?.[i], `the question is version ${SUBJECT_PROMPT_VERSION}'s, word for word (thought ${i + 1})`);
   });
-  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "dbf0ad8722d04a62a680587c4710b53c308d1b6409e2b7f3de58f07345b795c5", "…and the fixed text a recipe's prompt_hash names");
+  assert(createHash("sha256").update(subjectPrompt()).digest("hex") === "beed271ae9531d5ec63f827c5763c1fdb26ba7ee93e9d5d97d31dcc3a21fa914", "…and the fixed text a recipe's prompt_hash names");
   const q = ownSubjectMessages(sides[0])[0].content;
   assert(q.includes(OWN_RULES) && OWN_RULES.includes("**a session summary:** the work the session did, which its prompts and its outcome show together") && OWN_RULES.includes("A follow-up the session files while working on its header's ticket does not change its subject")
       && OWN_RULES.includes("**A thought is mainly about a component") && !q.includes("Step 2") && !q.includes("third subject") && !MEDIATED_TEST.includes("A follow-up the session files"),
     "the subject's own rules: a session's work, where its header's ticket comes from, the component rule; no pair test, no step 2");
-  assert(OWN_RULES.includes("show together, not its last message alone") && OWN_RULES.includes("nor does a ticket its closing message offers or asks about")
-      && OWN_RULES.includes("**a note reporting several separate things, such as a digest or a board review:** the note itself, not one of the things it reports"),
-    "a session's last message alone, a ticket its closing message offers, and a note reporting several things each have their words (review pass 5)");
+  assert(OWN_RULES.includes("nor does a ticket its closing message offers or asks about"), "a ticket a session's closing message offers has its words (review pass 5)");
+  assert(!/last message/.test(OWN_RULES) && !/several separate things/.test(OWN_RULES),
+    "…and neither a session's last message nor a note reporting several things has any: with them the 27B passed over a ticket only a session's outcome named, and named a column for a note's own ticket (review pass 6)");
   assert(OWN_ANSWER.includes("one thing") && OWN_ANSWER.includes("a ticket as its id alone, in its usual form") && OWN_RULES.includes("take the one the session mainly worked on") && OWN_ANSWER.includes("only when the work is the PR's and no ticket's") && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"),
     "the answer's shape: one thing, a ticket by its id alone, a PR only for no ticket's work, one ticket of several (review pass 2); the prompt's fixed text, which the recipe hashes, holds no thought");
 
@@ -2768,13 +2773,13 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   const current: [string | null, string | null, boolean][] = [
     ["metadata", "subject:metadata@r1", true], ["first_line", "subject:first_line@r2", true], ["model", "subject:qwen3.8:27b@p2", true], ["model", "subject:another-model@p2", true],
     ["metadata", "subject:rules@r1", false], ["first_line", "subject:rules@r1", false], ["first_line", "subject:first_line@r1", false], ["metadata", "subject:first_line@r2", false],
-    ["model", "subject:qwen3.8:27b@p1", false], ["model", "subject:x@p12", false], ["model", "subject:metadata@r1", false], ["model", "extract:x@p2", false], ["model", null, false], [null, "subject:metadata@r1", false], ["other", "subject:x@p2", false],
+    ["model", "subject:qwen3.8:27b@p1", false], ["model", "subject:x@p12", false], ["model", "subject:x@p20", false], ["model", "subject:metadata@r1", false], ["model", "extract:x@p2", false], ["model", null, false], [null, "subject:metadata@r1", false], ["other", "subject:x@p2", false],
   ];
   for (const [by, judge, want] of current) assert(subjectCurrent(by, judge) === want, `current: ${by} under ${judge} → ${want}`);
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}'];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}'];
   const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
@@ -2799,6 +2804,10 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     assert(copied.answer === "SMD-123" && copied.key === null, `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
     const cut = await askOwnSubject(cfg, { content: "Cut v02.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
     assert(cut.key === "version:v2.0.0", `a release the thought names, its leading zeros aside, is its key (${cut.key})`);
+    const partOf = await askOwnSubject(cfg, { content: "Merged PR 1727 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(partOf.answer === "PR 727" && partOf.key === null, `a PR's number inside a longer one is not the thought naming it (review pass 6: ${partOf.key})`);
+    const zeros = await askOwnSubject(cfg, { content: "Cut v2.0.0 today.", createdAt: null, metadata: {}, writer: null }, subject);
+    assert(zeros.key === "version:v2.0.0", `…and an answer's release with leading zeros is the one the thought names without them (review pass 6: ${zeros.key})`);
     /** A thought naming references of these kinds alone. */
     const only = (...kinds: string[]): NamedIn => (kind) => kinds.includes(kind);
     assert(subjectKey("SMD-999: the dashboard review", only("pr", "version")) === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (k, v) => k !== "ticket" || v === "SMD-2") === "ticket:SMD-2"
@@ -2807,10 +2816,14 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     assert(subjectKey("SMD-999's sleep budget", only()) === "phrase:sleep budget" && subjectKey("SMD-998 and SMD-999", only()) === null
         && subjectKey("v1.2.3", only()) === null && subjectKey("PR 123", only("ticket", "version")) === null && subjectKey("PR 123", only("pr")) === "pr:123",
       "…a possessive goes with its ticket, connectives alone name nothing, and a release or a PR the thought does not name is dropped too: the question's v1.2.3 copied (review pass 4)");
+    assert(subjectKey("v1.2.3's release notes", only()) === "phrase:release notes" && subjectKey("v1.2.3's release notes", only("version")) === "version:v1.2.3",
+      "…a release's possessive goes with it too, as a ticket's does; one the thought names is its key (review pass 6)");
+    assert(subjectKey("GPT-4 evaluation", only()) === "phrase:gpt-4 evaluation" && subjectKey("SMD-999 → the dashboard review", only()) === "phrase:the dashboard review",
+      "…the guard drops tickets alone, a model name's id staying in the phrase, and the trim takes a symbol a dropped ticket leaves (review pass 6)");
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
-    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 6, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 8, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
   }

@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { sweepSubjects, type SubjectSweepOptions } from "./subject-sweep.ts";
+import { DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions } from "./subject-sweep.ts";
 import { subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -6856,7 +6856,7 @@ if (want("10h")) {
         await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-10", "as the role reads it: smd-10")})`;
         const rolePass = await extractRun({}, sUrl, sEnv);
         const saidRole = rolePass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
-        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]) && /UPDATE on thoughts \(its row lock\)/.test(saidRole[0]),
+        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]) && /UPDATE on thoughts \(its row lock\)/.test(saidRole[0]) && saidRole[0].includes(DOOR_GRANTS),
           `…and the pass under it extracts, its entities standing, and says once that it records no subject, naming every grant the door needs (exit ${rolePass.code}, ${saidRole.length} line(s))`);
         const structure = await migrateInProcess({ grant: SROLE, groups: "structure" });
         assert(structure.code === 0, `the role is granted structure too (exit ${structure.code})`);
@@ -6873,6 +6873,32 @@ if (want("10h")) {
         await dropS();
       }
     }
+
+    // Review pass 6 (independent mutants): the sweep's own rule writes and the dry run's counts, where [10h] had held the
+    // pass's rule writes alone, a version 1 key of another ticket, and runs that only replace. Version 1's subjects at
+    // their own keys, the most common upgrade: a session summary's under its first line, a filed ticket's under the
+    // rules key; and a filed ticket never extracted, which the sweep adds.
+    await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-81", "start smd-81")})`;
+    const sameV1 = [await asV1(session, "ticket:SMD-81", "first_line", "subject:rules@r1"), await asV1(filed, "ticket:SMD-7", "metadata", "subject:rules@r1")];
+    const fresh = await seed("A ticket row filed under its id, never extracted.", { issue: "SMD-91" });
+    const sameDry = await sweep({ dryRun: true, model: false });
+    assert(sameV1.every((a) => a === "added" || a === "replaced")
+        && /record 2 by the ticket each is filed under, 1 by its session header's ticket \(2 in place of a standing subject, 0 with a new key\)/.test(sameDry.stdout),
+      `a dry run counts version 1's subjects at their own keys in place of a standing subject, none with a new key (exit ${sameDry.code}: ${sameDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    const sameRun = await sweep({ model: false });
+    const sessionNow = (await standingOf(session))!, filedAgain = (await standingOf(filed))!, freshNow = (await standingOf(fresh))!;
+    assert(/^3 subject\(s\) recorded \(2 by the ticket filed under, 1 by the session header's ticket\), 2 in place of a standing one \(0 with a new key\)/.test(tally(sameRun))
+        && sessionNow.key === "ticket:SMD-81" && sessionNow.judge === "subject:first_line@r2" && filedAgain.judge === "subject:metadata@r1" && freshNow.judge === "subject:metadata@r1",
+      `--subjects rules records each under its rule's key now, the session's under the first line's, and adds the one never found (exit ${sameRun.code}: ${tally(sameRun)})`);
+    const afterDry = await sweep({ dryRun: true, model: false });
+    assert(/record none by the rules/.test(afterDry.stdout), `…and a dry run after takes none of them, each current (exit ${afterDry.code}: ${afterDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    // A model's subject under another pass's key is no current subject, though it ends as the question's version does.
+    const asks = (r: { stdout: string }) => Number(/ask stub-judge about (\d+)/.exec(r.stdout)?.[1] ?? Number.NaN);
+    const beforeX = await sweep({ dryRun: true });
+    await asV1(pr, "pr:727", "model", "extract:x@p2");
+    const withX = await sweep({ dryRun: true });
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    assert(asks(withX) === asks(beforeX) + 1, `a model's subject under extract's key is taken, as no current subject (${asks(beforeX)} → ${asks(withX)})`);
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
