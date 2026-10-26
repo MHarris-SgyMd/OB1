@@ -1,14 +1,19 @@
 import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
-import { closeSession, cookieOptions, readSession, SESSION_COOKIE } from '$lib/server/session';
+import { revocations } from '$lib/server/rest';
+import { closeSession, cookieOptions, onTokensEnded, readSession, SESSION_COOKIE } from '$lib/server/session';
 
-/** The paths a visitor reaches signed out: the sign-in page and the liveness probe. */
-const OPEN = new Set([`${base}/signin`, `${base}/health`]);
+// Tokens no session holds any more, however it ended, are revoked at the AS (SMD-3307; review pass 3).
+onTokensEnded((t) => void revocations.add(t));
+
+/** The paths a visitor reaches signed out: the sign-in page, a sign-in through the authorization server (its start and its answer, SMD-3307), and the liveness probe. */
+const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/callback`, `${base}/health`]);
 
 // Every request: the session the cookie names, if any, becomes locals.session.
 // A cookie that names none (ended, expired, or from before a restart) is
-// dropped. Signed out, every path but OPEN redirects to /signin — here, not in
-// a layout's load, so a form action or an endpoint is behind it too.
+// dropped, and an expired session's tokens revoked at the AS (SMD-3307).
+// Signed out, every path but OPEN redirects to /signin — here, not in a
+// layout's load, so a form action or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
 	const id = event.cookies.get(SESSION_COOKIE);
 	const session = readSession(id);

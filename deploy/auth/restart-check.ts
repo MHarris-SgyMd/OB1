@@ -30,6 +30,20 @@
  * and exchanges it as the MCP service (`mcp`, its secret from the container's
  * environment) for a REST-core token, as the MCP server does at the hop. It
  * prints both as JSON `{ mcp, api }`, for CI to present to the REST core.
+ *
+ *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
+ *
+ * `--gui-refresh` (SMD-3307) signs the operator in as the operator GUI does —
+ * the confidential `gui` client (its secret from the container's environment),
+ * S256, `offline_access` with `prompt=login consent`, for the REST core — and checks
+ * what the GUI's session leans on: the code gives a refresh token, a refresh
+ * gives a new pair (the refresh token rotated), and the refresh token revoked
+ * as the GUI's sign-out revokes it is refused at the next refresh; a second
+ * sign-in in the same browser, prompt=login dropped and a day's max_age asked,
+ * is asked the password all the same, and is on a grant of its own, which the
+ * first one's revocation — sent while its consent page is up — leaves; and
+ * with the AS's session live, prompt=none is answered login_required (review
+ * passes 4 and 5). It prints one line saying so, or why not, and no token.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -186,7 +200,102 @@ if (process.argv.includes("--register")) {
   );
   if (api.status !== 200 || !api.body.access_token) fail(`the exchange answered ${api.status} ${api.body.error ?? ""}`);
   console.log(JSON.stringify({ mcp: mcp.body.access_token, api: api.body.access_token }));
+} else if (process.argv.includes("--gui-refresh")) {
+  const password = process.env.OB1_AUTH_OPERATOR_PASSWORD ?? "";
+  const origin = process.env.OB1_PUBLIC_ORIGIN ?? "";
+  const guiSecret = process.env.OB1_AUTH_SECRET_GUI ?? "";
+  if (!password || !origin || !guiSecret) {
+    console.error("--gui-refresh needs OB1_AUTH_OPERATOR_PASSWORD (exec -e), and OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_GUI in its environment");
+    process.exit(2);
+  }
+  const fail = (why: string): never => {
+    console.error(why);
+    process.exit(1);
+  };
+  const redirect = `${origin}/dashboard/auth/callback`;
+  const resource = `${origin}/api`;
+  const local = (href: string) => new URL(href.startsWith(origin) ? `http://127.0.0.1:3000${href.slice(origin.length)}` : href, BASE);
+  // One browser: the AS's session cookie is kept between the two sign-ins below.
+  const jar = new Map<string, string>();
+  /** A sign-in as the GUI's, with `extra` in its request, `atConsent` run once its consent page is up: the code, its verifier, and the pages the AS showed on the way. */
+  const signIn = async (extra: Record<string, string>, atConsent?: () => Promise<void>) => {
+    const verifier = randomBytes(32).toString("base64url");
+    const query = new URLSearchParams({
+      client_id: "gui",
+      response_type: "code",
+      redirect_uri: redirect,
+      scope: "openid offline_access brain:write",
+      state: "gui-refresh-check",
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge_method: "S256",
+      resource,
+      ...extra,
+    });
+    let url = new URL(`${BASE}/authorize?${query}`);
+    let init: RequestInit = {};
+    const prompts: string[] = [];
+    for (let step = 0; step < 16; step++) {
+      const r = await fetch(url, { ...init, redirect: "manual", headers: { ...(init.headers as Record<string, string>), cookie: [...jar].map(([n, v]) => `${n}=${v}`).join("; ") } });
+      for (const line of r.headers.getSetCookie()) {
+        const pair = line.split(";")[0].trim();
+        jar.set(pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1));
+      }
+      if (r.status >= 300 && r.status < 400) {
+        const location = r.headers.get("location") ?? "";
+        if (location.startsWith(redirect)) {
+          const back = new URL(location).searchParams;
+          return { code: back.get("code") ?? fail(`the authorization request came back with no code: ${back.get("error")} ${back.get("error_description")}`), verifier, prompts };
+        }
+        url = local(location);
+        init = {};
+        continue;
+      }
+      const page = await r.text();
+      const prompt = /data-prompt="([a-z]+)"/.exec(page)?.[1];
+      const action = /<form method="post" action="([^"]+)"/.exec(page)?.[1];
+      if (r.status !== 200 || (prompt !== "login" && prompt !== "consent") || !action) fail(`the sign-in stopped at ${url.pathname}: HTTP ${r.status} ${page.slice(0, 200).replace(/\s+/g, " ")}`);
+      prompts.push(prompt!);
+      if (prompt === "consent" && atConsent) await atConsent();
+      url = local(action!.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
+      init = { method: "POST", body: new URLSearchParams(prompt === "login" ? { password } : {}), headers: { origin, "content-type": "application/x-www-form-urlencoded" } };
+    }
+    return fail("the sign-in and consent gave no code in 16 steps");
+  };
+  const asGui = (path: string, body: Record<string, string>) =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${btoa(`gui:${guiSecret}`)}` }, body: new URLSearchParams(body) }).then(async (r) => ({ status: r.status, body: ((await r.json().catch(() => ({}))) ?? {}) as Record<string, string> }));
+  const exchange = async (s: { code: string; verifier: string }) => {
+    const t = await asGui("/token", { grant_type: "authorization_code", code: s.code, redirect_uri: redirect, code_verifier: s.verifier, resource });
+    if (t.status !== 200 || !t.body.access_token || !t.body.refresh_token) fail(`the code answered ${t.status} ${t.body.error ?? ""}, ${t.body.refresh_token ? "with" : "without"} a refresh token`);
+    return t.body;
+  };
+  const revoke = async (token: string) => {
+    const r = await fetch(`${BASE}/token/revocation`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${btoa(`gui:${guiSecret}`)}` }, body: new URLSearchParams({ token, token_type_hint: "refresh_token" }) });
+    if (r.status !== 200) fail(`the revocation answered ${r.status}`);
+  };
+  const first = await exchange(await signIn({ prompt: "login consent" }));
+  const second = await asGui("/token", { grant_type: "refresh_token", refresh_token: first.refresh_token, resource });
+  if (second.status !== 200 || !second.body.access_token || !second.body.refresh_token) fail(`the refresh answered ${second.status} ${second.body.error ?? ""}`);
+  if (second.body.refresh_token === first.refresh_token || second.body.access_token === first.access_token) fail("the refresh handed back the same tokens: it did not rotate");
+  // The same browser again, prompt=login dropped from the request and a day's max_age asked: the AS asks gui the password all the same (review pass 4).
+  // The first sign-in is revoked while this one's consent page is up, as the GUI's revoker may after an outage: this one is made all the same (review pass 5).
+  const again = await signIn({ prompt: "consent", max_age: "86400" }, () => revoke(second.body.refresh_token));
+  if (again.prompts[0] !== "login") fail(`a sign-in as gui without prompt=login was let through on the AS's session, no password asked (${again.prompts.join(" → ") || "no page"})`);
+  // One consent: the grant made at it holds what the request asks, or the AS asks again (review pass 5).
+  if (again.prompts.join(" → ") !== "login → consent") fail(`the sign-in's pages were ${again.prompts.join(" → ")}, not the password then one consent: the grant made at the consent fell short of the request`);
+  const next = await exchange(again);
+  // With the AS's session live, prompt=none is answered login_required, as OpenID Connect has it, not let through (review pass 5).
+  const silentQuery = new URLSearchParams({ client_id: "gui", response_type: "code", redirect_uri: redirect, scope: "openid offline_access brain:write", state: "gui-refresh-check", code_challenge: createHash("sha256").update(randomBytes(32).toString("base64url")).digest("base64url"), code_challenge_method: "S256", resource, prompt: "none" });
+  const silent = await fetch(`${BASE}/authorize?${silentQuery}`, { redirect: "manual", headers: { cookie: [...jar].map(([n, v]) => `${n}=${v}`).join("; ") } });
+  const silentAt = silent.headers.get("location") ?? "";
+  if (!silentAt.startsWith(redirect) || new URL(silentAt).searchParams.get("error") !== "login_required") fail(`a gui authorization with prompt=none answered ${silent.status} ${silentAt.startsWith(redirect) ? `error=${new URL(silentAt).searchParams.get("error")}` : "elsewhere"}, not login_required`);
+  const after = await asGui("/token", { grant_type: "refresh_token", refresh_token: second.body.refresh_token, resource });
+  if (after.status !== 400 || after.body.error !== "invalid_grant") fail(`a refresh with the revoked token answered ${after.status} ${after.body.error ?? ""}, not 400 invalid_grant`);
+  // Each sign-in on a grant of its own: revoking the first ended its grant, not the next one's (review pass 4).
+  const nextRefreshed = await asGui("/token", { grant_type: "refresh_token", refresh_token: next.refresh_token, resource });
+  if (nextRefreshed.status !== 200 || !nextRefreshed.body.refresh_token) fail(`revoking one sign-in's refresh token ended the next one's too (${nextRefreshed.status} ${nextRefreshed.body.error ?? ""}): they shared a grant`);
+  await revoke(nextRefreshed.body.refresh_token);
+  console.log("gui: the code gave a refresh token, the refresh rotated it, once revoked it is refused; a sign-in without prompt=login was asked the password, on a grant of its own");
 } else {
-  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope>");
+  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope> | --gui-refresh");
   process.exit(2);
 }
