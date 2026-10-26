@@ -5,17 +5,19 @@
 
 import { env } from '$env/dynamic/private';
 import { configuredIn } from '../../../../server-portable/oauth-edge.ts';
+import { onBreakGlass } from './listener';
 
 /**
- * Whether this origin offers key sign-in. Not while the stack is configured
- * with the authorization server (COMPOSE_PROFILES names auth, ADR decision
- * 16): then the public port never offers it, whether or not the authorization
- * server answers, since knocking it over must not open a weaker door. Sign-in
- * there is by code and PKCE through the authorization server; break-glass key
- * sign-in on a loopback-only listener is SMD-3307's PR 2.
+ * Whether a request's listener offers key sign-in. Always while the stack is
+ * not configured with the authorization server. While it is (COMPOSE_PROFILES
+ * names auth, ADR decision 16), the origin never offers it, whether or not the
+ * authorization server answers, since knocking it over must not open a weaker
+ * door — sign-in there is by code and PKCE through the authorization server —
+ * and only the break-glass port does, published on 127.0.0.1 alone, which no
+ * tunnel points at (ADR decision 15; listener.ts, SMD-3307).
  */
-export function keySignInOffered(e: Record<string, string | undefined> = env): boolean {
-	return !configuredIn(e.COMPOSE_PROFILES);
+export function keySignInOffered(request: Request, e: Record<string, string | undefined> = env): boolean {
+	return !configuredIn(e.COMPOSE_PROFILES) || onBreakGlass(request);
 }
 
 /** What whoami answers: the key's name, its scope and the operations it may call. */

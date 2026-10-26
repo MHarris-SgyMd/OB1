@@ -30,7 +30,10 @@ export type Refusal =
   // capture_thought's shapes, refused before any model call (032, SMD-2014).
   | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id
-  | { code: "REFUSED_METADATA_SHAPE"; retryable: false; problem: MetadataProblem; key?: string; count?: number; length?: number } // a caller `metadata` key or value the boundary refuses
+  | { code: "REFUSED_METADATA_SHAPE"; retryable: false; problem: MetadataProblem; key?: string; count?: number; length?: number } // a caller `metadata` key or value the boundary refuses (update_thought's `metadata_patch` naming `client_key` too)
+  // capture_thought's `client_key` (SMD-3314, migration 112).
+  | { code: "REFUSED_CLIENT_KEY_SHAPE"; retryable: false; value: string } // not a UUID
+  | { code: "REFUSED_CLIENT_KEY_SCOPE"; retryable: false }                // a capture-only key sent one: its dedup reply would say whether an id exists
   // capture_thought's pointers (SMD-1298, SMD-1978).
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "check_failed"; detail: string; noPrivilege: boolean } // the target's capture record, or whether it stands, could not be read
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // a capture key's id is not to hand while the registry may answer — whatever the target (SMD-2473)
@@ -94,6 +97,8 @@ const FACTS: Facts = {
   // (SMD-2617) — unless the key itself is malformed: a bad key is the
   // caller's raw input, and stays in the text.
   REFUSED_METADATA_SHAPE: (r) => ({ problem: r.problem, ...(r.key !== undefined && r.problem !== "bad_key" ? { key: r.key } : {}) }),
+  REFUSED_CLIENT_KEY_SHAPE: none,
+  REFUSED_CLIENT_KEY_SCOPE: none,
   SUPERSEDES_UNJUDGED: none,
   REFUSED_SUPERSEDES_UNKNOWN: none,
   // The derived_from indices to drop — present only for a caller allowed to

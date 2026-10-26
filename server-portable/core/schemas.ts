@@ -336,7 +336,12 @@ export const SPECS = {
       // and a per-source weight (SMD-1297) can tell a model summary from the
       // derived one.
       metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\` and the like — are refused, and so, for a capture-only key, are the keys a ticket's lifecycle is read from (${TICKET_META_KEYS_TEXT}). Returned to readers alongside the server's own metadata.`),
+        .describe(`Extra metadata keys to store on the thought (e.g. \`{"summary_model": "llama3.1:8b"}\`). Lower-case keys, string/number/boolean values; at most ${META_KEYS_MAX} keys. Keys the server owns — \`source\` (use the \`source\` argument), \`type\`, \`topics\`, \`people\`, \`client_key\` (use the \`client_key\` argument) and the like — are refused, and so, for a capture-only key, are the keys a ticket's lifecycle is read from (${TICKET_META_KEYS_TEXT}). Returned to readers alongside the server's own metadata.`),
+      // SMD-3314: the client's idempotency key — the thought's id on the
+      // brain the write was first made on, kept as metadata.client_key so
+      // every brain names the thought by that one id (migration 112).
+      client_key: z.string().optional()
+        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's and delete_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
     },
   },
   update_thought: {
@@ -352,11 +357,11 @@ export const SPECS = {
       idempotentHint: true,
     },
     inputSchema: {
-      id: z.string().describe("UUID of the thought to update — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
+      id: z.string().describe("UUID of the thought to update — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved; or the `client_key` a thought was captured with, when no thought has it as its id"),
       content: z.string().min(1).optional()
         .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
       metadata_patch: z.record(z.string(), z.unknown()).optional()
-        .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone. actor_kind, actor_name and trust are the server's: the kind and name of the key that wrote the current text, and the trust a change of text declares (none above the key's kind). A patch naming them sets none of them — save a trust no higher than your key's kind (ingested for a key with no kind) sent with a change of text — while its other keys still merge, and the reply names each one the thought kept"),
+        .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone. actor_kind, actor_name and trust are the server's: the kind and name of the key that wrote the current text, and the trust a change of text declares (none above the key's kind). A patch naming them sets none of them — save a trust no higher than your key's kind (ingested for a key with no kind) sent with a change of text — while its other keys still merge, and the reply names each one the thought kept. `client_key` is set only by capture_thought: a patch naming it is refused"),
       if_unchanged_since: z.string().optional()
         .describe("The updated_at from your last read. The update is refused as STALE_READ if the thought changed since"),
       // Migration 032 (SMD-1323): the visible half of the provenance
@@ -380,7 +385,7 @@ export const SPECS = {
       idempotentHint: true,
     },
     inputSchema: {
-      id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
+      id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved; or the `client_key` a thought was captured with, when no thought has it as its id"),
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the delete is refused and the reply names them. Pass true to delete anyway: each citation keeps its text and stance, loses its source, and records this id and the time as the deleted source. Default false.",
       ),

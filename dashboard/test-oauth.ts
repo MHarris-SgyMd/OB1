@@ -19,8 +19,18 @@ import { createHash } from 'node:crypto';
 import { authorizeUrl, createRenewer, createRevoker, exchangeCode, MAX_REVOKE_PENDING, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, REVOKE_KEEP_MS, REVOKE_RETRY_MS, revokeRefresh, type Revoked, signedInSince, SIGNIN_MS, signInFrom, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
 
 // session.ts reads SvelteKit's `$app/paths` (its cookies' path): a stand-in, so the store loads here.
-Bun.plugin({ name: 'app-paths', setup: (build) => void build.module('$app/paths', () => ({ exports: { base: '/dashboard' }, loader: 'object' })) });
+// …and signin.ts reads SvelteKit's `$env/dynamic/private`: an empty one, its env handed in by each call here.
+Bun.plugin({
+	name: 'sveltekit-stand-ins',
+	setup: (build) => {
+		build.module('$app/paths', () => ({ exports: { base: '/dashboard' }, loader: 'object' }));
+		build.module('$env/dynamic/private', () => ({ exports: { env: {} }, loader: 'object' }));
+	},
+});
 const session = await import('./src/lib/server/session.ts');
+const { keySignInOffered } = await import('./src/lib/server/signin.ts');
+const { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } = await import('./src/lib/server/listener.ts');
+const { grafanaUrl } = await import('./src/lib/server/grafana.ts');
 
 let pass = 0;
 let fail = 0;
@@ -181,13 +191,13 @@ console.log('▸ the session store: every ending of a token session revokes');
 {
 	const ended: string[] = [];
 	session.onTokensEnded((t) => void ended.push(t.refresh));
-	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true });
+	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, breakglass: false });
 	function tok(refresh: string): Tokens {
 		return { access: 'a', refresh, expiresAt: NOW };
 	}
 	const s1 = tokenSession('closed');
 	assert(session.closeSession(s1) !== null && ended.join() === 'closed', 'a token session closed (sign-out, a refusal) has its refresh token revoked');
-	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false });
+	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false, breakglass: false });
 	session.closeSession(k);
 	assert(ended.join() === 'closed', '…a key session nothing');
 	ended.length = 0;
@@ -250,6 +260,40 @@ console.log('▸ renewal');
 	const d = over(async (t) => (after++ === 0 ? { ok: false, unreachable: true } : newPair(t)), { s5: due });
 	try { await d.accessFor('s5'); } catch { /* the first fails */ }
 	assert((await d.accessFor('s5')) === 'a-new(r-old)', '…and the next call tries again: a failed renewal is not held');
+}
+
+console.log('▸ the break-glass listener (SMD-3307)');
+{
+	const ORIGIN_URL = new URL('https://brain.example.test/dashboard/signin');
+	const req = (method: string, headers: Record<string, string>) => new Request('http://app.ob1.internal:8000/dashboard/signin', { method, headers });
+	const bg = { 'x-ob1-listener': 'breakglass' };
+	assert(onBreakGlass(req('GET', bg)) && !onBreakGlass(req('GET', {})) && !onBreakGlass(req('GET', { 'x-ob1-listener': 'web' })), 'the listener is break-glass only when the proxy marks it so');
+	assert(breakGlassPort(undefined) === 8001 && breakGlassPort('') === 8001 && breakGlassPort('18397') === 18397 && breakGlassPort('0') === null && breakGlassPort('70000') === null && breakGlassPort('8001x') === null && breakGlassPort('08317') === 8317 && breakGlassPort('008317') === 8317 && breakGlassPort('+8317') === 8317 && breakGlassPort('8001-8002') === null && breakGlassPort('-1') === null, 'the break-glass port: 8001 unless set, read as compose reads one published port (leading zeros and a + taken), and 0, a range or a value that is no port none');
+	assert(originAllowed(req('GET', {}), ORIGIN_URL, 8001) && originAllowed(req('HEAD', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001), 'a safe method is taken from anywhere');
+	assert(originAllowed(req('POST', { origin: 'https://brain.example.test' }), ORIGIN_URL, 8001), 'a post from the origin is taken on the origin');
+	assert(!originAllowed(req('POST', { origin: 'https://brain.example.test', ...bg }), ORIGIN_URL, 8001), '…and not on the break-glass listener: a page on the public origin posts no key there (review pass 1)');
+	assert(!originAllowed(req('POST', { origin: 'https://brain.example.test.elsewhere.example' }), ORIGIN_URL, 8001) && !originAllowed(req('PATCH', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001) && !originAllowed(req('PUT', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001), '…the origin matched whole, not as a prefix, and PATCH and PUT checked as POST is');
+	assert(!originAllowed(req('POST', {}), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'https://elsewhere.example' }), ORIGIN_URL, 8001) && !originAllowed(req('DELETE', { origin: 'null' }), ORIGIN_URL, 8001), '…and none from another origin, from "null", or with no origin at all (a body-less post included)');
+	assert(originAllowed(req('POST', { origin: 'http://127.0.0.1:8001', ...bg }), ORIGIN_URL, 8001), 'on the break-glass listener, a post from its own http://127.0.0.1 origin is taken');
+	assert(!originAllowed(req('POST', { origin: 'http://localhost:8001', ...bg }), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'http://[::1]:8001', ...bg }), ORIGIN_URL, 8001), '…and not localhost\'s or [::1]\'s: the port is published on 127.0.0.1 alone, so another process can hold ::1 (review pass 1)');
+	assert(!originAllowed(req('POST', { origin: 'http://127.0.0.1:8001' }), ORIGIN_URL, 8001), '…but not on the origin: a page at http://127.0.0.1:8001 signs nothing in there');
+	assert(!originAllowed(req('POST', { origin: 'http://127.0.0.1:3000', ...bg }), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'https://127.0.0.1:8001', ...bg }), ORIGIN_URL, 8001) && !originAllowed(req('POST', { origin: 'http://127.0.0.1:8001', ...bg }), ORIGIN_URL, null), '…nor another loopback port, https, or any when the port is no port: another local page is the same site, its cookies the same host\'s');
+	assert(sessionCookieName(false, 8001) === 'ob1_dashboard_session' && sessionCookieName(true, 8001) === 'ob1_dashboard_breakglass_8001' && sessionCookieName(true, 8002) !== sessionCookieName(true, 8001), "each listener's session cookie a name of its own, the break-glass port's with its port in it: neither overwrites the other on a shared host, nor two brains' on 127.0.0.1 (review pass 1)");
+	// devalue's encoding of a flat { error: string }, read here without the package (a dependency of SvelteKit's, not this suite's): [{ error: <index> }, …values].
+	const devalueParse = (data: string) => { const a = JSON.parse(data) as [Record<string, number>, ...unknown[]]; return Object.fromEntries(Object.entries(a[0]).map(([k, i]) => [k, a[i]])); };
+	const asAction = originRefusal(req('POST', { accept: 'application/json', 'x-sveltekit-action': 'true', ...bg }), ORIGIN_URL, 8001);
+	const action = (await asAction.json().catch(() => ({}))) as { type?: string; status?: number; data?: string };
+	const actionData = (typeof action.data === 'string' ? devalueParse(action.data) : {}) as { error?: string };
+	assert(asAction.status === 200 && action.type === 'failure' && action.status === 403 && (actionData.error ?? '').includes('http://127.0.0.1:8001/dashboard/'), "the refusal to a form under use:enhance: SvelteKit's own failure shape, its { error } naming the break-glass port's one address, which the page shows under the key field (review pass 2)");
+	const asJson = originRefusal(req('POST', { accept: 'application/json' }), ORIGIN_URL, 8001);
+	const asText = originRefusal(req('POST', { accept: 'text/html', 'x-sveltekit-action': 'true' }), ORIGIN_URL, 8001);
+	const originSaid = 'https://brain.example.test/dashboard/';
+	assert(asJson.status === 403 && ((await asJson.json()) as { message: string }).message.includes(originSaid) && asText.status === 403 && (asText.headers.get('content-type') ?? '').startsWith('text/plain') && (await asText.text()).includes(originSaid), "…to another that asks for JSON, { message } as SvelteKit's check answered, and text otherwise (SvelteKit's header alone included), the origin's naming the address that works (review pass 3)");
+	assert(grafanaUrl({ GRAFANA_ROUTE: '/grafana/' }) === '/grafana/' && grafanaUrl({ GRAFANA_ROUTE: '/grafana/' }, true) === null && grafanaUrl({ GRAFANA_LINK: 'http://127.0.0.1:3000/grafana/' }, true) === 'http://127.0.0.1:3000/grafana/', "the nav's Grafana link: a path on the origin not on the break-glass port, which routes the GUI alone; an address of its own there too (review pass 2)");
+	const configured = { COMPOSE_PROFILES: 'auth' };
+	assert(keySignInOffered(req('GET', {}), {}) && keySignInOffered(req('GET', bg), {}), 'not configured, key sign-in on either listener');
+	assert(!keySignInOffered(req('GET', {}), configured) && !keySignInOffered(req('GET', { 'x-ob1-listener': 'web' }), configured), 'configured, none on the origin');
+	assert(keySignInOffered(req('GET', bg), configured) && keySignInOffered(req('GET', bg), { COMPOSE_PROFILES: 'observability,auth' }), '…and key sign-in on the break-glass listener, whatever the authorization server\'s state');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

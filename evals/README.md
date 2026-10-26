@@ -7793,7 +7793,8 @@ The consent-page mutants above hold its pages too.
 - **Work step 3, done in the deploy, its third cut:** registration stays open
   but is capped (`OB1_AUTH_MAX_CLIENTS`), and an hourly purge removes expired
   rows and registered clients unused for a day (`../deploy/auth/store.ts`).
-- **Work step 3, still to come:** passkeys and the loopback break-glass.
+- **Work step 3, still to come:** passkeys. The loopback break-glass is the
+  operator GUI's, on its own port (`../deploy/README.md`, SMD-3307).
 - **Also Work step 3:**
   - the guard's 64 KiB body cap is never exercised live (the oversize case
     stops at the library's 5 KiB limit first); it matters for `jwks_uri`, which

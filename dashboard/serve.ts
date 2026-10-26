@@ -15,11 +15,12 @@
 //     and Traefik replaces any X-Forwarded-Proto a client sends. So a stack
 //     reached over plain HTTP on the loopback or a LAN address signs in as it
 //     is reached, and one behind TLS needs OB1_PUBLIC_ORIGIN, or a form's post
-//     is refused as cross-site.
+//     is refused, its origin not the one the GUI reads.
 // It also sets adapter-node's drain and body limit (below), and reads
 // OB1_REST_URL (the REST core, api.ob1.internal on the mesh unless set),
 // OB1_STOP_GRACE (the stop's grace, as the servers read it), COMPOSE_PROFILES
-// (key sign-in is off while it names auth) and GRAFANA_LINK or GRAFANA_ROUTE
+// (key sign-in is off while it names auth, but on the break-glass port, whose
+// own origin BREAKGLASS_PORT names) and GRAFANA_LINK or GRAFANA_ROUTE
 // (the Grafana link, set by the overlays that reach Grafana).
 // It holds no brain key of its own: each visitor's key or token is the call's. Its one
 // secret is OB1_AUTH_SECRET_GUI, its credential as the authorization server's `gui`
@@ -90,10 +91,11 @@ if (publicOrigin && !problem) {
   env.PROTOCOL_HEADER = "x-forwarded-proto";
 }
 // Configured for the authorization server, the GUI signs in only through it (SMD-3307), as its `gui` client:
-// without the client's secret, or a sound origin to redirect through, it offers no sign-in at all. Said at the
-// start, as the MCP server says its own (the sign-in page says it too).
+// without the client's secret, or a sound origin to redirect through, it offers none on the origin (the
+// break-glass port takes an access key whatever its settings). Said at the start, as the MCP server says its
+// own (the sign-in page says it too).
 if (configuredIn(env.COMPOSE_PROFILES)) {
-  if (!env.OB1_AUTH_SECRET_GUI?.trim()) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_AUTH_SECRET_GUI is not set, so no sign-in is offered: set it in deploy/.env (provision.ts --init writes it) and recreate app.");
+  if (!env.OB1_AUTH_SECRET_GUI?.trim()) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_AUTH_SECRET_GUI is not set, so no sign-in is offered but an access key on the break-glass port: set it in deploy/.env (provision.ts --init writes it) and recreate app.");
   else if (!publicOrigin || problem) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_PUBLIC_ORIGIN is not a sound origin, so no sign-in through the authorization server is offered.");
 }
 env.PORT ||= "8000";

@@ -1371,6 +1371,10 @@ jobs:
             || { echo "compose.yaml's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+          # Under the auth profile, the break-glass listener (SMD-3307) publishes
+          # the one port more, on loopback too, its label the same script.
+          docker compose -f compose.yaml --profile auth config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.breakglass.ports | length == 1) and (.services.breakglass.ports[0].published == "8001") and (.services.breakglass.labels["ob1.forwarder"] == .configs.forwarder.content)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is; it dials the REST
           # core by its rooted mesh name (SMD-2294; the table is check 28's
@@ -1406,9 +1410,10 @@ jobs:
           # SMD-2285: the authorization server publishes nothing, joins only
           # the internal mesh and an outward network of its own (SMD-2583),
           # and is handed no Postgres credential, no plain password and not
-          # the POC's switch.
+          # the POC's switch. The profile's two ports are the forwarder's and
+          # the break-glass listener's (SMD-3307), held above.
           docker compose -f compose.yaml --profile auth config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
           # SMD-1849 PR 3a: the observability profile's collector publishes
           # nothing and joins the internal mesh, and since PR 3b the internal
           # telemetry network, where it scrapes pg-exporter, which publishes
@@ -1443,7 +1448,7 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["breakglass", "forwarder"]) and (on("front") == ["breakglass", "forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1630,8 +1635,8 @@ jobs:
               compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
-              # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
-              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
+              # The release's: an image and its pull policy, on any service but the proxy, its forwarder (SMD-2583) and the break-glass listener, the forwarder's image too (SMD-3307).
+              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ] && [ "$s" != breakglass ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
             esac
           }
@@ -1919,7 +1924,7 @@ jobs:
       # its public origin offers no key sign-in, whether or not the
       # authorization server answers — no key field, and a post of the write
       # key from the origin it is configured for refused with no cookie, by
-      # the GUI's own words (not SvelteKit's cross-site refusal). With the
+      # the GUI's own words (SvelteKit's own origin check is off). With the
       # authorization server not running, its page says sign-in is unavailable
       # (SMD-3307: the GUI holds the `gui` client's secret from .env, so this
       # is the AS's absence, not the GUI's settings).
@@ -3712,8 +3717,40 @@ jobs:
           (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test)
           left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
           [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
+          # The step below removes the authorization server, after its break-glass check with it up.
+
+      # SMD-3307's break-glass port (ADR decision 15): the `breakglass` service,
+      # under the auth profile, publishes 127.0.0.1:BREAKGLASS_PORT to the
+      # proxy's `breakglass` entrypoint, which routes /dashboard alone and marks
+      # it. On 8002 here, not its default, so the GUI's reading of the knob is
+      # held too (a form there is taken from http://127.0.0.1:8002 alone); the
+      # GUI is recreated on it. dashboard/smoke-breakglass.ts first with the
+      # authorization server up (--as-up): a sign-in through it starts on the
+      # origin and not on the break-glass port, which offers the key all the
+      # same. Then the server is removed, as the steps after expect, and the GUI
+      # recreated again, so its 30 s answer from the server's probe is not one
+      # from before the server went; the full run holds the Verify lines: on
+      # the origin no key is offered or taken — a forged X-OB1-Listener (the
+      # `web` entrypoint deletes it), `Host: 127.0.0.1` from that origin and
+      # from the configured one included — while on the break-glass port the
+      # key signs in with the server down, under a cookie of its own name, its
+      # session opening nothing on the origin; a post there from another
+      # loopback port, localhost, the configured origin or none is refused, and
+      # nothing but the GUI is routed. The key goes by name, never on a command
+      # line. `breakglass` is removed after.
+      - name: The break-glass port takes a key while the authorization server is down
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          export BREAKGLASS_PORT=8002
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps app
+          auth up -d --wait --wait-timeout 60 --no-deps breakglass
+          (cd ../dashboard && bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test --as-up)
           # Gone again, as the steps above leave it: the next step meets no authorization server.
           auth rm -sfv auth
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps app
+          (cd ../dashboard && bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test)
+          auth rm -sf breakglass
 
       # SMD-1846. What the proxy itself owes, beside the smoke:
       # - /.well-known, bare and under it, is answered by the proxy, not the

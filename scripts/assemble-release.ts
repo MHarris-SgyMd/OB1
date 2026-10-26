@@ -67,12 +67,16 @@ type CheckedFrontMatter = FragmentFrontMatter & { type: string; bump: string; ti
 
 // ── Pure functions (self-checked) ────────────────────────────────────────────
 
-/** Bump a version by kind, keeping the +upstream build metadata. */
+/**
+ * Bump a version by kind. The result is plain MAJOR.MINOR.PATCH (SMD-3317): the
+ * `+upstream.<sha>` build metadata the releases before 2.0.0 carried is dropped,
+ * and the pin goes on being recorded as data, in the release's `upstream` key.
+ */
 export function bumpVersion(version: string, kind: string): string {
   const [core] = String(version).split("+");
   const [maj, min, pat] = core.split("-")[0].split(".").map(Number);
   const next = kind === "major" ? [maj + 1, 0, 0] : kind === "minor" ? [maj, min + 1, 0] : [maj, min, pat + 1];
-  return `${next.join(".")}+upstream.${UPSTREAM_PIN}`;
+  return next.join(".");
 }
 
 /**
@@ -82,7 +86,7 @@ export function bumpVersion(version: string, kind: string): string {
  */
 export function nextVersion(releases: { version: string }[], bumps: string[]): string {
   const strongest = bumps.reduce((a, b) => (BUMP_RANK[b] > BUMP_RANK[a] ? b : a), "patch");
-  if (releases.length === 0) return `1.0.0+upstream.${UPSTREAM_PIN}`;
+  if (releases.length === 0) return "1.0.0";
   return bumpVersion(releases[releases.length - 1].version, strongest);
 }
 
@@ -369,10 +373,13 @@ function gitHead() {
 function selfCheck() {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
-  ok(nextVersion([], ["minor"]) === `1.0.0+upstream.${UPSTREAM_PIN}`, "first cut is 1.0.0 whatever the bump");
-  ok(nextVersion([{ version: "1.0.0" }], ["patch", "minor"]) === `1.1.0+upstream.${UPSTREAM_PIN}`, "strongest bump wins (minor over patch)");
-  ok(nextVersion([{ version: "1.4.2" }], ["major", "minor"]) === `2.0.0+upstream.${UPSTREAM_PIN}`, "a major resets minor and patch");
-  ok(bumpVersion("1.2.3+upstream.abc", "patch") === `1.2.4+upstream.${UPSTREAM_PIN}`, "patch increments the patch and re-pins upstream");
+  ok(nextVersion([], ["minor"]) === "1.0.0", "first cut is 1.0.0 whatever the bump");
+  ok(nextVersion([{ version: "1.0.0" }], ["patch", "minor"]) === "1.1.0", "strongest bump wins (minor over patch)");
+  ok(nextVersion([{ version: "1.4.2" }], ["major", "minor"]) === "2.0.0", "a major resets minor and patch");
+  ok(bumpVersion("1.2.3", "patch") === "1.2.4", "patch increments the patch");
+  // SMD-3317: a version is plain from 2.0.0 — the pin's build metadata on the last 1.x release is dropped, not carried.
+  ok(nextVersion([{ version: "1.9.0+upstream.9543c29" }], ["minor", "major"]) === "2.0.0", "the cut after 1.9.0+upstream.9543c29 is plain 2.0.0");
+  ok(bumpVersion("1.9.0+upstream.9543c29", "minor") === "1.10.0", "a minor on a pinned 1.x version is plain too");
   ok(highestChangeNumber([{ n: 18 }, { n: 100 }]) === 100, "highest change number from the directory (an empty directory is refused before this is asked)");
   const cf = renderChangeFile(101, "A title — a consequence (SMD-1)\n\nBody line.");
   ok(cf.name === "101-a-title.md" && cf.text === "# 101. A title — a consequence (SMD-1)\n\nBody line.\n", "a change file from a fragment body: name from the title's first clause, `# N.` heading, the body");

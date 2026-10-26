@@ -508,7 +508,7 @@ the latter is unset (`store.ts:databaseUrl`), and preflight says which variable
 supplied the string. An `https://` `SUPABASE_URL` is not a connection string,
 and preflight and the store's first use say so.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for the start's probe alone — see "serving degraded" above).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, `OB1_LISTEN_HOST` (compose never forwards it; for a server run outside the stack: the one IP address to listen on, such as `127.0.0.1`; unset, every address — `::` is every address too, `0.0.0.0` every IPv4 address; a value that is no IP address, a link-local IPv6 one (it needs an interface the setting does not take), or one the host's interfaces do not list, stops the server at start with exit 2, in words, without printing the value; SMD-3323), and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for the start's probe alone — see "serving degraded" above).
 
 On a container these are ordinary environment variables.
 
@@ -816,6 +816,58 @@ one told to use the operator's own key — and a database before 086 is named in
 fault; the REST core answers the code and its status. `thought_changes` reads the event
 as "reset by <key>", and a decline's line names the reset as the way out.
 
+## A write copied to another brain: `client_key` (SMD-3314)
+
+A thought captured on two brains separately gets two ids, while an edit, a delete or a
+`supersedes` names a thought by the id the brain that made it gave it. A client that
+repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`** on
+`capture_thought`: a UUID, by convention the thought's id on the brain where it was
+first written. The copy keeps it as `metadata.client_key`, one thought per key
+(migration 112's unique index), and every name a write takes resolves to **the thought
+with that id, else the one keeping it as its key**: `update_thought`'s and
+`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
+second brain the same ids it sent the first. A thought a refresh copied has the same id
+on both brains, and a key equal to it names that thought.
+
+- **A key that names a thought already** (as its id or its key) returns that thought
+  and writes nothing, with no model call: `Already captured — id …`, `keyed:
+  "matched"` beside it (REST and MCP alike). A retried copy, or copies racing under one key, make one
+  thought; the loser of a race is answered the same way.
+- **A key naming the thought that holds this very text** is a re-capture of it
+  (`keyed: "recaptured"`): merged as any write key's re-capture is (080), the key not
+  sent again, so the copy takes what the first brain's re-capture merged.
+- **A key that names nothing** is kept on the new row (`keyed: "recorded"`), and on
+  a re-capture of text already a thought it is merged onto that row, as 080's merge
+  takes a write key's metadata. A row already keeping another key keeps it
+  (`keyed: "held"`, with `heldKey` when it is a key's shape): the reply says the
+  key given was not recorded and names nothing here.
+- **Only a key that can read** sends one. A capture-only key is refused
+  (`REFUSED_CLIENT_KEY_SCOPE`, 403 over REST), as the match would tell it whether an id
+  exists (SMD-1298), and its names stay ids. A key that is not a UUID is
+  `REFUSED_CLIENT_KEY_SHAPE` (400).
+- **The key is set once.** `metadata.client_key` in a capture's `metadata`, or a
+  `metadata_patch` naming it, is `REFUSED_METADATA_SHAPE` (`reserved_key`). A deleted
+  thought's key goes with it, and is free again. Keys are kept and compared in lower
+  case: a `client_key` a caller's metadata set in upper case before 112 names nothing.
+- An edit or a delete that reached its thought by a key says so (`, named by its
+  client_key …`, `byClientKey` beside it); one by the thought's own id says nothing.
+- **A key is set once**, in the database too: migration 112's trigger refuses a write
+  that would give a keyed row another key (two keyed copies of one text racing past the
+  servers' read of the row), with the write's event, and the server captures it again
+  without the key and answers `held`. A name that is no uuid is `NOT_FOUND` for an edit
+  or a delete.
+- **What is named:** only a thought that has a name's id, or keeps it as its key.
+  Reads (`fetch`, `GET /v1/thoughts/{id}`) take ids alone. A name that is both one
+  thought's id and another's key names the one with the id. A thought each brain's own
+  writers made (a board-sync row, a worker's output, anything captured before the copying
+  began) has an id of its own on each brain, so a copied pointer to it resolves to
+  nothing on the second brain and is refused there as an unknown id would be: a client
+  copying writes drops such a pointer, or the write, on that brain. A copied edit drops
+  the first brain's `if_unchanged_since` too, which the second brain's own `updated_at`
+  never matches; and it keeps the first brain's order (a capture before the edit or
+  delete of it), or a late capture after a delete would bring the thought back.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
@@ -1072,14 +1124,14 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1212 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1215 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 485 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 490 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 741 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts and decide mode, chunking, the entity gate and genre, the provider's state and the vector mender, and a thought's own subject: its rules, its key and the question pinned by hash (SMD-3306)
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 226 — fully local provider, no credential
-bun run test:sql          # 290 — store conformance, real Postgres in a container
+bun run test:sql          # 296 — store conformance, real Postgres in a container
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
 ../db/with-postgres.sh bun test-rest-sql.ts  # 265 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row

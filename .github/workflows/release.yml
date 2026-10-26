@@ -317,10 +317,11 @@ jobs:
           profiles=()
           while read -r p; do if [ -n "$p" ]; then profiles+=("--profile=$p"); fi; done <<<"$list"
           # An image and its pull policy, on any service but the proxy and the
-          # forwarder in front of it, which carry every client's bytes and keep
-          # compose.yaml's pinned images: not a list the generator keeps, which
-          # a change to it could widen (SMD-2685 review pass 2; SMD-2583).
-          pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy" and . != "forwarder") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
+          # forwarder in front of it and the break-glass listener (SMD-3307),
+          # which carry every client's bytes and keep compose.yaml's pinned
+          # images: not a list the generator keeps, which a change to it could
+          # widen (SMD-2685 review pass 2; SMD-2583).
+          pins="$(docker compose -f compose.yaml "${profiles[@]}" config --services | jq -Rsc '[split("\n")[] | select(. != "" and . != "proxy" and . != "forwarder" and . != "breakglass") | ["services", ., "image"], ["services", ., "pull_policy"]]')"
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           rest='delpaths($pins) | with_entries(select(.key | startswith("x-") | not))'
           for public in no api hooks grafana; do

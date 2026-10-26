@@ -41,6 +41,16 @@ export type Env = {
    */
   OB1_STOP_GRACE?: string;
   /**
+   * The one IP address the serving entry listens on (auth.ts listenHostFrom,
+   * SMD-3323); unset, every address (`::` too; `0.0.0.0` every IPv4 one). A
+   * suite's children are given 127.0.0.1. Read once, at start-up, by api.ts and
+   * mcp-server/index.ts; a value that is no IP address, a link-local IPv6 one,
+   * or one this host does not have, stops either before it serves, exit 2.
+   * Never forwarded by compose: a container is reached on the mesh, so it
+   * listens on every address.
+   */
+  OB1_LISTEN_HOST?: string;
+  /**
    * Seconds between the vector mender's ticks (core/mend.ts, SMD-2889): the
    * servers give the thoughts saved without a vector theirs once the provider
    * answers and the egress gate allows. Whole seconds from 1 to 86400, `0` or

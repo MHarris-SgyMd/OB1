@@ -38,7 +38,7 @@
  * - sign-in and consent pages. The operator signs in by password, checked
  *   against an argon2id hash from the environment (decision 15's fallback);
  *   passkeys wait for the public origin (SMD-2382), and the loopback
- *   break-glass is the GUI's (SMD-2280).
+ *   break-glass is the GUI's (SMD-3307).
  *   Consent is asked of every client, first-party ones included, and names
  *   what the server has checked, not what the client calls itself: the
  *   `client_id` (for a metadata document, its host); where the code goes (an

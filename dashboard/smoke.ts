@@ -115,8 +115,8 @@ const attributesHold = (line: string) =>
 const redacted = (line: string) => line.replace(/=[^;]*/, "=…");
 
 // As a browser submits the form: HTML wanted (without `accept: text/html`,
-// SvelteKit answers an action as JSON for a fetch), same-origin (its CSRF
-// check reads `origin`).
+// SvelteKit answers an action as JSON for a fetch), same-origin (the GUI's
+// origin check reads `origin`, hooks.server.ts).
 const FORM = { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: ORIGIN };
 const signIn = async (key: string) => {
   const r = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ key }).toString() });
@@ -383,7 +383,7 @@ if (NOTES_ONLY) {
   assert(signin.status === 200 && signin.html.includes('name="key"'), `/signin offers key sign-in (${signin.status})`);
   assert(/content-security-policy/i.test([...signin.headers.keys()].join(" ")) && signin.headers.get("x-frame-options") === "DENY", "…with a Content-Security-Policy, and no framing");
   // same-origin, never no-referrer: under no-referrer a browser posts a plain form with `Origin: null`, which
-  // SvelteKit refuses as cross-site, and sign-out — a form with no script — failed in every browser (review pass 1).
+  // the GUI's origin check refuses, and sign-out — a form with no script — failed in every browser (review pass 1).
   // This smoke sets Origin itself, so it holds the header that decides what a browser sends.
   assert(signin.headers.get("referrer-policy") === "same-origin", `…and Referrer-Policy same-origin, so a browser's form post carries its origin (${signin.headers.get("referrer-policy")})`);
   const nullOrigin = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: { ...FORM, origin: "null" }, body: new URLSearchParams({ key: WRITE_KEY }).toString() });
