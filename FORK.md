@@ -45,11 +45,15 @@ highest migration its ledger recorded. The version scheme (SMD-1804) gives it a
 name:
 
 ```
-MAJOR.MINOR.PATCH+upstream.<sha>
+MAJOR.MINOR.PATCH
 ```
 
-The build metadata carries the upstream pin, so a version says both what the fork
-is and what it sits on (`1.0.0+upstream.9543c29`). The bump is chosen by the
+Plain SemVer from 2.0.0 (SMD-3317). The releases before it, 1.0.0 to 1.9.0,
+carried the upstream pin as build metadata (`1.0.0+upstream.9543c29`). The pin is
+frozen now (SMD-1256), so the version no longer spells it: "The pin" above names it
+once, and each release goes on recording it as data, in `releases.json`'s
+`upstream` key and the release notes' "upstream pin" line. The two forms order by
+their cores (build metadata takes no part). The bump is chosen by the
 contracts the fork already enforces — the rules are here, and checked, not
 remembered:
 
@@ -70,7 +74,8 @@ remembered:
     (SMD-2306, SMD-2532).
 
   A client written against `N.x` keeps working on `N.y`. A URL it was given goes
-  only after a release has said so on every answer, in a `Deprecation` header.
+  only after a release has said so on every answer, in a `Deprecation` header,
+  and a cut removes it no sooner than two weeks after that release (SMD-3057).
 - **MINOR** — an additive migration (a new function; a new column with
   `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
   worker, a new preflight check, or a surface marked deprecated (SemVer §7;
@@ -130,14 +135,16 @@ the brain it serves. `db/version.mjs` is the one definition of the current versi
 migration belongs to. 044 wrote `0.0.0+upstream.9543c29`, the pre-first-release
 baseline; each cut appends the migration that writes its version as the last file
 of the range it freezes — 048 writes `1.0.0+upstream.9543c29`, the first release;
-051 writes `1.1.0+upstream.9543c29`, the second. The server reports its own at
+051 writes `1.1.0+upstream.9543c29`, the second; from 2.0.0 the stamp is the plain
+version (`2.0.0`). The server reports its own at
 runtime — the MCP `initialize` reply, the `brain_info` tool and `GET /health` with a
 key — from `server-portable/version.ts`, generated from `db/version.mjs`,
 `releases.json` and `db/migrations/` by `scripts/gen-version.ts` and round-tripped
 by check-fork's 17e (SMD-2041).
 
 **A release is a tag naming three things**: the migration range it closes
-(the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin. The committed
+(the first cut, `001..048`; the second, `049..051`), the server commit, and the upstream pin
+(recorded as data beside the version, not in it, from 2.0.0). The committed
 `releases.json` is the machine-readable mirror CI reads with no network. Migrations
 inside a released range are **frozen** — the ledger's sha check already refuses
 drift at apply time; `check-fork-consistency` adds the rule that a renumber or
@@ -164,6 +171,45 @@ and `check-fork-consistency` pairs the two both ways. Conventional Commits is **
 adopted — the fragment's fields give tooling what it needs, and the `[fork]` prefix
 and `(caught: …)` tags stay. (The orphaned `.github/release-drafter.yml`, an
 upstream leftover no workflow ran, is removed so there is one release mechanism.)
+
+### Cutting a release
+
+A cut closes a capability, not a date, and carries everything merged to `main`
+before it. Its version is the last release's, bumped by the strongest `bump` among
+the `changes/` fragments it carries (`scripts/assemble-release.ts`'s `nextVersion`);
+once `main` holds a `bump: major` fragment, the next cut is a major. A patch can
+ship at any time for an urgent fix, but carries no migration.
+
+**Two commits, on one branch, in this order** (SMD-1804, SMD-1860;
+`scripts/assemble-release.ts --write` enforces it):
+1. **The version.** Run `bun scripts/assemble-release.ts` (a dry run that touches
+   nothing) for the version it proposes. Bump `db/version.mjs`'s `FORK_VERSION` to
+   it, and add the migration that writes it: a new `NNN_schema_version.sql`
+   upserting `ob1_config.schema_version`, the highest migration on disk, so the
+   range the cut freezes ends on the migration that names the release (check 17d
+   holds the two equal). Move `db/README.md`'s migration map and the suites'
+   migration counts with it, and run `bun scripts/gen-version.ts` to regenerate
+   `server-portable/version.ts` (17e). The stamp takes the next migration number,
+   so a branch adding a migration renumbers past it when it merges `main` after
+   the cut.
+2. **The release.** `bun scripts/assemble-release.ts --write`, which refuses a
+   tree whose `FORK_VERSION` or highest migration does not say the version it is
+   about to record, or one that is not clean. It writes each fragment as the next
+   numbered `changes/NNN-<slug>.md`, regenerates this file's index, writes the
+   `CHANGELOG.md` section and the `releases.json` entry (its `upstream` key the
+   pin, as data), and regenerates `server-portable/version.ts`.
+
+The PR lands the two. If `main` moves under an open cut, rebuild the cut on the
+new tip rather than merging, so `releases.json`'s server commit carries what
+shipped. The maintainer tags the merge commit `v<MAJOR.MINOR.PATCH>` and pushes
+the tag, and `.github/workflows/release.yml` publishes the images and the release
+from it (`scripts/release-artifacts.ts`).
+
+**The soak.** Before a cut is tagged, the canary runs it as the canary is: an
+in-place writer fed stable's inputs (`deploy/canary.sh up --no-refresh`), not a
+refreshed copy of stable's data (decided 2026-10-25; SMD-2541, SMD-1806). The
+cutover release, which changes how clients reach the brain, soaks at least 24
+hours.
 
 ### Deploying
 

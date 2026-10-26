@@ -303,8 +303,9 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
-migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
-baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
+migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
+it carried `+upstream.<sha>`, and 044 wrote the pre-first-release baseline
+`0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
@@ -315,7 +316,7 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.6.0+upstream.9543c29`, the seventh (`077..081`), and 083 writes
 `1.7.0+upstream.9543c29`, the eighth (`082..083`), and 089 writes
 `1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
-`1.9.0+upstream.9543c29`, the tenth (`090..103`). `preflight` prints the
+`1.9.0+upstream.9543c29`, the tenth (`090..103`); from 2.0.0, the eleventh, a stamp is the plain version. `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
