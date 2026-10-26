@@ -54,7 +54,7 @@ const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
  * and the code's default (127.0.0.1:11434) reaches nothing in CI — and, on a
  * box that runs Ollama, the real thing. Section [9] holds the probe itself.
  */
-const localStub = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+const localStub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ object: "list", data: [] }) });
 const LOCAL_STUB = `http://127.0.0.1:${localStub.port}/v1`;
 const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub", OB1_LLM_BASE_URL: LOCAL_STUB };
 
@@ -4144,7 +4144,7 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
 
   // --deep dials each endpoint by name: a chat endpoint that is down fails its
   // own row while the embeddings row passes against its endpoint.
-  const emb = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] }) });
+  const emb = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] }) });
   const deep = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${emb.port}/v1`, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" }, "--deep");
   emb.stop();
   assert(new RegExp(`✓\\s+embedding provider\\s+${rx(EMBEDDING_MODEL)} returns ${EMBEDDING_DIM} dimensions, matching the schema`).test(deep.out),
@@ -4161,6 +4161,7 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   let refuse = "";
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [] }); // the reachability probe (SMD-1875)
       const body = (await req.json()) as { model: string };
@@ -4213,6 +4214,7 @@ console.log("\n[7b] The extraction escalation model is probed under its own --de
   let refuse = "";
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [] });
       const body = (await req.json()) as { model: string };
@@ -4422,7 +4424,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // no credential even when a key is set — a key is never sent to prove reachability.
   const seen: { method: string; path: string; auth: string | null; length: string | null }[] = [];
   let status = 200;
-  const answering = Bun.serve({ port: 0, fetch: (req) => { seen.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), length: req.headers.get("content-length") }); return new Response(status === 200 ? '{"object":"list","data":[]}' : "not here", { status }); } });
+  const answering = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { seen.push({ method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization"), length: req.headers.get("content-length") }); return new Response(status === 200 ? '{"object":"list","data":[]}' : "not here", { status }); } });
   const ANSWERS = `http://127.0.0.1:${answering.port}/v1`;
   const up = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS, OB1_LLM_API_KEY: "k-local" });
   assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 200 to GET /models in \d+ ms; what it serves is checked under --deep`).test(up.out),
@@ -4448,7 +4450,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // for its request budget (first review pass). The stub keeps Bun.serve's
   // 10 s idleTimeout, and the upper bound below leans on it: a probe timeout
   // over 10 s would surface as the stub's own idle close at ~12 s.
-  const hung = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hung = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
   const t0 = performance.now();
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
@@ -4462,8 +4464,8 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // row name one address and judge another, on or off the box (first review
   // pass: `fetch` followed it, and a 302 to a dead port read as refused).
   let targetHits = 0;
-  const target = Bun.serve({ port: 0, fetch: () => { targetHits++; return new Response("here", { status: 200 }); } });
-  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: `http://127.0.0.1:${target.port}/elsewhere` } }) });
+  const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { targetHits++; return new Response("here", { status: 200 }); } });
+  const redirector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 302, headers: { Location: `http://127.0.0.1:${target.port}/elsewhere` } }) });
   const redirected = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${redirector.port}/v1` });
   redirector.stop(true); target.stop(true);
   assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 302 to GET \/models/.test(redirected.out) && targetHits === 0,
@@ -4484,7 +4486,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // Two endpoints: the same base is one socket and one probe; a chat base of
   // its own is its own row, so a down chat server fails by its own name.
   const chatSeen: string[] = [];
-  const chatStub = Bun.serve({ port: 0, fetch: (req) => { chatSeen.push(new URL(req.url).pathname); return Response.json({ object: "list", data: [] }); } });
+  const chatStub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { chatSeen.push(new URL(req.url).pathname); return Response.json({ object: "list", data: [] }); } });
   const CHAT = `http://127.0.0.1:${chatStub.port}/v1`;
   const shared = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: CHAT, OB1_CHAT_API_KEY: "k-chat" });
   assert(chatSeen.length === 1 && row(shared.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(shared.out),
@@ -4501,7 +4503,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
          "…and each row's remedy names its own knob (fifth review pass)");
   // A silent chat server: the wait is the chat row's cost too; and an embeddings
   // row beside a chat base of its own leaves the tags to that row (review pass 1).
-  const hungChat = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hungChat = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
   const chatSilent = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${hungChat.port}/v1` });
   hungChat.stop(true);
   assert(/^\s*!\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts — until it answers, a capture lands untagged \(no topics, no type\), each first waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\); the first capture it answers is tagged again$/.test(row(chatSilent.out, "chat endpoint")),
@@ -4515,14 +4517,14 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // the server's calls, so the row names the route before the endpoint and the
   // remedy leads with NO_PROXY (fifth review pass: a dead corporate proxy read
   // as "127.0.0.1 refused" with the container remedy).
-  const proxied = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+  const proxied = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ object: "list", data: [] }) });
   const PROXIED = `http://127.0.0.1:${proxied.port}/v1`;
   const deadProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: "http://127.0.0.1:1" });
   assert(deadProxy.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); HTTP_PROXY is set, so this call and every one the server makes go through that proxy unless NO_PROXY names 127\.0\.0\.1; the first capture/.test(row(deadProxy.out, "provider endpoint")),
          `a live endpoint behind a dead HTTP_PROXY fails naming the proxy variable (exit ${deadProxy.code})`);
   assert(/→ Add 127\.0\.0\.1 to NO_PROXY \(and no_proxy\) for the server, or unset HTTP_PROXY for it\. Otherwise: Inside a container/.test(fix(deadProxy.out, "provider endpoint")), "…with NO_PROXY first in the remedy, the hostname's remedy after");
   // A proxy that never answers is the route's too: silent through a proxy fails, as refused through one does (review pass 1).
-  const hungProxy = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hungProxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
   const silentProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: `http://127.0.0.1:${hungProxy.port}` });
   hungProxy.stop(true);
   assert(/✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s .*HTTP_PROXY is set/.test(row(silentProxy.out, "provider endpoint")),
@@ -4538,7 +4540,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // any Bun: 1.4.3's fetch sends a URL's userinfo itself, so it is out of the
   // URL before fetch sees it. The rows never print it (fifth review pass).
   const seenAuth: { method: string; auth: string | null }[] = [];
-  const plain = Bun.serve({ port: 0, fetch: (req) => {
+  const plain = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => {
     seenAuth.push({ method: req.method, auth: req.headers.get("authorization") });
     return req.method === "GET" ? Response.json({ object: "list", data: [] }) : Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }] });
   } });
@@ -4565,7 +4567,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // A 401 to a --deep probe names the credential that was sent, by its knob:
   // the base's user and password, the key, or none — and a chat endpoint that
   // is the embeddings one names the embeddings knobs (fourth review pass).
-  const deny = Bun.serve({ port: 0, fetch: (req) => req.method === "GET" ? Response.json({ object: "list", data: [] }) : new Response("no", { status: 401 }) });
+  const deny = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => req.method === "GET" ? Response.json({ object: "list", data: [] }) : new Response("no", { status: 401 }) });
   const DENY = `http://127.0.0.1:${deny.port}/v1`;
   const denyUser = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: DENY.replace("://", "://u:wrong@") }, "--deep");
   const denySharedKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: DENY, OB1_LLM_API_KEY: "sk-wrong", OB1_CHAT_BASE_URL: DENY }, "--deep");
@@ -4633,7 +4635,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
     skipRaw("a self-signed TLS endpoint reads as answering with an untrusted certificate", "no openssl to mint a certificate");
     skipRaw("…and passes under NODE_TLS_REJECT_UNAUTHORIZED=0", "no openssl to mint a certificate");
   } else {
-    const tlsStub = Bun.serve({ port: 0, tls: { key: Bun.file(join(certDir, "k.pem")), cert: Bun.file(join(certDir, "c.pem")) }, fetch: () => Response.json({ object: "list", data: [] }) });
+    const tlsStub = Bun.serve({ port: 0, hostname: "127.0.0.1", tls: { key: Bun.file(join(certDir, "k.pem")), cert: Bun.file(join(certDir, "c.pem")) }, fetch: () => Response.json({ object: "list", data: [] }) });
     const TLS = `https://127.0.0.1:${tlsStub.port}/v1`;
     const untrusted = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: TLS, NODE_TLS_REJECT_UNAUTHORIZED: undefined });
     assert(untrusted.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+${rx(TLS)} answers, but its TLS certificate is not trusted \(DEPTH_ZERO_SELF_SIGNED_CERT\) \(GET /models, 2\.5 s timeout\); every capture would fail the same way`).test(row(untrusted.out, "provider endpoint")),
@@ -4663,6 +4665,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const seen: string[] = [];
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const path = new URL(req.url).pathname;
       seen.push(`${req.method} ${path}`);
@@ -4672,12 +4675,13 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
       return Response.json({ contract: JEV_CONTRACT, model: MODEL, ms: 1, results: decisions.map((d) => ({ ...(d.id ? { id: d.id } : {}), kind: "binary", probabilities: { true: 0.6, false: 0.2, [INSUFFICIENT_EVIDENCE]: 0.2 }, selected: "true", abstained: false, p_insufficient: 0.2, p_true: 0.75, logits: [1, 0, 0], temperature: 5.0069, tokens: 30, truncated: false })) });
     },
   });
-  const other = Bun.serve({ port: 0, fetch: () => Response.json({ models: [] }) }); // answers, but not the contract
+  const other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ models: [] }) }); // answers, but not the contract
   // Answers every path with a redirect: something is there, and it is not the tier.
-  const redirector = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 302, headers: { Location: "http://elsewhere.invalid/" } }) });
+  const redirector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 302, headers: { Location: "http://elsewhere.invalid/" } }) });
   // Answers /info as the tier and fails /decide: the decision row's failure path.
   const halfTier = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch: (req) => (new URL(req.url).pathname === "/info"
       ? Response.json({ contract: JEV_CONTRACT, model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 512 })
       : Response.json({ error: "the model failed" }, { status: 500 })),
@@ -4722,7 +4726,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   assert(!/jevsecret/.test(halfway.out) && /✗\s+jev decision\s+Decision request to http:\/\/\*\*\*@127\.0\.0\.1:\d+\/decide failed: 500/.test(halfway.out), "a /decide that fails is the decision row's, userinfo masked");
   // A 401 is the credential's, not the path's: the base's user and password
   // are the tier's one credential, sent as Basic (SMD-2885, fourth review pass).
-  const guarded = Bun.serve({ port: 0, fetch: () => new Response("unauthorized", { status: 401 }) });
+  const guarded = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("unauthorized", { status: 401 }) });
   const jevDenied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://user:jevsecret@127.0.0.1:${guarded.port}`, OB1_JEV_LOCAL: "1" });
   const jevBare = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${guarded.port}`, OB1_JEV_LOCAL: "1" });
   guarded.stop(true);
@@ -4738,7 +4742,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart api does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
   // A proxy that answers — with an error status — is an answer not from the
   // tier, and the row still names the proxy as the route.
-  const badProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  const badProxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("bad gateway", { status: 502 }) });
   const viaBadProxy = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${badProxy.port}`, http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
   badProxy.stop();
   assert(/✗\s+jev tier\s+.* answers, but not as the tier: Info request .*502.*; HTTP_PROXY is set, so this call goes through that proxy/.test(viaBadProxy.out), "an error status through a proxy is not the tier's, and the proxy is named as the route");
@@ -4746,7 +4750,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   // the call goes direct: a live tier behind a proxy that answers only 502
   // passes, which it cannot through the proxy (seventh review pass: the
   // earlier case could not tell a direct dial from a proxied one).
-  const exemptProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });
+  const exemptProxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("bad gateway", { status: 502 }) });
   for (const noProxy of ["127.0.0.1", "*", `127.0.0.1:${stub.port}`, "localhost,127.0.0.1"]) {
     const exempted = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: `http://127.0.0.1:${exemptProxy.port}`, http_proxy: undefined, NO_PROXY: noProxy, no_proxy: undefined });
     assert(/✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4/.test(exempted.out) && !/HTTP_PROXY is set/.test(exempted.out), `NO_PROXY=${noProxy}: the tier is dialled direct past the proxy, and the row does not blame it`);
@@ -4764,7 +4768,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   exemptProxy.stop();
   assert(/✗\s+jev tier\s+.*502.*HTTP_PROXY is set/.test(wrongPort.out), "NO_PROXY=host:another-port does not exempt it, and the proxy is named");
   // An /info that names the contract and lacks its fields answers, but not as the tier.
-  const partial = Bun.serve({ port: 0, fetch: () => Response.json({ contract: JEV_CONTRACT }) });
+  const partial = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ contract: JEV_CONTRACT }) });
   const partialRun = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${partial.port}`, OB1_JEV_LOCAL: "1" });
   partial.stop();
   assert(/✗\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ answers, but not as the tier: .*lacks model, kinds, max_options/.test(partialRun.out), "an /info with the contract's name and not its fields is not the tier, not a crash");
@@ -4774,7 +4778,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   if (jevMinted.exitCode !== 0) {
     skipRaw("an https tier with an untrusted certificate answers, and the fix is http://", "no openssl to mint a certificate");
   } else {
-    const tlsTier = Bun.serve({ port: 0, tls: { key: Bun.file(join(jevCerts, "k.pem")), cert: Bun.file(join(jevCerts, "c.pem")) }, fetch: () => Response.json({}) });
+    const tlsTier = Bun.serve({ port: 0, hostname: "127.0.0.1", tls: { key: Bun.file(join(jevCerts, "k.pem")), cert: Bun.file(join(jevCerts, "c.pem")) }, fetch: () => Response.json({}) });
     const tls = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `https://127.0.0.1:${tlsTier.port}`, OB1_JEV_LOCAL: "1", NODE_TLS_REJECT_UNAUTHORIZED: undefined });
     tlsTier.stop(true);
     assert(/✗\s+jev tier\s+https:\/\/127\.0\.0\.1:\d+ answers, but its TLS certificate is not trusted/.test(tls.out) && /→ The tier serves plain http: use http:\/\/ in OB1_JEV_BASE_URL/.test(tls.out),
@@ -4824,6 +4828,7 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   let collectorStatus = 200;
   const collector = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       posted.push({ path: new URL(req.url).pathname, body: await req.text() });
       return new Response(collectorStatus === 200 ? "{}" : "down", { status: collectorStatus, headers: { "content-type": "application/json" } });
@@ -4831,6 +4836,7 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   });
   const provider = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [] });
       if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: new Array(EMBEDDING_DIM).fill(0) }], usage: { prompt_tokens: 1 } });

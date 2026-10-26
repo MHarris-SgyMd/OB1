@@ -120,7 +120,7 @@ edgeModule.useAuthReachability(new edgeModule.AuthReachability("http://auth.stub
 // hostname is the suite's own, 127.0.0.1 (SMD-3323), not the export's.
 const server = Bun.serve({ ...worker, port: 0, hostname: "127.0.0.1" });
 const PORT = server.port ?? 0;
-const BASE = `http://localhost:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}`;
 
 /** Every response the server sends, success or refusal, carries the permissive CORS header. */
 const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
@@ -4529,8 +4529,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     loopbackMcp.kill();
     everyMcp.kill();
   }
-  assert(second !== null && loopbackMcp.up && mcpSeen.here4 === "the child" && mcpSeen.here2.startsWith("refused") && mcpSeen.every2 === "the child",
-    `bun index.ts under serveChild listens on 127.0.0.1 alone, and blank on every address: a second loopback address refuses the one, reaches the other (${JSON.stringify(mcpSeen)})`);
+  assert(second !== null && loopbackMcp.up && mcpSeen.here4 === "the child" && (mcpSeen.here2.startsWith("refused") || mcpSeen.here2.endsWith(", another")) && mcpSeen.every2 === "the child",
+    `bun index.ts under serveChild listens on 127.0.0.1 alone, and blank on every address: a second loopback address refuses the one, reaches the other${second === null ? " — no second loopback address answered" : ""} (${JSON.stringify(mcpSeen)})`);
   const { code: mcpCode, said: mcpSaid } = await exitAndOutput(refusingMcp);
   assert(mcpCode === 2 && mcpSaid.includes("OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start") && !mcpSaid.includes("Started") && !mcpSaid.includes("Zq9X"),
     `bun index.ts told an OB1_LISTEN_HOST that is no IP address: exit 2 before it serves, the value never shown (exit ${mcpCode}; ${mcpSaid.slice(0, 300)})`);

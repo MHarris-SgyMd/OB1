@@ -1292,7 +1292,9 @@ console.log("\n[11b] `bun api.ts` listens where OB1_LISTEN_HOST says: serveChild
     every.kill();
   }
   assert(second !== null, `a second loopback address reaches a server on every address ([::1] or 127.0.0.2), so the rows below can tell 127.0.0.1 alone apart (${JSON.stringify(seen)})`);
-  assert(here.up && seen.here4 === "the child" && seen.here2.startsWith("refused"), `serveChild's child listens on 127.0.0.1 alone: 127.0.0.1 answers, ${second} does not (${JSON.stringify(seen)})`);
+  // Refused, or another app's answer: a 127.0.0.1 child can sit beside another process's [::1]-only listener on its port,
+  // which then answers there; what the row holds is that the child does not (PR 2a review pass 2).
+  assert(here.up && seen.here4 === "the child" && (seen.here2.startsWith("refused") || seen.here2.endsWith(", another")), `serveChild's child listens on 127.0.0.1 alone: 127.0.0.1 answers, ${second} does not (${JSON.stringify(seen)})`);
   // Asked at the second address alone: on every address, the child is the one this suite cannot keep from another app's
   // 127.0.0.1 listener at its port (a stress run saw it once in 300), and its own body there is what shows every address.
   assert(seen.every2 === "the child", `told a blank value, the child listens on every address, as unset: ${second} reaches it (${JSON.stringify(seen)})`);

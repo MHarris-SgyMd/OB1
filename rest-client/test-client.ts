@@ -389,8 +389,8 @@ console.log("\n[9] A key a header carries is sent, a bare ? is a query, no extra
     "headers() adds what it may (a traceparent) and no key: the call's key and the client's forwarder stand, from call and stream");
   // A redirect is an answer: fetch would carry the key and the forwarder to the next origin (review pass 3).
   const elsewhere: string[] = [];
-  const other = Bun.serve({ port: 0, fetch: (req) => { elsewhere.push(req.headers.get("x-brain-key") ?? "-"); return new Response("{}"); } });
-  const redirecting = Bun.serve({ port: 0, fetch: (req) => new Response(null, { status: 307, headers: { location: `http://localhost:${other.port}${new URL(req.url).pathname}` } }) });
+  const other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { elsewhere.push(req.headers.get("x-brain-key") ?? "-"); return new Response("{}"); } });
+  const redirecting = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${other.port}${new URL(req.url).pathname}` } }) });
   const real = createRestClient({ baseUrl: `http://127.0.0.1:${redirecting.port}`, forwarderKey: "fwd-raw" });
   const moved = await within(real.call("thought_stats", {}, { key: "write-raw" }));
   const movedStream = await within(real.stream("j", { key: "write-raw" }));

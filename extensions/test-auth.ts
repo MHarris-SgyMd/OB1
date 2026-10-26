@@ -453,6 +453,7 @@ console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive 
   let ran = 0;
   const server = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch(req) {
       // As hono's c.req.text(): read once, the same text for every caller.
       let text: Promise<string> | undefined;
@@ -559,7 +560,7 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/family-calendar/in
     warned.length = 0;
     env(MID_UPLOAD, KEYS);
     const host = handlers[SERVERS.indexOf(MID_UPLOAD)];
-    const upload = Bun.serve({ port: 0, fetch: (req) => host(req) });
+    const upload = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => host(req) });
     try {
       await leaveMidUpload(upload, "/mcp", "127.0.0.1", ["accept: application/json, text/event-stream", `x-access-key: ${READ_KEY}`], '{"jsonrpc":"2.0","id":1,"method":"tools/ca');
       const pending = await pendingSettled(upload);
@@ -883,7 +884,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
   ];
   const why = importFailed instanceof Error ? importFailed.message : String(importFailed);
   for (const [file] of ROWS) if (!handlerOf(file)) assert(false, `${file}: has a handler to serve — it is in neither SERVERS nor the single-key imports above, or it failed to import${importFailed ? ` (${why})` : ""}`);
-  const servers = new Map(ROWS.filter(([file]) => handlerOf(file)).map(([file]) => [file, Bun.serve({ port: 0, fetch: handlerOf(file)! })]));
+  const servers = new Map(ROWS.filter(([file]) => handlerOf(file)).map(([file]) => [file, Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: handlerOf(file)! })]));
   for (const s of SERVERS) if (servers.has(s.file)) env(s, KEYS);
   // A server logs what it refuses (a URL, a body cut short) on console.error:
   // silenced while asked, the verdicts kept and asserted after, since a

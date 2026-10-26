@@ -509,14 +509,16 @@
  *      reaches the result is read too). Its probe pins what it refuses and
  *      passes, the migrations' names, the line it reports, and that its walk
  *      reads each kind of file the brain's code has
- *  42. in test-rest.ts, test-server.ts and db/test-support.ts every server
- *      and child is held to 127.0.0.1 — Bun.serve and Bun.listen name
- *      hostname "127.0.0.1" at their object's top level, a node listen its
- *      host, an object giving a child PORT 0 or OB1_LISTEN_HOST that literal,
- *      set last with no spread after it — read on the code alone (comments,
- *      strings and regex literals blanked; a file it cannot read through is
- *      reported): on macOS a port picked for every address can be one another
- *      app holds on 127.0.0.1, which answers there in its place (SMD-3323);
+ *  42. in every suite and smoke script (each `test-*` or `smoke*` JavaScript
+ *      or TypeScript file git tracks or would track) every server and child
+ *      is held to 127.0.0.1 — Bun.serve and Bun.listen name hostname
+ *      "127.0.0.1" at their object's top level, a node listen its host, an
+ *      object giving a child PORT 0 or OB1_LISTEN_HOST that literal, set last
+ *      with no spread after it — and none dials `localhost` with a port; read
+ *      on the code alone (comments, string and template text and regex
+ *      literals blanked; a file it cannot read through is reported): on macOS
+ *      a port picked for every address can be one another app holds on
+ *      127.0.0.1, which answers there in its place (SMD-3323);
  *      LISTEN_EVERY_ADDRESS names the exceptions, one site each, with why
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
@@ -1993,26 +1995,61 @@ const DENO_EXCEPTIONS = new Map<string, CountedException>([]);
  * same line (a `]`-closed class may hold one); a `/` with no close on its line
  * is a division, and so is one after `)` or `<` (`</td>` is JSX's closer, and
  * two on a line read as a regex spanning the cell between, .tsx being in
- * scope). What this cannot read: a regex after `)` with a quote inside hides
- * the rest of that line, never a later one (a string stops at the newline);
- * an apostrophe in JSX text (`<td>it's</td><td>{Deno.pid}</td>`) does the
- * same — the .tsx analogue of the prose hazard check 22 met — and matters
- * only when `Deno` shares the line.
+ * scope), after a postfix `++` or `--`, and after a non-null `x!` — a `!`
+ * right after a name or a closing bracket, unless that name is a keyword not
+ * led by a `.` (`return!/re/` still negates; SMD-3323). What this cannot read:
+ * a regex after `)` with a quote inside hides the rest of that line, never a
+ * later one (a string stops at the newline), as does one after `)!` with no
+ * space (`if (a)!/'/`, read as a non-null) — but a backtick in such a regex
+ * opens a template that runs on, which check 42 reports at a later line; a
+ * `/` after a non-null with a space or a block comment before its `!`
+ * (`x ! / 2`) or after a tagged template's `!` reads as a regex to the
+ * next `/` on its line; an apostrophe in JSX text
+ * (`<td>it's</td><td>{Deno.pid}</td>`) does the same — the .tsx analogue of
+ * the prose hazard check 22 met — and matters only when `Deno` shares the
+ * line, as does a keyword before a `/` in JSX text (`<p>default / custom</p>`).
+ * `blankedWithOpen` also says where a template or `${` the text ends inside
+ * began, which check 42 reports rather than trusts.
  */
-const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "instanceof"]);
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "yield", "await", "instanceof", "default"]);
 function blanked(text: string, stringsToo: boolean): string {
   return scan(text, 0, stringsToo, false).out;
 }
-/** The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where. */
-function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number } {
+/**
+ * `blanked`, and where the text ends inside a template literal or `${` (-1 for none): the innermost `${` left open,
+ * else the template; a reading that ran on to the end, which check 42 reports at its line rather than trusts
+ * (SMD-3323). `scan`'s own `end` matters only to its recursion, so callers take this pair.
+ */
+function blankedWithOpen(text: string, stringsToo: boolean): { out: string; openAt: number } {
+  const { out, openAt } = scan(text, 0, stringsToo, false);
+  return { out, openAt };
+}
+/**
+ * The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where;
+ * `openAt` is where the text ends inside a template or `${`: the innermost `${` left open, else the template; -1 for
+ * none.
+ */
+function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number; openAt: number } {
   let out = "";
+  let openAt = -1;
   // The last code character that is not a space, the last identifier (kept across the spaces after it) and whether it
   // followed a `.` — for the regex-or-division question at a `/`.
   let last = "", word = "", wordOpen = false, afterDot = false, depth = 0;
+  // The code character just before `last` with nothing between them, "" where a space or a blanked span came between,
+  // the identifier that ended there and whether a `.` led it — for the postfix and non-null cases at a `/` (SMD-3323).
+  // `lastEnd` is where the last emitted code character sits in `out`, so adjacency is a position, not a read back into
+  // the growing string (PR 2a review pass 1: indexing `out` flattened it at every character, and the checker took
+  // 178 s, where it takes about 5). A string, template or regex leaves it behind, so what follows one is never adjacent.
+  let beforeLast = "", wordBeforeLast = "", dotBeforeLast = false, lastEnd = -1;
   const blank = (s: string) => s.replace(/[^\n]/g, " ");
   const emit = (ch: string) => {
     out += ch;
     if (/\s/.test(ch)) { wordOpen = false; return; }
+    const adjacent = last !== "" && lastEnd === out.length - 2;
+    beforeLast = adjacent ? last : "";
+    wordBeforeLast = adjacent ? word : "";
+    dotBeforeLast = adjacent && afterDot;
+    lastEnd = out.length - 1;
     if (/[\w$]/.test(ch)) { if (!wordOpen) afterDot = last === "."; word = wordOpen ? word + ch : ch; wordOpen = true; } else { word = ""; wordOpen = false; }
     last = ch;
   };
@@ -2036,11 +2073,13 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
       continue;
     }
     if (c === "`") {
+      const opened = i;
       out += c; i++;
       while (i < text.length && text[i] !== "`") {
         if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
         if (text[i] === "$" && text[i + 1] === "{") {
           const inner = scan(text, i + 2, stringsToo, true);
+          if (openAt < 0) openAt = inner.openAt >= 0 ? inner.openAt : inner.end >= text.length ? i : -1;
           out += "${" + inner.out + (inner.end < text.length ? "}" : "");
           i = inner.end + 1;
           continue;
@@ -2048,10 +2087,15 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
         out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
       }
       if (i < text.length) { out += "`"; i++; }
+      else if (openAt < 0) openAt = opened;
       last = "`"; word = "";
       continue;
     }
-    if (c === "/" && (last === "" || "(,=:[!&|?{};+-*%>~^".includes(last) || (REGEX_AFTER_WORD.has(word) && !afterDot))) {
+    // `a++ / 2` and `a-- / 2` divide: a postfix operator ends a value. So does TypeScript's non-null `x!`, where the `!`
+    // follows a value with nothing between (`return!/re/` still negates a regex).
+    const postfix = (last === "+" || last === "-") && beforeLast === last;
+    const nonNull = last === "!" && /[\w$)\]]/.test(beforeLast) && !(REGEX_AFTER_WORD.has(wordBeforeLast) && !dotBeforeLast);
+    if (c === "/" && !postfix && !nonNull && (last === "" || "(,=:[!&|?{};+-*%>~^".includes(last) || (REGEX_AFTER_WORD.has(word) && !afterDot))) {
       // A regex literal, if one closes on this line; else the `/` is a division.
       let j = i + 1, inClass = false, closed = false;
       for (; j < text.length && text[j] !== "\n"; j++) {
@@ -2069,11 +2113,11 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
     }
     if (inExpression) {
       if (c === "{") depth++;
-      else if (c === "}") { if (depth === 0) return { out, end: i }; depth--; }
+      else if (c === "}") { if (depth === 0) return { out, end: i, openAt }; depth--; }
     }
     emit(c); i++;
   }
-  return { out, end: text.length };
+  return { out, end: text.length, openAt };
 }
 
 /**
@@ -7196,22 +7240,47 @@ function checkStarReads() {
 checkStarReads();
 // ── 42: a suite's servers listen on 127.0.0.1, where they are reached (SMD-3323) ──
 /**
- * 42: in test-rest.ts, test-server.ts and db/test-support.ts, every server and child is held to 127.0.0.1
- * (listenSites says how each is read: a Bun.serve or Bun.listen call's own `hostname`, a node-style `.listen(`'s
- * host, an object giving a child `PORT` 0 or naming `OB1_LISTEN_HOST`, each that literal, set last and with no
- * spread after it). Listening on every address, a server can be handed, on macOS, a port another app (Tailscale, a
- * VM's port forwarder) holds on 127.0.0.1, which then answers 127.0.0.1 at that port in its place: 8 of 18,000
- * binds on every address took such a port, 0 of 18,000 on 127.0.0.1, and test-rest failed 7–8 runs in 300 under
- * load from it. No suite sees a server put back on every address (the collision is rare, and Linux has none), so
- * this does. Code alone is read (codeOnly): a quote in a comment, a regex literal or a `//` in a string earlier on
- * the line does not carry the reading past a call or skip one, and a `hostname` nested, commented or quoted inside
- * the call is not its own (review pass 2 found the first form's reading of a test-server provider ran 16,842
- * characters past it on an apostrophe). A file the reader cannot read through is reported, never passed (review
- * pass 3). LISTEN_EVERY_ADDRESS names each server or child that must listen on every address, by its file and a
- * fragment that names it and no other, with why; a fragment that names none, several, or one already held is
- * reported. Its probe pins each of these. The ticket's PR 2 widens the file list to the other suites.
+ * 42: in every suite and smoke script (each `test-*` or `smoke*` JavaScript or TypeScript file git tracks or would
+ * track — a developer's untracked one too, as checks 15 and 41 read them — the suites' support modules among them),
+ * every server and child is held to 127.0.0.1, and none is dialled at `localhost` (listenSites says how each is
+ * read: a Bun.serve or Bun.listen call's own `hostname`, a node-style `.listen(`'s host, an object giving a child
+ * `PORT` 0 or naming `OB1_LISTEN_HOST`, each that literal, set last and with no spread after it; a `localhost:` with a
+ * port interpolated or added after it, in a string or template, an `origin`/`referer` or scheme-less `host` header value
+ * aside; a dial by options, `{ hostname: "localhost", port }`, is not seen, and none is in the walk).
+ *
+ * Listening on every address, a server can be handed, on macOS, a port another app (Tailscale, a VM's port
+ * forwarder) holds on 127.0.0.1, which then answers 127.0.0.1 at that port in its place: macOS hands out port 0 from
+ * one cursor every process shares, and a bind on every address skips no port held on 127.0.0.1 alone. test-rest failed
+ * 7–8 runs in 300 under load from it. The mirror: a server held to 127.0.0.1 is still dialled at [::1] first by
+ * `localhost`, where another process's listener on its port answers, so a suite dials 127.0.0.1. No suite sees a
+ * server put back on every address (the collision is rare, and Linux has none), so this does.
+ *
+ * Code alone is read (blankedWithOpen, over `scan`, the scanner the checker's readers share; PR 2a): a quote in a
+ * comment, a regex literal or a `//` in a string earlier on the line does not carry the reading past a call or skip
+ * one, and a `hostname` nested, commented or quoted inside the call is not its own (PR 1's review pass 2 found its first
+ * reading of a test-server provider ran 16,842 characters past it on an apostrophe). A file the reader cannot read
+ * through is reported, never passed. LISTEN_EVERY_ADDRESS names each server or child that must listen on every
+ * address, by its file and a fragment that names it and no other, with why; a fragment that names none, several, or
+ * one already held is reported, as is an entry whose file the walk no longer reads (walkProblems, with the walk's
+ * own floor). Its probe pins each of these. PR 1 held test-rest.ts, test-server.ts and db/test-support.ts; PR 2a
+ * every suite and smoke script. Without git the walk cannot list them, and the check is skipped with a word, as
+ * check 41 is.
  */
-const LISTEN_LOOPBACK_FILES = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts"];
+/**
+ * The files check 42 reads: every `test-*` or `smoke*` JavaScript or TypeScript file git tracks or would track,
+ * declaration files and node_modules aside; null when git cannot list them.
+ */
+function listenLoopbackFiles(): string[] | null {
+  let names: string[];
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 42 is skipped)`);
+    return null;
+  }
+  return names.filter((n) => /(?:^|\/)(?:test-[^/]*|smoke[^/]*)\.(?:[cm]?[jt]s|[jt]sx)$/.test(n) && !n.endsWith(".d.ts") && !n.includes("/node_modules/"))
+    .filter((n) => existsSync(join(ROOT, n)) && statSync(join(ROOT, n)).isFile()).sort();
+}
 const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
   ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
@@ -7219,114 +7288,10 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-rest.ts", 'OB1_LISTEN_HOST: "  "', "[11b]'s blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-server.ts", "OB1_LISTEN_HOST: LISTEN_PLANTED", "the MCP server's refusing child: told a planted value, it exits before it serves"],
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
+  ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
+  ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
+  ["extensions/test-auth.ts", 'PORT: "0", ...live.env', "the vendored servers, which read no OB1_LISTEN_HOST until the ticket's PR 2b"],
 ];
-/**
- * `text` as code alone, offsets kept: each comment, each string's and template literal's text and each regex
- * literal's body blanked to spaces (newlines kept), the quotes and backticks left, so a quoted key still reads as
- * one and no quote, parenthesis or brace inside them is counted. `openAt` is where a template or a `${` opened that
- * the text ends inside (-1 for none): a reading that ran on, which the check reports at its line rather than trusts.
- */
-function codeOnly(text: string): { code: string; openAt: number } {
-  const out = text.split("");
-  const n = text.length;
-  const blank = (from: number, to: number) => {
-    for (let k = from; k < Math.min(to, n); k++) if (out[k] !== "\n") out[k] = " ";
-  };
-  // Per `${` still open, the braces opened inside it: its `}` is the one met at zero; and where each opened.
-  const open: number[] = [];
-  const openedAt: number[] = [];
-  let unclosedAt = -1;
-  const KEYWORD = /^(return|typeof|case|in|of|void|delete|throw|new|yield|await|else|do|default)$/;
-  /** The word ending at `k`, and whether a `.` comes before it (a property, not a keyword). */
-  const wordAt = (k: number) => {
-    let w = k;
-    while (w >= 0 && /[\w$]/.test(out[w])) w--;
-    let p = w;
-    while (p >= 0 && /\s/.test(out[p])) p--;
-    return { word: out.slice(w + 1, k + 1).join(""), dotted: out[p] === "." };
-  };
-  /** Whether a `/` at `at` starts a regex: where an expression starts, not after a value. */
-  const startsRegex = (at: number): boolean => {
-    let k = at - 1;
-    while (k >= 0 && /\s/.test(out[k])) k--;
-    if (k < 0) return true;
-    const ch = out[k];
-    // `a++ / 2`, `a-- / 2`: a postfix operator ends a value. `x! / 2`: TypeScript's non-null assertion does too,
-    // where the `!` follows a value with no space; `!/re/` negates a regex.
-    if ((ch === "+" || ch === "-") && out[k - 1] === ch) return false;
-    if (ch === "!" && k > 0 && /[\w$)\]]/.test(out[k - 1])) {
-      const before = wordAt(k - 1);
-      return !before.dotted && KEYWORD.test(before.word); // `return!/re/` negates; `x! / 2` divides
-    }
-    if (/[(,=:[!&|?{};+\-*%<>~^]/.test(ch)) return true;
-    // A keyword, not a property named like one (`a.of / 2`).
-    const { word, dotted } = wordAt(k);
-    return !dotted && KEYWORD.test(word);
-  };
-  // Template text from `from` to its closing backtick or its next `${`.
-  const template = (from: number): number => {
-    let j = from;
-    while (j < n && text[j] !== "`" && !(text[j] === "$" && text[j + 1] === "{")) j += text[j] === "\\" ? 2 : 1;
-    blank(from, j);
-    if (j >= n) {
-      unclosedAt = from - 1;
-      return n;
-    }
-    if (text[j] === "$") {
-      open.push(0);
-      openedAt.push(j);
-      return j + 2;
-    }
-    return j + 1;
-  };
-  let i = 0;
-  while (i < n) {
-    const c = text[i];
-    const d = text[i + 1];
-    if (c === "/" && d === "/") {
-      const e = text.indexOf("\n", i);
-      const end = e < 0 ? n : e;
-      blank(i, end);
-      i = end;
-    } else if (c === "/" && d === "*") {
-      const e = text.indexOf("*/", i + 2);
-      const end = e < 0 ? n : e + 2;
-      blank(i, end);
-      i = end;
-    } else if (c === '"' || c === "'") {
-      let j = i + 1;
-      while (j < n && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
-      blank(i + 1, j);
-      i = j + 1;
-    } else if (c === "`") {
-      i = template(i + 1);
-    } else if (c === "}" && open.length && open[open.length - 1] === 0) {
-      open.pop();
-      openedAt.pop();
-      i = template(i + 1);
-    } else if (c === "/" && startsRegex(i)) {
-      let j = i + 1;
-      let cls = false;
-      while (j < n && text[j] !== "\n") {
-        if (text[j] === "\\") {
-          j += 2;
-          continue;
-        }
-        if (text[j] === "[") cls = true;
-        else if (text[j] === "]") cls = false;
-        else if (text[j] === "/" && !cls) break;
-        j++;
-      }
-      blank(i + 1, j);
-      i = j + 1;
-    } else {
-      if (c === "{" && open.length) open[open.length - 1]++;
-      else if (c === "}" && open.length) open[open.length - 1]--;
-      i++;
-    }
-  }
-  return { code: out.join(""), openAt: unclosedAt >= 0 ? unclosedAt : openedAt.length ? openedAt[0] : -1 };
-}
 
 /**
  * Each bracket's partner in `code`, in one pass: `match[i]` for an opening or closing bracket at `i`, -1 where it
@@ -7424,7 +7389,7 @@ const LOOPBACK_LITERAL = /^(["'`])127\.0\.0\.1\1$/;
 const isLoopback = (v: string) => LOOPBACK_LITERAL.test(v);
 
 /** One place a server or child is started, and whether it is held to 127.0.0.1. */
-type ListenSite = { line: number; what: string; loopback: boolean; text: string };
+type ListenSite = { line: number; what: string; loopback: boolean; text: string; dial?: boolean };
 
 /**
  * Every place in `text` a server or child is started, each with whether it is held to 127.0.0.1:
@@ -7435,7 +7400,7 @@ type ListenSite = { line: number; what: string; loopback: boolean; text: string 
  *   path (a string that is not all digits);
  * - an object that gives a child `PORT` 0 or names `OB1_LISTEN_HOST`: `OB1_LISTEN_HOST` is that literal, last
  *   and with no spread after it.
- * Code alone is read (codeOnly). A file it cannot read through — a template or `${` left open, or brackets that do
+ * Code alone is read (blankedWithOpen). A file it cannot read through — a template or `${` left open, or brackets that do
  * not pair by kind — is one problem of its own, never a pass.
  */
 function listenSites(text: string): ListenSite[] | { line: number; why: string } {
@@ -7451,7 +7416,7 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
     }
     return lo + 1;
   };
-  const { code, openAt } = codeOnly(text);
+  const { out: code, openAt } = blankedWithOpen(text, true);
   const { match, unpairedAt } = bracketsOf(code);
   if (openAt >= 0) return { line: lineOf(openAt), why: "a template or ${ opened here is left open where the file ends" };
   if (unpairedAt >= 0) return { line: lineOf(unpairedAt), why: "a bracket here does not pair" };
@@ -7500,6 +7465,72 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
     if (!givesPort0 && !namesHost) continue;
     sites.push({ line: lineOf(m.index), what: givesPort0 ? 'a child given PORT "0"' : "a child given OB1_LISTEN_HOST", loopback: heldBy(entries, "OB1_LISTEN_HOST", isLoopback), text: text.slice(m.index, match[m.index] + 1) });
   }
+  // A `localhost` dial of a port, in a string or template (comments blanked, strings kept): Bun dials `localhost` at
+  // [::1] first, where another process's listener on the same port answers in place of a server held to 127.0.0.1
+  // (PR 2a review pass 1); a suite dials its own servers at 127.0.0.1.
+  // A string that is a request header's value — an `origin` or `referer` entry, or a `host` entry with no scheme, in an
+  // object that is a `headers:` value or `new Headers(`'s argument — is a header a row sends, not a dial
+  // (dashboard/smoke-breakglass.ts refuses a localhost Origin; PR 2a review passes 3–5). The key's span is found on
+  // `code`, where comments are blanked, and must open an object entry, right after `{` or `,`, so a ternary's `:`, a
+  // label or a call's argument is not one; an env's `ORIGIN` or a `cors({ origin })` is not a header.
+  const withStrings = blanked(text, false);
+  const headerKey = (m: RegExpMatchArray & { index: number }): boolean => {
+    let q = m.index;
+    while (q > 0 && code[q] === " ") q--; // back to the string's opening quote or backtick
+    let k = q - 1;
+    while (k >= 0 && /\s/.test(code[k])) k--;
+    if (code[k] !== ":") return false;
+    let e = k - 1;
+    while (e >= 0 && /\s/.test(code[e])) e--;
+    let start = e;
+    let key = "";
+    if (code[e] === '"' || code[e] === "'") {
+      start = code.lastIndexOf(code[e], e - 1);
+      if (start < 0) return false;
+      key = withStrings.slice(start + 1, e);
+    } else {
+      while (start >= 0 && /[\w$]/.test(code[start])) start--;
+      key = withStrings.slice(++start, e + 1);
+    }
+    let b = start - 1;
+    while (b >= 0 && /\s/.test(code[b])) b--;
+    if (code[b] !== "{" && code[b] !== ",") return false;
+    const named = /^(?:origin|referer)$/i.test(key) || (/^host$/i.test(key) && !withStrings.slice(q, m.index).includes("://"));
+    if (!named) return false;
+    // The object holding the entry: its `{`, found back over the brackets the entry's siblings close; an unmatched `(`
+    // or `[` on the way means the entry is in a call or an array, not that object (PR 2a review pass 6).
+    let o = b;
+    while (o >= 0 && code[o] !== "{") {
+      if (code[o] === "(" || code[o] === "[") return false;
+      o = (code[o] === ")" || code[o] === "]" || code[o] === "}") && match[o] >= 0 ? match[o] - 1 : o - 1;
+    }
+    if (o < 0) return false;
+    let before = o - 1;
+    while (before >= 0 && /\s/.test(code[before])) before--;
+    // The word ending at `end` in `code`, and the code character before it.
+    const wordBefore = (end: number) => {
+      let w = end;
+      while (w >= 0 && /[\w$]/.test(code[w])) w--;
+      let p = w;
+      while (p >= 0 && /\s/.test(code[p])) p--;
+      return { word: code.slice(w + 1, end + 1), prev: code[p] ?? "", prevAt: p };
+    };
+    if (code[before] === "(") {
+      let ce = before - 1;
+      while (ce >= 0 && /\s/.test(code[ce])) ce--;
+      const callee = wordBefore(ce);
+      return callee.word === "Headers" && wordBefore(callee.prevAt).word === "new" && callee.prev !== ".";
+    }
+    if (code[before] !== ":") return false;
+    let ke = before - 1;
+    while (ke >= 0 && /\s/.test(code[ke])) ke--;
+    const key2 = wordBefore(ke);
+    return key2.word === "headers" && (key2.prev === "{" || key2.prev === ",");
+  };
+  for (const m of withStrings.matchAll(/\blocalhost:(?:\$\{|["'`]\s*\+)/gi)) {
+    if (headerKey(m as RegExpMatchArray & { index: number })) continue;
+    sites.push({ line: lineOf(m.index), what: "a localhost dial of a port", loopback: false, dial: true, text: text.slice(m.index, text.indexOf("\n", m.index) < 0 ? text.length : text.indexOf("\n", m.index)) });
+  }
   return sites.sort((a, b) => a.line - b.line);
 }
 
@@ -7507,24 +7538,40 @@ function listenSites(text: string): ListenSite[] | { line: number; why: string }
  * The problems in `text`: one where the file cannot be read through, else each site not held to 127.0.0.1 that no
  * `allowed` fragment names, and each fragment that names no site, more than one, or one already held (stale).
  */
-type ListenProblem = { line: number; kind: "unread" | "site" | "exception"; msg: string };
+type ListenProblem = { line: number; kind: "unread" | "site" | "dial" | "exception"; msg: string };
 function listenProblems(text: string, allowed: string[] = []): ListenProblem[] {
   const sites = listenSites(text);
   if (!Array.isArray(sites)) return [{ line: sites.line, kind: "unread", msg: `check 42 cannot read the file through: ${sites.why}` }];
   const out: ListenProblem[] = [];
   const excused = new Set<ListenSite>();
   for (const fragment of allowed) {
-    const named = sites.filter((s) => s.text.includes(fragment));
+    const named = sites.filter((s) => !s.dial && s.text.includes(fragment));
     if (named.length !== 1) out.push({ line: 0, kind: "exception", msg: `the exception \`${fragment}\` names ${named.length} sites, not one` });
     else if (named[0].loopback) out.push({ line: named[0].line, kind: "exception", msg: `the exception \`${fragment}\` names a site already held to 127.0.0.1` });
     else excused.add(named[0]);
   }
-  for (const s of sites) if (!s.loopback && !excused.has(s)) out.push({ line: s.line, kind: "site", msg: `${s.what} not held to 127.0.0.1` });
+  for (const s of sites) if (!s.loopback && !excused.has(s)) out.push(s.dial ? { line: s.line, kind: "dial", msg: s.what } : { line: s.line, kind: "site", msg: `${s.what} not held to 127.0.0.1` });
   return out;
 }
 
+// PR 1's three, a suite of another directory, two smoke scripts (`smoke.ts`, `smoke-oauth.ts`) and an .mjs suite: a narrowed
+// pattern drops one (PR 2a review passes 3–4).
+const LISTEN_WALK_HELD = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts", "mcp-server/test-mcp.ts", "dashboards/open-brain-dashboard/smoke.ts", "dashboard/smoke-oauth.ts", "recipes/session-capture-hook/test-session-capture.mjs"];
+/**
+ * What is wrong with check 42's walk itself: it must reach the suites PR 1 held and dozens beside them (50 today), or a
+ * narrowed walk passes silently; and each LISTEN_EVERY_ADDRESS entry must name a file it reads (PR 2a review pass 2).
+ */
+function walkProblems(files: string[], exceptions: readonly (readonly [string, string, string])[] = LISTEN_EVERY_ADDRESS): string[] {
+  const out: string[] = [];
+  const missing = LISTEN_WALK_HELD.filter((f) => !files.includes(f));
+  if (files.length < 30 || missing.length) out.push(`check 42's walk read ${files.length} suite files${files.length < 30 ? ", under 30" : ""}${missing.length ? `, missing ${JSON.stringify(missing)}` : ""}: it lists every test-* and smoke* file`);
+  for (const [file, fragment] of exceptions) if (!files.includes(file)) out.push(`LISTEN_EVERY_ADDRESS names \`${fragment}\` in ${file}, which check 42's walk does not read — drop the entry`);
+  return out;
+}
 function checkLoopbackListeners() {
-  const cases: [string, number, string[]?][] = [
+  // Each case's problems, by count, or where how it reads matters (a site, not an unreadable file; the line a
+  // template was left open at) by kind and line (PR 2a review pass 1).
+  const cases: [string, number | string[], string[]?][] = [
     ['const s = Bun.serve({ port: 0, fetch: () => new Response("x") });', 1],
     ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x") });', 0],
     ["const s = Bun.serve({ port: 0, hostname: '127.0.0.1' });", 0],
@@ -7540,13 +7587,57 @@ function checkLoopbackListeners() {
     ['const s = Bun?.serve({ port: 0 });', 1],
     ['const { serve } = Bun; const f = Bun.serve; f({ port: 0 });', 1],
     ['type S = ReturnType<typeof Bun.serve>;', 0],
-    ['x = a++ / 2 + `/${q}`;\nconst s = Bun.serve({ port: 0 });\nconst u = `v`;', 1],
-    ['const t = `${n++ / 2}`; const s = Bun.serve({ port: 0 });', 1],
-    ['const r = x! / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
-    ['const r = a.of / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
+    ['x = a++ / 2 + `/${q}`;\nconst s = Bun.serve({ port: 0 });\nconst u = `v`;', ["site@2"]],
+    ['const t = `${n++ / 2}`; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const r = x! / 2 + `${y}`; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const r = a.of / 2 + `${y}`; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const v = a-- / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ["const a = `x ${f(`\ny ${z`;", ["unread@2"]],
+    ['const u = `http://localhost:${p}/v1`;', ["dial@1"]],
+    ['const u = "http://localhost:" + p;', ["dial@1"]],
+    ['// dial `http://localhost:${p}` here, not that', 0],
+    ['const u = "http://localhost:9/v1";', 0],
+    ['const u = `HTTP://LOCALHOST:${p}/v1`;', ["dial@1"]],
+    ['const o = { localhost: "" + y };', 0],
+    ['fetch(u, { headers: { origin: `http://localhost:${p}`, "Referer": `http://localhost:${p}/x` } });', 0],
+    ['fetch(u, { headers: { accept: `http://localhost:${p}` } });', ["dial@1"]],
+    ['fetch(u, { headers: { host: `localhost:${p}` } });', 0],
+    ['const raw = { host: `localhost:${p}` };', ["dial@1"]],
+    ['f(a, origin, `http://localhost:${p}`);', ["dial@1"]],
+    ['const o = { hostUrl: `localhost:${p}` };', ["dial@1"]],
+    ['fetch(u, { headers: { origin : `http://localhost:${p}` } });', 0],
+    ['const a = "http://x"; fetch(u, { headers: { host: `localhost:${p}` } });', 0],
+    ['spawn(cmd, { env: { ...process.env, ORIGIN: `http://localhost:${port}` } });', ["dial@1"]],
+    ['const h = new Headers({ "Origin": `http://localhost:${p}` });', 0],
+    ['app.use(cors({ origin: `http://localhost:${p}` }));', ["dial@1"]],
+    ['fetch(`http://localhost:${p}`, { headers: { origin: `http://localhost:${p}` } });', ["dial@1"]],
+    ['const h = makeHeaders({ origin: `http://localhost:${p}` });', ["dial@1"]],
+    ['const o = { myheaders: { origin: `http://localhost:${p}` } };', ["dial@1"]],
+    ['const o = { $headers: { origin: `http://localhost:${p}` } };', ["dial@1"]],
+    ['const o = { Headers: { origin: `http://localhost:${p}` } };', ["dial@1"]],
+    ['fetch(u, { headers: { a: { origin: `http://localhost:${p}` } } });', ["dial@1"]],
+    ['fetch(u, { headers: { accept: x ? origin : `http://localhost:${p}` } });', ["dial@1"]],
+    ['fetch(u, { headers: { x: [a, origin, `http://localhost:${p}`] } });', ["dial@1"]],
+    ['fetch(u, { headers: { host: `http://localhost:${p}` } });', ["dial@1"]],
+    ['fetch(u, { headers: { "x-origin-url": `http://localhost:${p}` } });', ["dial@1"]],
+    ['const o = x ? headers : { origin: `http://localhost:${p}` };', ["dial@1"]],
+    ['fetch(u, { headers: { a: f({ b: [1] }), origin: `http://localhost:${p}` } });', 0],
+    ['const cfg = { host: `http://localhost:${p}` };', ["dial@1"]],
+    ['const cfg = { apiHost: `http://localhost:${p}`, originUrl: `http://localhost:${p}` };', ["dial@1", "dial@1"]],
+    ['f(origin, `http://localhost:${p}`);', ["dial@1"]],
+    ['const base = process.env.ORIGIN ? process.env.ORIGIN : `http://localhost:${port}`;', ["dial@1"]],
+    ['const o = { u // "origin"\n : `http://localhost:${p}` };', ["dial@2"]],
     ['const ok = !/a`b/.test(x); const s = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 0],
-    ['const t = `open ${x', 1],
-    ['const t = `open\nconst s = Bun.serve({ port: 0 });', 1],
+    ['const t = `open ${x', ["unread@1"]],
+    ['const a = 1;\nconst t = `open\n${x', ["unread@3"]],
+    ['const t = `open\nconst s = Bun.serve({ port: 0 });', ["unread@1"]],
+    ['const r = x! / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const r = f()! / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const r = a[0]! / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ['const n = a.default! / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', ["site@1"]],
+    ["export default /'/.source; const s = Bun.serve({ port: 0 });", ["site@1"]],
+    ["if (a) !/'/.test(s) && f(); const s = Bun.serve({ port: 0 });", ["site@1"]],
+    ["const n = a + +/'/.source.length; const s = Bun.serve({ port: 0 });", ["site@1"]],
     ['const v = a++ / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', 1],
     ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1" ];', 1],
     ['server.listen("0", () => done());', 1],
@@ -7597,16 +7688,33 @@ function checkLoopbackListeners() {
     ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(token) });', 1, ["new Response(token)"]],
     ['const s = Bun.serve({ port: 0 });', 2, ["new Response(token)"]],
   ];
-  const wrong = cases.map(([t, n, allowed]) => ({ t, want: n, got: listenProblems(t, allowed ?? []).length })).filter((c) => c.got !== c.want);
+  const wrong = cases.map(([t, want, allowed]) => {
+    const problems = listenProblems(t, allowed ?? []);
+    const got = typeof want === "number" ? problems.length : problems.map((p) => `${p.kind}@${p.line}`);
+    return { t, want, got };
+  }).filter((c) => JSON.stringify(c.got) !== JSON.stringify(c.want));
+  // The walk's own guards, on lists made up here.
+  const many = [...LISTEN_WALK_HELD, ...Array.from({ length: 40 }, (_, i) => `x/test-${i}.ts`)];
+  const walkWrong = [
+    walkProblems(many, [["x/test-1.ts", "f", "why"]]).length === 0,
+    /under 30/.test(walkProblems(many.slice(0, 29), []).join()),
+    walkProblems(many.slice(0, 30), []).length === 0,
+    /missing \["mcp-server\/test-mcp.ts"\]/.test(walkProblems(many.filter((f) => f !== "mcp-server/test-mcp.ts"), []).join()),
+    /x\/gone\.ts, which check 42's walk does not read/.test(walkProblems(many, [["x/gone.ts", "f", "why"]]).join()),
+  ].map((ok, i) => (ok ? -1 : i)).filter((i) => i >= 0);
+  if (walkWrong.length) fail(SELF, `check 42's walk guard no longer reads its probe as written (cases ${walkWrong.join(", ")}): a full walk passes, so does one of 30, one of 29 or missing a held suite fails, an exception naming a file outside it fails (SMD-3323)`);
   if (wrong.length) fail(SELF, `check 42 no longer reads its probe as written (${JSON.stringify(wrong)}): code alone is read and an unreadable file reported, a call's own top-level hostname with no spread after it, a node listen's host, a child's OB1_LISTEN_HOST, and each exception naming one site still on every address (SMD-3323)`);
-  for (const f of LISTEN_LOOPBACK_FILES) {
-    if (!existsSync(join(ROOT, f))) { fail(f, `missing — check 42 holds its servers to 127.0.0.1 (SMD-3323)`); continue; }
+  const files = listenLoopbackFiles();
+  if (files === null) return;
+  for (const problem of walkProblems(files)) fail(SELF, `${problem} (SMD-3323)`);
+  for (const f of files) {
     const allowed = LISTEN_EVERY_ADDRESS.filter(([file]) => file === f).map(([, fragment]) => fragment);
     for (const p of listenProblems(readFileSync(join(ROOT, f), "utf8"), allowed)) {
       const fix = {
         site: `on macOS a port picked for every address can be one another app holds on 127.0.0.1, which then answers there in its place; set hostname to the literal "127.0.0.1" (a node listen: its host; a child: OB1_LISTEN_HOST), last and with no spread after it, or list the site in LISTEN_EVERY_ADDRESS with why`,
+        dial: "Bun dials `localhost` at [::1] first, where another process's listener on the port answers in place of a server held to 127.0.0.1; dial 127.0.0.1",
         exception: "make its fragment name exactly one site that is still on every address, or drop the entry",
-        unread: "a site after it could not be seen; mend the code there, or teach codeOnly the construct, with a probe case",
+        unread: "a site after it could not be seen; mend the code there, or teach scan the construct, with a probe case",
       }[p.kind];
       fail(p.line > 0 ? `${f}:${p.line}` : p.kind === "exception" ? SELF : f, `${p.msg} — ${fix} (check 42, SMD-3323)`);
     }
