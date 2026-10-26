@@ -20,6 +20,14 @@ import { SQL } from "bun";
 
 const { assert, report } = createAssert();
 
+/**
+ * The shim's catalog reads, told by how each begins — a table's columns, a function's overloads, foreign keys, a
+ * primary key, the server's encoding — not by the catalogs they name: a spelled-out star's own statement reads
+ * pg_attribute too, for the shape it carries beside its rows (SMD-3329).
+ */
+const COLUMNS_READ = /^\s*SELECT a\.attname AS name, format_type/;
+const CATALOG_READ = /^\s*SELECT (?:a\.attname AS name|p\.proargnames|c\.conname)|^SHOW server_encoding/;
+
 // [0] The pool size reads "" as unset — a compose file forwarding ${OB1_PG_POOL:-}
 // sends "" for an unset knob, and Number("") was 0 here until SMD-1843, a size
 // Bun's SQL refuses at construction.
@@ -588,7 +596,7 @@ try {
   const one = await db.from("gizmos").select("label, widgets (name)").eq("label", "g1").single();
   assert(one.error === null && (one.data as unknown as { widgets: { name: string } }).widgets?.name === "alpha", "an embed under single()");
   const { text } = await db.from("gizmos").select("*, widgets (name)").eq("label", "g1").toSQL();
-  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.oid::text \|\| ':' \|\| c\.relnatts FROM pg_class c WHERE c\.oid = to_regclass\('"gizmos"'\)\) AS __natts, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
+  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.oid::text \|\| ':' \|\| c\.relnatts \|\| ':' \|\| md5\(.*?FROM pg_class c WHERE c\.oid = to_regclass\('"gizmos"'\)\) AS __natts, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
     `the embed is a correlated subquery on the foreign key, its table aliased by depth (${text})`);
   // Refusals, each naming why.
   assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("*, widgets(name)"))), "two foreign keys to the same table are refused, naming the column form");
@@ -677,7 +685,7 @@ try {
   const pool = db.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
   const realUnsafe = pool.unsafe;
   let catalogReads = 0;
-  pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_attribute/.test(String(a[0]))) catalogReads++; return realUnsafe.apply(this, a); };
+  pool.unsafe = function (this: unknown, ...a: unknown[]) { if (COLUMNS_READ.test(String(a[0]))) catalogReads++; return realUnsafe.apply(this, a); };
   try {
     const ghost = await db.from("latecomers").select("id").in("ghost", []);
     const ghostAgain = await db.from("latecomers").select("id").in("ghost", []);
@@ -991,8 +999,9 @@ try {
   // so the second call runs on the connection that prepared the first.
   // Bun prepares a statement only when it has parameters, so every read here binds one.
   const admin = new SQL({ url: URL_, max: 1 });
-  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)", "widen_dov(int)", "widen_dov(text)", "widen_mid(int)", "widen_prep(int)", "widen_trig()", "widen_first_fn(int)", "odd_out(int)", "odd_cols(int)"]) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
-  for (const t of ["widen_t", "widen_pt", "widen_log", "widen_first", "widen_cnt", "widen_rt_t", "widen_rb", "widen_rb_new", "odd_names", "emoji_names"]) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)", "widen_dov(int)", "widen_dov(text)", "widen_mid(int)", "widen_prep(int)", "widen_hid(int)", "widen_trig()", "widen_first_fn(int)", "odd_out(int)", "odd_cols(int)"]) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+  await admin`DROP SCHEMA IF EXISTS widen_hidden CASCADE`;
+  for (const t of ["widen_t", "widen_pt", "widen_bind", "widen_two", "widen_burst", "widen_log", "widen_first", "widen_cnt", "widen_rt_t", "widen_rb", "widen_rb_new", "odd_names", "emoji_names"]) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
   await admin`DROP SEQUENCE IF EXISTS widen_seq`;
   await admin`CREATE TABLE widen_t (id serial PRIMARY KEY, name text NOT NULL)`;
   await admin`INSERT INTO widen_t (name) VALUES ('first')`;
@@ -1029,7 +1038,7 @@ try {
   const afterPool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
   const afterUnsafe = afterPool.unsafe;
   let afterStatements = 0;
-  afterPool.unsafe = function (this: unknown, ...a: unknown[]) { if (!/FROM pg_(attribute|proc|constraint|index)|^SHOW /.test(String(a[0]))) afterStatements++; return afterUnsafe.apply(this, a); };
+  afterPool.unsafe = function (this: unknown, ...a: unknown[]) { if (!CATALOG_READ.test(String(a[0]))) afterStatements++; return afterUnsafe.apply(this, a); };
   let after: Awaited<ReturnType<typeof reads>>;
   try { after = await reads("after"); } finally { afterPool.unsafe = afterUnsafe; }
   assert(afterStatements === 6, `the six reads after the migration ran six statements, none refused and run again (${afterStatements})`);
@@ -1078,7 +1087,7 @@ try {
   const realUnsafe = pool.unsafe;
   const counted = async (run: () => PromiseLike<{ error: { code?: string } | null }>) => {
     let catalogReads = 0, queries = 0;
-    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_(attribute|proc)|^SHOW server_encoding/.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
+    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (CATALOG_READ.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
     const codes: (string | undefined)[] = [];
     try { for (let i = 0; i < 5; i++) codes.push((await run()).error?.code); } finally { pool.unsafe = realUnsafe; }
     return { codes: codes.join(), catalogReads, queries };
@@ -1176,6 +1185,59 @@ try {
   const arrayed = await one.from("widen_rt_t").select("*").eq("id", 1);
   const arrayedAgain = await one.from("widen_rt_t").select("*").eq("id", 1);
   assert(retypedTable.error === null && arrayed.error === null && JSON.stringify(arrayedAgain.data) === '[{"id":1,"n":"2","tags":["a"],"d":"2026-09-21"}]', `a table's column retyped, and one moved into an array and one to a date: each next call answers, the array a list and the date bare — shaped by a fresh read (${retypedTable.error?.message ?? "ok"}; ${arrayed.error?.message ?? "ok"}; ${JSON.stringify(arrayedAgain.data)})`);
+  // A column retyped that a statement binds as a parameter: Bun's statement keeps the parameter types it was first
+  // given, so Postgres meets a type error before any refused plan. The next read that returns rows carries the
+  // changed shape, and every statement over the table is made new; the filter then answers. So too a column moved
+  // into an array: the fresh map binds an array literal.
+  await admin`CREATE TABLE widen_bind (id int, d text, e text)`;
+  await admin`INSERT INTO widen_bind VALUES (1, '2026-09-21', 'x')`;
+  await one.from("widen_bind").select("id").eq("d", "2026-09-21");
+  await admin`ALTER TABLE widen_bind ALTER COLUMN d TYPE date USING d::date, ALTER COLUMN e TYPE text[] USING ARRAY[e]`;
+  // A read never prepared before, so nothing is refused: only the shape it carries back says the types moved.
+  await one.from("widen_bind").select("*").lt("id", 100);
+  const boundFilter = await one.from("widen_bind").select("id").eq("d", "2026-09-21");
+  const boundArray = await one.from("widen_bind").insert({ id: 2, d: "2026-09-22", e: ["a", "b"] }).select("e");
+  assert(JSON.stringify(boundFilter.data) === '[{"id":1}]' && JSON.stringify(boundArray.data) === '[{"e":["a","b"]}]', `a column a filter binds, retyped, and one moved into an array: after a read that returns rows, the filter answers and the array binds (${boundFilter.error?.message ?? JSON.stringify(boundFilter.data)}; ${boundArray.error?.message ?? JSON.stringify(boundArray.data)})`);
+  // One migration that drops a spelled-out column and retypes another: the 42703's retry is a new statement too, so
+  // the plan prepared before the dropped column existed is never met, and the first call answers.
+  await admin`CREATE TABLE widen_two (id int, a int, b int)`;
+  await admin`INSERT INTO widen_two VALUES (1, 2, 3)`;
+  await one.from("widen_two").select("*").eq("id", 1);
+  await admin`ALTER TABLE widen_two ADD COLUMN c int`;
+  await one.from("widen_two").select("*").eq("id", 1);
+  await one.from("widen_two").select("*").eq("id", 1);
+  await admin`ALTER TABLE widen_two DROP COLUMN c, ALTER COLUMN b TYPE bigint`;
+  const both = await one.from("widen_two").select("*").eq("id", 1);
+  assert(both.error === null && JSON.stringify(both.data) === '[{"id":1,"a":2,"b":"3"}]', `a migration that drops one spelled-out column and retypes another: the first call answers (${both.error?.message ?? JSON.stringify(both.data)})`);
+  // Twenty calls refused at once by one retype, on a pool of five: the map is forgotten and read again once, not twenty
+  // times.
+  const burst = createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=smd3329burst`, "k", { max: 5 });
+  await admin`CREATE TABLE widen_burst (id int, n int)`;
+  await admin`INSERT INTO widen_burst SELECT g, g FROM generate_series(1, 20) g`;
+  await Promise.all(Array.from({ length: 20 }, (_, i) => burst.from("widen_burst").select("*").eq("id", i + 1)));
+  await admin`ALTER TABLE widen_burst ALTER COLUMN n TYPE bigint`;
+  const burstPool = burst.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
+  const burstUnsafe = burstPool.unsafe;
+  let burstReads = 0;
+  const burstGenerations = new Set<string>();
+  burstPool.unsafe = function (this: unknown, ...a: unknown[]) {
+    const q = String(a[0]);
+    if (COLUMNS_READ.test(q)) burstReads++;
+    else if (/FROM "widen_burst"/.test(q)) burstGenerations.add(/generation (\d+)/.exec(q)?.[1] ?? "0");
+    return burstUnsafe.apply(this, a);
+  };
+  let burstResults: { error: { code?: string } | null }[];
+  try { burstResults = await Promise.all(Array.from({ length: 20 }, (_, i) => burst.from("widen_burst").select("*").eq("id", i + 1))); } finally { burstPool.unsafe = burstUnsafe; }
+  await burst.close();
+  assert(burstResults.every((r) => r.error === null) && burstReads <= 2 && burstGenerations.size === 2, `twenty calls refused at once by one retype on a pool of five: all answer, with ${burstReads} catalog read(s), the retries all one new generation (${[...burstGenerations].join(", ")})`);
+  // A function returning a composite the catalog cannot see (a type off the search path) reads as a scalar, and its
+  // rows carry the type's fields: no sign of a change, so no catalog read on each call.
+  await admin`CREATE SCHEMA widen_hidden`;
+  await admin`CREATE TYPE widen_hidden.pair AS (a int, b int)`;
+  await admin`CREATE FUNCTION widen_hid(p int) RETURNS widen_hidden.pair LANGUAGE sql STABLE AS $$ SELECT ROW(p, p + 1)::widen_hidden.pair $$`;
+  await one.rpc("widen_hid", { p: 1 });
+  const hidden = await counted(() => one.rpc("widen_hid", { p: 1 }));
+  assert(hidden.codes === ",,,," && hidden.catalogReads === 0 && hidden.queries === 5, `a function returning a composite off the search path: five calls, five statements, ${hidden.catalogReads} catalog reads`);
   // A table rebuilt under its name with the old one's attribute count: a new oid, so its new column arrives.
   await admin`CREATE TABLE widen_rb (id int, name text, gone int)`;
   await admin`ALTER TABLE widen_rb DROP COLUMN gone`;
@@ -1207,6 +1269,7 @@ try {
   await admin`DROP FUNCTION widen_mid(int)`;
   await admin`CREATE FUNCTION widen_mid(p int) RETURNS TABLE (a int, b int) LANGUAGE sql STABLE AS $$ SELECT p, p + 1 $$`;
   await admin`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'smd3329two'`;
+  for (let i = 0; i < 50 && (await admin`SELECT 1 FROM pg_stat_activity WHERE application_name = 'smd3329two'`).length; i++) await Bun.sleep(20);
   const mids: string[] = [];
   for (let i = 0; i < 4; i++) { const r = await two.rpc("widen_mid", { p: 1 }); mids.push(r.error ? `error ${r.error.code}` : JSON.stringify(r.data)); }
   await two.close();
@@ -1232,7 +1295,8 @@ try {
   const asciiAdmin = new SQL({ url: asciiUrl, max: 1 });
   const ascii = createClient(`${asciiUrl}${asciiUrl.includes("?") ? "&" : "?"}application_name=smd3329ascii`, "k", { max: 1 });
   const [{ db: asciiDb }] = await ascii.sql`SELECT current_database() AS db`;
-  await asciiAdmin.unsafe(`CREATE TABLE tt (id int, ${["a", "b", "c", "d"].map((k) => `"${k}${"\u00e9".repeat(31)}" text`).join(", ")}, z int)`);
+  // Twelve names of 31 é: 372 bytes more than characters, past the end of the list's shape subquery.
+  await asciiAdmin.unsafe(`CREATE TABLE tt (id int, ${[..."abcdefghijkl"].map((k) => `"${k}${"\u00e9".repeat(31)}" text`).join(", ")}, z int)`);
   await asciiAdmin`INSERT INTO tt (id, z) VALUES (1, 2)`;
   await ascii.from("tt").select("*").eq("id", 1);
   await asciiAdmin`ALTER TABLE tt DROP COLUMN z`;
@@ -1244,7 +1308,7 @@ try {
   asciiPool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM "tt"/.test(String(a[0]))) asciiQueries++; return asciiUnsafe.apply(this, a); };
   try { for (let i = 0; i < 3; i++) await ascii.from("tt").select("*").eq("no_such_column", 1); } finally { asciiPool.unsafe = asciiUnsafe; }
   assert(asciiQueries === 3, `three filters on a missing column on the SQL_ASCII server: ${asciiQueries} queries, not a retry each`);
-  assert(asciiDb === "smd3329_ascii" && asciiDrop.error === null && !("z" in ((asciiDrop.data as object[])?.[0] ?? { z: 1 })), `a column dropped under a client of a SQL_ASCII server, after columns named outside ASCII: the next call answers (${asciiDb}; ${asciiDrop.error?.message ?? "ok"})`);
+  assert(asciiDb === "smd3329_ascii" && asciiDrop.error === null && !("z" in ((asciiDrop.data as object[])?.[0] ?? { z: 1 })), `a column dropped under a client of a SQL_ASCII server, after twelve columns named outside ASCII: the next call answers (${asciiDb}; ${asciiDrop.error?.message ?? "ok"})`);
   await ascii.close();
   await asciiAdmin.close();
   await admin`DROP DATABASE smd3329_ascii WITH (FORCE)`;
@@ -1264,7 +1328,9 @@ try {
   await admin`DROP TABLE odd_names`;
   await one.close();
   await admin`ALTER TABLE gizmos DROP COLUMN added`;
-  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)", "widen_dov(int)", "widen_dov(text)", "widen_mid(int)", "widen_prep(int)"]) await admin.unsafe(`DROP FUNCTION ${f}`);
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)", "widen_dov(int)", "widen_dov(text)", "widen_mid(int)", "widen_prep(int)", "widen_hid(int)"]) await admin.unsafe(`DROP FUNCTION ${f}`);
+  await admin`DROP SCHEMA widen_hidden CASCADE`;
+  for (const t of ["widen_bind", "widen_two", "widen_burst"]) await admin.unsafe(`DROP TABLE ${t}`);
   await admin`DROP TABLE widen_pt`;
   await admin`DROP TABLE widen_rt_t`;
   await admin`DROP TABLE widen_rb`;
