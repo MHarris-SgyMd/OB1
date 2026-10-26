@@ -3026,10 +3026,11 @@ will do before it claims anything.
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subject when a rule finds it: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
-session summary's header ticket, when the session's title or listed prompts name
-it too, in any case. The capture hook's header lists the tickets a session's
-prompts named, and its branch's or directory's only when they named none: a
-session on a branch may have done other work. A ticket-shaped word counts unless
+session summary's header ticket, when the capture hook's header names that one
+alone and the session's title or listed prompts name it too, in any case. The
+hook's header lists the tickets a session's prompts named, and its branch's or
+directory's only when they named none: a session on a branch may have done other
+work, and a header naming several is the model's to choose among. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
@@ -3041,8 +3042,9 @@ keyed by no rule, or edited since), or one found under an older rule or question
 — gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`), the door
 replacing the old one. The model is asked the subject's own question about the
 thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
-answer is read into a key: the first ticket id in it, else the one PR it names,
-else a release's version, else the answer as a lower-case phrase. Version 1 read
+answer is read into a key: the first ticket id in it, else the one PR it names
+(several, a range or a list are no PR), else a release's version, else the answer
+as a lower-case phrase. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
@@ -3050,7 +3052,9 @@ for sessions that did other work, a note's first-line ticket that was only
 context, and vague model phrases among the misses. The sweep takes one thought
 at a time without a lease, the door's lock and fingerprint check making a sweep
 beside the pass safe. An answer naming nothing records nothing, so the next
-sweep asks again, and an out-of-date subject stands meanwhile; one that is not
+sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
+its thought is asked again at every sweep, and counted in the summary, until
+SMD-3306 PR 4 records "asked, got nothing" and closes it safely. One that is not
 JSON with a subject records nothing either, is said, and exits 1, as the pass
 fails a malformed answer. A changed judge model leaves its predecessor's
 subjects standing, current at the same question: nothing asks them again yet.
@@ -5453,11 +5457,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3048 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1707 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1708 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 321 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 322 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

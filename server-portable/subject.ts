@@ -41,6 +41,8 @@ const TICKETS_IN_TEXT = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9_]
 const TICKET_ID = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 /** A pull request's number, each in a text: `PR 12`, `PR #12`, `PR-12`, `pull request 12`, `…/pull/12`, or a bare `#12`. */
 const PR_NUMBERS = /(?:\bPR\s*[#-]?\s*|\bpull request\s*#?\s*|\/pull\/|(?<![\w&#])#)([0-9]{1,9})(?![0-9])/gi;
+/** What follows a PR's number when another number goes with it: a range or a list (`PR 10–12`, `PR 502 and 503`, `PR 12/13`). */
+const ANOTHER_NUMBER = /^\s*(?:[-–—/,&+]|and\b|or\b|to\b|through\b)\s*(?:PR\s*)?#?\s*[0-9]/i;
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
@@ -92,7 +94,12 @@ export function subjectKey(answer: string): string | null {
   if (!text) return null;
   const ticket = ticketIn(text);
   if (ticket) return `ticket:${ticket}`;
-  const prs = new Set([...text.matchAll(PR_NUMBERS)].map((m) => String(Number(m[1]))));
+  // Each PR named, and a mark for a number a range or a list adds after one (review pass 1: `PR 10–12` read as PR 10).
+  const prs = new Set<string>();
+  for (const m of text.matchAll(PR_NUMBERS)) {
+    prs.add(String(Number(m[1])));
+    if (ANOTHER_NUMBER.test(text.slice((m.index ?? 0) + m[0].length))) prs.add("and another");
+  }
   if (prs.size === 1) return `pr:${[...prs][0]}`;
   const version = VERSION.exec(text);
   if (version) return `version:v${version[1].split(".").map((n) => String(Number(n))).join(".")}`;
@@ -127,30 +134,37 @@ export function firstLineTicket(content: string): string | null {
   return line === undefined ? null : ticketIn(line);
 }
 
-/** A session summary's header, the capture hook's first line (recipes/session-capture-hook's renderSummary). */
-const SESSION_HEADER = /^\s*Session summary\b/;
-/** The lines after the hook's header that carry the session's title and listed prompts: `Title: …`, `Asked (N prompts):` and its `- …` items. */
-const ASKED_LINE = /^(?:Title: |Asked \([0-9]+ prompts?\):|- )/;
+/** A session summary's header, the capture hook's first line: its parts joined by " — " (recipes/session-capture-hook's renderSummary). */
+const SESSION_HEADER = /^\s*Session summary — /;
+/** The hook's title line, and the line its listed prompts follow, each `- …`. */
+const TITLE_LINE = /^Title: /;
+const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
 
 /**
- * A session summary's header ticket (its first line's first, firstLineTicket) when the session's title or listed
- * prompts name it too, in any case, as the hook reads a prompt's tickets; else null. The hook's header lists the
- * tickets the session's prompts named, and the branch's or directory's only when they named none. On Verify item 1
- * (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose prompts named it and
- * 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a release, a review.
- * Read up to the first line that is neither a title nor a listed prompt, so the outcome's own lines never count.
+ * A session summary's header ticket, when the header names one ticket alone and the session's title or listed prompts
+ * name it too, in any case, as the hook reads a prompt's tickets; else null. The hook's header lists the tickets the
+ * session's prompts named, and the branch's or directory's only when they named none. On Verify item 1 (post hoc)
+ * the header's ticket was the session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of
+ * those whose prompts did not, where a session on a branch did other work: a triage, a release, a review. A header
+ * naming several is the model's to choose among (review pass 1: the rule's first was right on 0.375 of those drawn).
+ * The hook's layout is read as it is written: the header; a blank line between its parts; `Title: …`; `Asked (N
+ * prompts):` and its `- …` items. The first line of any other shape ends the read, so the outcome's lines, and a `- `
+ * line no `Asked` heads, never count.
  */
 export function sessionHeaderTicket(content: string): string | null {
   const lines = content.split(LINE_BREAK);
   const at = lines.findIndex((l) => l.trim() !== "");
   if (at < 0 || !SESSION_HEADER.test(lines[at])) return null;
-  const ticket = ticketIn(lines[at]);
-  if (ticket === null) return null;
+  const tickets = new Set([...lines[at].matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).filter(isTicket));
+  if (tickets.size !== 1) return null;
+  const [ticket] = tickets;
   const named = new RegExp(`(?<![A-Za-z0-9_])${ticket}(?![A-Za-z0-9_])`, "i");
+  let asked = false;
   for (const line of lines.slice(at + 1)) {
     if (line.trim() === "") continue;
-    if (!ASKED_LINE.test(line)) break;
-    if (named.test(line)) return ticket;
+    if (ASKED_LINE.test(line)) asked = true;
+    else if (!TITLE_LINE.test(line) && !(asked && line.startsWith("- "))) break;
+    else if (named.test(line)) return ticket;
   }
   return null;
 }

@@ -6611,9 +6611,10 @@ if (want("10h")) {
   });
   const seed = async (content: string, metadata: Record<string, unknown> = {}) =>
     ((await sql`SELECT upsert_thought(${content}, ${{ metadata }}::jsonb) AS r`)[0].r as { id: string }).id;
-  /** A session summary as the capture hook lays one out: its header's ticket, its title and one listed prompt, its outcome. */
+  /** A session summary as the capture hook writes one (renderSummary): its header, then each part a blank line apart. */
   const summary = (ticket: string, prompt: string, outcome = "The work done in it.") =>
-    `Session summary — ${ticket} — claude-code — ob1 (michaelharris/${ticket.toLowerCase()}-work) — 2026-10-01\nTitle: ${prompt}\nAsked (1 prompt):\n- ${prompt}\nOutcome (the assistant's last message):\n${outcome}`;
+    [`Session summary — ${ticket} — claude-code — ob1 (michaelharris/${ticket.toLowerCase()}-work) — 2026-10-01`, `Title: ${prompt}`, `Asked (1 prompt):\n- ${prompt}`,
+      `Outcome (the assistant's last message):\n${outcome}`, "Brain: no thoughts read or written this session."].join("\n\n");
   const filed = await seed("The ticket row's own text, its id in its metadata alone.", { issue: "SMD-7" });
   const session = await seed(summary("SMD-8", "start smd-8"));
   const release = await seed("OB1 release notes: what shipped this week.");
@@ -6744,7 +6745,7 @@ if (want("10h")) {
     const v1 = [await asV1(filed, "ticket:SMD-7", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
     assert(v1.join() === "replaced,replaced,added", `version 1's subjects written as PR 2 wrote them: its rules key, its question's (${v1.join(", ")})`);
     const reDry = await sweep({ dryRun: true });
-    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject\); ask stub-judge about 4\./.test(reDry.stdout),
+    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject\); ask stub-judge about 4 \(2 with an out-of-date subject\)\./.test(reDry.stdout),
       `a dry run counts them as a run would: the filed ticket found again in place of version 1's, the rest the model's (exit ${reDry.code}: ${reDry.stdout.trim().split("\n").slice(-1)[0]})`);
     asked = ownCalls;
     const reRun = await sweep();
@@ -6754,6 +6755,13 @@ if (want("10h")) {
       `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
     assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
       "…and the one the model now names nothing for stands, out of date, for the next sweep to ask again; no other of version 1's stands");
+    // Another model's subject under the current question is current: the sweep's query reads subjectCurrent's "any
+    // model" (review pass 1: [10h] held only stub-judge's, so a query keyed to the configured model passed).
+    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    const anotherDry = await sweep({ dryRun: true });
+    assert(another === "replaced" && /^ {2}3 thought\(s\) with no subject at their text by the current rules and question$/m.test(anotherDry.stdout)
+      && /ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(anotherDry.stdout),
+      `another model's subject at the current question is current, not taken (exit ${anotherDry.code}: ${anotherDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
     // The spawned CLI prints what run() in this process does (masked seconds).
     const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
@@ -6804,7 +6812,7 @@ if (want("10h")) {
     }
     // A dry run counts as a run would: the two whose text moved under the same ticket are kept, not recorded (review pass 2).
     const keepDry = await sweep({ dryRun: true });
-    assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3\./.test(keepDry.stdout),
+    assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(keepDry.stdout),
       `a dry run counts a subject the door would keep as kept (exit ${keepDry.code}: ${keepDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
     // A role without the door's grants (review pass 1: the sweep crashed on its first write, a question spent). Granted

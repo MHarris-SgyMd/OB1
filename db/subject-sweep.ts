@@ -17,15 +17,17 @@
  * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
  * whose text moved since their subject was found, and those whose subject a rule or question found that has changed since.
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
- * pass key, so a changed rule finds again the subjects it found, those alone, and keeps none of the old keys.
+ * pass key, so a changed rule finds again the subjects it found, and those alone.
  * It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
- * meanwhile: the door closes a subject without reading which one, so closing it here could close one a pass wrote
- * since the sweep read the thought (SMD-3306 PR 4 records "asked, got nothing"). So do an answer that is not JSON with
+ * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
+ * reading which one, so closing it here could close one a pass wrote since the sweep read the thought. Until SMD-3306
+ * PR 4 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
+ * different keys by when each was found; the summary counts those left with an out-of-date subject. So do an answer that is not JSON with
  * a subject, a timeout or the provider refusing the thought's length, and a row the egress gate refuses, each
  * counted. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then
  * ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes and asks
@@ -228,7 +230,7 @@ async function sweep(
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
    * pass 2: a thought the sweep ended at was counted and in none). `taken`, for --limit, counts that one too.
    */
-  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
+  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
   let taken = 0;
   let llmMs = 0;
   let calls = 0;
@@ -319,6 +321,8 @@ async function sweep(
       recipe = subjectRecipe({ by: found.by });
     } else if (!MODEL || DRY_RUN) {
       n.left++;
+      // One holding a subject found at another text or under an older rule or question: a model's answer would replace it.
+      if (row.standing_key !== null) n.leftOutOfDate++;
       return true;
     } else {
       let a: Awaited<ReturnType<typeof ask>>;
@@ -443,13 +447,14 @@ async function sweep(
     out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by its session header's ticket"]]) || "none by the rules"}` +
       (n.replaced ? ` (${n.replaced} in place of a standing subject)` : "") +
       (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") + "; " +
-      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) + ". Nothing was written or asked." +
+      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) +
+      (n.leftOutOfDate ? ` (${n.leftOutOfDate} with an out-of-date subject)` : "") + ". Nothing was written or asked." +
       (wouldRefuse.length ? ` A run would be refused: ${wouldRefuse.join("; ")}.` : ""));
     return 0;
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
+  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, `left for the judge model (--subjects rules)${n.leftOutOfDate ? `, ${n.leftOutOfDate} with an out-of-date subject` : ""}`], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
   out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one` : ""}${rest ? `; ${rest}` : ""}`);
   if (endedBy) {
     err(endedBy.line);
