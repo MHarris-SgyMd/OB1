@@ -1811,6 +1811,58 @@ console.log("\n[19] textThoughts: a search's text match without a vector, bounde
   }
 }
 
+console.log("\n[20] A running store's reads of a set-returning function survive a migration that adds a trailing column to it: each names its columns, so the connection's prepared plan re-plans to the same result type instead of failing 0A000 (SMD-3302)");
+{
+  // One connection, so each read's second call meets the plan its first prepared. Each function is widened as a
+  // migration would (110 added page_key and remaining): the real one renamed aside, one under its name and arguments
+  // returning its columns and one more. A raw connection that prepared `SELECT *` first is the control: it fails 0A000,
+  // so the widening is the kind that breaks a running server's `*` (a tagged template, which Bun prepares).
+  const one = new SqlStore(URL_, { max: 1 });
+  const raw = new SQL({ url: URL_, max: 1 });
+  const admin = new SQL({ url: URL_, max: 1 });
+  const older = await store.captureThought({ content: "smd-3302 the older side", payload: { metadata: {} }, embedding: unit(20) });
+  const newer = await store.captureThought({ content: "smd-3302 the newer side", payload: { metadata: {} }, embedding: unit(21) });
+  const [{ id: pid }] = await admin`SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.5, 'smd-3302', 0.9, 'consolidate:smd3302@p1', NULL) AS id`;
+  const reads: [string, string, () => Promise<number>, () => Promise<unknown>][] = [
+    ["list_supersession_proposals", "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)",
+      async () => (await one.listSupersessionProposals({ judgeKey: "consolidate:smd3302@p1" })).proposals.filter((p) => p.id === pid).length,
+      () => raw`SELECT * FROM list_supersession_proposals('pending', 5, NULL, ${"consolidate:smd3302@p1"}::text, NULL, NULL, NULL)`],
+    ["list_proposal_writers", "list_proposal_writers(uuid[])",
+      async () => (await one.listSupersessionProposals({ judgeKey: "consolidate:smd3302@p1" })).proposals.filter((p) => p.id === pid && p.older.writer !== null).length,
+      () => raw`SELECT * FROM list_proposal_writers(${raw.array([pid], "UUID")}::uuid[])`],
+    ["thought_changes", "thought_changes(timestamptz, uuid, text, text, text[], int)",
+      async () => (await one.listChanges({ since: "2000-01-01T00:00:00Z", limit: 1 })).length,
+      () => raw`SELECT * FROM thought_changes(${"2000-01-01T00:00:00Z"}::timestamptz, NULL, NULL, NULL, NULL, 1)`],
+  ];
+  try {
+    for (const [name, sig, read, star] of reads) {
+      const before = await read();
+      await star();
+      await admin.unsafe(`DO $$ DECLARE r text := pg_get_function_result('${sig}'::regprocedure); a text := pg_get_function_arguments('${sig}'::regprocedure);
+          n int := (SELECT pronargs FROM pg_proc WHERE oid = '${sig}'::regprocedure); BEGIN
+        ALTER FUNCTION ${sig} RENAME TO ${name}_smd3302;
+        EXECUTE format('CREATE FUNCTION ${name}(%s) RETURNS %s, smd3302_added integer) LANGUAGE sql AS $f$ SELECT *, 0 FROM ${name}_smd3302(%s) $f$',
+          a, left(r, length(r) - 1), (SELECT string_agg('$' || g, ', ') FROM generate_series(1, n) g));
+      END $$`);
+      let after = -1, err = "", control = "";
+      try {
+        after = await read();
+      } catch (e) {
+        err = (e as Error).message;
+      }
+      try { await star(); } catch (e) { control = String((e as { errno?: unknown }).errno); }
+      await admin.unsafe(`DROP FUNCTION ${sig}; ALTER FUNCTION ${sig.replace(`${name}(`, `${name}_smd3302(`)} RENAME TO ${name}`);
+      assert(control === "0A000", `${name} widened by a trailing column: a connection that prepared \`SELECT *\` first fails 0A000, the control (${control || "no error"})`);
+      assert(before === 1 && after === 1 && err === "", `…and the store's read, prepared before on its one connection, reads again after (${before}, ${after}${err ? `: ${err}` : ""})`);
+    }
+  } finally {
+    await admin`DELETE FROM supersession_proposals WHERE id = ${pid}::uuid`;
+    await admin.close();
+    await raw.close();
+    await one.close();
+  }
+}
+
 await store.close();
 
 report();

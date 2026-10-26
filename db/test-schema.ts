@@ -8703,8 +8703,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `fifteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
+    `sixteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15874,6 +15874,87 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
+}
+
+console.log("\n[100] Migration 112: a thought's client_key — a unique btree on thoughts ((metadata->>'client_key')), partial on the value being there, its comment and sentinel naming it; one thought per key, rows without one never colliding; a re-apply a no-op; rows already sharing a key refused by name before the build; another shape, another table or an INVALID index under the name refused by name (SMD-3314)");
+{
+  const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_client_key_unique')) AS d`)).rows[0].d ?? "";
+  const d = await def();
+  assert(/^CREATE UNIQUE INDEX thoughts_client_key_unique ON public\.thoughts USING btree \(\(\(metadata ->> 'client_key'::text\)\)\) WHERE \(\(metadata ->> 'client_key'::text\) IS NOT NULL\)$/.test(d),
+    `thoughts_client_key_unique is a unique btree on the key, partial on its being there (${d || "absent"})`);
+  const c = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass('thoughts_client_key_unique'), 'pg_class') AS c`)).rows[0].c ?? "";
+  const file = files.find((f) => f.endsWith("_thought_client_key.sql")) ?? "no _thought_client_key.sql";
+  const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
+  assert(/Migration 112 \/ SMD-3314/.test(c) && /ob1:client-key-one-thought/.test(src), `…its comment naming the migration, and the file its sentinel (${c.slice(0, 60)})`);
+
+  // One thought per key; rows with no key, or a non-object metadata, never collide.
+  const k = "0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a";
+  await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] keyed', $1::jsonb), ('[100] plain one', '{}'), ('[100] plain two', '{}'), ('[100] null meta', NULL)`, [JSON.stringify({ client_key: k })]);
+  let dup = "";
+  try { await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] the same key again', $1::jsonb)`, [JSON.stringify({ client_key: k })]); } catch (e) { dup = (e as Error).message; }
+  assert(/thoughts_client_key_unique/.test(dup), `a second thought with the key is refused (${dup.slice(0, 80) || "accepted"})`);
+  // A table this small is read whole by choice: sequential scans off, the plan says whether the index can serve.
+  await db.exec(`SET enable_seqscan = off`);
+  // The servers' read itself (store-sql.ts's thoughtsNamed): the key's arm a correlated subquery over the name.
+  const plans = (await db.query<Record<string, string>>(`EXPLAIN SELECT n.name, COALESCE(
+        (SELECT t.id::text FROM thoughts t WHERE t.id = n.name::uuid),
+        (SELECT t.id::text FROM thoughts t WHERE t.metadata->>'client_key' = n.name)) AS id
+      FROM unnest(ARRAY['${k}']::text[]) AS n(name)`)).rows.map((r) => Object.values(r)[0]).join(" ");
+  await db.exec(`RESET enable_seqscan`);
+  assert(/thoughts_client_key_unique/.test(plans), `the servers' read of a key walks the index — an equality implies its predicate (${plans.slice(0, 160)})`);
+
+  // A key is set once: a write giving a keyed row another key is refused, and the row keeps its own; the same key
+  // written again, a row with none taking one, and a key taken away are not refused (review pass 2).
+  const otherKey = "0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7b";
+  let moved = "";
+  try { await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] keyed'`, [JSON.stringify({ client_key: otherKey })]); } catch (e) { moved = (e as Error).message; }
+  const kept = (await db.query<{ k: string | null }>(`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[100] keyed'`)).rows[0].k;
+  assert(/^client_key is set once: thought [0-9a-f-]{36} keeps 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a, and a write gave it 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7b$/.test(moved) && kept === k,
+    `a write giving a keyed row another key is refused, the key kept (${moved.slice(0, 100) || "applied"}, ${kept})`);
+  let quiet = "";
+  try {
+    await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] keyed'`, [JSON.stringify({ client_key: k, note: "same key" })]);
+    await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] plain one'`, [JSON.stringify({ client_key: otherKey })]);
+    await db.exec(`UPDATE thoughts SET metadata = metadata - 'client_key' WHERE content = '[100] plain one'`);
+  } catch (e) { quiet = (e as Error).message; }
+  const plainKey = (await db.query<{ k: string | null }>(`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[100] plain one'`)).rows[0].k;
+  assert(quiet === "" && plainKey === null, `the same key again, a first key, and a key taken away are not refused (${quiet.slice(0, 80) || "none refused"}, ${plainKey})`);
+  const trig = (await db.query<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('ob1_client_key_set_once()'::regprocedure, 'pg_proc')) AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_client_key_set_once'`)).rows[0];
+  assert(trig.n === 1 && /Migration 112 \/ SMD-3314/.test(trig.c ?? "") && /ob1:client-key-set-once/.test(src), `one set-once trigger on thoughts, its function's comment and the file's sentinel naming it (${trig.n})`);
+
+  // Re-applied, nothing moves.
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  const trigAgain = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_client_key_set_once'`)).rows[0].n;
+  assert(again.endsWith("_thought_client_key.sql") && (await def()) === d && trigAgain === 1, `112 applied again changes nothing: the index, one trigger (${again.slice(0, 80)}, ${trigAgain})`);
+
+  const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
+  // Rows already sharing a key — a caller's metadata could set it before 112 — refused by name before the build.
+  await db.exec(`DROP INDEX thoughts_client_key_unique`);
+  await db.query(`INSERT INTO thoughts (content, metadata) VALUES ('[100] a caller''s copy of the key', $1::jsonb)`, [JSON.stringify({ client_key: k })]);
+  const shared = await refusal();
+  assert(/migration 112: 1 metadata\.client_key value\(s\) are kept by more than one thought \(the first: 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a\) — a caller's metadata set them before 112 reserved the key\. Keep one thought per value/.test(shared) && (await def()) === "",
+    `rows sharing a key: refused by name, no index built (${shared.slice(0, 140)})`);
+  await db.exec(`UPDATE thoughts SET metadata = metadata - 'client_key' WHERE content = '[100] a caller''s copy of the key'`);
+  await reapply(file);
+  assert((await def()) === d, "the duplicate cleared, the file builds the index in its shape");
+
+  // Anything else under the name is refused (100's rule).
+  await db.exec(`DROP INDEX thoughts_client_key_unique; CREATE INDEX thoughts_client_key_unique ON thoughts ((metadata->>'client_key')) WHERE (metadata->>'client_key') IS NOT NULL`);
+  const notUnique = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is not a unique btree on thoughts \(\(metadata->>'client_key'\)\) WHERE that value IS NOT NULL — CREATE INDEX thoughts_client_key_unique/.test(notUnique),
+    `the shape without UNIQUE: refused, naming what it is (${notUnique.slice(0, 140)})`);
+  await db.exec(`DROP INDEX thoughts_client_key_unique; CREATE TABLE tu_keyed (metadata jsonb); CREATE UNIQUE INDEX thoughts_client_key_unique ON tu_keyed ((metadata->>'client_key')) WHERE (metadata->>'client_key') IS NOT NULL`);
+  const other = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is not a unique btree on thoughts .+ ON public\.tu_keyed /.test(other), `the shape on another table: refused, naming it (${other.slice(0, 140)})`);
+  await db.exec(`DROP TABLE tu_keyed`);
+  await reapply(file);
+  // Last, and put back in place: a DROP after this catalog write fails inside PGlite ([90]).
+  await db.exec(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
+  const invalid = await refusal();
+  assert(/migration 112: thoughts_client_key_unique exists but is INVALID — a CONCURRENTLY build or drop that did not finish/.test(invalid), `an INVALID index in the shape: refused, naming it (${invalid.slice(0, 120)})`);
+  await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

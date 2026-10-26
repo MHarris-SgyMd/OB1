@@ -389,6 +389,7 @@ const EXEMPT: Record<string, Record<string, [number, string]>> = {
     Provider: [13, "the provider's settings and its adapter: the library calls each inside its own request handling, where a throw is that request's error answer (measured: a throw in the client validator was that registration's 500); the refresh token's TTL and its rotation (SMD-2286) are arithmetic on the token's iiat, called inside the token endpoint"],
     registerGrantType: [1, "the token exchange's handler: the library runs it inside its token endpoint, where a throw is that request's error answer, as each of its refusals is"],
     jwtVerify: [1, "the key set jose reads while the exchange awaits the verification"],
+    Check: [1, "the GUI's password-every-time check (SMD-3307): the library runs it inside its authorization request, as each of its own prompt checks, where a throw is that request's error answer; it reads a set and two properties and cannot throw"],
   },
   "store.ts": {
     transaction: [1, "bun:sqlite wraps the purge in a transaction, which the store runs in line"],

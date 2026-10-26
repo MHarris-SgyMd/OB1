@@ -53,20 +53,67 @@ is and what it sits on (`1.0.0+upstream.9543c29`). The bump is chosen by the
 contracts the fork already enforces — the rules are here, and checked, not
 remembered:
 
-- **MAJOR** — a migration changes a shipped function's signature or return shape
-  (020's `match_thoughts`, 014's sentinel), drops or renames a shipped
-  table/column/index a client can see, changes the MCP tool surface
-  incompatibly (a tool removed, an argument's meaning changed), or stops
-  answering a URL or transport a configured client uses (the origin root the
-  proxy's `/mcp` replaced closed with 2.0.0: SMD-2306, SMD-2532). A client
-  written against `N.x` keeps working on `N.y`; a URL it was given goes only
-  after a release has said so on every answer, in a `Deprecation` header.
+- **MAJOR** — a change a client sees. One of these:
+  - A migration changes a shipped function's signature or return shape so that
+    a positional call resolves to another form or to none, or a reader that
+    takes columns by position reads something else (020's `match_thoughts`,
+    014's sentinel).
+  - A shipped table, column or index a client can see is dropped or renamed.
+  - The MCP tool surface changes incompatibly: a tool removed, or an argument's
+    meaning changed.
+  - A URL, route, port, transport or setting stops answering, where something
+    inside the version contract (below) gives it to a configured client. The
+    origin root that the proxy's `/mcp` replaced closed this way with 2.0.0
+    (SMD-2306, SMD-2532).
+
+  A client written against `N.x` keeps working on `N.y`. A URL it was given goes
+  only after a release has said so on every answer, in a `Deprecation` header.
 - **MINOR** — an additive migration (a new function; a new column with
   `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
   worker, a new preflight check, or a surface marked deprecated (SemVer §7;
-  the root URL's `Deprecation` header, SMD-2306).
+  the root URL's `Deprecation` header, SMD-2306). A shipped function changed
+  only additively is a MINOR too — a trailing parameter with a default, a
+  trailing output column, or an older form dropped and created anew — when
+  every caller in the tree resolves the new signature and every reader keys
+  its columns by name (046, 058, 059, 061 and 070 each argued this before the
+  rule said it: SMD-2324). So is a removal outside the version contract, with
+  an upgrade line in its fragment.
 - **PATCH** — no schema change: server, docs, evals, tests, or a migration that
   only re-comments (028, 043).
+
+**What the version contract covers** (SMD-2687). A version speaks for what a
+release ships, and for nothing else:
+- **Its two images.** `ob1-server` (`server-portable/Dockerfile`: the MCP server,
+  the REST core, the operator GUI and the plugins). `ob1-migrate`
+  (`db/Dockerfile`: `migrate.ts` and the migrations).
+- **The files it attaches** (`scripts/release-artifacts.ts`, `ASSETS`):
+  - `deploy/compose.yaml` with its profiles;
+  - the digest-pinned `compose.release.yaml`;
+  - the settings `.env.example` names;
+  - the four opt-in overlays: `compose.api-public.yaml` (`/api`),
+    `compose.hooks-public.yaml`, `compose.grafana-port.yaml` and
+    `compose.grafana-public.yaml`.
+
+A URL, route, port or setting that any of these gives a client falls under the
+MAJOR rule. Outside the contract nothing is a MAJOR: a removal there is a
+MINOR, with an upgrade line. Two things sit outside it:
+- **Maintainer tooling**, which a release neither attaches nor builds into an
+  image: `deploy/compose.host-ports.yaml`, the edge (`deploy/edge/`), the
+  scripts under `deploy/` (`canary.sh`, `tier.sh`, `instance.ts`, `smoke.sh`)
+  and the `db/` scripts the migrator does not carry.
+- **Vendored code**: `integrations/`, `extensions/` and the `recipes/` servers,
+  which no image carries.
+
+The cuts decided this before it was written here:
+- v1.6.0 stayed a minor though SMD-2294 dropped the tier stack's own ports and
+  settings, since `compose.tiers.yaml` was the maintainer's promotion pipeline,
+  not a client's setup.
+- v1.7.0 stayed a minor though SMD-1931 deleted six vendored integrations.
+- SMD-2878's retirement of `compose.tiers.yaml` ships in 2.0.0 as a minor change.
+
+A fragment that removes a URL, port or setting from a shipped file, or deletes
+vendored code, says in one sentence which side of this line it falls on
+(`changes/README.md`).
 
 **The brain reports its version.** Migration 044 writes `schema_version` into
 `ob1_config`; `preflight` prints it beside the ledger's highest migration and

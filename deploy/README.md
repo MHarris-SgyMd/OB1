@@ -3495,7 +3495,9 @@ the three discovery paths outside it to it while it answers, and answers them
 its tokens (SMD-2286, "Tokens at the REST core" below). `mcp-server/` is
 its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
-since SMD-2287 PR 5b; the GUI becomes one with SMD-2280. The
+since SMD-2287 PR 5b; the operator GUI signs the operator in through it as
+the confidential `gui` client, code and PKCE with a refresh token, with
+`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`). The
 MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3511,7 +3513,7 @@ started with. It assumes the stack of step 1: compose reads the whole of
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth mcp server proxy   # builds and starts it, recreates the MCP servers on the new .env (they advertise OAuth only when configured), and waits
+compose up -d --wait --wait-timeout 60 auth api mcp app proxy   # builds and starts it, recreates the REST core, the MCP server and the GUI on the new .env (each reads the switch; the GUI signs in through it, and its sessions start again), and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
@@ -3617,9 +3619,10 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
-  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The
-  operator's page of grants is SMD-2280's; until then, the compromise steps
-  under "Custody and backups" below end every grant.
+  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
+  the GUI's sign-out does its own. The operator's page of grants is SMD-3307's
+  third PR; until then, the compromise steps under "Custody and backups" below
+  end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
@@ -3762,7 +3765,11 @@ and the client secrets; a kept password would be hashed again as it was),
 run `--init` for new ones, hand each client its new secret, and drop the store
 (`compose rm -sf auth`, then `podman volume rm <project>_auth-data`, or
 `docker volume rm`; `open-brain_auth-data` for the stack of step 1) before
-`compose up -d --wait auth`: every client signs in again. Both shapes were measured:
+`compose up -d --wait auth api mcp app`, which hands the MCP server and the
+GUI their new secrets (without them every GUI sign-in is refused, the GUI's
+log saying `invalid_client`) and has the REST core drop the old signing key at
+once (it keeps a key set ten minutes, and ten more while the AS is away):
+every client signs in again. Both shapes were measured:
 the backup above restored into a fresh volume brings a registered client back
 with its registration token, and the fresh volume alone does not.
 
@@ -3784,7 +3791,7 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the GUI as this server's client (SMD-2280). The release overlay does not pin an image for it yet,
+SMD-2286), and the GUI's break-glass key sign-in and page of grants (SMD-3307's second and third PRs). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover
