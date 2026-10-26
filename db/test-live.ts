@@ -6576,7 +6576,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities, no model asked, again at an edited text, and a first line's UTF-8 no ticket; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 111's door and a role without its grants, as the pass meets each (migration 111, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 111's door and a role without its grants, as the pass meets each (migration 111, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** The judge's answer by words in the thought; any other thought, an empty subject. */
@@ -6611,12 +6611,18 @@ if (want("10h")) {
   });
   const seed = async (content: string, metadata: Record<string, unknown> = {}) =>
     ((await sql`SELECT upsert_thought(${content}, ${{ metadata }}::jsonb) AS r`)[0].r as { id: string }).id;
+  /** A session summary as the capture hook lays one out: its header's ticket, its title and one listed prompt, its outcome. */
+  const summary = (ticket: string, prompt: string, outcome = "The work done in it.") =>
+    `Session summary — ${ticket} — claude-code — ob1 (michaelharris/${ticket.toLowerCase()}-work) — 2026-10-01\nTitle: ${prompt}\nAsked (1 prompt):\n- ${prompt}\nOutcome (the assistant's last message):\n${outcome}`;
   const filed = await seed("The ticket row's own text, its id in its metadata alone.", { issue: "SMD-7" });
-  const session = await seed("SMD-8 session summary\n\nThe work done in it.");
+  const session = await seed(summary("SMD-8", "start smd-8"));
   const release = await seed("OB1 release notes: what shipped this week.");
   const pr = await seed("Reviewed and merged pull work for the dashboard.");
-  const none = await seed("A passing remark, nothing here to name.");
-  const garbled = await seed("A garbled answer comes back for this one.");
+  // A session whose prompts name no ticket: its header's is its branch's, and its work may be another's (version 2's
+  // rule 1), so it is the model's. Version 1 took the header's ticket.
+  const none = await seed(summary("SMD-11", "a passing remark", "Nothing here to name."));
+  // A note whose first line names a ticket as context: the model's in version 2, the first line's in version 1.
+  const garbled = await seed("SMD-12 process note: a garbled answer comes back for this one.");
   // Ticket-shaped words on a first line whose prefixes are denied (an encoding, a model name): no ticket.
   const utf = await seed("UTF-8 handling for the GPT-4 export, nothing filed.");
   const rawKey = "c".repeat(64);
@@ -6657,14 +6663,16 @@ if (want("10h")) {
     assert(first.code === 0 && /7 extracted, 0 failed/.test(first.stdout) && /; recorded 2 thought\(s\)' own subject by its ticket\n/.test(first.stdout) && ownCalls === 0 && extractCalls === 7,
       `the pass extracts the seven and records the two subjects a rule finds, asking no own question (exit ${first.code}, ${ownCalls} own question(s): ${first.stdout.split("\n").find((l) => /wrote /.test(l))?.trim()})`);
     const byFiled = s.find((x) => x.thought === filed), bySession = s.find((x) => x.thought === session);
-    assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === "subject:rules@r1"),
-      `the ticket filed under, and the first line's: standing, under the rules' key (${JSON.stringify(s.map((x) => [x.key, x.by]))})`);
-    assert(!s.some((x) => x.thought === utf), "a first line's UTF-8 and GPT-4, denied prefixes, are no ticket: the thought is left to the model");
-    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === "subject:rules@r1" && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rules_version === 1 && x.agent === agent.id),
-      "…each with its lineage row: the text read, the rules' key and recipe, the worker's agent");
+    const ruleKeyOf = (by: string) => (by === "metadata" ? "subject:metadata@r1" : "subject:first_line@r2");
+    assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === ruleKeyOf(x.by)),
+      `the ticket filed under, and the session header's its prompt names: standing, each under its rule's key (${JSON.stringify(s.map((x) => [x.key, x.by, x.judge]))})`);
+    assert(!s.some((x) => x.thought === utf || x.thought === none || x.thought === garbled),
+      "a first line's UTF-8 and GPT-4, denied prefixes, a session whose prompts name no ticket, and a note's first-line ticket: each left to the model");
+    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === ruleKeyOf(x.by) && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rule_version === (x.by === "metadata" ? 1 : 2) && x.agent === agent.id),
+      "…each with its lineage row: the text read, its rule's key and recipe, the worker's agent");
 
     // An edit: 016's trigger re-queues it, and the next pass finds its subject again at the new text.
-    await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, retitled\n\nThe work done in it."})`;
+    await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "retitled: start smd-9")})`;
     const second = await extractRun();
     s = await subjects();
     const now = s.find((x) => x.thought === session && x.standing), was = s.find((x) => x.thought === session && !x.standing);
@@ -6674,7 +6682,7 @@ if (want("10h")) {
     // The sweep: a dry run, then the rules alone, ask no model and write nothing.
     let asked = ownCalls;
     const dry = await sweep({ dryRun: true });
-    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no subject at their text$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
+    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no subject at their text by the current rules and question$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
       `--subjects --dry-run counts the five no rule keys, asks nothing and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A dry run reads on: a signal aborted before it changes nothing (review pass 1: it read none and exited 0).
     const dryStopped = await sweep({ dryRun: true, signal: AbortSignal.abort() });
@@ -6703,7 +6711,7 @@ if (want("10h")) {
     const full = await sweep();
     s = await subjects();
     const rel = s.find((x) => x.thought === release && x.standing), pull = s.find((x) => x.thought === pr && x.standing);
-    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p1" && x.produced_by === "subject:stub-judge@p1" && x.fp === x.current && x.agent === agent.id),
+    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p2" && x.produced_by === "subject:stub-judge@p2" && x.fp === x.current && x.agent === agent.id),
       `the sweep records the model's subjects, read into their keys, under the model's pass key (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
     assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && rel.recipe.answer === "OB1 release 2.0.0" && pull?.recipe?.answer === "PR 727" && rel.recipe.prompt_hash === promptHash(subjectPrompt()),
       "…its recipe the model, the question's hash and the subject it answered");
@@ -6726,6 +6734,26 @@ if (want("10h")) {
     const relAfter = (await standingOf(release))!;
     assert(/^0 subject\(s\) recorded; 1 kept, at the text read now/.test(tally(moved)) && relAfter.id === relBefore.id && relAfter.fp === relAfter.current && relAfter.fp !== relBefore.fp,
       `a moved text named the same: the facet kept, its lineage at the new text (exit ${moved.code}: ${tally(moved)})`);
+
+    // Version 1's subjects found again (SMD-3306 PR 3): its one rules key and its question's version are no current
+    // pass's, so the sweep takes each, and the door replaces it under the current key. One the model now names nothing
+    // for stands, out of date: a close could close one a pass wrote since the sweep read it (PR 4's record).
+    const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
+    const asV1 = async (id: string, key: string, by: string, judge: string) =>
+      ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string }).action;
+    const v1 = [await asV1(filed, "ticket:SMD-7", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
+    assert(v1.join() === "replaced,replaced,added", `version 1's subjects written as PR 2 wrote them: its rules key, its question's (${v1.join(", ")})`);
+    const reDry = await sweep({ dryRun: true });
+    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject\); ask stub-judge about 4\./.test(reDry.stdout),
+      `a dry run counts them as a run would: the filed ticket found again in place of version 1's, the rest the model's (exit ${reDry.code}: ${reDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    asked = ownCalls;
+    const reRun = await sweep();
+    const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!, noneNow = (await standingOf(none))!;
+    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one; 2 the model named nothing for, 1 answered not as JSON of the expected shape"
+      && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2" && ownCalls === asked + 4,
+      `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
+    assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
+      "…and the one the model now names nothing for stands, out of date, for the next sweep to ask again; no other of version 1's stands");
 
     // The spawned CLI prints what run() in this process does (masked seconds).
     const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
@@ -6765,7 +6793,7 @@ if (want("10h")) {
       const noDoor = await sweep();
       assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 111's/.test(noDoor.stderr), `--subjects without 111's door refuses, naming the migration (exit ${noDoor.code})`);
       await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
-      await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, edited again."})`;
+      await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "edited again: start smd-9")})`;
       const noDoorPass = await extractRun();
       const said = noDoorPass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
       // Three: the two just edited, two subjects for a rule, and the release note, edited above.
@@ -6803,8 +6831,8 @@ if (want("10h")) {
         const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
         assert(roleDry.code === 0 && /A run would be refused: this role cannot write a thought's subject\./.test(roleDry.stdout),
           `…and a dry run under it counts, and says a run would be refused (exit ${roleDry.code})`);
-        // A new ticket on its first line, so the door inserts a facet: the same subject kept would write no facet.
-        await sql`SELECT update_thought(${session}::uuid, ${"SMD-10 session summary, as the role reads it."})`;
+        // A new ticket in its header and prompt, so the door inserts a facet: the same subject kept would write no facet.
+        await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-10", "as the role reads it: smd-10")})`;
         const rolePass = await extractRun({}, sUrl, sEnv);
         const saidRole = rolePass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
         assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]),

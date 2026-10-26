@@ -169,12 +169,13 @@
  *
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subject is recorded when a rule finds
- * it: the ticket it is filed under, else the first ticket on its first line
- * (server-portable/subject.ts), through migration 111's
+ * it: the ticket it is filed under, else a session summary's header ticket
+ * its prompts name (server-portable/subject.ts), through migration 111's
  * record_thought_subject at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
  * thoughts extracted before 111, those no rule keys, which it asks the judge
- * model about, and those whose text moved. A brain before 111, or a role
+ * model about, those whose text moved, and those whose subject an older rule
+ * or question found. A brain before 111, or a role
  * without the grants 111's door needs, records no subject and says so once;
  * the entities stand either way.
  */
@@ -188,7 +189,7 @@ import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
-import { ruleSubject, SUBJECT_RULES_KEY } from "../server-portable/subject.ts";
+import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
@@ -1225,8 +1226,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   /**
    * The thought's own subject by the rules (SMD-3306), recorded once its
-   * entities are: the ticket it is filed under, else the first ticket on its
-   * first line, at the text the claim read; record_thought_subject refuses a
+   * entities are: the ticket it is filed under, else a session summary's
+   * header ticket its prompts name (subject.ts's ruleSubject), each under its
+   * rule's key, at the text the claim read; record_thought_subject refuses a
    * text that moved since. No model is asked here: a thought no rule keys is
    * --subjects' (db/subject-sweep.ts). A courtesy, as the kept windows are: a
    * brain before 111, or a role without its door's grants, records none and
@@ -1240,7 +1242,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const found = ruleSubject(row);
     if (!found) return;
     try {
-      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, SUBJECT_RULES_KEY, subjectRecipe(found), agentId);
+      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
       if (w.action === "added" || w.action === "replaced") subjects.recorded++;
       else if (w.action === "kept") subjects.kept++;
     } catch (e) {

@@ -1,7 +1,8 @@
 /**
- * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought with no standing subject at
- * its current text is given its own subject, the rules' or, for the rest, the judge model's
- * (server-portable/subject.ts), through migration 111's record_thought_subject.
+ * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought with no current subject is
+ * given its own subject, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
+ * migration 111's record_thought_subject. A subject is current when it stands at the thought's text and was found
+ * under the current rules and question (subjectCurrent).
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
@@ -12,14 +13,19 @@
  *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
- * a thought filed under a ticket, or naming one on its first line, has its subject once it is extracted. This sweep
- * is the rest: thoughts extracted before 111, those the rules leave to the model, and those whose text moved since
- * their subject was found. It is also the one-time backfill. It takes one thought at a time, without a lease:
+ * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
+ * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
+ * whose text moved since their subject was found, and those whose subject a rule or question found that has changed since.
+ * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
+ * pass key, so a changed rule finds again the subjects it found, those alone, and keeps none of the old keys.
+ * It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
- * A model answer naming nothing records nothing, so the next sweep asks again; so do an answer that is not JSON with
+ * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
+ * meanwhile: the door closes a subject without reading which one, so closing it here could close one a pass wrote
+ * since the sweep read the thought (SMD-3306 PR 4 records "asked, got nothing"). So do an answer that is not JSON with
  * a subject, a timeout or the provider refusing the thought's length, and a row the egress gate refuses, each
  * counted. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then
  * ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes and asks
@@ -30,7 +36,7 @@ import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_RULES_KEY, subjectModelKey, type SubjectBy } from "../server-portable/subject.ts";
+import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, SUBJECT_MODEL_SUFFIX, subjectModelKey, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -81,10 +87,10 @@ export interface SubjectSweepOptions {
   onPass?: (stop: PassStop) => void;
 }
 
-/** The thoughts with no standing subject at their current text, a page at a time in id order. */
+/** The thoughts with no current subject, a page at a time in id order. */
 const PAGE = 100;
 
-/** A thought the sweep takes, with its standing subject's key, way and pass when it has one (at another text). */
+/** A thought the sweep takes, with its standing subject's key, way and pass when it has one (at another text, or out of date). */
 type Candidate = {
   id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string;
   standing_key: string | null; standing_by: string | null; standing_judge: string | null;
@@ -143,7 +149,7 @@ async function sweep(
   const judgeKey = subjectModelKey(cfg.judgeModel);
   /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
   const wouldRefuse: string[] = [];
-  out(`  subjects: the rules (${SUBJECT_RULES_KEY})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature} (${judgeKey})` : ", no model (--subjects rules)"}`);
+  out(`  subjects: the rules (${subjectRuleKey("metadata")}, ${subjectRuleKey("first_line")})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature} (${judgeKey})` : ", no model (--subjects rules)"}`);
   if (MODEL) {
     out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
     // A policy that refuses whatever the row: stop before the first call, as the pass does (SMD-1903).
@@ -194,27 +200,35 @@ async function sweep(
     }
   }
 
-  const NO_SUBJECT_AT_TEXT = sql`
+  // No current subject: none standing at the thought's text, or one found under another rule's key or an older
+  // question's (subject.ts's subjectCurrent, read here in SQL: a model's at the current question, by any model).
+  const NO_CURRENT_SUBJECT = sql`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
        WHERE f.thought_id = t.id AND f.kind = 'subject' AND f.valid_until IS NULL
-         AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)))`;
+         AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
+         AND CASE f.payload->>'by'
+               WHEN 'metadata' THEN f.payload->>'judge_key' = ${subjectRuleKey("metadata")}
+               WHEN 'first_line' THEN f.payload->>'judge_key' = ${subjectRuleKey("first_line")}
+               WHEN 'model' THEN starts_with(f.payload->>'judge_key', ${SUBJECT_KEY_PREFIX})
+                             AND right(f.payload->>'judge_key', ${SUBJECT_MODEL_SUFFIX.length}::int) = ${SUBJECT_MODEL_SUFFIX}
+               ELSE false END)`;
   let total: number;
   try {
-    total = Number(((await sql`SELECT count(*)::int AS n FROM thoughts t WHERE ${NO_SUBJECT_AT_TEXT}`) as { n: number }[])[0].n);
+    total = Number(((await sql`SELECT count(*)::int AS n FROM thoughts t WHERE ${NO_CURRENT_SUBJECT}`) as { n: number }[])[0].n);
   } catch (e) {
     if (sqlState(e) !== "42501") throw e;
     err(`\n  This role cannot read the thoughts' subjects (${(e as Error).message}): the sweep reads thoughts, thought_facets and derivations.`);
     return 2;
   }
   const todo = LIMIT ? Math.min(LIMIT, total) : total;
-  out(`  ${total} thought(s) with no subject at their text${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
+  out(`  ${total} thought(s) with no subject at their text by the current rules and question${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
 
   /**
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
    * pass 2: a thought the sweep ended at was counted and in none). `taken`, for --limit, counts that one too.
    */
-  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
+  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
   let taken = 0;
   let llmMs = 0;
   let calls = 0;
@@ -290,14 +304,18 @@ async function sweep(
     const found = ruleSubject(row);
     let key: string, by: SubjectBy, judge: string, recipe: Recipe;
     if (found && DRY_RUN) {
-      // The door keeps a subject found the same way by the same pass at a moved text: counted as a run would count it.
-      if (row.standing_key === found.key && row.standing_by === found.by && row.standing_judge === SUBJECT_RULES_KEY) n.kept++;
-      else n[found.by]++;
+      // The door keeps a subject found the same way by the same pass at a moved text, and replaces any other standing
+      // one: counted as a run would count it.
+      if (row.standing_key === found.key && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
+      else {
+        n[found.by]++;
+        if (row.standing_key !== null) n.replaced++;
+      }
       return true;
     }
     if (found) {
       ({ key, by } = found);
-      judge = SUBJECT_RULES_KEY;
+      judge = subjectRuleKey(found.by);
       recipe = subjectRecipe({ by: found.by });
     } else if (!MODEL || DRY_RUN) {
       n.left++;
@@ -364,7 +382,10 @@ async function sweep(
     if (w.stale) n.stale++;
     else if (w.gone) n.gone++;
     else if (w.action === "kept") n.kept++;
-    else if (w.action === "added" || w.action === "replaced") n[by]++;
+    else if (w.action === "added" || w.action === "replaced") {
+      n[by]++;
+      if (w.action === "replaced") n.replaced++;
+    }
     return true;
   }
 
@@ -386,7 +407,7 @@ async function sweep(
                  s.payload->>'key' AS standing_key, s.payload->>'by' AS standing_by, s.payload->>'judge_key' AS standing_judge
             FROM thoughts t
             LEFT JOIN thought_facets s ON s.thought_id = t.id AND s.kind = 'subject' AND s.valid_until IS NULL
-           WHERE t.id > ${after}::uuid AND ${NO_SUBJECT_AT_TEXT}
+           WHERE t.id > ${after}::uuid AND ${NO_CURRENT_SUBJECT}
            ORDER BY t.id LIMIT ${PAGE}`) as Candidate[];
       } catch (e) {
         if (!databaseUnavailable(e)) throw e;
@@ -419,16 +440,17 @@ async function sweep(
       err(endedBy.line);
       return endedBy.code;
     }
-    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by the ticket on its first line"]]) || "none by the rules"}` +
+    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by its session header's ticket"]]) || "none by the rules"}` +
+      (n.replaced ? ` (${n.replaced} in place of a standing subject)` : "") +
       (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") + "; " +
       (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) + ". Nothing was written or asked." +
       (wouldRefuse.length ? ` A run would be refused: ${wouldRefuse.join("; ")}.` : ""));
     return 0;
   }
   const recorded = n.metadata + n.first_line + n.model;
-  const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the first line's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
+  const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
   const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
-  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${rest ? `; ${rest}` : ""}`);
+  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one` : ""}${rest ? `; ${rest}` : ""}`);
   if (endedBy) {
     err(endedBy.line);
     return endedBy.code;
