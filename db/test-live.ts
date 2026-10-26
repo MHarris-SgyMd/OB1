@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions } from "./subject-sweep.ts";
+import { DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -6743,7 +6743,7 @@ if (want("10h")) {
     // for stands, out of date: a close could close one a pass wrote since the sweep read it (PR 4's record).
     const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
     const asV1 = async (id: string, key: string, by: string, judge: string) =>
-      ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string }).action;
+      ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as SubjectWrite).action;
     // The filed thought's version 1 key is another ticket's, so the run reports a new key (review pass 3).
     const v1 = [await asV1(filed, "ticket:SMD-70", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
     assert(v1.join() === "replaced,replaced,added", `version 1's subjects written as PR 2 wrote them: its rules key, its question's (${v1.join(", ")})`);

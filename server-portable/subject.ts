@@ -17,7 +17,7 @@
  *   - a session header's branch ticket taken for a session that did other work (the rubric's rule 3, version 2's rule
  *     1, which neither the first-line rule nor the model applied: right on 0.667 of the sessions whose prompts did not
  *     name it, post hoc);
- *   - a note's first-line ticket that is only context (the model, asked instead, agreed 0.950 against the rule's 0.750);
+ *   - a note's first-line ticket that is only context (the model, asked instead, agreed 0.950 to the rule's 0.750);
  *   - vague model phrases.
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
@@ -320,7 +320,8 @@ export const SUBJECT_MODEL_SUFFIX = `@p${SUBJECT_PROMPT_VERSION}`;
 /**
  * Whether a standing subject was found under the current rules and question: a rule's under that rule's key now, a
  * model's under the current question, by any model. A judge model changed since does not make a subject out of date,
- * and nothing asks it again yet. The sweep's query reads the same (db/subject-sweep.ts).
+ * and nothing asks it again yet. This is the rule's statement, with no caller at run time: the sweep reads the same
+ * in SQL (db/subject-sweep.ts's NO_CURRENT_SUBJECT); test-thoughts holds this arm by arm, and test-live [10h] the SQL.
  */
 export function subjectCurrent(by: string | null, judge: string | null): boolean {
   if (by === "metadata" || by === "first_line") return judge === subjectRuleKey(by);
@@ -331,8 +332,8 @@ export function subjectCurrent(by: string | null, judge: string | null): boolean
  * The judge model's own subject for one thought: one call at the chat endpoint, as decide mode's writer is asked,
  * through providerCall, which refuses before the request when the egress gate says the row may not leave (kind
  * `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the subject at most 200 code points, for a recipe, null when
- * the answer gave no subject string; `key` is read from the subject whole (subjectKey), a ticket, a PR or a release only
- * when the thought's own text names it, and null when it named nothing a key holds.
+ * the answer gave no subject string; `key` is read from the subject whole (subjectKey): a ticket or a release only
+ * when the thought's own text names it, a PR when its number appears there, null when it named nothing a key holds.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answer: string | null; key: string | null }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {

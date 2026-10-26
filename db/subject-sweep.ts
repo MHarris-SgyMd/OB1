@@ -15,7 +15,7 @@
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
  * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
- * whose text moved since their subject was found, and those whose subject a rule or question found that has changed since.
+ * whose text moved since their subject was found, and those found under a rule or question that has changed since.
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
  * pass key, so a changed rule finds again the subjects it found, and those alone. Version 1's one key for both rules
  * is taken whole, once: its filed tickets are found again unchanged, under the metadata rule's own key (review pass 5).
@@ -142,7 +142,8 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
   try {
     return await sweep(sql, cfg, { MODEL, DRY_RUN, LIMIT, env, url: opts.url ?? "", signal: opts.signal, onPass: opts.onPass, out, err });
   } catch (e) {
-    // A database that stops answering before the pages, or between them, ends the sweep in words, not a trace (review pass 2).
+    // A database that stops answering before the pages, or between them, ends the sweep in words, not a trace
+    // (review pass 2).
     if (!databaseUnavailable(e)) throw e;
     err(databaseDown(e));
     return 1;
@@ -238,7 +239,7 @@ async function sweep(
   /**
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
    * pass 2: a thought the sweep ended at was counted and in none). `taken`, for --limit, counts that one too.
-   * `replaced` and `newKey` count within the recorded ones, and `leftOutOfDate` within the rest: no bucket of their own.
+   * `replaced` and `newKey` count within the recorded ones, `leftOutOfDate` within the rest: no bucket of their own.
    */
   const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
   let taken = 0;
@@ -334,7 +335,8 @@ async function sweep(
       recipe = subjectRecipe({ by: found.by });
     } else if (!MODEL || DRY_RUN) {
       n.left++;
-      // One holding a subject found at another text or under an older rule or question: it stands until a model's answer replaces it.
+      // One holding a subject found at another text or under an older rule or question: it stands until a model's
+      // answer replaces it.
       if (row.standing_key !== null) n.leftOutOfDate++;
       return true;
     } else {
@@ -410,7 +412,8 @@ async function sweep(
       n[by]++;
       if (w.action === "replaced") {
         n.replaced++;
-        // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a reader wants.
+        // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
+        // reader wants.
         if (row.standing_key !== key) n.newKey++;
       }
     }
