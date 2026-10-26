@@ -991,8 +991,8 @@ try {
   // so the second call runs on the connection that prepared the first.
   // Bun prepares a statement only when it has parameters, so every read here binds one.
   const admin = new SQL({ url: URL_, max: 1 });
-  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_trig()", "widen_first_fn(int)", "odd_out(int)", "odd_cols(int)"]) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
-  for (const t of ["widen_t", "widen_log", "widen_first", "odd_names", "emoji_names"]) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)", "widen_trig()", "widen_first_fn(int)", "odd_out(int)", "odd_cols(int)"]) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
+  for (const t of ["widen_t", "widen_log", "widen_first", "widen_cnt", "odd_names", "emoji_names"]) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
   await admin`DROP SEQUENCE IF EXISTS widen_seq`;
   await admin`CREATE TABLE widen_t (id serial PRIMARY KEY, name text NOT NULL)`;
   await admin`INSERT INTO widen_t (name) VALUES ('first')`;
@@ -1070,7 +1070,7 @@ try {
   const realUnsafe = pool.unsafe;
   const counted = async (run: () => PromiseLike<{ error: { code?: string } | null }>) => {
     let catalogReads = 0, queries = 0;
-    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_(attribute|proc)/.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
+    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_(attribute|proc)|^SHOW server_encoding/.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
     const codes: (string | undefined)[] = [];
     try { for (let i = 0; i < 5; i++) codes.push((await run()).error?.code); } finally { pool.unsafe = realUnsafe; }
     return { codes: codes.join(), catalogReads, queries };
@@ -1085,7 +1085,7 @@ try {
     assert(c.codes === "42703,42703,42703,42703,42703" && c.catalogReads <= 1 && c.queries === 5, `five calls ${what} a column the table lacks: five 42703s, ${c.catalogReads} catalog read(s) and ${c.queries} queries — one each, not a retry (${c.codes})`);
   }
   // Postgres counts characters, JavaScript code units: columns named with characters outside the BMP, before the
-  // caller's bad column, must not move its place into the spelled-out list (45 such characters, more than the 27
+  // caller's bad column, must not move its place into the spelled-out list (45 such characters, more than the 26
   // between the list's end and the filter's column; a name holds 63 bytes, 15 of them).
   await admin.unsafe(`CREATE TABLE emoji_names (id int PRIMARY KEY, ${["a", "b", "c"].map((k) => `"${k}${"\u{1F642}".repeat(15)}" text`).join(", ")})`);
   await one.from("emoji_names").select("*").eq("id", 1);
@@ -1098,6 +1098,10 @@ try {
     BEGIN PERFORM nextval('widen_seq'); RETURN QUERY EXECUTE 'SELECT t.id, t.title FROM widen_t t'; END $$`);
   await admin.unsafe(`CREATE FUNCTION widen_na(p_name text) RETURNS TABLE (id int, name text) LANGUAGE plpgsql AS $$
     BEGIN PERFORM nextval('widen_seq'); RAISE EXCEPTION 'not supported' USING ERRCODE = '0A000'; END $$`);
+  // An inlined SQL function's body runs inside the statement, and a 0A000 it raises carries no function context:
+  // only the plan cache's own refusal (its routine, RevalidateCachedQuery) is a changed plan.
+  await admin.unsafe(`CREATE FUNCTION widen_inl(x text) RETURNS SETOF int LANGUAGE sql STABLE AS $$
+    SELECT CASE WHEN g = 1 THEN nextval('widen_seq')::int ELSE length((x::record)::text) END FROM generate_series(1, 2) g $$`);
   await admin`CREATE TABLE widen_log (id int, name text)`;
   await admin.unsafe(`CREATE FUNCTION widen_trig() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN PERFORM nextval('widen_seq'); RAISE EXCEPTION 'column "name" does not exist' USING ERRCODE = '42703'; END $$`);
@@ -1106,8 +1110,68 @@ try {
   const body = await one.rpc("widen_body", { p_name: "first" });
   const trig = await one.from("widen_log").insert({ id: 1, name: "a" }).select("*");
   const na = await one.rpc("widen_na", { p_name: "first" });
+  const inl = await one.rpc("widen_inl", { x: "(1)" });
+  // …and when the fresh read would spell a new statement: a scalar the catalog has read, made again with columns and
+  // an argument, called with that argument — a statement never prepared, so its body runs and raises a 0A000 of its own.
+  await admin`CREATE FUNCTION widen_inl2(x text) RETURNS int LANGUAGE sql STABLE AS $$ SELECT 1 $$`;
+  await one.rpc("widen_inl2", { x: "(1)" });
+  await admin`DROP FUNCTION widen_inl2(text)`;
+  await admin.unsafe(`CREATE FUNCTION widen_inl2(x text, y text DEFAULT '') RETURNS TABLE (a int) LANGUAGE sql STABLE AS $$
+    SELECT CASE WHEN g = 1 THEN nextval('widen_seq')::int ELSE length((x::record)::text) END FROM generate_series(1, 2) g $$`);
+  const inl2 = await one.rpc("widen_inl2", { x: "(1)", y: "" });
   const [{ last_value }] = await admin`SELECT last_value::int FROM widen_seq`;
-  assert(body.error?.code === "42703" && trig.error?.code === "42703" && na.error?.code === "0A000" && last_value === 3, `a 42703 from a function body and from a trigger, and a 0A000 from a function body, each ran once: the sequence at ${last_value} after the three calls, not 6 (${body.error?.message}; ${trig.error?.message}; ${na.error?.message})`);
+  assert(body.error?.code === "42703" && trig.error?.code === "42703" && na.error?.code === "0A000" && inl.error?.code === "0A000" && inl2.error?.code === "0A000" && last_value === 5, `a 42703 from a function body and from a trigger, and a 0A000 from a plpgsql body and from two inlined SQL bodies, each ran once: the sequence at ${last_value} after the five calls, not 10 (${body.error?.message}; ${trig.error?.message}; ${na.error?.message}; ${inl.error?.message}; ${inl2.error?.message})`);
+  // A changed plan that no fresh read mends — a scalar's type changed, a named call's OUT column retyped — is one
+  // statement a call: the scalar's fresh read spells the same `*` and is answered unrun, the named call not retried.
+  await admin`CREATE FUNCTION widen_sc2(p_name text) RETURNS int LANGUAGE sql STABLE AS $$ SELECT 1 $$`;
+  await admin`CREATE FUNCTION widen_rt(p_name text) RETURNS TABLE (id int) LANGUAGE sql STABLE AS $$ SELECT 1 $$`;
+  await one.rpc("widen_sc2", { p_name: "first" });
+  await one.rpc("widen_rt", { p_name: "first" });
+  await admin`DROP FUNCTION widen_sc2(text)`;
+  await admin`CREATE FUNCTION widen_sc2(p_name text) RETURNS text LANGUAGE sql STABLE AS $$ SELECT 'one' $$`;
+  await admin`DROP FUNCTION widen_rt(text)`;
+  await admin`CREATE FUNCTION widen_rt(p_name text) RETURNS TABLE (id bigint) LANGUAGE sql STABLE AS $$ SELECT 1::bigint $$`;
+  const retypedScalar = await counted(() => one.rpc("widen_sc2", { p_name: "first" }));
+  const retypedNamed = await counted(() => one.rpc("widen_rt", { p_name: "first" }));
+  assert(retypedScalar.codes === "0A000,0A000,0A000,0A000,0A000" && retypedScalar.queries === 5, `a scalar whose type changed: five 0A000s in five statements, the fresh read's same statement answered unrun (${retypedScalar.queries} statements, ${retypedScalar.catalogReads} catalog reads)`);
+  assert(retypedNamed.codes === "0A000,0A000,0A000,0A000,0A000" && retypedNamed.queries === 5 && retypedNamed.catalogReads === 0, `a named call whose OUT column was retyped: five 0A000s, five statements and no catalog read (${retypedNamed.queries}, ${retypedNamed.catalogReads})`);
+  // The count query a page past the end runs names no column of the shim's: its 42703 is not placed in the page's list.
+  await admin`CREATE TABLE widen_cnt (id int, c int)`;
+  await admin`INSERT INTO widen_cnt VALUES (1, 1), (2, 1)`;
+  await one.from("widen_cnt").select("*").eq("c", 1);
+  let pages = 0, dropped = false;
+  pool.unsafe = function (this: unknown, ...a: unknown[]) {
+    const q = String(a[0]);
+    if (q.startsWith("SELECT count(*)::int AS __count") && !dropped) { dropped = true; return admin`ALTER TABLE widen_cnt DROP COLUMN c`.then(() => realUnsafe.apply(this, a)); }
+    if (/FROM "widen_cnt"/.test(q) && !q.startsWith("SELECT count(*)")) pages++;
+    return realUnsafe.apply(this, a);
+  };
+  let counted5: { error: { code?: string } | null };
+  try { counted5 = await one.from("widen_cnt").select("*", { count: "exact" }).eq("c", 1).range(5, 9); } finally { pool.unsafe = realUnsafe; }
+  assert(dropped && counted5.error?.code === "42703" && pages === 1, `a count query's 42703 is the count's own: the page ran once (${pages}), not again (${counted5.error?.code})`);
+  // A SQL_ASCII server counts the place in bytes, not characters: columns named outside ASCII before a dropped one.
+  const asciiUrl = Object.assign(new URL(URL_), { pathname: "/smd3329_ascii" }).toString();
+  await admin`DROP DATABASE IF EXISTS smd3329_ascii WITH (FORCE)`;
+  await admin`CREATE DATABASE smd3329_ascii ENCODING 'SQL_ASCII' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'`;
+  const asciiAdmin = new SQL({ url: asciiUrl, max: 1 });
+  const ascii = createClient(`${asciiUrl}${asciiUrl.includes("?") ? "&" : "?"}application_name=smd3329ascii`, "k", { max: 1 });
+  const [{ db: asciiDb }] = await ascii.sql`SELECT current_database() AS db`;
+  await asciiAdmin.unsafe(`CREATE TABLE tt (id int, ${["a", "b", "c", "d"].map((k) => `"${k}${"\u00e9".repeat(31)}" text`).join(", ")}, z int)`);
+  await asciiAdmin`INSERT INTO tt (id, z) VALUES (1, 2)`;
+  await ascii.from("tt").select("*").eq("id", 1);
+  await asciiAdmin`ALTER TABLE tt DROP COLUMN z`;
+  const asciiDrop = await ascii.from("tt").select("*").eq("id", 1);
+  // …and a filter on a column the table lacks, after them, stays the caller's: the place read in bytes, not two a character.
+  const asciiPool = ascii.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
+  const asciiUnsafe = asciiPool.unsafe;
+  let asciiQueries = 0;
+  asciiPool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM "tt"/.test(String(a[0]))) asciiQueries++; return asciiUnsafe.apply(this, a); };
+  try { for (let i = 0; i < 3; i++) await ascii.from("tt").select("*").eq("no_such_column", 1); } finally { asciiPool.unsafe = asciiUnsafe; }
+  assert(asciiQueries === 3, `three filters on a missing column on the SQL_ASCII server: ${asciiQueries} queries, not a retry each`);
+  assert(asciiDb === "smd3329_ascii" && asciiDrop.error === null && !("z" in ((asciiDrop.data as object[])?.[0] ?? { z: 1 })), `a column dropped under a client of a SQL_ASCII server, after columns named outside ASCII: the next call answers (${asciiDb}; ${asciiDrop.error?.message ?? "ok"})`);
+  await ascii.close();
+  await asciiAdmin.close();
+  await admin`DROP DATABASE smd3329_ascii WITH (FORCE)`;
   // Every column a `*` spells out is the catalog's, so any name a column can have is quoted as Postgres quotes it —
   // where a caller's own list keeps ident()'s rule — and an unnamed OUT parameter leaves the call reading `*`.
   await admin.unsafe(`CREATE TABLE odd_names (id int PRIMARY KEY, "my col" text, "naïve" int, "q""uote" int)`);
@@ -1124,7 +1188,8 @@ try {
   await admin`DROP TABLE odd_names`;
   await one.close();
   await admin`ALTER TABLE gizmos DROP COLUMN added`;
-  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)"]) await admin.unsafe(`DROP FUNCTION ${f}`);
+  for (const f of ["widen_fn(text)", "widen_rows(text)", "widen_sc(text)", "widen_body(text)", "widen_na(text)", "widen_inl(text)", "widen_inl2(text, text)", "widen_sc2(text)", "widen_rt(text)"]) await admin.unsafe(`DROP FUNCTION ${f}`);
+  await admin`DROP TABLE widen_cnt`;
   await admin`DROP TABLE widen_log CASCADE`;
   await admin`DROP FUNCTION widen_trig()`;
   await admin`DROP SEQUENCE widen_seq`;
