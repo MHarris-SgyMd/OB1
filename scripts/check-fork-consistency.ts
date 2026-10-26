@@ -6995,9 +6995,10 @@ const MCP_SERVICE = {
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
- * `bun ../dashboard/serve.ts` with auto-install off, holding no key and no secret — only the origin and the
- * configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so
- * dropping or pinning it would reopen that door) — on the mesh alone, its files read-only and no capability, its
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin and the configured
+ * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so dropping or
+ * pinning it would reopen that door), and the authorization server's secret for its `gui` client, the one secret it
+ * holds, which signs the operator in through the AS while the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its
  * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
  * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
  */
@@ -7010,6 +7011,7 @@ const APP_SERVICE = {
     OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
     COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
     OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
+    OB1_AUTH_SECRET_GUI: "${OB1_AUTH_SECRET_GUI:-}",
   },
   stop_grace_period: "${OB1_STOP_GRACE:-10}s",
   depends_on: { api: { condition: "service_started" } },

@@ -1,15 +1,30 @@
 import { fail, redirect } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
 import { HOME } from '$lib/paths';
 import type { Actions, PageServerLoad } from './$types';
 import { codeOf, rest } from '$lib/server/rest';
 import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
-import { FIRST_READ, keySignInOffered, whoAmI } from '$lib/server/signin';
+import { FIRST_READ, keySignInOffered, REFUSED_WORDS, whoAmI } from '$lib/server/signin';
+import { oauthSettings } from '$lib/server/oauth';
+import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
-export const load: PageServerLoad = async ({ locals, request }) => {
+/**
+ * The page's state (ADR decision 16, SMD-2382): not configured, key sign-in;
+ * configured and the authorization server answering, a sign-in through it;
+ * configured and not answering, no sign-in here — knocking the AS over opens
+ * no weaker door — pointing to break-glass; configured but the GUI given no
+ * secret or no sound origin, said as the operator's to fix.
+ */
+export const load: PageServerLoad = async ({ locals, request, url }) => {
 	// Signed in, a visit goes home; a post's own answer stands, so a refused key
 	// sent from a tab still signed in says why (review pass 2).
 	if (locals.session && request.method === 'GET') throw redirect(303, HOME);
-	return { offered: keySignInOffered() };
+	// Its own words alone: `constructor` or `__proto__` in the address is no word of it (review pass 1: an inherited key was a 500).
+	const word = url.searchParams.get('refused') ?? '';
+	const refused = Object.hasOwn(REFUSED_WORDS, word) ? REFUSED_WORDS[word] : null;
+	if (keySignInOffered()) return { mode: 'key' as const, refused };
+	if (!oauthSettings(env)) return { mode: 'misconfigured' as const, refused };
+	return { mode: (await authReachability().reachable()) ? ('oauth' as const) : ('unavailable' as const), refused };
 };
 
 export const actions: Actions = {
@@ -17,7 +32,7 @@ export const actions: Actions = {
 	// under that key. A refusal is the core's (401 here); what the key may call
 	// decides whether it may sign in at all and whether it may capture.
 	default: async ({ request, cookies, url }) => {
-		if (!keySignInOffered()) return fail(403, { error: 'Key sign-in is off: this stack is configured with the authorization server.' });
+		if (!keySignInOffered()) return fail(403, { error: 'Key sign-in is off: this stack is configured with the authorization server. Sign in through it.' });
 		const form = await request.formData();
 		const key = String(form.get('key') ?? '').trim();
 		if (!key) return fail(400, { error: 'Paste an access key.' });
@@ -41,7 +56,7 @@ export const actions: Actions = {
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach.
 		closeSession(cookies.get(SESSION_COOKIE));
-		const id = openSession({ key, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
+		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
 		cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);
 	},
