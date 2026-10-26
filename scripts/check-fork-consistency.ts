@@ -520,6 +520,12 @@
  *      reported): on macOS a port picked for every address can be one another
  *      app holds on 127.0.0.1, which answers there in its place (SMD-3323);
  *      LISTEN_EVERY_ADDRESS names the exceptions, one site each, with why
+ *  43. no workflow under .github/workflows/ gives a container a secret's
+ *      value on the command line: an `-e` or `--env` naming a secret-shaped
+ *      variable (a KEY, SECRET, PASSWORD, PW, TOKEN or CREDENTIAL word in its
+ *      name) with a `$` in its value fails, since the runner's process list
+ *      shows it; pass it by name (`-e NAME`) from the shell's environment
+ *      (SMD-3351). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -7642,6 +7648,61 @@ function checkLoopbackListeners() {
   }
 }
 checkLoopbackListeners();
+
+// ── 43: a workflow gives a container a secret by name, never its value on the command line (SMD-3351) ──
+/**
+ * 43: in each workflow, an `-e` or `--env` flag (docker run, compose exec or run) that gives a secret-shaped
+ * variable a value with a `$` in it puts what that expands to in the docker process's argv, which the runner's
+ * process list shows for as long as it runs. Set the variable in the shell's environment and pass it by name,
+ * `-e NAME`. A secret-shaped name has KEY, SECRET, PASSWORD, PASSWD, PW, TOKEN or CREDENTIAL (or a plural) as
+ * one of its `_`-separated words. A literal value passes (a stand-in a step declares), as do a single-quoted one,
+ * which expands nothing, and a comment line. It reads the name alone: `-e ROLE_URL="$url"` passes, whatever the
+ * URL carries.
+ */
+const SECRET_NAME_WORD = /^(?:KEYS?|SECRETS?|PASSWORDS?|PASSWD|PW|TOKENS?|CREDENTIALS?)$/;
+function secretsOnArgv(text: string): { line: number; name: string }[] {
+  const out: { line: number; name: string }[] = [];
+  text.split("\n").forEach((l, i) => {
+    if (/^\s*#/.test(l)) return;
+    for (const m of l.matchAll(/(?:^|[\s(])(?:-e|--env)(?:\s+|=)(["']?)([A-Za-z_][A-Za-z0-9_]*)=(\S*)/g)) {
+      const [, quote, name, value] = m;
+      if (quote === "'" || value.startsWith("'") || !value.includes("$")) continue;
+      if (name.toUpperCase().split("_").some((w) => SECRET_NAME_WORD.test(w))) out.push({ line: i + 1, name });
+    }
+  });
+  return out;
+}
+function checkSecretsOnArgv() {
+  const cases: [string, number][] = [
+    ['auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie', 1],
+    ["auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --session-cookie", 0],
+    ['docker run -d --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 img', 1],
+    ["OB1_FORWARDER_KEY=$(openssl rand -hex 32) docker run -d -e OB1_FORWARDER_KEY -e OB1_REST_URL=http://127.0.0.1:9 img", 0],
+    ["docker run --env OB1_SMOKE_READ_KEY=${KEY} img", 1],
+    ["docker run --env=API_TOKEN=$t img", 1],
+    ['args=(-e "PLUGIN_PW=$p")', 1],
+    ["docker run -e OB1_GUI_SECRET=${{ secrets.GUI }} img", 1],
+    ['docker run -e A_KEY="$a" -e B_TOKEN="$b" img', 2],
+    ['oneshot -e ROLE_URL="$good" orchestration-runner-role', 0],
+    ['auth exec -T -e PUB="$pub" auth bun x', 0],
+    ["docker run -e KEYBOARD=$k img", 0],
+    ["docker run -e OB1_X_SECRET=ci-stand-in-0123 img", 0],
+    ["docker run -e 'OB1_X_SECRET=$literal' img", 0],
+    ['          # auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth', 0],
+    ["auth exec -T auth bun -e 'const k = process.env.OB1_KEY; console.log(k)'", 0],
+  ];
+  const wrong = cases.map(([t, n]) => ({ t, want: n, got: secretsOnArgv(t).length })).filter((c) => c.got !== c.want);
+  if (wrong.length) fail(SELF, `check 43 no longer reads its probe as written (${JSON.stringify(wrong)}): an -e or --env giving a secret-shaped name a value with a $ fails, one by name, a literal, a single-quoted value, another name and a comment pass (SMD-3351)`);
+  const dir = join(ROOT, ".github", "workflows");
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
+  if (!files.length) { fail(".github/workflows", "no workflow found — check 43 reads each one for a secret on the command line (SMD-3351)"); return; }
+  for (const f of files) {
+    for (const s of secretsOnArgv(readFileSync(join(dir, f), "utf8"))) {
+      fail(`.github/workflows/${f}:${s.line}`, `-e ${s.name}=<a value with $> puts the secret on the docker command line, which the runner's process list shows while it runs — set ${s.name} in the step's environment (export it) and pass it by name, -e ${s.name} (check 43, SMD-3351)`);
+    }
+  }
+}
+checkSecretsOnArgv();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
