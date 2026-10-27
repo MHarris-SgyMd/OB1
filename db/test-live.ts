@@ -14227,8 +14227,9 @@ async function sleepScaffold(sql: SQL) {
   await sql`DELETE FROM query_log`;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
   // No extraction key recorded: extraction's first pass records the stub
-  // model's. [38]'s dry run reads its pool unbuilt, and another model's key
-  // would refuse every pass (SMD-3392 review pass 2).
+  // model's. With the stub's own key the trigger would pool each capture as
+  // it is written, where [38]'s dry run reads its pool unbuilt; another
+  // model's would refuse every pass (SMD-3392 review pass 2).
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
@@ -15857,8 +15858,8 @@ if (want("38r")) {
   const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, stub, capture, claims, beat, lines, sleepRun, bounded } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
-  // 5 s too. The extraction key [38] left recorded the scaffold clears, as
-  // for [38]: extraction's first pass records it again.
+  // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
+  // the scaffold clears it, and extraction's first pass records it again.
   const restoreOutage = shortenOutage();
   try {
     /** A thought at another embedding model (or with no vector), written by the sync key, which wakes nothing. */
@@ -16318,9 +16319,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded, as [38] does before it in a
-  // full run, is another model's, which every pass's start would refuse: set aside, and
-  // put back at the end.
+  // The extraction key [38r] leaves recorded, in a full run and the long
+  // cell alike, is another model's, which every pass's start would refuse:
+  // set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
