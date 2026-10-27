@@ -28,7 +28,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, listenOn } from "../_shared/auth.ts";
 import { mcpReply } from "../_shared/sse.ts";
 
 const app = new Hono();
@@ -230,5 +230,6 @@ app.get("/", (c) => c.json({ status: "ok", service: "Meal Planning (Shared)", ve
 
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: app.fetch,
 };

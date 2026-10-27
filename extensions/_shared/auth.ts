@@ -380,10 +380,11 @@ function canonicalIp(text: string): string | null {
  * setting does not take; with its zone it is refused the same way), or, where
  * the entry passes `hostAddresses` (its network interfaces' addresses, as the
  * OS lists them: Linux's other 127/8 addresses are not listed, so not taken),
- * one this host does not have, is a problem, which the entry says before it
- * starts and exits 2 on: Bun's own word for an address it cannot listen on
- * misleads ("Is port N in use?" on macOS, EADDRNOTAVAIL on Linux). The value
- * is never said, so a secret pasted into it is not printed (SMD-3235).
+ * one this host does not have, is a problem, which the core entries say before
+ * they start and exit 2 on, and listenOn throws: Bun's own word for an address
+ * it cannot listen on misleads ("Is port N in use?" on macOS, EADDRNOTAVAIL on
+ * Linux). The value is never said, so a secret pasted into it is not printed
+ * (SMD-3235).
  */
 export function listenHostFrom(raw: string | undefined, hostAddresses?: readonly string[]): { hostname?: string; problem: string | null } {
   const text = raw?.trim() ?? "";
@@ -397,6 +398,18 @@ export function listenHostFrom(raw: string | undefined, hostAddresses?: readonly
     return { problem: `OB1_LISTEN_HOST (a value not shown) is not an address of this host, ${fix}` };
   }
   return { hostname: ip, problem: null };
+}
+
+/**
+ * Bun's listen options for a vendored server's default export (SMD-3323 PR 2b): `{ hostname }` where OB1_LISTEN_HOST
+ * names one IP address, `{}` for every address, unset or blank. The problem listenHostFrom finds in any other value
+ * is thrown, so the server stops at start, in words, the value never said. It does not check the host's interfaces
+ * as the core servers do: that needs `node:os`, and this file stays runtime-neutral.
+ */
+export function listenOn(raw: string | undefined): { hostname?: string } {
+  const { hostname, problem } = listenHostFrom(raw);
+  if (problem) throw new Error(problem);
+  return hostname ? { hostname } : {};
 }
 
 /**

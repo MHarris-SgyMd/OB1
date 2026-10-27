@@ -55,18 +55,21 @@ environment, `Deno.serve` at the end — and the shim imports `bun`, so until
 SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
 members, as its first import (SMD-1480, FORK.md change 74). The servers are
 Bun-native now: `process.env` for the environment and, at the tail, the shape the
-core server has (`||`: an empty `PORT` is unset, not port 0) —
+core server had (`||`: an empty `PORT` is unset, not port 0), with the listen address
+`OB1_LISTEN_HOST` names, every address unset (`listenOn` from `_shared/auth.ts`, SMD-3323) —
 
 ```ts
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: app.fetch,
 };
 ```
 
 — which Bun serves when the file is the entry module (`PORT` 8000 unset, Deno's
 old default — a port podman's `gvproxy` also holds on macOS, so the examples say
-`PORT=8787`), and which a test imports as `default.fetch` without listening. A
+`PORT=8787`), and which a test imports as `default.fetch` without listening (the
+import reads `OB1_LISTEN_HOST`, so a value that is no IP address throws there too). A
 file that still reaches `Deno.*` fails at the call under Bun, is refused by the
 codemod's triage, and fails check 11 of `scripts/check-fork-consistency.ts`.
 Then, from a checkout:
