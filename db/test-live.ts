@@ -50,8 +50,8 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
-import { subjectPrompt } from "../server-portable/subject.ts";
+import { currentSubjectSql, DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { subjectCurrent, subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
@@ -6958,25 +6958,62 @@ if (want("10h")) {
     // SMD-3306 PR 4: the question's own reasoning (OB1_SUBJECT_REASONING, on when unset), named in the pass key and the
     // recipe. A subject a model found with its reasoning off is taken while it is on, and asked again with it; turning
     // it off takes none found with it on, and asks with no reasoning pass, under the key without the `r`.
-    const offEnv = { ...env, OB1_SUBJECT_REASONING: "off" };
+    const offEnv = { ...env, OB1_SUBJECT_REASONING: "off" }, lowEnv = { ...env, OB1_SUBJECT_REASONING: "low" };
     await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
-    const onDry = await sweep({ dryRun: true }), offDry = await sweep({ dryRun: true }, offEnv), lowDry = await sweep({ dryRun: true }, { ...env, OB1_SUBJECT_REASONING: "low" });
+    const onDry = await sweep({ dryRun: true }), offDry = await sweep({ dryRun: true }, offEnv), lowDry = await sweep({ dryRun: true }, lowEnv);
     assert(asks(onDry) === asks(beforeX) + 1 && asks(offDry) === asks(beforeX) && asks(lowDry) === asks(onDry)
-        && /, reasoning on \(subject:stub-judge@p2r\)$/m.test(onDry.stdout) && /, reasoning off \(subject:stub-judge@p2\)$/m.test(offDry.stdout) && /, reasoning low \(subject:stub-judge@p2r\)$/m.test(lowDry.stdout)
+        && /, reasoning on, at most 900 s a call \(subject:stub-judge@p2r\)$/m.test(onDry.stdout) && /, reasoning off, at most 300 s a call \(subject:stub-judge@p2\)$/m.test(offDry.stdout)
+        && /, reasoning low, at most 900 s a call \(subject:stub-judge@p2r\)$/m.test(lowDry.stdout)
         && /^ {2}\d+ thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(offDry.stdout),
-      `a model's subject found with its reasoning off is taken while it is on, at any effort, not while it is off, each run naming its reasoning and key (${asks(beforeX)} → ${asks(onDry)} on, ${asks(lowDry)} low, ${asks(offDry)} off)`);
+      `a model's subject found with its reasoning off is taken while it is on, at any effort, not while it is off, each run naming its reasoning, its limit a call and its key (${asks(beforeX)} → ${asks(onDry)} on, ${asks(lowDry)} low, ${asks(offDry)} off)`);
+    // The limit a call follows the reasoning (review pass 1: two of 200 reasoning calls took over 300 s); --timeout is
+    // over it, and the CLI without the flag leaves the sweep its own.
+    const timed = await sweep({ dryRun: true, timeout: 42 });
+    const spawnedDry = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "--dry-run"], { env: env as Record<string, string>, cwd: HERE });
+    assert(/, reasoning on, at most 42 s a call \(/m.test(timed.stdout) && spawnedDry.code === 0 && /, reasoning on, at most 900 s a call \(subject:stub-judge@p2r\)$/m.test(spawnedDry.stdout),
+      `--timeout over the default, and the CLI without it leaving the sweep its own (exit ${spawnedDry.code}: ${spawnedDry.stdout.split("\n").find((l) => /subjects:/.test(l))?.trim().slice(-60)})`);
     asked = ownCalls;
     const onRun = await sweep();
     const prOn = (await standingOf(pr))!;
     assert(prOn.key === "pr:727" && prOn.judge === "subject:stub-judge@p2r" && prOn.recipe?.reasoning === "on" && ownCalls - asked === asks(onDry) && ownEfforts.slice(asked).every((e) => e === "unsent")
         && /\(1 by stub-judge\), 1 in place of a standing one \(0 with a new key\)/.test(tally(onRun)),
       `…asked again with its reasoning on, the provider's default (no effort sent), and found again under the key with the \`r\`, its recipe naming it (exit ${onRun.code}: ${tally(onRun)})`);
+    // An effort is sent as asked, keyed as on, and named in the recipe (review pass 1: only a dry run held it).
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
+    asked = ownCalls;
+    const lowRun = await sweep({}, lowEnv);
+    const prLow = (await standingOf(pr))!;
+    assert(prLow.key === "pr:727" && prLow.judge === "subject:stub-judge@p2r" && prLow.recipe?.reasoning === "low" && ownCalls - asked === asks(onDry) && ownEfforts.slice(asked).every((e) => e === "low"),
+      `…an effort asked for is sent as asked, the subject found under the key with the \`r\`, its recipe naming the effort (exit ${lowRun.code}: ${tally(lowRun)})`);
     await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
     asked = ownCalls;
     const offRun = await sweep({}, offEnv);
     const prOff = (await standingOf(pr))!;
     assert(prOff.key === "pr:727" && prOff.judge === "subject:stub-judge@p2" && prOff.recipe?.reasoning === "off" && ownCalls - asked === asks(beforeX) + 1 && ownEfforts.slice(asked).every((e) => e === "none"),
       `…and with it off, the release note's subject found with it on is not asked again, and one out of date is asked with no reasoning pass and found under the key without the \`r\`, its recipe naming it (exit ${offRun.code}, ${ownCalls - asked} asked: ${tally(offRun)})`);
+    // A key that runs past the current suffix is no pass's (review pass 1: held in TypeScript alone, so a SQL match
+    // anywhere in the key passed): taken under either setting.
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p2rr");
+    const rrOn = await sweep({ dryRun: true }), rrOff = await sweep({ dryRun: true }, offEnv);
+    assert(asks(rrOn) === asks(beforeX) + 1 && asks(rrOff) === asks(beforeX) + 1,
+      `…and a key ending \`@p2rr\` is no current subject under either setting (${asks(rrOn)} on, ${asks(rrOff)} off, of ${asks(beforeX)} + 1)`);
+    // The sweep's SQL against subjectCurrent, cell by cell under both settings (review pass 1: an off arm matching
+    // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among them.
+    const ways = ["metadata", "first_line", "model", "other", null];
+    const passes = ["subject:metadata@r1", "subject:first_line@r2", "subject:first_line@r1", "subject:rules@r1", "subject:x@p2", "subject:x@p2r", "subject:x@p1", "subject:x@p1r",
+      "subject:x@p12", "subject:x@p12r", "subject:x@p20", "subject:x@p2rr", "extract:x@p2", "extract:x@p2r", "x@p2", "@p2r", "p2", "", null];
+    const grid = ways.flatMap((by) => passes.map((judge) => ({ by, judge })));
+    const differ: string[] = [];
+    for (const on of [true, false]) {
+      const got = (await sql`
+        SELECT (${currentSubjectSql(sql, on)}) IS TRUE AS current
+          FROM (SELECT v.i, jsonb_build_object('by', v.by, 'judge_key', v.judge) AS payload
+                  FROM jsonb_to_recordset(${JSON.stringify(grid.map((g, i) => ({ i, ...g })))}::text::jsonb) AS v(i int, by text, judge text)) f
+         ORDER BY f.i`) as { current: boolean }[];
+      got.forEach((r, i) => { if (r.current !== subjectCurrent(grid[i].by, grid[i].judge, on)) differ.push(`${grid[i].by} under ${grid[i].judge} ${on ? "on" : "off"}`); });
+      if (got.length !== grid.length) differ.push(`${got.length} rows of ${grid.length} ${on ? "on" : "off"}`);
+    }
+    assert(differ.length === 0, `the sweep's SQL reads every way and pass key as subjectCurrent does, under both settings (${grid.length * 2} cells; differing: ${differ.slice(0, 4).join("; ") || "none"})`);
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;

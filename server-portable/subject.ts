@@ -19,9 +19,10 @@
  *     name it, post hoc);
  *   - a note's first-line ticket that is only context (the model, asked instead, agreed 0.950 to the rule's 0.750);
  *   - vague model phrases.
- * Version 2 met that bar on a third fresh draw with the judge model reasoning (0.945 against 0.941, Linear 18d6fd63).
- * Without reasoning it missed on that draw and on the second (0.933 against 0.941; 0.918 against 0.930, e58bd13a).
- * So the question is asked with reasoning unless OB1_SUBJECT_REASONING says off.
+ * Version 2 met Verify item 1's bar, the raters' own agreement less 0.05, on a third fresh draw with the judge model
+ * reasoning (0.945 against 0.941, Linear 18d6fd63). Without reasoning it missed on that draw and on the second (0.933
+ * against 0.941; 0.918 against 0.930, e58bd13a), though what reasoning changed was not significant alone (8 thoughts
+ * better, 4 worse). So the question is asked with reasoning unless OB1_SUBJECT_REASONING says off.
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest and finds again a subject found under an older rule or question (db/subject-sweep.ts). A key is
@@ -326,7 +327,8 @@ export function subjectReasoning(cfg: Pick<EmbedConfig, "subjectReasoning">): st
 }
 /**
  * How the pass key of a subject the current question found ends, whatever model answered it: `r` after the version
- * when the model's reasoning was on, at any effort, as decide mode's `@p<n>d<m>` names its own variant.
+ * when the model's reasoning was on, as decide mode's `@p<n>d<m>` names its own variant. An effort asked for is keyed
+ * the same, though only the provider's default was measured; the recipe names it.
  */
 export const subjectModelSuffix = (reasoning: boolean): string => `@p${SUBJECT_PROMPT_VERSION}${reasoning ? "r" : ""}`;
 /** The pass key of a subject the judge model found, beside extraction's `extract:<model>@p<n>`. */
@@ -336,10 +338,11 @@ export const subjectModelKey = (model: string, reasoning: boolean): string => `$
  * Whether a standing subject was found under the current rules and question: a rule's under that rule's key now, a
  * model's under the current question, by any model, and with its reasoning on when the question is asked with it on
  * (`reasoning`). A judge model changed since does not make a subject out of date, and nothing asks it again yet.
- * Reasoning turned on does, since the model's subjects met Verify item 1's bar with it and missed without (SMD-3306);
- * reasoning turned off does not: off spares the asks to come its cost, and keeps what was asked with it on. This is
+ * Reasoning turned on does, since the model's subjects met Verify item 1's bar with it and missed without (SMD-3306),
+ * though what it changed was not significant alone; reasoning turned off does not: off spares the asks to come its
+ * cost, and keeps what was asked with it on. This is
  * the rule's statement, with no caller at run time: the sweep reads the same in SQL (db/subject-sweep.ts's
- * NO_CURRENT_SUBJECT); test-thoughts holds this arm by arm, and test-live [10h] the SQL.
+ * currentSubjectSql); test-thoughts holds this arm by arm, and test-live [10h] the SQL against it, row by row.
  */
 export function subjectCurrent(by: string | null, judge: string | null, reasoning: boolean): boolean {
   if (by === "metadata" || by === "first_line") return judge === subjectRuleKey(by);

@@ -174,8 +174,10 @@
  * record_thought_subject at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
  * thoughts extracted before 111, those no rule keys, which it asks the judge
- * model about, those whose text moved, and those whose subject an older rule
- * or question found. A brain before 111, or a role
+ * model about, those whose text moved, those whose subject an older rule or
+ * question found, and, while the question is asked with the judge model's
+ * reasoning on (OB1_SUBJECT_REASONING), those a model found with it off. A
+ * brain before 111, or a role
  * without the grants 111's door needs, records no subject and says so once;
  * the entities stand either way.
  */
@@ -2037,7 +2039,8 @@ if (import.meta.main) {
       process.exit(2);
     }
     const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
-    const timeout = cli.int("timeout", { absent: 300, min: 1, max: MAX_CALL_TIMEOUT_S });
+    // Absent, the sweep's own default, which follows the question's reasoning (SMD-3306 PR 4).
+    const timeout = cli.has("timeout") ? cli.int("timeout", { absent: 300, min: 1, max: MAX_CALL_TIMEOUT_S }) : undefined;
     const sql = openSql(url, { max: 2 });
     let uninstall = () => {};
     await closeThenExit(sql, async () => {

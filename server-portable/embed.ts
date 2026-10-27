@@ -746,9 +746,10 @@ function numberOr(raw: string | undefined, fallback: number, range: "positive" |
  *
  * The subject question's own knob, OB1_SUBJECT_REASONING, is ON when unset
  * (SMD-3306): the judge model's subjects met Verify item 1's bar with the 27B
- * reasoning, and missed it without, and only the `--subjects` sweep asks the
- * question, off the capture path. It costs about 8x the time: a median of 71s a
- * call against 9s, the 27B on 55 canary session summaries asked both ways.
+ * reasoning and missed it without, though what it changed was not significant
+ * alone, and only the `--subjects` sweep asks the question, off the capture
+ * path. It costs about 8x the time: a median of 71s a call against 9s, the 27B
+ * on 55 canary session summaries asked both ways.
  */
 function reasoningFields(rawValue: string | undefined, unset: "on" | "off"): Record<string, unknown> {
   // Trimmed like the model, URL and numeric knobs. Compose's own dotenv trims
