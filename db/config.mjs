@@ -1657,7 +1657,7 @@ export async function setPathWithoutTemp(tx) {
  * string's options=, a role's setting — the build went there, or found
  * another tool's `thoughts` and failed on it, and with no schema on the path
  * at all the ledger's CREATE failed with 3F000. The brain lives in public,
- * where preflight and --baseline look, so public goes first and the rest of
+ * where preflight looks, so public goes first and the rest of
  * the path follows in its order, read as Postgres reads it: an extension's
  * schema on it (Supabase's `extensions`) still resolves. Session scope
  * (`set_config(…, false)`), as alignVectorSearchPath's is: it holds for each
@@ -1670,9 +1670,7 @@ export async function setPathWithoutTemp(tx) {
  * `schema_migrations` of its shape, with `name` and `sha256` — and public
  * holds no brain: that ledger and `thoughts` beside it. An empty ledger
  * alone in public, which --dry-run or a first run failed at 001 leaves, is
- * no brain. `adopting` (--baseline, which records a schema built by hand
- * and has just found public.thoughts) takes public's `thoughts` alone as
- * the brain there. `viaUser` is true where the schema is the role's own and
+ * no brain. `viaUser` is true where the schema is the role's own and
  * the path names it as `"$user"`, which the operator does not see spelled. Building on would start a second brain in public. Every schema
  * the path resolves to (current_schemas: those this role may use) is read,
  * not the first ledger a name resolves to, so another tool's
@@ -1691,7 +1689,7 @@ export async function setPathWithoutTemp(tx) {
  * which need no privilege on the schema. Bun.sql only (a tagged-template
  * client).
  */
-export async function pinPublicFirst(sql, adopting = false) {
+export async function pinPublicFirst(sql) {
   const [state] = await sql`
     SELECT current_setting('search_path') AS path,
            current_setting('server_version_num')::int AS version,
@@ -1705,7 +1703,7 @@ export async function pinPublicFirst(sql, adopting = false) {
                  AND a.attnum > 0 AND NOT a.attisdropped) = 2 AS brain`)[0].brain;
   const publicThoughts = (await sql`SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                                                      WHERE n.nspname = 'public' AND c.relname = 'thoughts') AS present`)[0].present;
-  if (!(publicThoughts && (adopting || (await holdsBrain("public"))))) {
+  if (!(publicThoughts && (await holdsBrain("public")))) {
     for (const schema of state.schemas) {
       if (schema !== "public" && (await holdsBrain(schema))) {
         const viaUser = schema === state.user && searchPathSchemas(state.path, state.version).includes("$user");
@@ -1845,8 +1843,9 @@ export function bytesText(bytes) {
  * (SMD-2871, SMD-2880), `ledger.state` one of:
  * - "pending": the ledger is read and records neither 039 nor a later file
  *   — a plain migrator run applies the pending files, 039 among them;
- * - "none": no ledger — a plain run runs every file and records them, where
- *   --baseline (the migration ledger row's adoption) would record 039 unrun;
+ * - "none": no ledger, or one recording nothing — the re-apply, which runs
+ *   every file in one transaction after its checks and records them (a plain
+ *   run would check nothing first, SMD-3325);
  * - "recorded": it records 039 — the re-apply, since a plain run skips it;
  * - "hole": it records a later file without 039 (a row removed or misspelt
  *   by hand) — the re-apply, since a plain run would apply 039 alone after
@@ -1867,7 +1866,7 @@ export function apply039(ledger = { state: "pending" }) {
     case "hole": return `The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${reapply}.`;
     case "unread": return `Whether 039 is recorded is unknown (${ledger.why ?? "this role cannot read schema_migrations"}), so re-apply the recorded migrations, which applies 039 either way: ${reapply}.`;
     case "locked": return `The ledger is locked (${ledger.why ?? "its read timed out"}): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.`;
-    case "none": return "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).";
+    case "none": return `The ledger records nothing, or there is none, so re-apply the migrations: ${reapply}; with nothing recorded it applies every file, 039 among them, and records each.`;
     default: return "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
   }
 }
