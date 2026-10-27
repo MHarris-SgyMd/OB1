@@ -1,14 +1,14 @@
 # server-portable
 
 The Open Brain REST core (`api.ts`) and the core every brain operation runs
-in, with no dependency on Deno or on Supabase's function host. It began as a
+in, on Bun. It began as a
 runtime-neutral build of the MCP server, with the same tools and wire behaviour
 as upstream's Edge Function build (`server/index.ts`, in this fork until
 SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
 PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
 
-This exists so the runtime decision in the Supabase migration could be made
-last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
+It was built runtime-neutral so the runtime could be chosen last, and it was:
+the brain runs on Bun, as the compose stack (`SETUP.md`). The
 Cloudflare Workers target and the PostgREST store it needed were retired in
 SMD-3152 — no brain ran them.
 

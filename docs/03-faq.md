@@ -100,7 +100,7 @@ That's a fair ask, and you're right — that doesn't exist in the Open Brain rig
 
 Here's how to think about it: the Open Brain is the backend. It's where the data lives, where the vectors live, where your AI connects. Obsidian is a frontend. There's nothing stopping you from having both — use the Open Brain as your storage and retrieval layer, and build (or eventually connect) a nicer interface on top of it.
 
-That could be as simple as a lightweight web app that reads from your Supabase tables and lets you browse, edit, and organize visually. It's a real project — not a copy-paste afternoon — but it's totally within reach, especially if you use an AI to help you build it. The database and API are already there. You'd just be putting a face on it.
+That could be as simple as a lightweight web app that reads from your brain through its REST core and lets you browse, edit, and organize visually. It's a real project — not a copy-paste afternoon — but it's totally within reach, especially if you use an AI to help you build it. The database and API are already there. You'd just be putting a face on it.
 
 For now, if that visual editing experience is how you think and work best, keep using Obsidian (or Workflowy) for that. Use the Open Brain for what it's good at: giving your AI access to everything you've captured. They can coexist — just don't expect one to be the other.
 

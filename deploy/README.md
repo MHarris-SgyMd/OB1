@@ -1,14 +1,10 @@
-# deploy — running Open Brain without Supabase
+# deploy — the compose stack
 
-Phase 4 of the migration: the operational glue. Supabase supplied a database, a
-place to run the function, a secret store and a deploy command. Off Supabase each
-is an ordinary piece of infrastructure, and this directory is the smallest working
-arrangement of them.
-
-`compose.yaml` is the migration plan's Phase 4 exit test made literal — a change
-reaches a running system with **no Supabase CLI installed and no supabase.com
-account involved**. It is a reference, not a production topology: no TLS, no
-backups, no resource limits.
+The brain is `compose.yaml`: the proxy, the REST core, the MCP server at `/mcp`,
+Postgres and the profiles beside them, each an ordinary piece of infrastructure
+you run, with its settings in an env file. This directory is the smallest
+working arrangement of them. It is a reference, not a production topology: no
+TLS, no backups, no resource limits.
 
 ## Prerequisites
 
@@ -39,8 +35,8 @@ bun server-portable/keygen.ts --name mcp-forwarder --scope forward   # → a lin
 server's own forward key (SMD-2287), required: compose refuses the stack
 without `OB1_FORWARDER_KEY`.
 
-`deploy/.env` is gitignored. This replaces `supabase secrets set`: the same values,
-now ordinary environment variables your platform's secret store supplies.
+`deploy/.env` is gitignored. Its values are ordinary environment variables,
+which a platform's secret store can supply instead.
 
 ### 2. Bring it up
 
@@ -108,17 +104,17 @@ degraded when the provider answers, with no restart (SMD-2890).
 
 The services, in order, the last two with the profile:
 
-| Service | Replaces |
+| Service | What it is |
 | --- | --- |
-| `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
-| `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `api` | Upstream's Edge Function and its deploy command — the REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284). It builds the server image, which `mcp` and `app` run; `server`, the MCP server `server-portable/index.ts` was, built it until SMD-2287 PR 6b retired both |
-| `mcp` | — the MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
-| `app` | Supabase's dashboard for browsing the brain — the operator GUI at `/dashboard`, a client of the REST core, on the mesh alone (SMD-2280; `dashboard/README.md`) |
-| `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
-| `forwarder` | — the stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
-| `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
-| `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
+| `postgres` | The brain's database, Postgres with pgvector (`pgvector/pgvector:0.8.6-pg16`) |
+| `migrate` | The `ob1-migrate` image (`db/Dockerfile`): runs `db/migrate.ts`, then exits |
+| `api` | The REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284). It builds the server image, which `mcp` and `app` run; `server`, the MCP server `server-portable/index.ts` was, built it until SMD-2287 PR 6b retired both |
+| `mcp` | The MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
+| `app` | The operator GUI at `/dashboard`, a client of the REST core, on the mesh alone (SMD-2280; `dashboard/README.md`) |
+| `proxy` | The stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
+| `forwarder` | The stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
+| `ollama` (profile) | A local model endpoint, in place of OpenRouter, the server's default |
+| `ollama-pull` (profile) | Pulls both models; runs once, then exits |
 
 ### 3. Verify
 
@@ -960,17 +956,17 @@ The data layer is built lazily on first use. Without a gate, a server with a wro
 `tools/list`, and passes any HTTP liveness probe — then fails when a user captures
 their first thought, with the real error buried inside a tool response.
 
-On Supabase this mattered less: the platform injected the database credentials, so
-they could not be wrong. Off Supabase every one is hand-written.
+Every one of those settings is written by hand in the env file, so any of them
+can be wrong.
 
 So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun api.ts`, the image's default command (`index.ts` until SMD-2287 PR 6b); the MCP server and the operator GUI run their own entries from the image without it, as they read no store. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
 
-One check that matters most on a database brought from a provider (a dump
-restored from Supabase, say): `vector extension`. If pgvector sits in a schema
-off the connection's `search_path` (Supabase uses `extensions`), the bare `vector` type does not resolve and every
+One check that matters most on a database brought from a managed provider (a
+restored dump, say): `vector extension`. If pgvector sits in a schema off the
+connection's `search_path` (some providers install it in `extensions`), the bare `vector` type does not resolve and every
 capture and search would fail with `type "vector" does not exist` on a database
 that has pgvector. Preflight fails with the schema it found and the exact
 statement to run: the login role's `ALTER ROLE … IN DATABASE … SET search_path`,
@@ -3861,19 +3857,9 @@ so the profile builds from a checkout.
   will not start). Preflight's `filter bitmap memory` row is information only: what a
   filter's bitmap needs against `work_mem`, with no recommendation until
   SMD-1464 settles `match_thoughts`' plan mode.
-- **Upstream's Edge Function on Supabase passing checks 2, 3 and 4.** There the API gateway
-  answers the OAuth discovery path with 401 before the function sees it, so check
-  2 fails there — and the failure is real: the claude.ai connector will not open
-  against that deployment either (upstream
-  [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
-  Checks 3 and 4 fail too: upstream's Edge Function build has no method guard, so
-  a GET answers 200 instead of 405 — with a key it hangs (upstream
-  [#424](https://github.com/NateBJones-Projects/OB1/issues/424)) — and it has no
-  `/health` route, so that GET gets the same 200 JSON-RPC refusal instead of
-  `ok` (FORK.md change 75).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
-  `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
-  cron job or a scheduled workflow (the `orchestration` profile's n8n). Not ported here.
+  `pg_net` to call an endpoint on a schedule, which the stack's Postgres does not
+  ship. Here that becomes an ordinary cron job or a scheduled workflow (the `orchestration` profile's n8n). Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
   checkout with the provider reachable, not from this stack. A checkout reaches
@@ -3894,8 +3880,8 @@ so the profile builds from a checkout.
   in its log, rather than exiting or failing the thoughts it holds
   (SMD-2599); a model the provider does not serve at start is refused with
   exit 2. Reviewing what consolidation proposes stays a person's job.
-- **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
-  does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
+- **Auth.** Clients still send a shared key, in a header or `?key=` (upstream
+  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216)).
   The `auth` profile's authorization server runs behind the proxy's `/auth`;
   the MCP server at `/mcp` is its client (SMD-2287), and only the operator
   signs in there, with no passkey yet ("Authorization server", above).

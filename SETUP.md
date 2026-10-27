@@ -1,9 +1,9 @@
-# Setting up Open Brain without Supabase
+# Setting up Open Brain
 
-Upstream's guide builds Open Brain on supabase.com: a hosted Postgres, an Edge
-Function, SQL pasted into a dashboard, and `supabase secrets set`. This fork runs
-the same thing on infrastructure you control, with no Supabase account and no
-Supabase CLI.
+Open Brain here is one compose stack on infrastructure you control: a proxy,
+the REST core, the MCP server, Postgres with pgvector, and the profiles beside
+them. (Upstream's guide builds it on supabase.com; this fork needs no Supabase
+account or CLI.)
 
 Same MCP tools, same `thoughts` schema, same clients. Different plumbing.
 
@@ -54,8 +54,8 @@ replayed against what the brain was actually asked (`evals/eval-replay.ts`) and
 show whether callers use what comes back (`evals/eval-utilization.ts`). It is
 **personal data at rest**: every query you typed. It adds no new external
 destination and makes no model or provider call —
-the rows land in the same database your thoughts already live in, so on a hosted
-(Supabase) deployment they are in your cloud database, not on your machine. And
+the rows land in the same database your thoughts already live in, so where the
+stack runs on a cloud host they are on that host, not on your machine. And
 nothing reads it on the capture or search path; the write is best-effort and
 never fails a search. `prune_query_log()` enforces a retention window
 (`OB1_QUERY_LOG_RETENTION_DAYS`, default 30), and `evals/export-queries.ts`
@@ -419,8 +419,6 @@ a leak is worth. See [issue #216](https://github.com/NateBJones-Projects/OB1/iss
   credit, **or** nothing at all if you use the `local-models` profile — in which
   case budget about 7 GB for the model downloads instead
 - [Bun](https://bun.sh) 1.4+ to mint keys and run the tests
-
-No Supabase account. No Supabase CLI. No Deno.
 
 ## Steps
 

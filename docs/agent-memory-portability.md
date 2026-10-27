@@ -2,7 +2,7 @@
 
 ```mermaid
 flowchart LR
-  Contract["Recall and write-back contracts"] --> Postgres["Supabase/Postgres adapter"]
+  Contract["Recall and write-back contracts"] --> Postgres["Postgres adapter"]
   Contract -. optional .-> SQLite["SQLite/local migration assistant"]
   Contract --> Future["Future hosted or local stores"]
   Postgres --> API["OB1 Agent Memory API"]
@@ -11,7 +11,7 @@ flowchart LR
   API --> Runtime["OpenClaw, Codex, Claude Code, internal agents"]
 ```
 
-V1 ships on Supabase/Postgres because OB1 is built there now. The product requirement is not to ship SQLite support in v1. The requirement is to keep the recall and write-back contracts clean enough that future storage adapters, importers, or migration assistants can exist without changing runtime behavior.
+V1 ships on Postgres because the brain is built there now. The product requirement is not to ship SQLite support in v1. The requirement is to keep the recall and write-back contracts clean enough that future storage adapters, importers, or migration assistants can exist without changing runtime behavior.
 
 ## Adapter Boundary
 
