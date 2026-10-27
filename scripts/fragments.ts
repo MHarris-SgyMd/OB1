@@ -65,7 +65,9 @@ export const BUMPS = new Set(["major", "minor", "patch"]);
  * nowhere); the FORK body runs to the end of the file, its first line the plain
  * title ending in every ticket the front matter lists (check 17b reads a
  * released ticket from that title once it is a numbered file), nothing on the
- * second line, `## ` sub-headings of its own kept, and no numbered heading.
+ * second line, `## ` sub-headings of its own kept, and no numbered heading; and
+ * no path to a fragment, since the cut numbers every one and rewrites no mention
+ * (a path pinned to a commit, `<sha>:changes/smd-N.md`, still resolves; SMD-2047).
  */
 export function fragmentProblems(text: string, name?: string): string[] {
   const problems: string[] = [];
@@ -129,5 +131,11 @@ export function fragmentProblems(text: string, name?: string): string[] {
     const prose = fork.replace(/^```[\s\S]*?^```/gm, ""); // a `# 1. install` comment in a fenced snippet is not a heading
     if (/\n#{1,6} \d+\. |# change \d+/i.test("\n" + prose)) problems.push("the `## FORK` body carries a numbered heading — the release step assigns the change number and writes the `# N.` heading");
   }
+  // A path to a fragment dies at the cut: the release step numbers every fragment
+  // and rewrites no mention of one. Five pending fragments held eight such paths,
+  // six to fragments 2.0.0 numbers and two to one 1.9.0 had (SMD-2047). Name the
+  // ticket; a path pinned to a commit still resolves.
+  const paths = [...new Set([...body.matchAll(/([0-9a-f]{7,40}:)?changes\/smd-\d+\.md/g)].filter((m) => !m[1]).map((m) => m[0]))];
+  if (paths.length) problems.push(`names a fragment by its path (${paths.join(", ")}) — the cut numbers every fragment and rewrites no mention, so the path points at nothing after it; name the ticket ("SMD-NNNN's record") instead, or pin the path to a commit (\`<sha>:changes/smd-NNNN.md\`)`);
   return problems;
 }
