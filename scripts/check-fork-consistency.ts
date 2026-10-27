@@ -4024,7 +4024,9 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
  * the FORK body (`### N.` / `# N.`) is the mistake the fragment format exists to
  * prevent — the number is assigned at release, so a fragment cannot know its own.
  * A citation of an existing change number is fine; check 15 holds every citation
- * to a file (SMD-1917).
+ * to a file (SMD-1917). A path to another fragment is not: the cut numbers every
+ * fragment and rewrites no mention, so a fragment names a change by its ticket, or
+ * pins the path to a commit (SMD-2047).
  */
 
 function checkFragments() {
@@ -4061,10 +4063,12 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
     ["no front matter here\n", "no front matter"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: 045\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a scalar `migrations:` (read as none, it passed while the cut refused \"migration 000\" — SMD-1870)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nIts sibling `changes/smd-2.md` says why.\n", "a path to another fragment, which points at nothing once the cut numbers it (SMD-2047)"],
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
     ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nThe mutant lists are at `fbedb39c:changes/smd-1.md`, and SMD-2's record says why; `changes/smd-NNNN.md` is the pattern.\n", "a fragment path pinned to a commit, a ticket named instead of a path, and the pattern written with letters"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
   // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.ts).
