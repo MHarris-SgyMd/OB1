@@ -1569,9 +1569,10 @@ services:
   # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
   # — `--profile sleep` — and an alternative to `--profile workers`, not a
   # companion: `bun db/sleep.ts --follow` runs the re-derive sweep, then
-  # extraction, then consolidation beside it, only while the brain is quiet
+  # re-embed when the brain has vectors not at OB1_EMBEDDING_MODEL (SMD-2679),
+  # then extraction, then consolidation beside it, only while the brain is quiet
   # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
-  # thought_audit; a search does not count (SMD-3315) — and hard-stops both
+  # thought_audit; a search does not count (SMD-3315) — and hard-stops them
   # within OB1_SLEEP_POLL seconds (unset, 5) of the next live write, every lease
   # returned. A sleep runs at most OB1_SLEEP_BUDGET minutes (unset, 60; 0 for
   # no clock), then its passes stop after the thought in hand and the next

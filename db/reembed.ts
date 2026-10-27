@@ -36,7 +36,10 @@
  *
  * ── Following (SMD-2679) ────────────────────────────────────────────────────
  * --follow polls after the pass, as extract-entities.ts's and consolidate.ts's
- * do, so the sleep scheduler can run re-embed (PR 4b). Each poll pools again —
+ * do, so the sleep scheduler runs re-embed (PR 4b: db/sleep.ts, which reads
+ * reembedBacklog, below, to start it only with work). A follower's writes are
+ * marked background (actor_context.background), as the vector mender's are, so
+ * the scheduler it runs under does not wake on them. Each poll pools again —
  * no trigger feeds this pool, as 016's feeds extraction's: the data rule and
  * the rows not at the target, or every thought under a backfill key (a
  * follower may take one, and records a model where none is recorded, as a run
@@ -45,9 +48,10 @@
  * --accept-failed are refused beside it, a configured model other than the one
  * ob1_config records is the start's refusal of kind `model-switch` (permanent:
  * a retry reads the same record), and the record moving under a running
- * follower ends it so at its next poll, after the pass in hand drains, exit
- * 2 — a pass in hand meanwhile may write its model's vectors over the new
- * pass's, which the new model's data rule returns to its pool. A poll costs
+ * follower ends it so, exit 2, read at each poll and before each worker's
+ * batch (SMD-2679 PR 4b) — the batches in hand meanwhile may write its
+ * model's vectors over the new pass's, which the new model's data rule
+ * returns to its pool. A poll costs
  * a scan of thoughts (the rows not at the target) and of the job's succeeded
  * rows (the data rule), as consolidate.ts's poll costs its pool's scan.
  * Outages are waited out as the claim workers' are (worker-bootstrap.ts,
@@ -596,6 +600,127 @@ export interface ReembedOptions {
   session?: SessionSettings;
 }
 
+/**
+ * The pool's rules over the thoughts and one job's claim rows — what is not at
+ * the key's target, what a pool is built from, the data rule and the
+ * operator's standing acceptances — run()'s, and reembedBacklog's for the
+ * sleep scheduler (SMD-2679 PR 4b), so the two read one definition. `target`
+ * is the key's model; `backfill`, a key that names none.
+ */
+function poolRules(sql: SQL, target: string, backfill: boolean) {
+  /**
+   * "Not at the target": the row has no vector, or its label differs from the
+   * target, NULL (unknown) included — see "The row says which model it is at"
+   * in the header. One definition for the pool, the data rule and the counts.
+   */
+  const notAtTarget = () => sql`(embedding IS NULL OR embedding_model IS DISTINCT FROM ${target})`;
+  /** What the pool is built from: every thought for a backfill, the rows not at the target otherwise. */
+  const poolable = () => (backfill ? sql`true` : notAtTarget());
+
+  /**
+   * The data rule — a succeeded row under this job whose thought is not at the
+   * target. Returned to the pool on every run: the row says done, the thought
+   * says otherwise. Failed rows are left to --retry-failed. A row succeeded with
+   * a caveat is at the target unless its thought has since moved, in which case
+   * this rule takes it and --retry-fallbacks has nothing left to return — the
+   * run requeues in that order, and --dry-run counts the caveats it would still
+   * find (caveatsAtTarget) rather than every caveat.
+   */
+  /**
+   * Under a backfill key an UNLABELLED thought is left to its finished row: 021
+   * could label nothing from a key naming no model, so after upgrading every
+   * such row is NULL, and treating NULL as "moved" there would return the whole
+   * corpus on the first run (third review pass). A backfill's reason is not the
+   * model; only a label that names another model, or no vector, says its
+   * finished row is wrong. Under the model's own key NULL is not at the target —
+   * 021 labelled what it had evidence for, and what is left has none.
+   */
+  const doneButNotAtTarget = () =>
+    // An ACCEPTED row is left, under either key shape, by the same bound: the
+    // operator's word holds while nothing has written the thought since the
+    // failed attempt read it (updated_at <= claimed_at; finished_at for a row
+    // never claimed); an edit is a new question — "Saying I know".
+    sql`status = 'succeeded' AND EXISTS (
+          SELECT 1 FROM thoughts x WHERE x.id = thought_id
+            AND NOT ((${accepted()}) AND ${standingBound()})
+            AND ${backfill
+              ? // The trust is bounded by 021's own evidence rule: a finished row
+                // vouches for an unlabelled thought only while nothing has written
+                // the row since — a NULL beside a row written since is a later
+                // foreign write, not a pre-021 pass (fifth review pass).
+                sql`(x.embedding IS NULL
+                     OR (x.embedding_model IS NOT NULL AND x.embedding_model <> ${target})
+                     OR (x.embedding_model IS NULL AND x.updated_at > finished_at))`
+              : // notAtTarget()'s columns are unqualified, and name x's here: the
+                // claim row has none of them.
+                notAtTarget()})`;
+  /**
+   * An accepted row — see "Saying I know": a succeeded row whose caveat is the
+   * operator's. Recognised by the prefix config.mjs spells once for both tools.
+   */
+  const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`;
+  /**
+   * The bound an acceptance stands within: the thought `x` written no later than
+   * the claim row's attempt read it. Named for a thought aliased x beside an
+   * unaliased claim row, which is how every reader here joins the two; config.mjs
+   * spells it once more for preflight and the corpus query, where the aliases
+   * differ. See "Saying I know".
+   */
+  const standingBound = () => sql`COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)`;
+  /**
+   * …and STANDING: nothing has written the thought since the failed attempt
+   * read it — claimed_at, not the release's finished_at, which an edit during a
+   * slow refusal would have hidden behind (second review pass); a hand-written
+   * row with neither timestamp is never standing rather than NULL, which no
+   * reader would have counted and the data rule would never have returned
+   * (third review pass). The counts use
+   * this form, so they cannot call a row accepted that the data rule and
+   * preflight no longer treat as such (first review pass).
+   * `last_error IS NOT NULL` above is not decoration: starts_with(NULL, …) is
+   * NULL, and a NOT around it inside the data rule turned every ordinary
+   * succeeded row's predicate NULL — false — for a row whose thought moved
+   * before its claim was released (first review pass).
+   */
+  const standingAcceptance = () =>
+    sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND ${standingBound()})`;
+
+  return { notAtTarget, poolable, doneButNotAtTarget, accepted, standingBound, standingAcceptance };
+}
+
+/**
+ * Re-embed's backlog under a model's own key, read only: the rows pending or
+ * in flight, those a follower's first pool would add — the thoughts not at the
+ * key's model with no row under it, and the data rule's succeeded rows whose
+ * thought has moved — and the failed ones. The sleep scheduler reads it as its
+ * re-embed pool (SMD-2679 PR 4b): an empty backlog starts no pass, so no probe
+ * loads the embedding model for nothing. Writes nothing; reaches no provider.
+ * `mine`: count only the leases that process can work — expired, or its own
+ * since it began — so another process's live lease, which its follower would
+ * not claim, does not hold its sleep (review pass 1: extraction waited out a
+ * crashed run's 900 s lease). `unlabelled`: of the unpooled, the vectors that
+ * carry no model — a brain from before migration 021, which nothing vouches for.
+ */
+export async function reembedBacklog(sql: SQL, job: string, mine?: { prefix: string; since: Date }): Promise<{ pending: number; claimed: number; unpooled: number; failed: number; unlabelled: number }> {
+  const model = parseReembedKey(job)?.model;
+  if (model === undefined) throw new Error(`reembedBacklog: ${job} names no model`);
+  const { poolable, doneButNotAtTarget } = poolRules(sql, model, false);
+  // One statement, so one snapshot: a claim made between two reads would count as neither (sleep.ts's poolOf).
+  const [counts] = await sql`
+    SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending,
+           count(*) FILTER (WHERE status = 'claimed' AND ${mine === undefined ? sql`true` : sql`(ttl_expires_at < now() OR (starts_with(worker_id, ${mine.prefix}) AND claimed_at >= ${mine.since}::timestamptz))`})::int AS claimed,
+           count(*) FILTER (WHERE status = 'failed')::int AS failed,
+           -- In a WHERE of its own, not a FILTER: a sublink in a FILTER runs once per succeeded row (a SubPlan, 4 µs a
+           -- row, 7–9 s at 2.5M rows), where here it is pulled up into a semi-join over the thoughts not at the model,
+           -- as the follower's own requeue plans it (review pass 3: 340 ms at 2.5M).
+           (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${job} AND ${doneButNotAtTarget()}) AS moved,
+           (SELECT count(*)::int FROM thoughts t
+             WHERE ${poolable()} AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})) AS unpooled,
+           (SELECT count(*)::int FROM thoughts t
+             WHERE t.embedding IS NOT NULL AND t.embedding_model IS NULL AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})) AS unlabelled
+      FROM thought_work_claims WHERE work_type = ${job}`;
+  return { pending: Number(counts.pending), claimed: Number(counts.claimed), unpooled: Number(counts.unpooled) + Number(counts.moved), failed: Number(counts.failed), unlabelled: Number(counts.unlabelled) };
+}
+
 /** What run() says when a caller's signal stopped --retire or --accept-failed before its write: neither has a pass. */
 const stoppedBefore = (flag: string): string => `\n  stopped before ${flag} wrote anything: the caller's signal was aborted`;
 
@@ -1060,82 +1185,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // otherwise. A run under a foreign key is refused above.
   const TARGET = parseReembedKey(JOB)?.model ?? embedConfig.embeddingModel;
 
-  /**
-   * "Not at the target": the row has no vector, or its label differs from the
-   * target, NULL (unknown) included — see "The row says which model it is at"
-   * in the header. One definition for the pool, the data rule and the counts.
-   */
-  const notAtTarget = () => sql`(embedding IS NULL OR embedding_model IS DISTINCT FROM ${TARGET})`;
-  /** What the pool is built from: every thought for a backfill, the rows not at the target otherwise. */
-  const poolable = () => (BACKFILL ? sql`true` : notAtTarget());
-
-  /**
-   * The data rule — a succeeded row under this job whose thought is not at the
-   * target. Returned to the pool on every run: the row says done, the thought
-   * says otherwise. Failed rows are left to --retry-failed. A row succeeded with
-   * a caveat is at the target unless its thought has since moved, in which case
-   * this rule takes it and --retry-fallbacks has nothing left to return — the
-   * run requeues in that order, and --dry-run counts the caveats it would still
-   * find (caveatsAtTarget) rather than every caveat.
-   */
-  /**
-   * Under a backfill key an UNLABELLED thought is left to its finished row: 021
-   * could label nothing from a key naming no model, so after upgrading every
-   * such row is NULL, and treating NULL as "moved" there would return the whole
-   * corpus on the first run (third review pass). A backfill's reason is not the
-   * model; only a label that names another model, or no vector, says its
-   * finished row is wrong. Under the model's own key NULL is not at the target —
-   * 021 labelled what it had evidence for, and what is left has none.
-   */
-  const doneButNotAtTarget = () =>
-    // An ACCEPTED row is left, under either key shape, by the same bound: the
-    // operator's word holds while nothing has written the thought since the
-    // failed attempt read it (updated_at <= claimed_at; finished_at for a row
-    // never claimed); an edit is a new question — "Saying I know".
-    sql`status = 'succeeded' AND EXISTS (
-          SELECT 1 FROM thoughts x WHERE x.id = thought_id
-            AND NOT ((${accepted()}) AND ${standingBound()})
-            AND ${BACKFILL
-              ? // The trust is bounded by 021's own evidence rule: a finished row
-                // vouches for an unlabelled thought only while nothing has written
-                // the row since — a NULL beside a row written since is a later
-                // foreign write, not a pre-021 pass (fifth review pass).
-                sql`(x.embedding IS NULL
-                     OR (x.embedding_model IS NOT NULL AND x.embedding_model <> ${TARGET})
-                     OR (x.embedding_model IS NULL AND x.updated_at > finished_at))`
-              : // notAtTarget()'s columns are unqualified, and name x's here: the
-                // claim row has none of them.
-                notAtTarget()})`;
+  /** The pool's rules over the thoughts and this job's claim rows (poolRules, above run()). */
+  const { notAtTarget, poolable, doneButNotAtTarget, accepted, standingBound, standingAcceptance } = poolRules(sql, TARGET, BACKFILL);
   const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget()})`;
-  /**
-   * An accepted row — see "Saying I know": a succeeded row whose caveat is the
-   * operator's. Recognised by the prefix config.mjs spells once for both tools.
-   */
-  const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`;
-  /**
-   * The bound an acceptance stands within: the thought `x` written no later than
-   * the claim row's attempt read it. Named for a thought aliased x beside an
-   * unaliased claim row, which is how every reader here joins the two; config.mjs
-   * spells it once more for preflight and the corpus query, where the aliases
-   * differ. See "Saying I know".
-   */
-  const standingBound = () => sql`COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)`;
-  /**
-   * …and STANDING: nothing has written the thought since the failed attempt
-   * read it — claimed_at, not the release's finished_at, which an edit during a
-   * slow refusal would have hidden behind (second review pass); a hand-written
-   * row with neither timestamp is never standing rather than NULL, which no
-   * reader would have counted and the data rule would never have returned
-   * (third review pass). The counts use
-   * this form, so they cannot call a row accepted that the data rule and
-   * preflight no longer treat as such (first review pass).
-   * `last_error IS NOT NULL` above is not decoration: starts_with(NULL, …) is
-   * NULL, and a NOT around it inside the data rule turned every ordinary
-   * succeeded row's predicate NULL — false — for a row whose thought moved
-   * before its claim was released (first review pass).
-   */
-  const standingAcceptance = () =>
-    sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND ${standingBound()})`;
 
   /**
    * Return this job's rows a predicate selects to the pool as if never tried:
@@ -1903,7 +1955,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const toVector = (v: number[]) => `[${v.join(",")}]`;
   // `via`, the door (046's origin column) — `source` until SMD-1730, when the
   // trigger stopped reading an actor's source; the row's own stays the column.
-  const actor = actorPayload({ name: "reembed", via: "db/reembed.ts", session: JOB });
+  // A follower's writes are background work (SMD-2679 PR 4b): a vectorless row it gives a vector is audited,
+  // and the sleep scheduler, which runs it, reads past a background write as it reads past the vector mender's.
+  const actor = actorPayload({ name: "reembed", via: "db/reembed.ts", session: JOB, ...(FOLLOW ? { background: "reembed" } : {}) });
 
   let stopping = false;
   /**
@@ -2106,6 +2160,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
+          // A follower reads the record before each batch, not only at its poll: a --switch-model run by hand beside
+          // it had the whole drain — a sleep's backlog — written at the old model after the switch (SMD-2679 PR 4b,
+          // review pass 4). The batches in hand still land; the follower ends, 2, once the drain returns.
+          if (FOLLOW) {
+            const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+            if (r && r.value !== embedConfig.embeddingModel) {
+              switchedTo = r.value;
+              return;
+            }
+          }
           batch = (await sql`
             SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
           if (batch.length === 0) return;
@@ -2418,7 +2482,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     await (stamper ? stamper.during(waited) : waited);
   };
   if (total > 0) await stamped(drain());
-  if (FOLLOW) {
+  // A record moved under the first drain ends the follower now, as under a poll's.
+  if (FOLLOW && switchedTo === null) {
     await waitForProvider();
     await stamper?.stamp(haltedByProvider || configError !== null ? "failed" : "ok");
     /** A poll's pool that failed is said once, until one is read again: it costs the poll, not the follower. */
@@ -2482,6 +2547,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (work > 0 && !stopping) {
         total += work;
         await stamped(drain());
+        // A worker found the record moved before a batch: the follower ends now, not a poll later.
+        if (switchedTo !== null) break;
         await waitForProvider();
       }
       await stamper?.stamp(haltedByProvider || configError !== null ? "failed" : "ok");

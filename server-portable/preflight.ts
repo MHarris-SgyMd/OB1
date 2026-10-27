@@ -4706,6 +4706,8 @@ if (configFailed) {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                // A re-embed follower is a hand run — no compose service runs one — so its fix is the row alone (review pass 3).
+                if ((h.stale || h.ended) && sleepRuns && h.worker === "reembed") return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
@@ -4797,7 +4799,14 @@ if (configFailed) {
             // Followers running here keep a scheduler down: it refuses beside
             // them, so "start it again" alone would only refuse again (review pass 3).
             const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
-            if (down && followers.length) {
+            // A re-embed follower run by hand keeps it down too: its fix is to stop that run (review pass 3).
+            const handFollowers = w.heartbeats.filter((b) => b.worker === "reembed" && !b.stale && !b.ended);
+            const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
+            if (down && handFollowers.length && !followers.length) {
+              fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
+            } else if (down && followers.length) {
+              // Beside the workers' followers, named too: their fix alone would leave the scheduler refusing (review pass 4).
+              if (handFollowers.length) fixes.push(`${handFix}.`);
               fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
             } else if (h.restart) {
               fixes.push(heldFix(h, "sleep") as string);
