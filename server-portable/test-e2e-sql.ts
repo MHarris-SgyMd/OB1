@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { answersHealth, applyMigrations, childPort, createAssert, plantLedger, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
+import { answersHealth, applyMigrations, childPort, createAssert, migrationFiles, plantLedger, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -2504,7 +2504,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // A ledger planted over the schema: it records every file, so its highest is
   // the tree's last — a fresh brain is current.
   const planted = await plantLedger(URL_);
-  assert(planted > 0, `the planted ledger records every file (${planted} rows)`);
+  assert(planted === migrationFiles().length, `the planted ledger records every file (${planted} rows)`);
   const info = await health("e2e-key") as Record<string, any>;
   const db = info.database ?? {};
   const [truth] = await sql`

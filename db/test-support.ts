@@ -1232,20 +1232,22 @@ export async function ledgerNames(sql: SQL): Promise<string[] | null> {
  * the rows `migrate.ts --baseline` wrote, planted directly, for the sections
  * that need a schema older than its ledger, a brain damaged from outside,
  * which the migrations' guards and `--reapply` answer (SMD-3325). The table is
- * the migrator's and each sha its own (migrationSha over the template), so a
- * plain run reads every file as applied and unchanged; a name already recorded
- * keeps its row. Returns how many rows it added.
+ * the migrator's, in public, where the migrator puts it whatever the path puts
+ * first, and each sha its own (migrationSha over the template, read per call),
+ * so a plain run reads every file as applied and unchanged; a name already
+ * recorded keeps its row. One INSERT for every file. Returns how many rows it
+ * added.
  */
 export async function plantLedger(url: string): Promise<number> {
   const sql = new SQL({ url, max: 1 });
   try {
-    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`;
-    let added = 0;
-    for (const f of migrationFiles()) {
-      const rows = await sql`INSERT INTO schema_migrations (name, sha256) VALUES (${f}, ${migrationSha(readFileSync(join(MIGRATIONS, f), "utf8"))}) ON CONFLICT (name) DO NOTHING RETURNING name`;
-      added += rows.length;
-    }
-    return added;
+    await sql`CREATE TABLE IF NOT EXISTS public.schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`;
+    const rows = migrationFiles().map((name) => ({ name, sha256: migrationSha(readFileSync(join(MIGRATIONS, name), "utf8")) }));
+    const added = await sql`
+      INSERT INTO public.schema_migrations (name, sha256)
+      SELECT name, sha256 FROM jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb) AS r(name text, sha256 text)
+      ON CONFLICT (name) DO NOTHING RETURNING name`;
+    return added.length;
   } finally {
     await sql.close();
   }
