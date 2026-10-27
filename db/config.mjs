@@ -1335,6 +1335,17 @@ export const ACCEPTED_BY_MODEL_SQL =
 export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
 
 /**
+ * Whether the fork's schema is in public: migration 001's `thoughts`, a table
+ * or a partitioned one, by pg_class so a role's search_path does not hide it.
+ * An SQL expression, read as a column (`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS
+ * present`) by migrate.ts's refusal of a plain run over a schema with no
+ * ledger and preflight's ledger row, so the two judge one database alike
+ * (SMD-3425).
+ */
+export const PUBLIC_THOUGHTS_EXISTS =
+  "EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p'))";
+
+/**
  * The lock timeout, in seconds, migrate.ts sets for its session — every
  * transaction it opens, the checks' reads before a re-run, the ledger reads —
  * and quotes in every message of its own that names it; db/test-upgrade.ts
@@ -1845,7 +1856,7 @@ export function bytesText(bytes) {
  *   — a plain migrator run applies the pending files, 039 among them;
  * - "none": no ledger, or one recording nothing — the re-apply, which runs
  *   every file in one transaction after its checks and records them (a plain
- *   run would check nothing first, SMD-3325);
+ *   run is refused there, SMD-3425);
  * - "recorded": it records 039 — the re-apply, since a plain run skips it;
  * - "hole": it records a later file without 039 (a row removed or misspelt
  *   by hand) — the re-apply, since a plain run would apply 039 alone after
@@ -1888,8 +1899,8 @@ export function apply039(ledger = { state: "pending" }) {
  *   dropped first;
  * - a free shipped name: filled first, by renaming a staging index of 039's
  *   shape onto it or building one under it CONCURRENTLY (an INVALID staging
- *   index dropped before) — a re-apply, or a plain run with no ledger,
- *   re-runs 001's and 007's CREATE INDEX ahead of 039 and would build a
+ *   index dropped before) — a re-apply, the one run a schema with no ledger
+ *   takes (SMD-3425), re-runs 001's and 007's CREATE INDEX ahead of 039 and would build a
  *   vector index there inside its transaction, then 039 its own;
  * - beside anything else under the name, 039 swaps the staging index in:
  *   adopting one of its shape, or building one inside its transaction,
@@ -1922,7 +1933,7 @@ export function plan039({ pairs, dim }) {
     if (!shipped) {
       if (exact(staging)) { g.why.push(`${ship} is missing and ${stage}, of 039's shape, is built`); g.first.push(`ALTER INDEX ${stage} RENAME TO ${ship};`); }
       else {
-        g.why.push(`${ship} is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`);
+        g.why.push(`${ship} is missing, and a re-apply would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`);
         g.first.push(...(staging?.valid === false ? [`DROP INDEX CONCURRENTLY ${stage};`] : []), create(ship));
       }
       continue;

@@ -56,7 +56,10 @@ page naming the address that takes it ("The origin", below).
   page could load. A key the core refuses is refused (401), with nothing held.
 - **The session is the server's.** The cookie (`ob1_dashboard_session`, `Path=/dashboard`,
   httpOnly, SameSite=Lax, a day, Secure on https) carries a random id and nothing
-  else. The key and its scope stay in the server's memory, so neither the key nor
+  else. Where the origin names a port its name carries it (`ob1_dashboard_session_8010`
+  at `http://127.0.0.1:8010`): a browser keeps one cookie per host and name whatever
+  the port, so two brains reached on one machine would otherwise share it, and signing
+  in to one would sign the browser out of the other (SMD-3352). The key and its scope stay in the server's memory, so neither the key nor
   anything sealed from it reaches the browser, and sign-out ends the session on the
   server. A restart signs everyone out.
 - **A revoked key** ends its sessions at their next page: the REST core answers 401,

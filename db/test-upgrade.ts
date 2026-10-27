@@ -5072,7 +5072,7 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   await applyMigrations(URL_, OPTS);
 }
 
-console.log("\n[22] --baseline and --force are retired: each is refused by name, on an empty database and over a schema with no ledger alike, changing nothing; --reapply brings that schema under the ledger, refusing first from a shell unlike the brain (SMD-3325)");
+console.log("\n[22] --baseline and --force are retired: each is refused by name, on an empty database and over a schema with no ledger alike, changing nothing; a plain run and its dry run are refused over that schema too (SMD-3425), and --reapply brings it under the ledger, refusing first from a shell unlike the brain (SMD-3325)");
 {
   await dropSchema(URL_);
   // One probe for the section: the ledger's names, or null with no ledger table (test-support's ledgerNames).
@@ -5104,6 +5104,21 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
     assert(r.code === 2 && retiredBaseline.test(r.out) && (await ledger()) === null,
            `${flags.join(" ")} over a schema with no ledger is refused as retired, no ledger written (exit ${r.code})`);
   }
+  // A plain run over that schema is refused too, its dry run with it (SMD-3425):
+  // it would give each file its own transaction and check nothing first.
+  // Nothing written, --reapply named; and over an empty ledger beside it, as a
+  // --dry-run on an empty database leaves one (SMD-2291).
+  for (const flags of [[], ["--dry-run"]] as const) {
+    const r = await migrate(...flags);
+    assert(r.code === 2 && /refused: public\.thoughts is here and the migration ledger records no migration \(no schema_migrations table\)/.test(r.out)
+      && /cd db && bun migrate\.ts --url … --reapply/.test(r.out) && /Nothing was changed\./.test(r.out) && (await ledger()) === null,
+      `${flags.length ? "--dry-run" : "a plain run"} over a schema with no ledger is refused naming --reapply, no ledger written (exit ${r.code})${r.code === 2 ? "" : `:\n${r.out}`}`);
+  }
+  await probe.unsafe("CREATE TABLE public.schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
+  const overEmpty = await migrate();
+  assert(overEmpty.code === 2 && /refused: public\.thoughts is here and the migration ledger records no migration \(schema_migrations holds none\)/.test(overEmpty.out) && (await ledger())?.length === 0,
+    `a plain run over the schema beside an empty ledger is refused the same way, nothing recorded (exit ${overEmpty.code})`);
+  await probe.unsafe("DROP TABLE public.schema_migrations");
   // The remedy the refusal and preflight name, over that schema with a thought
   // in it: --reapply. From a shell whose model is not the one ob1_config
   // records it refuses first and writes nothing — not even the ledger table,
@@ -5140,6 +5155,9 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "008" });
   await probe`INSERT INTO thoughts (content, metadata) VALUES ('written before any ledger', '{}'::jsonb)`;
+  const plainOlder = await migrate();
+  assert(plainOlder.code === 2 && /refused: public\.thoughts is here/.test(plainOlder.out) && (await ledger()) === null,
+    `a plain run over the schema through 007 with no ledger is refused, nothing written (exit ${plainOlder.code})`);
   const fromOlder = await migrate("--reapply");
   assert(fromOlder.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(fromOlder.out) && (await ledger())?.length === MIGRATIONS.length,
          `--reapply over the schema through 007 with no ledger applies every file and records each (exit ${fromOlder.code})${fromOlder.code === 0 ? "" : `:\n${fromOlder.out}`}`);
