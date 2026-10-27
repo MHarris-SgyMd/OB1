@@ -6633,7 +6633,7 @@ if (want("10h")) {
   let extractCalls = 0, ownCalls = 0;
   /** Each own question's reasoning_effort, in order ("unsent" for none): the question's own knob (SMD-3306 PR 4). */
   const ownEfforts: string[] = [];
-  let judgeMode: "answer" | "refuse" | "503" = "answer";
+  let judgeMode: "answer" | "refuse" | "503" | "slow" = "answer";
   /** While false, the garbled thought's answer is an empty subject of the expected shape instead. */
   let garbledAnswers = true;
   /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
@@ -6659,6 +6659,8 @@ if (want("10h")) {
       if (body.model !== "stub-judge") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
       if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
       if (judgeMode === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      // Past a one-second limit a call (PR 4, review pass 2).
+      if (judgeMode === "slow") await Bun.sleep(1500);
       const hit = owns.find(([w]) => thought.includes(w) && (garbledAnswers || w !== "garbled"));
       return Response.json({ choices: [{ message: { content: hit ? hit[1] : '{"subject":"","deliverables":[]}' } }] });
     },
@@ -6856,6 +6858,12 @@ if (want("10h")) {
     const refusedRun = await sweep().finally(() => { judgeMode = "answer"; });
     assert(refusedRun.code === 2 && /The provider refused the request itself: .*401/.test(refusedRun.stderr) && ownCalls === asked + 1 && /^ {2}0 thought\(s\) in /m.test(refusedRun.stdout),
       `the provider's refusal ends the sweep at the first question, exit 2, the thought it ended at counted in no bucket nor among those finished (exit ${refusedRun.code}: ${refusedRun.stdout.trim().split("\n").slice(-1)[0]})`);
+    // With an effort sent, the refusal names the knob that sent it, which a word the provider refuses needs (PR 4,
+    // review pass 2); with none sent, as above, it does not.
+    judgeMode = "refuse";
+    const refusedLow = await sweep({}, { ...env, OB1_SUBJECT_REASONING: "low" }).finally(() => { judgeMode = "answer"; });
+    assert(refusedLow.code === 2 && /, and OB1_SUBJECT_REASONING, which sent reasoning_effort "low"\. Nothing was recorded/.test(refusedLow.stderr) && !/OB1_SUBJECT_REASONING/.test(refusedRun.stderr),
+      `…and with an effort sent it names the knob that sent it, which it does not with none sent (exit ${refusedLow.code}: ${refusedLow.stderr.trim().split("\n").slice(-1)[0]?.slice(-90)})`);
     asked = ownCalls;
     const restore = shortenPauses();
     judgeMode = "503";
@@ -6997,6 +7005,12 @@ if (want("10h")) {
     const rrOn = await sweep({ dryRun: true }), rrOff = await sweep({ dryRun: true }, offEnv);
     assert(asks(rrOn) === asks(beforeX) + 1 && asks(rrOff) === asks(beforeX) + 1,
       `…and a key ending \`@p2rr\` is no current subject under either setting (${asks(rrOn)} on, ${asks(rrOff)} off, of ${asks(beforeX)} + 1)`);
+    // A call past the limit names the sweep's own limit, not the provider's knob, which the sweep overrides (review
+    // pass 2): the stub answers after 1.5 s, the limit is 1 s.
+    judgeMode = "slow";
+    const slowRun = await sweep({ timeout: 1, limit: 1 }).finally(() => { judgeMode = "answer"; });
+    assert(slowRun.code === 1 && /: no answer \(timed out after 1 s, the sweep's limit a call, which --timeout sets\); the next sweep asks again/.test(slowRun.stderr) && !/OB1_LLM_TIMEOUT/.test(slowRun.stderr),
+      `a call past the limit is unanswered, its line naming --timeout, not OB1_LLM_TIMEOUT (exit ${slowRun.code}: ${slowRun.stderr.trim().split("\n")[0]?.slice(0, 160)})`);
     // The sweep's SQL against subjectCurrent, cell by cell under both settings (review pass 1: an off arm matching
     // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among them.
     const ways = ["metadata", "first_line", "model", "other", null];

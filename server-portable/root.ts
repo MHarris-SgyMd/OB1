@@ -185,7 +185,7 @@ export type Env = {
   OB1_METADATA_REASONING?: string;
   /**
    * The same for the subject question alone (`--subjects`, SMD-3306), but on
-   * when unset: off/false/0 asks it with no reasoning pass. Turning it on asks
+   * when unset: off/false/0 (or none) asks it with no reasoning pass. Turning it on asks
    * again about every subject a model found with it off.
    */
   OB1_SUBJECT_REASONING?: string;

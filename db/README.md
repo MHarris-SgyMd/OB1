@@ -2836,7 +2836,7 @@ bun extract-entities.ts --url … --switch-key           # required when the mod
 bun extract-entities.ts --url … --subjects              # each thought's own subject where none is current — none at its text, or one an older rule or question found, or a model with its reasoning off while it is on: the rules, then the judge model for the rest (SMD-3306)
 bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once)
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3107,8 +3107,11 @@ thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
 about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
 summaries. A model's subject found with it off is taken again while it is on
 (`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
-off takes none again. An effort asked for (`low`, `high`) is keyed as on, though
-only the provider's default was measured. The setting is what the question asks
+off takes none again. An effort asked for (`low`, `high`; `none` is off) is keyed
+as on, though only the provider's default was measured. A brain that set
+`OB1_METADATA_REASONING` asked the question with that before PR 4: set
+`OB1_SUBJECT_REASONING` to the same value to go on asking that way (its subjects
+are asked once more, to take the `r`). The setting is what the question asks
 for: a judge model with no reasoning mode (the metadata model, `qwen2.5:7b` by
 default, when `OB1_JUDGE_MODEL` is unset) answers as before, and its subjects
 are asked again once for nothing. The default `--timeout` follows it: 900 s a
@@ -3127,7 +3130,9 @@ JSON with a subject records nothing either, is said, and exits 1, as the pass
 fails a malformed answer. A changed judge model leaves its predecessor's
 subjects standing, current at the same question: nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today). On a brain upgraded
+been measured on the question (the stable brain's, today); its counts follow
+`OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
+out of date while it is on. On a brain upgraded
 from version 1 it finds every filed ticket again, unchanged, under the metadata
 rule's own key, and leaves every thought the model must answer under its old
 subject, out of date and counted, until a run with the model. There the
@@ -5576,11 +5581,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1743 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1745 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 111 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 334 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

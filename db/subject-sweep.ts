@@ -12,12 +12,14 @@
  *   --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off)
  *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
  *   exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering ·
- *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
+ *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal (the first
+ *   after the call in hand, which can run to the limit a call; a second at once)
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
  * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
- * whose text moved since their subject was found, and those found under a rule or question that has changed since.
+ * whose text moved since their subject was found, those found under a rule or question that has changed since, and,
+ * while the question is asked with the judge model's reasoning on, those a model found with it off.
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
  * pass key, so a changed rule finds again the subjects it found, and those alone. Version 1's one key for both rules
  * is taken whole, once: its filed tickets are found again unchanged, under the metadata rule's own key (review pass 5).
@@ -153,7 +155,7 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
   const LIMIT = opts.limit ?? 0;
   const resolved = resolveEmbedConfig(env as EmbedEnv);
   // A reasoning call runs long: of 200 the 27B answered with its reasoning on, two took over 300 s, the slowest 369 s,
-  // where the slowest of 160 without it took 133 s (SMD-3306 PR 4). Each default is about 2.4x the slowest measured.
+  // where the slowest of 160 without it took 133 s (SMD-3306 PR 4): each default about 2.4x and 2.3x the slowest.
   const TIMEOUT_S = opts.timeout ?? (subjectReasoning(resolved) === "off" ? 300 : 900);
   if (opts.sql != null && noUrl && env.OB1_WORKER_KEY && !DRY_RUN) {
     // The pass's rule (extract-entities.ts's run): the key resolves on a connection of its own.
@@ -187,6 +189,8 @@ async function sweep(
   const { MODEL, DRY_RUN, LIMIT, env, out, err } = o;
   const reasoning = subjectReasoning(cfg);
   const reasoningOn = reasoning !== "off";
+  /** The effort each question sends, which a refusal names (review pass 2); none is sent with reasoning on. */
+  const sentEffort = cfg.subjectReasoning.reasoning_effort;
   const judgeKey = subjectModelKey(cfg.judgeModel, reasoningOn);
   /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
   const wouldRefuse: string[] = [];
@@ -314,7 +318,9 @@ async function sweep(
           return { egress: e.message };
         }
         const kind = classifyError(e);
-        if (kind === "thought") return { unanswered: (e as Error).message };
+        // A timeout names the sweep's own limit, which --timeout sets, not the provider's knob the message names: the
+        // sweep sets the limit over it (review pass 2).
+        if (kind === "thought") return { unanswered: e instanceof ProviderError && e.kind === "timeout" ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
         if (kind === "transient" && attempt < TRANSIENT_PAUSES_MS.length) {
           await sleepUnless(TRANSIENT_PAUSES_MS[attempt], stop.signal);
           if (stop.signal.aborted) throw e;
@@ -371,7 +377,7 @@ async function sweep(
         if (hardStop.signal.aborted || stop.signal.aborted) return false;
         const kind = classifyError(e);
         endedBy = kind === "fatal"
-          ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider. Nothing was recorded for this thought.` }
+          ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider${sentEffort === undefined ? "" : `, and OB1_SUBJECT_REASONING, which sent reasoning_effort ${JSON.stringify(sentEffort)}`}. Nothing was recorded for this thought.` }
           : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
         return false;
       }
