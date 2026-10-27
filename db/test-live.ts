@@ -11715,8 +11715,8 @@ if (want("26")) {
     // Refused before any query, the message intact on stderr.
     const noUrl = await lint({}, "--tier=1");
     const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
-    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
-      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL, got a "https:" URL/.test(httpsUrl.out) && !httpsUrl.out.includes("example.supabase.co") && !/\[tier 1\] done/.test(httpsUrl.out),
+      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal naming its scheme alone, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
     }
 
     // A graph table the role may not read is a refusal, not an absence: with SELECT on `thoughts` alone, Tier 2 exits 1
@@ -11763,9 +11763,10 @@ if (want("26")) {
     assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && ascending(thoughtsOut, (r) => String(r.id)) && ascending(entitiesOut ?? [], (r) => Number(r.id)) && thoughtsOut.every((r) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(String(r.created_at)) && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
       `…the thoughts file holds exactly the table's ${N} ids once each and in id order (a page query without its ORDER BY survived every other assertion on a fresh heap — review pass 3, mutant), timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
     const bkNoUrl = await backup({});
-    const bkHttps = await backup({ SUPABASE_URL: "https://example.supabase.co" });
-    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL/.test(bkHttps.out) && !/Open Brain Backup --/.test(bkHttps.out),
-      `…no URL exits 1 with both lines of its message; a Supabase URL exits 1 with the shim's refusal, before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
+    // A mistyped scheme on a connection string: the refusal names the scheme and repeats none of the value (SMD-2263).
+    const bkHttps = await backup({ SUPABASE_URL: "mysql://u:pw-not-real@127.0.0.1:5432/x" });
+    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL, got a "mysql:" URL/.test(bkHttps.out) && !bkHttps.out.includes("pw-not-real") && !/Open Brain Backup --/.test(bkHttps.out),
+      `…no URL exits 1 with both lines of its message; a mistyped scheme exits 1 with the shim's refusal, which names the scheme and repeats none of the value (its password included), before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
     await sql`DELETE FROM thoughts`;
