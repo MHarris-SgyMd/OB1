@@ -30,7 +30,7 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, quoteIdent, reembedKey } from "./config.mjs";
 
 /**
@@ -469,22 +469,21 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   await sql.close();
 }
 
-console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one transaction, 021's backfill with the acceptances out of its sight, and what the re-run refuses (SMD-1193, SMD-1421)");
+console.log("\n[7] --reapply onto a 020 under a ledger of every file — every migration in one transaction, 021's backfill with the acceptances out of its sight, and what the re-run refuses (SMD-1193, SMD-1421)");
 {
   await dropSchema(URL_);
-  // A brain adopted with --baseline: the schema as far as 020, by hand as it
-  // were, and a ledger that says every migration. reembed.ts refuses to run
-  // there and names the remedy; this is the remedy.
+  // A ledger ahead of its schema: the schema as far as 020, applied bare, and a
+  // ledger planted with every migration. reembed.ts refuses to run there and
+  // names the remedy; this is the remedy.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
-  // The migrator's shell: the parent's without its OB1_* variables, plus the
-  // suite's width and model (test-support's migratorEnv); the bare apply above
-  // pinned the same chunk-context default, so the two halves of the fixture
+  await plantLedger(URL_);
+  // The migrator's shell, for its runs below: the parent's without its OB1_*
+  // variables, plus the suite's width and model (test-support's migratorEnv);
+  // the bare apply above pinned the same chunk-context default, so the two
   // agree. reembed.ts --status takes the same shell.
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
 
   const sql = new SQL({ url: URL_, max: 1 });
-  // The brain as it stood before this change: baselined through 029, so 030
+  // The brain as it stood before this change: recorded through 029, so 030
   // is pending, and a PLAIN run — the compose stack's, which gates the server
   // on it — must not fail with a bare "does not exist".
   // 030 by name, not "the last file". The scenario deletes only 030 from the
@@ -625,7 +624,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // thoughts and redefines 058's node_lifecycle and node_state on their own
   // signatures, refusing by name without 025 or 058 ([20t]); 069 adds the
   // durable jobs table and prune_jobs, keyed to nothing prior — nothing to
-  // refuse, so it applies cleanly over an older baseline ([20u]); 070 redefines 029's
+  // refuse, so it applies cleanly under an older schema ([20u]); 070 redefines 029's
   // listing under a third argument with a lineage column, the two-argument
   // form dropped first, refusing by name without 016, 025 or 029 ([20v]); 071 adds a
   // table, an index and four triggers on 053's thought_sources and one on
@@ -702,7 +701,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
   // refusing by name rows that share one ([20bd]) — all
   // recorded by the
-  // baseline with their
+  // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -710,8 +709,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plainRun.out);
-  assert(plainOk, `a plain run on the baselined brain fails at 030 naming what is missing and --reapply, not with a bare error (exit ${plainRun.code})${plainOk ? "" : `:\n${plainRun.out}`}`);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plainRun.out);
+  assert(plainOk, `a plain run on the brain whose ledger is ahead fails at 030 naming what is missing and --reapply, not with a bare error (exit ${plainRun.code})${plainOk ? "" : `:\n${plainRun.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${last}`)[0].c) === 0, "…and records nothing");
   const { vec, KEY, plant, enqueue, accept, labels, corpus } = evidenceFixture(sql);
   const { vouched, accepted, earlierThenAccepted } = await corpus();
@@ -731,7 +730,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
            /schema_migrations records 021 as\n\s+applied \(--baseline\?\) but the schema installed is older\. Re-apply the recorded migrations with the migrator/.test(status.out) &&
            /cd db && bun migrate\.ts --url … --reapply\s*$/m.test(status.out) && !/re-run the body/.test(status.out),
-         `reembed.ts --status on the baselined brain names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
+         `reembed.ts --status on the brain whose ledger is ahead names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
 
   // 021 pending too, from here on: a ledger hole on the very file whose block
   // applyShadowed runs with the acceptances out of its sight, so a plain run
@@ -1036,21 +1035,20 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
 
 console.log("\n[9] Migration 031 on a schema without 015 — refused up front, naming 015 and --reapply (SMD-1023)");
 {
-  // A brain adopted with --baseline at a ledger through 031 whose schema stops
+  // A brain with a ledger planted through 031 whose schema stops
   // before 015. 031's CREATE FUNCTION would succeed there (plpgsql resolves
   // the table at first run) and its column COMMENT would fail bare; the file
   // opens with 030's guard instead, so a plain run — the compose stack's,
   // gating the server — fails naming what is missing and the remedy.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-015 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the031 = MIGRATIONS.find((f) => f.startsWith("031_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the031}`;
   const plain = await migrate();
   const ok = plain.code === 1 && /031_renew_claims\.sql\s+FAILED: migration 031 needs 015 \(thought_work_claims\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 031 naming 015 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the031}`)[0].c) === 0, "…records nothing");
   assert((await sql`SELECT to_regprocedure('renew_claims(text, text, int)') IS NULL AS absent`)[0].absent === true, "…and defines nothing: the guard runs before the function");
@@ -1124,11 +1122,11 @@ console.log("\n[11] 021 with the acceptances out of its sight on a plain run —
     return { sql, ...fx, ...corpus, suffixed };
   };
 
-  // The column absent and 030 recorded — a --baseline'd brain with a hole at
+  // The column absent and 030 recorded — a planted ledger with a hole at
   // 021: the block labels from the plain rows alone, the suffixed-key
   // acceptance out of its sight like the own-key ones.
   let b = await build();
-  await migrate("--baseline");
+  await plantLedger(URL_);
   await b.sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const absent = await migrate();
   assert(absent.code === 0, `a plain run with a hole at 021 on a schema without the column applies it ${shown(absent)}`);
@@ -1149,7 +1147,7 @@ console.log("\n[11] 021 with the acceptances out of its sight on a plain run —
   const late = await b.plant("unlabelled; a pass to the model was refused and accepted");
   await b.enqueue(b.KEY, [late]);
   await b.accept(b.KEY, [late]);
-  await migrate("--baseline");
+  await plantLedger(URL_);
   await b.sql`DELETE FROM schema_migrations WHERE name LIKE '021%' OR name LIKE '030%'`;
   const [{ db }] = (await b.sql`SELECT current_database() AS db`) as { db: string }[];
   await b.sql.unsafe(`ALTER DATABASE "${db}" SET search_path = "$user", public, pg_temp`);
@@ -1774,21 +1772,20 @@ console.log("\n[19] Migration 041 onto a populated 040 — match_thoughts gains 
 
 console.log("\n[20] Migration 043 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1749)");
 {
-  // A brain adopted with --baseline at a ledger through 043 whose schema stops
-  // before 034 — a guide-built brain, or one baselined and never re-applied.
+  // A brain with a ledger planted through 043 whose schema stops before 034:
+  // a ledger ahead of its schema, damaged from outside.
   // 043's two COMMENTs would fail bare there (relation "query_log" does not
   // exist), and a plain run — the compose stack's, gating the server — would
   // stop with no remedy named; the file opens with 031's guard instead.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "034" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the043 = MIGRATIONS.find((f) => f.startsWith("043_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the043}`;
   const plain = await migrate();
   const ok = plain.code === 1 && /043_query_log_tool_comment\.sql\s+FAILED: migration 043 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 043 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the043}`)[0].c) === 0, "…records nothing");
   // The guard is the only thing between the file and the table: with 034's
@@ -1933,7 +1930,7 @@ console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains 
 
 console.log("\n[20c] Migration 047 on a schema without 034 — refused up front, naming 034 and --reapply, and applied once the table exists (SMD-1492)");
 {
-  // 047's guard is 043's ([20]) verbatim: on a brain baselined at a ledger through
+  // 047's guard is 043's ([20]) verbatim: on a brain with a ledger planted through
   // 047 whose schema stops before 034, its CREATE INDEX would fail bare (relation
   // "query_log" does not exist), and a plain run — the compose stack's, gating the
   // server — would stop with no remedy named. [20] drives 043's guard and [20b]
@@ -1941,15 +1938,14 @@ console.log("\n[20c] Migration 047 on a schema without 034 — refused up front,
   // refusal message or a guard that failed to fire went uncaught. This drives it.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "034" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-034 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the047 = MIGRATIONS.find((f) => f.startsWith("047_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the047}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /047_query_log_logged_at_index\.sql\s+FAILED: migration 047 needs 034 \(query_log\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 047 naming 034 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the047}`)[0].c) === 0, "…047 records nothing");
   // The guard is the only thing between the file and the table: with 034..046 in
@@ -1967,19 +1963,18 @@ console.log("\n[20d] Migration 049 on a schema without 010 — refused up front,
 {
   // 049's guard is 047's ([20c]) on 010's table: its `'ob1_agent_keys'::regclass`
   // would otherwise fail bare (tenth review pass: every sibling carried the
-  // guard, this file did not). Same drive: a ledger baselined over a schema that
+  // guard, this file did not). Same drive: a ledger planted over a schema that
   // stops before 010, 049 alone made pending.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "010" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-010 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the049 = MIGRATIONS.find((f) => f.startsWith("049_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the049}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /049_agent_key_scope_capture\.sql\s+FAILED: migration 049 needs 010 \(ob1_agent_keys\.scope\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 049 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the049}`)[0].c) === 0, "…049 records nothing");
   await sql.close();
@@ -2089,7 +2084,7 @@ console.log("\n[20e] Migration 050 onto a populated 046 — every thought gains 
 
 console.log("\n[20f] Migration 052 on a schema without 008, and on 008's table without 046's columns — refused up front, naming the migration and --reapply, and applied once both are there (SMD-1296)");
 {
-  // 052's guard is 047's shape ([20c]): a brain baselined at a ledger through
+  // 052's guard is 047's shape ([20c]): a brain with a ledger planted through
   // 052 whose schema stops before 008 would take the function and fail at its
   // first call with a bare "relation thought_audit does not exist"; the file
   // refuses at apply instead, naming 008 — and, on 008's table as a hand-applied
@@ -2097,15 +2092,14 @@ console.log("\n[20f] Migration 052 on a schema without 008, and on 008's table w
   // lesson), so both are driven.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "008" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-008 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the052 = MIGRATIONS.find((f) => f.startsWith("052_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the052}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /052_thought_changes\.sql\s+FAILED: migration 052 needs 008 \(thought_audit\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 052 naming 008 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the052}`)[0].c) === 0, "…052 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "008" && f < "046" });
@@ -2122,7 +2116,7 @@ console.log("\n[20f] Migration 052 on a schema without 008, and on 008's table w
 
 console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables without 042's — refused up front, naming the missing migration and --reapply, and applied once both are there (SMD-1867)");
 {
-  // 053's guard is 052's shape ([20f]): a brain baselined at a ledger through
+  // 053's guard is 052's shape ([20f]): a brain with a ledger planted through
   // 053 whose schema stops before 016 would fail at source_thought's SQL body
   // — validated at CREATE — with a bare "column n.supersedes does not exist"
   // (025's column; a plpgsql body is not checked against the catalog until it
@@ -2133,15 +2127,14 @@ console.log("\n[20g] Migration 053 on a schema without 016, and on 016's tables 
   // review pass: the guard had none).
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the053 = MIGRATIONS.find((f) => f.startsWith("053_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the053}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /053_thought_sources_and_links\.sql\s+FAILED: migration 053 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 053 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the053}`)[0].c) === 0, "…053 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "042" });
@@ -2158,19 +2151,18 @@ console.log("\n[20h] Migration 054 on a schema without 010 — refused up front,
 {
   // 054's guard is 049's ([20d]): a plpgsql body is not checked against the
   // catalog at CREATE, so without it 054 would apply over a pre-010 schema and
-  // fail bare at its COMMENT ON COLUMN. Same drive: a ledger baselined over a
+  // fail bare at its COMMENT ON COLUMN. Same drive: a ledger planted over a
   // schema that stops before 010, 054 alone made pending.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "010" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-010 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the054 = MIGRATIONS.find((f) => f.startsWith("054_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the054}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /054_resolve_agent_stale_touch\.sql\s+FAILED: migration 054 needs 010 \(ob1_agent_keys\.last_used_at, revoked_at, scope\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 054 naming 010 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the054}`)[0].c) === 0, "…054 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "010" });
@@ -2237,19 +2229,18 @@ console.log("\n[20i] Migration 055 onto a populated brain at the file before it 
     "re-applying 055 is a no-op: the shape as it left it (six functions and an index more than 053), no row moved, no audit row added, nothing to fill");
   await sql.close();
 
-  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20g]'s shape): a brain with a ledger planted through
   // 055 whose schema stops before 046, then before 050.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "046" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-046 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql2 = new SQL({ url: URL_, max: 1 });
   const the055 = MIGRATIONS.find((f) => f.startsWith("055_"))!;
   await sql2`DELETE FROM schema_migrations WHERE name = ${the055}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /055_capture_event_payload\.sql\s+FAILED: migration 055 needs 046 \(thought_audit\.actor_kind, ob1_registry_kind\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 055 naming 046 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the055}`)[0].c) === 0, "…055 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "046" && f < "050" });
@@ -2272,15 +2263,14 @@ console.log("\n[20j] Migration 056 on a schema without 016, and on 016's tables 
   // structured-wins rule — without the table and facet kind 053 ships beside it.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the056 = MIGRATIONS.find((f) => f.startsWith("056_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the056}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /056_entity_name_gate\.sql\s+FAILED: migration 056 needs 016 \(ob1_entity_edges\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 056 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the056}`)[0].c) === 0, "…056 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "053" });
@@ -2303,15 +2293,14 @@ console.log("\n[20k] Migration 058 on a schema without 025, and on 025's pointer
   // node_dependencies() with "relation thought_sources does not exist".
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "025" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-025 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the058 = MIGRATIONS.find((f) => f.startsWith("058_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the058}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /058_node_state\.sql\s+FAILED: migration 058 needs 025 \(thoughts\.supersedes\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 058 naming 025 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the058}`)[0].c) === 0, "…058 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "025" && f < "053" });
@@ -2333,8 +2322,7 @@ console.log("\n[20l] Migration 059 on a schema without 058, and on 058 without 0
   // reaches 058, so the checks that can be reached here are 058 and 045.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "058" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-058 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the058 = MIGRATIONS.find((f) => f.startsWith("058_"))!;
   const the059 = MIGRATIONS.find((f) => f.startsWith("059_"))!;
@@ -2342,7 +2330,7 @@ console.log("\n[20l] Migration 059 on a schema without 058, and on 058 without 0
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /059_search_prefers_current\.sql\s+FAILED: migration 059 needs 058 \(node_state\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 059 naming 058 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the059}`)[0].c) === 0, "…059 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the058 });
@@ -2419,19 +2407,18 @@ console.log("\n[20m] Migration 060 onto a populated brain at the file before it 
     "re-applying 060 is a no-op: the shape as it left it (four functions and a table more than 058), no row moved, no audit row added, no snapshot row re-seeded");
   await sql.close();
 
-  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20g]'s shape): a brain with a ledger planted through
   // 060 whose schema stops before 042, then before 050, then before 055.
   for (const [stop, needs] of [["042", "migration 060 needs 042 \\(delete_thought\\(uuid, jsonb, boolean\\), thoughts_guard_citation_sources\\); this schema lacks it"], ["050", "migration 060 needs 050 \\(ob1_stamp_actor, thought_audit\\.seq\\); this schema lacks it"], ["055", "migration 060 needs 055 \\(ob1_thought_diff, ob1_append_thought_event, ob1_actor_stamp, ob1_actor_stamp_kept\\); this schema lacks it"]] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the060 = MIGRATIONS.find((f) => f.startsWith("060_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the060}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`060_append_then_project\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 060 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the060}`)[0].c) === 0, `…060 records nothing without ${stop}`);
     await sql2.close();
@@ -2520,19 +2507,18 @@ console.log("\n[20n] Migration 061 onto a populated brain at the file before it 
     "re-applying 061 is a no-op: the shape as it left it (a table and five functions more than 060), no row moved, no audit row added, no lineage row re-seeded or moved");
   await sql.close();
 
-  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20g]'s shape): a brain with a ledger planted through
   // 061 whose schema stops before 013, then 029, then 056, then 060.
   for (const [stop, needs] of [["013", "migration 061 needs 013 \\(thought_chunks\\.context, the 4-argument upsert_thought's context arm\\); this schema lacks it"], ["029", "migration 061 needs 029 \\(supersession_proposals\\); this schema lacks it"], ["056", "migration 061 needs 056 \\(entity_type_gate, record_thought_entities' body\\); this schema lacks it"], ["060", "migration 061 needs 060 \\(ob1_refresh_thought_vector, ob1_embedding_snapshot\\); this schema lacks it"]] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the061 = MIGRATIONS.find((f) => f.startsWith("061_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the061}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`061_derivations\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 061 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the061}`)[0].c) === 0, `…061 records nothing without ${stop}`);
     await sql2.close();
@@ -2614,7 +2600,7 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
     "re-applying 063 is a no-op: the shape as it left it, the proposal CHECKs as it wrote them (dropped and re-added by the same definitions), no row moved, the marks and the stale status kept");
   await sql.close();
 
-  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20g]'s shape): a brain with a ledger planted through
   // 063 whose schema stops before 016, then 029, then 060, then 061.
   for (const [stop, needs] of [
     ["016", "migration 063 needs 016 \\(requeue_thought_work, the entity tables\\); this schema lacks it"],
@@ -2624,14 +2610,13 @@ console.log("\n[20o] Migration 063 onto a populated brain at the file before it 
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the063 = MIGRATIONS.find((f) => f.startsWith("063_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the063}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`063_rebuild_derived\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 063 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the063}`)[0].c) === 0, `…063 records nothing without ${stop}`);
     await sql2.close();
@@ -2695,19 +2680,18 @@ console.log("\n[20p] Migration 064 onto a populated brain at the file before it 
     `a re-apply is a no-op: no thought, lineage row or revision moved, one write_page_section (exit ${re.code})`);
   await sql.close();
 
-  // The guard, driven ([20n]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20n]'s shape): a brain with a ledger planted through
   // 064 whose schema stops before 025, then 032, then 060, then 061, then 063.
   for (const [stop, needs] of [["025", "migration 064 needs 025 \\(thoughts\\.derived_from\\); this schema lacks it"], ["032", "migration 064 needs 032 \\(validate_derived_from, update_thought's provenance envelope\\); this schema lacks it"], ["060", "migration 064 needs 060 \\(ob1_project_thought_event, the write functions that append then project\\); this schema lacks it"], ["061", "migration 064 needs 061 \\(derivations, ob1_record_derivation, ob1_actor_agent_id\\); this schema lacks it"], ["063", "migration 064 needs 063 \\(derivations\\.stale_since, the rebuild's mark ob1_record_derivation clears\\); this schema lacks it"]] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the064 = MIGRATIONS.find((f) => f.startsWith("064_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the064}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`064_pages\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 064 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the064}`)[0].c) === 0, `…064 records nothing without ${stop}`);
     await sql2.close();
@@ -2729,15 +2713,14 @@ console.log("\n[20q] Migration 065 on a schema without 016, and on 016's tables 
   // not exist".
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "016" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-016 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the065 = MIGRATIONS.find((f) => f.startsWith("065_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the065}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /065_identifier_allowlist\.sql\s+FAILED: migration 065 needs 016 \(ob1_entities\) and 056 \(entity_type_gate, apply_entity_type_gate\); this schema lacks 016/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 065 naming 016 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the065}`)[0].c) === 0, "…065 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "016" && f < "056" });
@@ -2826,15 +2809,14 @@ console.log("\n[20r] Migration 066 onto a populated brain at the file before it 
   // A re-apply moves nothing. The ledger first: the suite's applier writes
   // none, and the migrator's first run would create schema_migrations — a
   // shape move that is the ledger's, not the file's (run-it, the build; a
-  // brain has its ledger). The files after 066 first too: --baseline records
-  // EVERY file in the tree as applied, so a --reapply over a schema stopped
+  // brain has its ledger). The files after 066 first too: the planted ledger
+  // records EVERY file in the tree as applied, so a --reapply over a schema stopped
   // at 066 would apply a later file for real and move the shape — the
   // ledger's claim, not the file's (SMD-2297's 067 was the first such file;
   // caught when it landed beside this leg). Each condition named on failure:
   // a bundled assertion said only "no".
   await applyMigrations(URL_, { ...OPTS, only: (f) => f > "066" });
-  const baseline = await migrate("--baseline");
-  assert(baseline.code === 0, `--baseline records the ledger over the schema at the tree's head (exit ${baseline.code})`);
+  await plantLedger(URL_);
   const shapeAfter = await shape(sql), stampsAfter = await stamps(), proposalsAfter = await proposals();
   const re2 = await migrate("--reapply");
   const firstDiff = (a: string, b: string) => { const x = JSON.parse(a) as Record<string, unknown>[], y = JSON.parse(b) as Record<string, unknown>[]; for (let i = 0; i < Math.max(x.length, y.length); i++) for (const k of new Set([...Object.keys(x[i] ?? {}), ...Object.keys(y[i] ?? {})])) if (JSON.stringify(x[i]?.[k]) !== JSON.stringify(y[i]?.[k])) return `row ${i} ${k}: ${JSON.stringify(x[i]?.[k])} -> ${JSON.stringify(y[i]?.[k])}`; return ""; };
@@ -2843,7 +2825,7 @@ console.log("\n[20r] Migration 066 onto a populated brain at the file before it 
   assert(failed.length === 0, `a re-apply is a no-op: the shape as it left it, no thought moved, the rule standing (${failed.join("; ") || "exit 0"})`);
   await sql.close();
 
-  // The guard, driven ([20p]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20p]'s shape): a brain with a ledger planted through
   // 066 whose schema stops before 025, then 029, then 063.
   for (const [stop, needs] of [
     ["025", "migration 066 needs 025 \\(thoughts\\.derived_from\\); this schema lacks it"],
@@ -2852,14 +2834,13 @@ console.log("\n[20r] Migration 066 onto a populated brain at the file before it 
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the066 = MIGRATIONS.find((f) => f.startsWith("066_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the066}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`066_lineage_excludes_candidates\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 066 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the066}`)[0].c) === 0, `…066 records nothing without ${stop}`);
     await sql2.close();
@@ -2953,7 +2934,7 @@ console.log("\n[20s] Migration 067 onto a populated brain at 063 — settle_supe
     "re-applying 067 is a no-op: the shape as it left it, no thought, lineage row or proposal moved");
   await sql.close();
 
-  // The guard, driven ([20g]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20g]'s shape): a brain with a ledger planted through
   // 067 whose schema stops before 036, then 061, then 063.
   for (const [stop, needs] of [
     ["036", "migration 067 needs 036 \\(review_supersession_proposal\\) and 061 \\(ob1_record_derivation\\); this schema lacks them"],
@@ -2962,14 +2943,13 @@ console.log("\n[20s] Migration 067 onto a populated brain at 063 — settle_supe
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the067 = MIGRATIONS.find((f) => f.startsWith("067_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the067}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`067_pass_settles_stale\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 067 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the067}`)[0].c) === 0, `…067 records nothing without ${stop}`);
     await sql2.close();
@@ -2989,15 +2969,14 @@ console.log("\n[20t] Migration 068 on a schema without 058 — refused up front,
   // every schema that reaches 058, so 058 is the check reached here.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "058" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-058 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the068 = MIGRATIONS.find((f) => f.startsWith("068_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the068}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /068_node_state_projection\.sql\s+FAILED: migration 068 needs 058 \(node_state\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 068 naming 058 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the068}`)[0].c) === 0, "…068 records nothing");
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "058" && f < "068" });
@@ -3023,16 +3002,15 @@ console.log("\n[20t] Migration 068 on a schema without 058 — refused up front,
   await sql.close();
 }
 
-console.log("\n[20u] Migration 069 adds the durable jobs table and prune_jobs with nothing to refuse — applied cleanly over a pre-069 baseline, and the objects work (SMD-2318)");
+console.log("\n[20u] Migration 069 adds the durable jobs table and prune_jobs with nothing to refuse — applied cleanly under a ledger ahead of a pre-069 schema, and the objects work (SMD-2318)");
 {
   // 069 references no earlier migration (no FK, no function it redefines), so
   // unlike the guarded migrations above there is nothing to refuse: a plain run
-  // over an older baseline just applies it. The point here is that it applies
+  // under a ledger ahead of an older schema just applies it. The point here is that it applies
   // cleanly through the upgrade harness and its table and function work.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "069" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-069 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the069 = MIGRATIONS.find((f) => f.startsWith("069_"))!;
   await sql`DELETE FROM schema_migrations WHERE name = ${the069}`;
@@ -3112,20 +3090,19 @@ console.log("\n[20v] Migration 070 onto a populated brain at 068 — the listing
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore) && (await stamps()) === before && (await lineage()) === lineageBefore, "the file is DDL alone: no audit row written, no thought moved, no lineage row moved");
   // A re-apply moves nothing. The ledger first, and the files after 070 first
-  // (--baseline records every file as applied, so a later one would otherwise
+  // (the planted ledger records every file as applied, so a later one would otherwise
   // apply for real under --reapply — [20r]'s lesson from 067; 109 redefines
   // this listing under a fourth argument, [20ba], and the flag reads in its
   // body). Each condition named on failure.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f > "070" });
-  const baseline = await migrate("--baseline");
-  assert(baseline.code === 0, `--baseline records the ledger over the schema at the tree's head (exit ${baseline.code})`);
+  await plantLedger(URL_);
   const shapeAfter = await shape(sql), stampsAfter = await stamps(), proposalsAfter = await proposals();
   const re2 = await migrate("--reapply");
   const failed = [re2.code !== 0 && `exit ${re2.code}`, JSON.stringify(await shape(sql)) !== JSON.stringify(shapeAfter) && "shape moved", (await stamps()) !== stampsAfter && "a thought moved", (await proposals()) !== proposalsAfter && "a proposal moved", (await forms()).flags !== true && "the flag gone", Number((await forms()).n) !== 1 && "two forms", idsOf(await list(null, true)) !== [pE, pG].sort().join() && "the selection moved"].filter(Boolean);
   assert(failed.length === 0, `a re-apply is a no-op: the shape as it left it, no thought or proposal moved, one form carrying the flag (${failed.join("; ") || "exit 0"})`);
   await sql.close();
 
-  // The guard, driven ([20r]'s shape): a brain baselined at a ledger through
+  // The guard, driven ([20r]'s shape): a brain with a ledger planted through
   // 070 whose schema stops before 016, then 025, then 029.
   for (const [stop, needs] of [
     ["016", "migration 070 needs 016 \\(content_fingerprint_of\\); this schema lacks it"],
@@ -3134,14 +3111,13 @@ console.log("\n[20v] Migration 070 onto a populated brain at 068 — the listing
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const baselined = await migrate("--baseline");
-    assert(baselined.code === 0, `--baseline records every migration over the pre-${stop} schema (exit ${baselined.code})`);
+    await plantLedger(URL_);
     const sql2 = new SQL({ url: URL_, max: 1 });
     const the070 = MIGRATIONS.find((f) => f.startsWith("070_"))!;
     await sql2`DELETE FROM schema_migrations WHERE name = ${the070}`;
     const plain = await migrate();
     const ok = plain.code === 1 && new RegExp(`070_listing_flags_lineage_pair\\.sql\\s+FAILED: ${needs}`).test(plain.out) &&
-      /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+      /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
     assert(ok, `a plain run fails at 070 naming ${stop} and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
     assert(Number((await sql2`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the070}`)[0].c) === 0, `…070 records nothing without ${stop}`);
     await sql2.close();
@@ -3162,18 +3138,17 @@ console.log("\n[20w] Migration 071 on a schema without 068 — refused up front,
   // every schema that reaches 058, so 068 is the check reached here.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "068" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-068 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   const sql = new SQL({ url: URL_, max: 1 });
   const the068 = MIGRATIONS.find((f) => f.startsWith("068_"))!;
   const the071 = MIGRATIONS.find((f) => f.endsWith("_node_dependencies_keyed.sql"))!;  // by name: renumbered when main takes its number
   await sql`DELETE FROM schema_migrations WHERE name = ${the071}`;
-  // 068 stays recorded and never tried — the baseline is what an adopted
-  // brain's ledger says — so 071 is the first file the plain run applies.
+  // 068 stays recorded and never tried — the planted ledger says so — so
+  // 071 is the first file the plain run applies.
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /071_node_dependencies_keyed\.sql\s+FAILED: migration 071 needs 068 \(ob1_ticket_head, ob1_superseded_by\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 071 naming 068 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the071}`)[0].c) === 0, "…071 records nothing");
   // The file locks thoughts, then thought_sources, before its first trigger:
@@ -3228,15 +3203,14 @@ console.log("\n[20x] Migration 073 on a schema without 061 — refused up front,
   // the bodies and fail at the first capture, not at the migration.
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "061" });
-  const baselined = await migrate("--baseline");
-  assert(baselined.code === 0, `--baseline records every migration over the pre-061 schema (exit ${baselined.code})`);
+  await plantLedger(URL_);
   let sql = new SQL({ url: URL_, max: 1 });
   const the073 = MIGRATIONS.find((f) => f.endsWith("_thought_trust_on_the_row.sql"))!;  // by name: renumbered when main takes its number
   await sql`DELETE FROM schema_migrations WHERE name = ${the073}`;
   const plain = await migrate();
   const ok = plain.code === 1 &&
     /073_thought_trust_on_the_row\.sql\s+FAILED: migration 073 needs 061 \(derivations, ob1_record_derivation\); this schema lacks it/.test(plain.out) &&
-    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+    /\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
   assert(ok, `a plain run fails at 073 naming 061 and --reapply, not at the first capture after it (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the073}`)[0].c) === 0, "…073 records nothing");
   await sql.close();
@@ -3334,19 +3308,19 @@ console.log("\n[20y] Migration 074 onto a populated brain at the file before it 
 
 console.log("\n[20z] Migration 075: refused without 074 or 068, naming each; onto a populated brain at the file before it — an 8-argument hybrid and current read beside the 7-argument forms, every argument required, an operator's REVOKE on each 7 carried to its 8, every 7-argument call answering row for row as before, min_trust read through both arms, no audit row and no row moved; a re-apply a no-op (SMD-1724)");
 {
-  // The guard, driven: a schema stopping before 074, baselined. A plpgsql
+  // The guard, driven: a schema stopping before 074, its ledger planted. A plpgsql
   // body binds its calls when it runs, so without it 075 would apply and
   // every search through the 7-argument forms fail at its first call.
   const the075 = MIGRATIONS.find((f) => f.endsWith("_min_trust_hybrid.sql"))!;  // by name: renumbered when main takes its number
   const the074 = MIGRATIONS.find((f) => f.endsWith("_min_trust.sql"))!;
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the074 });
-  const baselined = await migrate("--baseline");
+  const planted = await plantLedger(URL_);
   let probe = new SQL({ url: URL_, max: 1 });
   await probe`DELETE FROM schema_migrations WHERE name = ${the075}`;
   await probe.close();
   const plain = await migrate();
-  const refusedOk = baselined.code === 0 && plain.code === 1 &&
+  const refusedOk = planted === MIGRATIONS.length && plain.code === 1 &&
     /_min_trust_hybrid\.sql\s+FAILED: migration 075 needs 074 \(ob1_min_trust_rank, match_thoughts and search_thoughts_keyword with min_trust\); this schema lacks it/.test(plain.out);
   assert(refusedOk, `075 on a schema without 074 is refused up front, naming 074, not left to fail at the first search (exit ${plain.code})${refusedOk ? "" : `:\n${plain.out}`}`);
   // …and without 068: 074 has no guard of its own requiring it, so 074 lands
@@ -3459,12 +3433,12 @@ console.log("\n[20ab] Migration 078: refused without 069, naming it; onto a jobs
   const the069 = MIGRATIONS.find((f) => f.endsWith("_jobs.sql"))!;
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the069 });
-  const baselined = await migrate("--baseline");
+  const planted = await plantLedger(URL_);
   let probe = new SQL({ url: URL_, max: 1 });
   await probe`DELETE FROM schema_migrations WHERE name = ${the078}`;
   await probe.close();
   const plain = await migrate();
-  const refusedOk = baselined.code === 0 && plain.code === 1 &&
+  const refusedOk = planted === MIGRATIONS.length && plain.code === 1 &&
     /_jobs_door\.sql\s+FAILED: migration 078 needs 069 \(the jobs table\); this schema lacks it/.test(plain.out);
   assert(refusedOk, `078 on a schema without 069 is refused up front, naming 069 (exit ${plain.code})${refusedOk ? "" : `:\n${plain.out}`}`);
 
