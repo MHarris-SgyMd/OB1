@@ -1,8 +1,7 @@
-# A complete Open Brain stack with no Supabase anywhere.
-#
-# This is the migration plan's Phase 4 exit test made literal: a change reaches a
-# running system through an ordinary pipeline, with no Supabase CLI installed and
-# no supabase.com account involved. Postgres, the schema, and the MCP server.
+# The Open Brain stack: the forwarder and proxy in front, the REST core, the MCP
+# server, the operator GUI, Postgres and the migrator, and the profiles beside
+# them. A change reaches a running system through an ordinary pipeline: build,
+# migrate, start.
 #
 #   podman compose -f deploy/compose.yaml --profile local-models up --build
 #   docker compose -f deploy/compose.yaml --profile local-models up --build
@@ -14,7 +13,7 @@
 #
 # Secrets come from deploy/.env, which is gitignored. Copy .env.example first.
 # Nothing here is production-shaped — no TLS, no backups, no resource limits — it
-# is a working reference for what the pieces are once Supabase is gone.
+# is a working reference for what the pieces are.
 #
 # What the host can reach: only the forwarder, in front of the proxy (and
 # n8n, under --profile orchestration), and only from the host itself; the
@@ -581,7 +580,7 @@ x-forwarder: &forwarder |
     .listen(PORT, () => console.error("forwarder: listening on " + PORT + ", to " + PROXY + ":" + PORT + " on an internal network"));
 
 services:
-  # Replaces: the Supabase-hosted Postgres.
+  # The brain's database: Postgres with pgvector.
   #
   # Pinned to a pgvector release, not the floating `pg16` tag. Migration 014
   # declares `hnsw.iterative_scan` on match_thoughts, which exists from pgvector
@@ -678,7 +677,9 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # Replaces: pasting SQL into the Supabase dashboard's SQL editor.
+  # The migrator: applies db/migrations in order, each recorded in the ledger,
+  # then the enabled plugins' own (db/README.md has --reapply, which re-runs
+  # the core's).
   # Runs to completion, then exits. The server waits for it.
   #
   # Built from db/Dockerfile — the ob1-migrate image the release job publishes
@@ -739,8 +740,7 @@ services:
 
   # The REST core (SMD-2284): every operation the MCP tools expose, as JSON —
   # the one server that reads the store, run as `bun api.ts` after the image's
-  # preflight. Replaces the Supabase Edge Function, and `supabase functions
-  # deploy`; until SMD-2287 PR 6b retired it, a `server` service ran the MCP
+  # preflight. Until SMD-2287 PR 6b retired it, a `server` service ran the MCP
   # server the image's index.ts was beside it. Internal by default: no port,
   # reached on the mesh as api.ob1.internal (the MCP server and the GUI), and
   # through the proxy at /api only where deploy/compose.api-public.yaml is
@@ -1660,7 +1660,9 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
+  # The stack's own model endpoint, where OB1_LLM_BASE_URL points by default.
+  # Optional — enable with `--profile local-models`, or name another provider in
+  # deploy/.env.
   #
   # Ollama exposes an OpenAI-compatible surface at /v1, so the server needs no
   # code change: its OB1_LLM_BASE_URL falls back to this service (above), and no
