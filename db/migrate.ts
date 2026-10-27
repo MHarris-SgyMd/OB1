@@ -16,9 +16,10 @@
  * Every migration is also individually idempotent, so a schema applied without
  * the migrator, which has no ledger yet, is brought under it by --reapply:
  * every file runs again over what is there, in one transaction, after the
- * checks that this shell agrees with the brain, and is recorded. (A plain run
- * would give each file its own transaction and check nothing first.)
- * Recording the ledger without running the files was retired (SMD-3325).
+ * checks that this shell agrees with the brain, and is recorded. A plain run
+ * there is refused, --dry-run too, naming --reapply: it would give each file
+ * its own transaction and check nothing first (SMD-3425). Recording the
+ * ledger without running the files was retired (SMD-3325).
  *
  * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
  * transaction with a lock timeout (LOCK_TIMEOUT_S); recorded rows stay as they are, pending
@@ -61,6 +62,7 @@ import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
+  REAPPLY_COMMAND,
   PLUGIN_LOGIN_ROLE,
   PLUGIN_NAME_RE,
   alignVectorSearchPath,
@@ -721,6 +723,35 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // the ledger, so its CREATE neither fails with 3F000 on a path that names no
   // schema nor lands in another. See pinPublicFirst (config.mjs).
   if (!(await publicFirst(sql, out, err))) return 2;
+
+  // A schema applied without the migrator — public.thoughts there, and a ledger
+  // missing or recording nothing — is brought under it by --reapply alone
+  // (SMD-3425): one transaction, after the checks that this shell agrees with
+  // the brain. A plain run would give each file its own, check nothing, and
+  // from a shell of another model have 006 re-record ob1_config's. Refused,
+  // its dry run too, before the ledger's CREATE: nothing is written. Judged by
+  // pg_class in public, as preflight's ledger row reads it, so a role's
+  // search_path does not hide either table. An empty database (no thoughts)
+  // is a first build and goes on.
+  if (!reapply) {
+    const [state] = (await sql`
+      SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS thoughts,
+             to_regclass('public.schema_migrations') IS NOT NULL AS ledger`) as { thoughts: boolean; ledger: boolean }[];
+    const recorded = state.thoughts && state.ledger
+      ? Number(((await sql`SELECT count(*)::int AS c FROM public.schema_migrations`) as { c: number }[])[0].c)
+      : 0;
+    if (state.thoughts && recorded === 0) {
+      err(
+        `${dryRun ? "--dry-run" : "A plain run"} refused: public.thoughts is here and the migration ledger records nothing (${state.ledger ? "schema_migrations is empty" : "no schema_migrations table"}) — a schema applied without the migrator.\n` +
+          "  A plain run would re-run every file in a transaction of its own, checking nothing first: from a shell of another\n" +
+          "  OB1_EMBEDDING_MODEL, 006 would re-record the brain's model, and a run stopped part-way would leave older definitions committed.\n" +
+          `  Re-apply the migrations instead, with the server and every worker stopped: ${REAPPLY_COMMAND}\n` +
+          "  — every file in one transaction, after checking this shell agrees with the brain, each recorded (SMD-3425). Nothing was changed."
+      );
+      return 2;
+    }
+  }
 
   const LEDGER_DDL = `
     CREATE TABLE IF NOT EXISTS schema_migrations (
