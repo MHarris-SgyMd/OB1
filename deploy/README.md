@@ -113,7 +113,7 @@ The services, in order, the last two with the profile:
 | `app` | The operator GUI at `/dashboard`, a client of the REST core, on the mesh alone (SMD-2280; `dashboard/README.md`) |
 | `proxy` | The stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
 | `forwarder` | The stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
-| `ollama` (profile) | A local model endpoint, in place of OpenRouter, the server's default |
+| `ollama` (profile) | The stack's own model endpoint, where `OB1_LLM_BASE_URL` points unless the env file names another provider (`http://ollama:11434/v1`) |
 | `ollama-pull` (profile) | Pulls both models; runs once, then exits |
 
 ### 3. Verify
@@ -956,8 +956,9 @@ The data layer is built lazily on first use. Without a gate, a server with a wro
 `tools/list`, and passes any HTTP liveness probe — then fails when a user captures
 their first thought, with the real error buried inside a tool response.
 
-Every one of those settings is written by hand in the env file, so any of them
-can be wrong.
+The settings the server needs come from the env file by hand (the database
+password from which compose builds `DATABASE_URL`, the access keys, the model
+provider's endpoint and key), so any of them can be wrong.
 
 So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun api.ts`, the image's default command (`index.ts` until SMD-2287 PR 6b); the MCP server and the operator GUI run their own entries from the image without it, as they read no store. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
@@ -3860,7 +3861,7 @@ so the profile builds from a checkout.
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule, which the stack's Postgres does not
   ship. Here that becomes an ordinary cron job or a scheduled workflow (the `orchestration` profile's n8n). Not ported here.
-- **Data migration.** `pg_dump --data-only` from the old database, plus a full
+- **Data migration.** `pg_dump --data-only` from a brain you are moving onto the stack, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
   checkout with the provider reachable, not from this stack. A checkout reaches
   this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
@@ -3880,7 +3881,7 @@ so the profile builds from a checkout.
   in its log, rather than exiting or failing the thoughts it holds
   (SMD-2599); a model the provider does not serve at start is refused with
   exit 2. Reviewing what consolidation proposes stays a person's job.
-- **Auth.** Clients still send a shared key, in a header or `?key=` (upstream
+- **Auth.** Clients send a shared key, in a header or `?key=` (upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216)).
   The `auth` profile's authorization server runs behind the proxy's `/auth`;
   the MCP server at `/mcp` is its client (SMD-2287), and only the operator

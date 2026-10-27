@@ -2,17 +2,16 @@
 /**
  * preflight.ts — fail a bad deployment before it serves traffic.
  *
- * Phase 4 of the migration. Without this the server starts happily when
+ * Without this the server starts happily when
  * misconfigured: `initialize` succeeds, `tools/list` returns every tool, and the
  * first real tool call returns "Error: OB1_STORE is unset, which selects the SQL
  * store, and DATABASE_URL is not set. …" inside a tool response. Every liveness
  * probe reports green, including the container healthcheck, because the HTTP layer genuinely is fine — the data layer is built
  * lazily on first use.
  *
- * On Supabase that mattered less: the platform injected SUPABASE_URL and
- * SUPABASE_SERVICE_ROLE_KEY, so they could not be wrong. Off Supabase every one of
- * them is a hand-written environment variable, and the failure is silent until a
- * user tries to capture a thought.
+ * The settings it reads are hand-written environment variables, so any of them
+ * can be wrong, and the failure is silent until a user tries to capture a
+ * thought.
  *
  * Run it as a deploy gate, an init container, or a readiness probe:
  *

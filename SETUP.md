@@ -2,10 +2,9 @@
 
 Open Brain here is one compose stack on infrastructure you control: a proxy,
 the REST core, the MCP server, Postgres with pgvector, and the profiles beside
-them. (Upstream's guide builds it on supabase.com; this fork needs no Supabase
-account or CLI.)
-
-Same MCP tools, same `thoughts` schema, same clients. Different plumbing.
+them. Upstream's guide builds Open Brain on supabase.com; this fork needs no
+Supabase account or CLI, and no Deno. The MCP tools, the `thoughts` schema and
+the clients are upstream's; the plumbing is not.
 
 This file is the operator's reference: the two decisions, what leaves the box,
 where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started.md)
