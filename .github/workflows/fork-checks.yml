@@ -3508,13 +3508,15 @@ jobs:
           # so it never answers for the server; compose's up, exec, restart,
           # logs and plain ps pass it over (exec picks the server first), and it
           # is waited for and asserted before the server's stop, by when its
-          # 30 s are long past. A failure before then stops it, so the teardown
-          # meets no one-off holding the volume.
+          # 30 s are long past. A failure before then removes its container by
+          # name — killing the background job would reach a subshell, not
+          # compose, nor the container — so the teardown meets no one-off
+          # holding the volume.
           ../.github/ci/auth-settings.sh
           auth up --no-start --build --no-deps auth
-          auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
+          auth run --rm --no-deps --name ob1-auth-refusal -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
           refusal=$!
-          trap 'kill "$refusal" 2> /dev/null || true' EXIT
+          trap 'docker rm -f ob1-auth-refusal > /dev/null 2>&1 || true' EXIT
           auth up -d --wait --wait-timeout 120 --no-deps auth
           for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
             got=$(via_proxy "http://127.0.0.1:8010$path")
