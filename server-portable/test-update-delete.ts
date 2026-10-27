@@ -37,6 +37,7 @@ await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
 /** Vector keyed off text length, so a changed embedding is observable. */
 const provider = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
     const body = (await req.json()) as Record<string, unknown>;
@@ -61,7 +62,7 @@ delete process.env.MCP_ACCESS_KEY;
 
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
-process.env.OB1_LLM_BASE_URL = `http://localhost:${provider.port}/v1`;
+process.env.OB1_LLM_BASE_URL = `http://127.0.0.1:${provider.port}/v1`;
 // Declared local to the egress gate (SMD-1903): the stub is on this box, and
 // the gate reads the flag, never the address — without it the default, deny,
 // refuses every call to it. test-egress.ts holds that case. (CI caught this
@@ -79,8 +80,8 @@ delete process.env.SUPABASE_URL;
 
 const worker = await mcpUnderTest();
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 const writer = mcpClient(BASE, WRITE);
 const viewer = mcpClient(BASE, READ);
 const sql = new SQL({ url: URL_, max: 2 });

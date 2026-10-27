@@ -194,8 +194,8 @@ delete process.env.MCP_ACCESS_KEY;
 // The MCP server as a REST client, the REST core behind it in this process (SMD-2287).
 const worker = await mcpUnderTest();
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 
 async function toolsFor(key: string, via: "header" | "query"): Promise<string[]> {
   const url = via === "query" ? `${BASE}/?key=${key}` : BASE;

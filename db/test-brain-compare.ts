@@ -122,6 +122,7 @@ function baseInfo(over: Partial<BrainInfo> & { thoughts?: number; highestMigrati
 function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep: BrainEndpoint } {
   const server = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
       const key = req.headers.get("x-brain-key");
@@ -189,7 +190,7 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
       return new Response("not found", { status: 404 });
     },
   });
-  const ep: BrainEndpoint = { label: `fake:${server.port}`, base: `http://localhost:${server.port}`, key: KEY };
+  const ep: BrainEndpoint = { label: `fake:${server.port}`, base: `http://127.0.0.1:${server.port}`, key: KEY };
   return { server, ep };
 }
 
@@ -410,6 +411,7 @@ ok(trimBase("http://h:1///") === "http://h:1" && trimBase("http://h:1") === "htt
   const seen: { authorization: string | null; key: string | null }[] = [];
   const server = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch(req) {
       seen.push({ authorization: req.headers.get("authorization"), key: req.headers.get("x-brain-key") });
       return Response.json(baseInfo({}));
@@ -899,7 +901,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   const logged = (...qs: [string, "keyword" | "hybrid" | "current" | "literal" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
 
   const same = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1), uid(2)] } }, { hits: { q: [uid(1), uid(2)] } });
-  ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of localhost:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
+  ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of 127\.0\.0\.1:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — 127\.0\.0\.1:\d+ returns 127\.0\.0\.1:\d+'s ids on the one replayed\./.test(same.out),
     `--diff: the canary answering as stable does passes, with the window and the counts (${same.code}: ${same.out.split("\n").slice(-2).join(" | ")})`);
   ok(!same.out.includes(KEY), "--diff prints no key");
 
@@ -930,10 +932,10 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(someSkipped.code === 0 && someSkipped.out.includes("replayed 1 of 2 distinct logged searches") && someSkipped.out.includes("on the 1 replayed (1 skipped, not compared)."),
     `--diff claims only the searches it compared (${someSkipped.out.split("\n").slice(-1)})`);
   const canaryFails = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2)] } }, { hits: { q: [uid(1)], r: [uid(2)] }, refuse: ["q"] });
-  ok(canaryFails.code === 1 && /failed: localhost:\d+ failed 1 that localhost:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
+  ok(canaryFails.code === 1 && /failed: 127\.0\.0\.1:\d+ failed 1 that 127\.0\.0\.1:\d+ answered \(under Retrieval, above\) — not a pass\./.test(canaryFails.out),
     `--diff fails when the canary fails a search stable answered, the rest unmoved (${canaryFails.code}: ${canaryFails.out.split("\n").slice(-1)})`);
   ok(canaryFails.out.includes("✗ [hybrid] \"q\": b failed, a answered") && canaryFails.out.includes("1 replay failed on one brain and answered on the other — a delta.") && !canaryFails.out.includes("no delta")
-      && !canaryFails.out.includes("~ [hybrid]") && canaryFails.out.includes("replayed 1 of 2 distinct logged searches in the most recent page of") && /\(0 skipped, 1 failed on one brain\)/.test(canaryFails.out) && !/localhost:(\d+): localhost:\1:/.test(canaryFails.out),
+      && !canaryFails.out.includes("~ [hybrid]") && canaryFails.out.includes("replayed 1 of 2 distinct logged searches in the most recent page of") && /\(0 skipped, 1 failed on one brain\)/.test(canaryFails.out) && !/127\.0\.0\.1:(\d+): 127\.0\.0\.1:\1:/.test(canaryFails.out),
     `the report shows the one-sided failure apart and does not call it no delta (${canaryFails.out.split("\n").filter((l) => l.includes("✗") || l.includes("delta")).join(" | ")})`);
   // A one-sided failure beside a moved ranking: both are said.
   const failedAndMoved = await gate({ log: logged(["q", "hybrid"], ["r", "keyword"]), hits: { q: [uid(1)], r: [uid(2), uid(3)] } }, { hits: { q: [uid(1)], r: [uid(3), uid(2)] }, refuse: ["q"] });
@@ -943,7 +945,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(canaryFailsReplay.code === 1, `--replay exits 1 on it too: a failed step, not a report (${canaryFailsReplay.code})`);
   const stableFails = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1)] }, refuse: ["q"] }, { hits: { q: [uid(1)] } });
   const stableLine = stableFails.out.split("\n").find((l) => l.startsWith("failed:")) ?? "";
-  ok(stableFails.code === 1 && /^failed: localhost:(\d+) failed 1 that localhost:\d+ answered/.test(stableLine) && stableFails.out.includes("a failed, b answered — localhost:"),
+  ok(stableFails.code === 1 && /^failed: 127\.0\.0\.1:(\d+) failed 1 that 127\.0\.0\.1:\d+ answered/.test(stableLine) && stableFails.out.includes("a failed, b answered — 127\.0\.0\.1:"),
     `--diff fails, naming stable, when stable fails a search it logged (${stableFails.code}: ${stableLine})`);
 
   // Searches logged with no arm (before migration 045) are counted, not lost.
@@ -983,7 +985,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   try { await fetchLoggedSearches(badPage.ep, null); } catch (e) { badThrew = (e as Error).message; } finally { badPage.server.stop(true); }
   ok(/returned no list of searches/.test(badThrew), `a page whose searches are not a list is refused, not read as empty (${badThrew})`);
   const unread = await gate({}, {});
-  ok(unread.code === 1 && unread.out.includes("nothing replayed: the log of localhost:") && unread.out.includes("could not be read."), `--diff whose stable has no list_logged_searches is a failed step, exit 1 (${unread.code})`);
+  ok(unread.code === 1 && unread.out.includes("nothing replayed: the log of 127.0.0.1:") && unread.out.includes("could not be read."), `--diff whose stable has no list_logged_searches is a failed step, exit 1 (${unread.code})`);
   const unreadReplay = await gate({}, {}, { gate: false });
   ok(unreadReplay.code === 1, `--replay whose stable log could not be read exits 1 too (${unreadReplay.code})`);
 
@@ -1021,7 +1023,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     const run = await cli(["--diff", "--from", a.ep.base, "--to", b.ep.base], KEY);
     ok(run.code === 1 && run.out.includes("what moved: 1 of 1"), `tier.ts --diff over HTTP exits 1 on a move (${run.code}: ${run.err.trim()})`);
     const noKey = await cli(["--diff", "--from", a.ep.base, "--to", b.ep.base], null);
-    ok(noKey.code === 1 && /tier\.ts: error: --diff: no read key for localhost:\d+\. Pass --from-key\/--to-key, set OB1_COMPARE_KEY/.test(noKey.err),
+    ok(noKey.code === 1 && /tier\.ts: error: --diff: no read key for 127\.0\.0\.1:\d+\. Pass --from-key\/--to-key, set OB1_COMPARE_KEY/.test(noKey.err),
       `tier.ts --diff with no key names its own flags, not --compare's (${noKey.code}: ${noKey.err.trim()})`);
   } finally { a.server.stop(true); b.server.stop(true); }
 
@@ -1043,10 +1045,10 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   // A redirect is not followed with the key (review pass 4): a 307 elsewhere is a failed read.
   {
     let elsewhere = 0;
-    const sink = Bun.serve({ port: 0, fetch() { elsewhere++; return new Response("ok"); } });
-    const hop = Bun.serve({ port: 0, fetch() { return new Response(null, { status: 307, headers: { location: `http://localhost:${sink.port}/health` } }); } });
+    const sink = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch() { elsewhere++; return new Response("ok"); } });
+    const hop = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch() { return new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${sink.port}/health` } }); } });
     let threw = "";
-    try { await getBrainInfo({ label: "hop", base: `http://localhost:${hop.port}`, key: KEY }); } catch (e) { threw = (e as Error).message; }
+    try { await getBrainInfo({ label: "hop", base: `http://127.0.0.1:${hop.port}`, key: KEY }); } catch (e) { threw = (e as Error).message; }
     finally { sink.stop(true); hop.stop(true); }
     ok(elsewhere === 0 && /hop: could not be reached/.test(threw), `a redirect to another host is not followed with the key (${elsewhere} request(s) reached it; ${threw.slice(0, 80)})`);
   }

@@ -88,11 +88,11 @@ process.env.MCP_ACCESS_KEYS = [
 // Both doors in one process, over the one process root (root.ts): one store. The MCP server is the REST core's
 // client (SMD-2287), so its reply is render.ts over the REST answer by construction; [2] holds both to a core of this
 // suite's own besides (`directly`).
-const mcpServer = Bun.serve({ port: 0, fetch: (await mcpUnderTest()).fetch });
+const mcpServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await mcpUnderTest()).fetch });
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
-const MCP = `http://localhost:${mcpServer.port}`;
-const API = `http://localhost:${apiServer.port}`;
+const apiServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await import("./api.ts")).default.fetch });
+const MCP = `http://127.0.0.1:${mcpServer.port}`;
+const API = `http://127.0.0.1:${apiServer.port}`;
 
 type Reply = { text: string; sc: Record<string, unknown>; isError: boolean };
 let rpcId = 1;
@@ -695,12 +695,12 @@ console.log("\n[6c] The authorization server's token through REST (SMD-2286): th
   const settings = tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://brain.example.test" })!;
   const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });
   const jwks = { keys: [{ ...(await exportJWK(publicKey)), kid: "ob1-suite", alg: "ES256", use: "sig" }] };
-  const tokenApi = Bun.serve({ port: 0, fetch: (await import("./api.ts")).restApp(() => {}, () => checkerOver(settings, createLocalJWKSet(jwks))).fetch });
+  const tokenApi = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await import("./api.ts")).restApp(() => {}, () => checkerOver(settings, createLocalJWKSet(jwks))).fetch });
   const mint = (scope: string, sub = "operator", act?: string) =>
     new SignJWT({ scope, ...(act ? { act: { sub: act } } : {}) }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid: "ob1-suite" })
       .setIssuer(settings.issuer).setAudience(settings.audience).setSubject(sub).setIssuedAt().setExpirationTime("10m").sign(privateKey);
   const asToken = async (method: string, path: string, token: string, body?: unknown) => {
-    const r = await fetch(`http://localhost:${tokenApi.port}${path}`, { method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const r = await fetch(`http://127.0.0.1:${tokenApi.port}${path}`, { method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: r.status, body: await r.json() as Record<string, unknown> };
   };
   const write = await mint("brain:write", "operator", "mcp");
@@ -763,7 +763,7 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
   // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: "0" },
+    env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1" },
     stdout: "pipe", stderr: "pipe",
   });
   const { port } = await childPort(child, 20_000);

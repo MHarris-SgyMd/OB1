@@ -513,7 +513,7 @@ console.log("\n[9] The MCP reply: the value as JSON text and as structured conte
 console.log("\n[10] Each server refuses to start on a name in OB1_PLUGINS that is no plugin");
 // The MCP server's entry (SMD-2287 PR 6a, where index.ts was; it needs its forward key to get that far) and the REST core's.
 for (const [entry, dir] of [["mcp-server/index.ts", `${import.meta.dir}/../mcp-server`], ["api.ts", import.meta.dir]]) {
-  const p = Bun.spawnSync(["bun", "--no-env-file", entry.split("/").at(-1)!], { cwd: dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_PLUGINS: "example,nope", OB1_FORWARDER_KEY: "f".repeat(64) }, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+  const p = Bun.spawnSync(["bun", "--no-env-file", entry.split("/").at(-1)!], { cwd: dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_PLUGINS: "example,nope", OB1_FORWARDER_KEY: "f".repeat(64) }, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
   const said = p.stderr.toString() + p.stdout.toString();
   assert(p.exitCode !== 0 && p.exitCode !== null && /"nope", which is no plugin/.test(said), `${entry} exits at its start, naming the name (exit ${p.exitCode}: ${said.match(/OB1_PLUGINS[^\n]*/)?.[0] ?? said.slice(0, 120)})`);
 }
