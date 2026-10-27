@@ -2613,19 +2613,27 @@ it stable, the record. `canary.sh` stands the canary beside it, and takes it dow
 ```bash
 # from a branch worktree, name the running stack's env file (deploy/.env is gitignored)
 # the canary mints its own key: no key of stable's is needed, or opens it
-deploy/canary.sh --env-file ~/OB1/deploy/.env --port 8011 up --connect   # the first up names its port
-deploy/canary.sh --env-file ~/OB1/deploy/.env up                         # later ones read it from its env file
-deploy/canary.sh --env-file ~/OB1/deploy/.env up --no-refresh            # bring it level in place, keeping its own rows
+deploy/canary.sh --env-file ~/OB1/deploy/.env --port 8011 up --connect   # the first up names its port, and stands it up from stable
+deploy/canary.sh --env-file ~/OB1/deploy/.env up                         # later ones bring it level in place, keeping its own rows
+deploy/canary.sh --env-file ~/OB1/deploy/.env up --refresh               # replace its database with stable's: its own rows go
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
 
-Every `up` refreshes the canary from stable, unless `--no-refresh` says not to
-(SMD-3154). A canary that holds rows stable does not, its own ingests or its
-own passes' proposals, keeps them that way: `up --no-refresh` mends its env
-file and keys as `up` does, runs this checkout's `migrate` on the canary's own
-database, and recreates the servers, its proxy and forwarder on its own
-networks. It is refused on a canary with no database to keep: no volume
-(changing nothing), or one whose database holds no relations. Either form
+A plain `up` keeps the canary's database and brings it level in place
+(SMD-3155; SMD-3154 made the path, then behind `--no-refresh`). Since
+SMD-3314 a canary holds rows no other brain has: its own captures, edits and
+keys, its own ingests and its passes' proposals. `up` mends its env file and
+keys, runs this checkout's `migrate` on the canary's own database, and
+recreates the servers, its proxy and forwarder on its own networks. Only
+`up --refresh` replaces that database with stable's, and its own rows with
+it. A canary with no database to keep (no volume, or a running one holding
+no relations) is stood up from stable by a plain `up` or `--refresh`, said. A database stamped
+other than `canary` in `ob1_config` is refused, naming `--refresh`: a
+refresh that died before its last step leaves stable's copy, which an
+in-place migration would keep as the canary's. `--no-refresh` is still
+accepted: it keeps, as a plain `up` does, and is refused on a canary with no
+database to keep (no volume, changing nothing; or one whose database holds
+no relations), where a plain `up` would stand one up. Either form
 builds its images while the canary serves, then stops its writers before its
 Postgres is touched, its servers, a running `sleep` worker and a running
 board-sync, and brings the worker back on the new build once the smoke has
@@ -2633,8 +2641,7 @@ passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
 `up` says how to start it, and exits 1), and board-sync as step 5 below says.
 A run that fails after the stop says what it left stopped and how to go on.
 A running writer of another profile (the workers, the import runner) is
-refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
-is the guard.
+refused before anything changes: stop it first.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
 `open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
@@ -2841,8 +2848,8 @@ stable is redeployed:
      port is stable's;
    - its port is taken. For another container's, pass another
      `--port`; if that container is a canary stood up by hand, remove it
-     instead, since the new canary is refreshed from stable and nothing is
-     lost that stable does not hold. A process on the host listening there is
+     instead: a canary with no database of this project's is stood up from
+     stable, and nothing is lost that stable does not hold. A process on the host listening there is
      refused too;
    - `--connect` finds another connector under the name (below);
    - stable's project cannot be read from its env file, or is not a compose
@@ -2867,16 +2874,18 @@ stable is redeployed:
    the canary's own port, address, tier and profiles where it holds others (a
    `--port` that differs, a file from before SMD-2874), and starts the canary's
    Postgres. Once standing servers are stopped (3), it sets the
-   canary database's password to that file's, then refreshes it from stable
-   through `tier.sh`, one half on each project's database network: the dump,
-   the settings, a migration with this checkout, the stamp and the mark
-   ("Refreshing a tier", above). Stable's password comes from stable's env
+   canary database's password to that file's. Then, on a canary with a
+   database, it runs this checkout's `migrate` on it in place (SMD-3155).
+   With `--refresh`, or on a canary with no database to keep, it refreshes it
+   from stable through `tier.sh` instead, one half on each project's database
+   network: the dump, the settings, a migration with this checkout, the stamp
+   and the mark ("Refreshing a tier", above). Stable's password comes from stable's env
    file alone and the canary's from its own: a password set only in the
    shell is not used, since canary.sh unsets it (compose would let it win
    over the canary's file) and tier.sh refuses one beside
    `--from-env-file`.
 3. It builds the server image from this checkout (as `api`) and recreates the
-   REST core, so its pool opens on the refreshed database, then the MCP server at `/mcp` (SMD-2287), on the same image and
+   REST core, so its pool opens on the migrated or refreshed database, then the MCP server at `/mcp` (SMD-2287), on the same image and
    the file's own forward key, and starts its own proxy and forwarder,
    recreated only when their port changed. It waits for the keyed `/health` to
    be the REST core's record, which the MCP server answers only once the REST
@@ -2913,7 +2922,7 @@ stable is redeployed:
    `--no-smoke` skips the smoke.
 5. It (re)starts the canary's board-sync on the new build whenever the
    canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
-   upgraded in place (`--no-refresh`) is never refreshed, and a refresh was
+   upgraded in place (a plain `up`) is never refreshed, and a refresh was
    what brought it stable's ticket rows, so without its own board-sync its
    copy of the board stays as it was at its last refresh. A running
    board-sync stops with the other writers before the canary's Postgres is
@@ -2949,12 +2958,12 @@ stable is redeployed:
      makes besides.
    - **Turning it on** in a canary that holds rows of its own: set the file's
      `LINEAR_API_KEY` line (one line; a clearing leaves it as
-     `LINEAR_API_KEY=`, to fill in), then `up --no-refresh` (a plain `up`
-     refreshes from stable, replacing those rows). **Checking it syncs:** the
+     `LINEAR_API_KEY=`, to fill in), then `up` (`up --refresh` would replace
+     those rows with stable's). **Checking it syncs:** the
      canary's `brain_info` shows a `heartbeat:board-sync` alive and a
      board-sync watermark that keeps up with stable's.
    - **Turning it off:** empty the line (or take it out) and re-run
-     `up --no-refresh`: every board-sync container of the canary's is removed,
+     `up`: every board-sync container of the canary's is removed,
      said. With no key and none standing, the run says the canary runs no
      board-sync.
 6. With `--connect` it registers the Claude Code connector named for the
@@ -3011,7 +3020,7 @@ is the canary's life, in four `up`s:
   smoke key must list nothing at the canary and the canary's nothing at
   stable, each listing at its own; its probe must pass on a thought whose text
   holds literals, searched for without them;
-- a second `up`, with no `--port` (its env file's) under
+- a second `up`, `--refresh` (a plain `up` keeps since SMD-3155), with no `--port` (its env file's) under
   `SERVER_BIND=0.0.0.0`, against a provider stub serving another model. The
   canary's forwarder must stay on loopback and stable's `/canary/mcp` be the
   proxy's 404; the thought put on stable just before it must reach the
@@ -3019,7 +3028,9 @@ is the canary's life, in four `up`s:
 - a third `up`, with a connector at the port's root: named as one the
   canary no longer answers, and the root the proxy's own 404 with no
   `Deprecation` header (SMD-2532);
-- a fourth `up`, on `--port 8012`: written to the canary's env file (written
+- a fourth `up`, a plain one on `--port 8012`, which keeps the canary's
+  database (a canary-only row survives, no tier half runs); then a database
+  stamped `stable` refused, running and stopped; the port written to the canary's env file (written
   mode 600, compose reading 8012), its forwarder moved, 8011 free, and a
   connector left at 8011 named, one `SERVER_PORT` line left; then 8013
   edited into the file by hand with stable's keys added back to
