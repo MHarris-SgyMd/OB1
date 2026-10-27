@@ -56,28 +56,40 @@ bun migrate.ts --url postgres://user:pass@host:5432/dbname
 Each migration runs in its own transaction and is recorded in `schema_migrations`,
 so re-running is a no-op and a failure part-way resumes rather than restarting.
 
-### 4. Adopting an existing database
+### 4. A schema with no ledger
 
-If your `thoughts` table was created by hand from the guide, you have two options.
-Every migration is individually idempotent, so you can simply run them — nothing
-will be duplicated. Or record them as applied without executing:
+A schema applied without the migrator has no `schema_migrations` yet. Every
+migration is individually idempotent, so `--reapply` (§5) brings it under the
+ledger: every file runs again over what is there, in one transaction, and is
+recorded. Stop the server and every worker first. It checks first that this
+shell agrees with the brain: the embedding width, and the model 006 would
+otherwise re-record in `ob1_config`. A plain run would give each file its own
+transaction, leaving older definitions in place if it stopped part-way, and
+checks nothing. Preflight's `migration ledger` row names `--reapply` where it
+finds `thoughts` and no ledger, or one recording nothing. A live `--reapply`
+over no ledger makes the table inside its transaction, so a refusal or a
+failure leaves none behind. `--reapply` leaves plugins' migrations to a plain
+run after it.
 
-```bash
-bun migrate.ts --url ... --baseline
-```
+Recording the ledger without running the files, `--baseline`, was retired with
+its override `--force` (SMD-3325). The compose stack builds every brain by
+running the files, and no hand-built database was left to adopt. Each flag is
+refused by name, exit 2, before the run reads anything.
 
-`--baseline` is all-or-nothing: it marks **every** migration not already in the
-ledger as applied, without running any of them. That is what adoption wants, and
-it is the wrong tool for recording a single migration you applied by hand — on a
-database sitting at 009 it would mark 010 applied too, and the agent registry
-would never be created. For one migration, insert the one `schema_migrations`
-row; `--dry-run` prints the `sha256` to use beside each name.
+To record a single migration you applied by hand, insert its one
+`schema_migrations` row; `--dry-run` prints the `sha256` to use beside each name.
+
+Fifty-two migrations between 030 and 111 open with a guard that refuses, naming what the file needs
+and `--reapply`, where the ledger records a file the schema lacks. That was the
+state `--baseline` left; their hint still asks "adopted with --baseline?", the
+files being hashed. A new migration does not paste the guard.
 
 ### 5. Re-applying what the ledger already records
 
-A database adopted with `--baseline` can say 030 in its ledger while its
-functions are the guide's: a plain run skips every recorded file, and
-`reembed.ts` and preflight refuse or warn on the body they find and name this:
+A ledger can record a file whose objects the schema lacks: a body removed or
+replaced from outside the migrations. Or there is no ledger at all (§4). A plain run skips every recorded file,
+and `reembed.ts` and preflight refuse or warn on the body they find and name
+this:
 
 ```bash
 bun migrate.ts --url ... --reapply
@@ -108,8 +120,8 @@ from what `ob1_config` records (006 would re-record it — run from a shell
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
 own definition is the update). The checks read the catalog and `ob1_config`
-under a 10 s lock timeout of their own. A plain run on the baselined brain,
-where 030 is pending, fails at 030 with what is missing and this command,
+under a 10 s lock timeout of their own. A plain run on a brain whose ledger
+is ahead of its schema, where 030 is pending, fails at 030 with what is missing and this command,
 rather than a bare "does not exist"; preflight's `edit signature`, `delete
 signature`, `vector models` and `atomic capture` remedies name it where the
 ledger records the migration they find absent.
@@ -149,8 +161,7 @@ Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
-030's own header still describes, that file being hashed. `--baseline` runs no
-SQL and shadows nothing.
+030's own header still describes, that file being hashed.
 
 **Stop the server and any re-embed or extraction worker first, and connect
 directly, not through a transaction-mode pooler:** the migrator sets session
@@ -224,8 +235,8 @@ only when the core's are clean:
   as they are.
 
 `--dry-run` lists each plugin's pending files under its own heading: the sha,
-and the role and schema each would run as. It makes nothing. `--baseline` and
-`--reapply` leave plugins to a plain run, and say so. A name that is no plugin,
+and the role and schema each would run as. It makes nothing. `--reapply`
+leaves plugins to a plain run, and says so. A name that is no plugin,
 or one given twice, is refused before anything runs (exit 2).
 
 ```bash
@@ -1716,7 +1727,7 @@ schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
 page's LIMIT). Preflight's `thought indexes` row warns while the index is
 INVALID or of another shape, and — once the ledger records 100 — missing: the
-file is not re-run, so a drop, a `--baseline` adoption or an unfinished
+file is not re-run, so a drop or an unfinished
 `CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
 that mends it (`--reapply` for an index whose migration's other objects are
 absent too), or — for an INVALID one — the pid of the index operation it
@@ -2662,7 +2673,7 @@ a load that inserted the text around `upsert_thought` still can, which lands
 as a failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
-adopted with `--baseline` — ledger says 021, body says 013 — is told to
+whose ledger is ahead of its schema — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
 above; the migrator runs 021's backfill with the operator's acceptances out of
 its sight, so it labels from real passes alone).
@@ -5578,8 +5589,9 @@ that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
 
 `migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
-defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
-force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+defines it and does nothing else, and `run({ url, dryRun, reapply, grant, sql,
+writer })` is the CLI's run, returning the exit code (`baseline` and `force`
+are refused as retired, as the CLI refuses the flags, SMD-3325) — its
 lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
 the migration files are read per call, and a client passed in is used in
 place of the URL and never closed. It must be one connection (the `max: 1`
@@ -5849,7 +5861,7 @@ first assumed. See FORK.md's SMD-1632 section.
 ### What only the live suite can catch
 
 - **The migration runner.** `migrate.ts` talks to a server over TCP with `Bun.sql`.
-  PGlite is not a server, so the ledger, `--dry-run`, `--baseline` and drift
+  PGlite is not a server, so the ledger, `--dry-run` and drift
   detection were untested until `test-live.ts` existed.
 - **Driver-level parameter binding.** The double-encoding bug below is invisible to
   a test that writes SQL literals. It only appears when a client binds a JS value

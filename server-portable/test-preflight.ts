@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -386,9 +386,9 @@ if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is disti
 else {
   const { SQL } = await import("bun");
   // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
-  // excludes public, and the adoption row a schema-present/no-ledger brain shows.
+  // excludes public, and the row a schema-present/no-ledger brain shows.
   const offPathUrl = `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere`;
-  const adoptRow = /!\s+migration ledger\s+no schema_migrations table — the schema was applied by hand\n\s+→ Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/;
+  const schemaThereRow = /!\s+migration ledger\s+no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun \(SMD-3325\)\n\s+→ Re-apply the migrations over it with the migrator — cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain/;
   // Drop and apply are separate calls on purpose: the two assertions between them
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
@@ -397,15 +397,13 @@ else {
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
 
-  // The migration ledger row on the empty database names the migrate command,
-  // not --baseline: --baseline records every migration as applied without running
-  // one, and over no schema it leaves a ledger the next plain run reads as done
-  // (SMD-2237). It says what the schema row above it says, and never contradicts
-  // it with an adoption step there is nothing to adopt.
+  // The migration ledger row on the empty database names the migrate command
+  // and says nothing has been migrated: what the schema row above it says
+  // (SMD-2237), never the schema-present row's wording.
   assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here\n\s+→ Apply the migrations: cd db && bun migrate\.ts/.test(before.out),
          "…the migration ledger row names the migrate command on an empty database (SMD-2237)");
-  assert(!/the schema was applied by hand/.test(before.out) && !/--baseline/.test(before.out),
-         "…and never tells an empty database to --baseline");
+  assert(!/the schema is there/.test(before.out),
+         "…and never tells an empty database its schema is there");
 
   // Another tool's thoughts, in a schema of its own, does not make an
   // un-migrated public read as "exists but does not resolve" (SMD-2062):
@@ -440,13 +438,13 @@ else {
          `…and with it first on the path of a role that may not read it, the migrations, which build in public, and public put ahead for the server — never a GRANT on it (${(strayFirst?.out ?? "").split("\n").find((l) => /\bschema\b/.test(l))?.trim()})`);
   // And the migration ledger row reads the SMD-2237 split by public alone: the
   // probe is pg_class-qualified to schema public, so pf_stray.thoughts (another
-  // tool's, off the path) is not a schema to adopt — the row says "nothing has
-  // been migrated here", never "applied by hand" or --baseline. A probe that
-  // dropped the `nspname = 'public'` qualifier would match the stray table and
-  // offer to --baseline an empty public: the exact wrong advice SMD-2237 removes.
+  // tool's, off the path) is not the brain's schema — the row says "nothing has
+  // been migrated here", never "the schema is there". A probe that dropped the
+  // `nspname = 'public'` qualifier would match the stray table and tell an
+  // empty public its schema is there.
   assert(/!\s+migration ledger\s+no schema_migrations table and no schema — nothing has been migrated here/.test(strayRun.out) &&
-         !/the schema was applied by hand/.test(strayRun.out) && !/--baseline/.test(strayRun.out),
-         "…and the migration ledger row reads public alone — another schema's thoughts is not a schema to adopt (SMD-2237)");
+         !/the schema is there/.test(strayRun.out),
+         "…and the migration ledger row reads public alone — another schema's thoughts is not the brain's schema (SMD-2237)");
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
@@ -455,23 +453,42 @@ else {
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(after.out), "…and that atomic capture is available, with the shipped bodies (a warn would also say \"present\")");
   assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
-  // The schema is present (applyMigrations installs it) but writes no ledger, so
-  // this is the legitimate adoption case: the row offers --baseline, with the full
-  // "applied by hand" wording and the remedy. Pinning both — not merely "no
-  // schema_migrations table", which the empty-database message also contains —
-  // keeps the SMD-2237 split honest from the other side: a probe that always read
-  // "no schema" would send a hand-applied brain to re-run the migrations.
-  assert(adoptRow.test(after.out),
-         "…and, with the schema present but no ledger, offers --baseline to adopt it (the legitimate case the empty-database guard must not swallow, SMD-2237)");
+  // The schema is present (applyMigrations installs it) but writes no ledger:
+  // the row says the schema is there, that adopting it unrun was retired, and
+  // the --reapply that brings it under the ledger (SMD-3325). Pinning the
+  // wording — not merely "no schema_migrations table", which the
+  // empty-database message also contains — keeps the SMD-2237 split honest
+  // from the other side: a probe that always read "no schema" would say
+  // nothing had been migrated over a whole schema.
+  assert(schemaThereRow.test(after.out),
+         "…and, with the schema present but no ledger, says so and names --reapply over it (SMD-3325)");
   // The protective direction of the public-qualified probe: the same
   // migrated-but-no-ledger brain, read from a role whose search_path excludes
-  // public, still offers --baseline. The probe is pg_class-qualified to public,
+  // public, still reads the schema as there. The probe is pg_class-qualified to public,
   // so it finds public.thoughts even when the role cannot resolve it by name — the
   // search_path-independence the probe's comment promises. A to_regclass spelling
   // would miss it here and wrongly say "nothing has been migrated" (SMD-2237).
   const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
-  assert(adoptRow.test(afterOffPath.out),
-         "…and offers --baseline even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
+  assert(schemaThereRow.test(afterOffPath.out),
+         "…and reads it so even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
+  // An empty ledger beside the schema — a dry run's, or a CREATE by hand — is
+  // the same brain: it warns and names --reapply, never "recording none" as
+  // ok (SMD-3325 review pass 3). With a plugin named, the remedy says the
+  // plain run --reapply leaves its migrations to.
+  const emptyLedger = new SQL({ url: LIVE, max: 1 });
+  let recordingNone: { code: number; out: string };
+  try {
+    await emptyLedger.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+    recordingNone = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_PLUGINS: "example" });
+  } finally {
+    await emptyLedger.unsafe(`DROP TABLE IF EXISTS schema_migrations`);
+    await emptyLedger.close();
+  }
+  assert(/!\s+migration ledger\s+schema_migrations present, recording none, but the schema is there — applied without the migrator/.test(recordingNone.out)
+           && /cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with nothing recorded it runs every file again/.test(recordingNone.out)
+           && /--reapply leaves the plugins' migrations \(OB1_PLUGINS\) to a plain run after it\./.test(recordingNone.out),
+         `…and an empty ledger beside the schema warns the same way, naming --reapply and, with a plugin named, the plain run after it (${row(recordingNone.out, "migration ledger")})`);
+  assert(!/--reapply leaves the plugins'/.test(after.out), "…a remedy that names no plugin follow-up when OB1_PLUGINS is unset");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
   /**
@@ -782,7 +799,7 @@ else {
   assert(/search signatures.*before migration 020/s.test(dropped.out), "a recorded 014 whose function was replaced by 007's is still the pre-020 form (the signature check says so)");
   // Re-applying 007 replaces the BODY as well as the clause, so this is the
   // "replaced its body" wording with the body re-run as the remedy.
-  assert(/recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (--baseline or a redefinition), not a missing migration");
+  assert(/recorded as applied — a body put there from outside the migrations, or a later redefinition, replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (a body from outside or a redefinition), not a missing migration");
   assert(/Re-apply the recorded migrations with the migrator — cd db && bun migrate\.ts --url … --reapply/.test(dropped.out), "…with a remedy a plain run will not turn into a no-op: the migrator's re-run");
   // The other branch: 014's body intact, its SET clause gone — what a successor
   // that redefined the function without the clause leaves. (An earlier draft
@@ -856,7 +873,7 @@ else {
   // and 039's refusal of the unrendered shape would name a good staging
   // index), so no 074 after it; nothing to build, the indexes being 039's.
   const rawFix = fix(rawBody.out, "walk index");
-  assert(rawFix.includes("→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
+  assert(rawFix.includes("→ The ledger records nothing, or there is none, so re-apply the migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && rawFix.includes("with nothing recorded it applies every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
          `…with the migrator as the remedy: no file by hand, no 074 after it, nothing to build first (${rawFix.trim().slice(0, 60)}…)`);
   /**
    * SMD-2871: 039's window. The raw-column body is 038's, as before 039;
@@ -933,7 +950,7 @@ else {
   const castRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(new RegExp(`${memRow(underCast.total)}\\s*$`, "m").test(castRun.out),
          `…and a staging index built under the cast body, the walk index remedy's way, is the one walked: counted with the rest, no clause (${bytesText(underCast.total)})`);
-  assert(fix(castRun.out, "walk index").trim() === "→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
+  assert(fix(castRun.out, "walk index").trim() === `→ ${apply039({ state: "none" })}` && apply039({ state: "none" }).includes("--reapply"),
          "…and the walk index remedy, the staging index built, asks for 039 alone: nothing left to build first (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -3063,13 +3080,13 @@ else {
   const pre023 = await run(SQL_ENV);
   assert(pre023.code === 0 && /fingerprint backfill\s+2 thought\(s\) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row/.test(pre023.out) && /Apply db\/migrations\/023_content_fingerprint_backfill\.sql\./.test(pre023.out),
          "before 023 the same row is a warning whose remedy is the migration");
-  // Adopted with --baseline: the ledger says 023, the function is absent, and
+  // A ledger ahead of its schema: the ledger says 023, the function is absent, and
   // "apply 023" would be a loop the migrator skips out of. The remedy is the
   // migrator's re-run, as reembed.ts says for 021 (SMD-1193).
   await claims.unsafe("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
-  await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'baseline') ON CONFLICT DO NOTHING");
-  const baselined = await run(SQL_ENV);
-  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-apply the recorded migrations with the migrator — cd db && bun migrate\.ts --url … --reapply — which re-runs every migration in one transaction/.test(baselined.out),
+  await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'planted') ON CONFLICT DO NOTHING");
+  const ahead = await run(SQL_ENV);
+  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(ahead.out) && /The ledger says 023 but backfill_content_fingerprints is absent: re-apply the recorded migrations with the migrator — cd db && bun migrate\.ts --url … --reapply — which re-runs every migration in one transaction/.test(ahead.out),
          "…and where the ledger already says 023 the remedy is the migrator's re-run, not a migration a plain run would skip");
   await claims.unsafe("DROP TABLE schema_migrations");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
@@ -3206,8 +3223,8 @@ else {
 
     // A role that may read the corpus and neither the ledger nor ob1_config
     // (review pass 1): the ledger row says the table is there and unreadable —
-    // information_schema hid it from such a role, and the row told it to adopt
-    // a hand-applied schema with --baseline — and the version row says it
+    // information_schema hid it from such a role, and the row told it to record
+    // the ledger over the schema a second time — and the version row says it
     // could not read ob1_config rather than that 044 never ran.
     await claims.unsafe("DROP ROLE IF EXISTS pf_reader");
     await claims.unsafe("CREATE ROLE pf_reader LOGIN PASSWORD 'reader'");
@@ -3327,13 +3344,12 @@ else {
 
       // The same role with public off its search path (review pass 2): the
       // ledger exists and does not resolve for it. Never "no schema_migrations
-      // table" and never the --baseline remedy, which on a partly migrated
-      // brain would record pending migrations as applied.
+      // table": the ledger is there, and the row must say so.
       await claims.unsafe("ALTER ROLE pf_reader SET search_path = nowhere");
       const lost = await run({ ...SQL_ENV, DATABASE_URL: readerUrl });
       assert(/!\s+migration ledger\s+schema_migrations exists \(schema public\) but does not resolve for this role/.test(lost.out)
-               && !/no schema_migrations table/.test(lost.out) && !/Adopt it with: cd db && bun migrate\.ts --url \$DATABASE_URL --baseline/.test(lost.out),
-             `a ledger off the role's search path warns that it does not resolve, and recommends no --baseline (${row(lost.out, "migration ledger")})`);
+               && !/no schema_migrations table/.test(lost.out),
+             `a ledger off the role's search path warns that it does not resolve, and never reads as no ledger (${row(lost.out, "migration ledger")})`);
 
       // The same role granted SELECT on every table, ob1_config among them,
       // public still off its path (SMD-2062): the write-privileges check tested
@@ -5473,7 +5489,7 @@ else {
     }
 
     // A schema older than its ledger — 001 to 024 applied, every file
-    // recorded (--baseline over a hand-built schema): 025's, 068's and 074's
+    // recorded (a planted ledger): 025's, 068's and 074's
     // indexes missing with the columns, table and function they need, sent
     // to the re-apply, never a CREATE naming what is not there — 074's name
     // held by an index of another shape too, cleared and left to the re-apply.
