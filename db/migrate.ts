@@ -9,7 +9,7 @@
  *   bun db/migrate.ts --url postgres://user:pass@host:5432/dbname
  *   DATABASE_URL=... bun db/migrate.ts
  *   bun db/migrate.ts --dry-run        # show what would run, touch nothing
- *   bun db/migrate.ts --reapply        # re-run every recorded migration, in one transaction
+ *   bun db/migrate.ts --reapply        # re-run every migration, recorded or not, in one transaction
  *   await run({ url, dryRun: true })   # the same, in-process: import { run } from "./migrate.ts" (SMD-2304)
  *
  * Applied migrations are recorded in schema_migrations, so re-running is a no-op.
@@ -203,7 +203,7 @@ async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], gr
     const other = quoteIdent(pinned.schema);
     const named = pinned.viaUser ? ` (the path's "$user")` : "";
     err(
-      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no brain.\n` +
+      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no ledger of its own.\n` +
         (grant
           ? "  --grant grants on the brain's objects in public, and there are none there.\n"
           : "  This migrator builds in public, where preflight looks; run on, it would start a second brain there.\n") +
@@ -722,18 +722,26 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // schema nor lands in another. See pinPublicFirst (config.mjs).
   if (!(await publicFirst(sql, out, err))) return 2;
 
-  await sql`
+  const LEDGER_DDL = `
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name        text PRIMARY KEY,
       sha256      text NOT NULL,
       applied_at  timestamptz NOT NULL DEFAULT now()
-    )
-  `;
+    )`;
+  // A live --reapply over a database with no ledger makes it inside its one
+  // transaction, not here: its checks may refuse and a file may fail, and an
+  // empty ledger left behind reads to preflight as a migrated brain recording
+  // none, so "Nothing was written" must hold (SMD-3325, review pass 3).
+  const ledgerInTransaction =
+    reapply && !dryRun && ((await sql`SELECT to_regclass('schema_migrations') IS NULL AS absent`) as { absent: boolean }[])[0].absent;
+  if (!ledgerInTransaction) await sql.unsafe(LEDGER_DDL);
 
   const applied = new Map<string, string>(
-    (await sql`SELECT name, sha256 FROM schema_migrations`).map(
-      (r: { name: string; sha256: string }) => [r.name, r.sha256]
-    )
+    ledgerInTransaction
+      ? []
+      : (await sql`SELECT name, sha256 FROM schema_migrations`).map(
+          (r: { name: string; sha256: string }) => [r.name, r.sha256]
+        )
   );
 
   /** Recorded in the ledger under --reapply: re-run rather than skipped. */
@@ -1152,6 +1160,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const notes = new Map<string, string>();
     try {
       await begin(async (tx: SQL) => {
+        if (ledgerInTransaction) await tx.unsafe(LEDGER_DDL);
         for (const m of migrations) {
           progress.current = m;
           const note = await applyShadowed(tx, m);

@@ -4484,22 +4484,26 @@ if (configFailed) {
         const tree = pad3(LATEST_MIGRATION);
         const hi = facts.highestMigration;
         const status = ledgerStatus(hi, LATEST_MIGRATION); // brain_info's rule, one definition
-        if (!ledgerPresent) {
-          // Whether a fork schema is there: public.thoughts (migration 001's
-          // table), by pg_class so a role's search_path does not hide it — the
-          // predicate the schema row's off-path probe uses. With one, it was
-          // applied without the migrator, which no longer adopts a schema by
-          // recording the ledger unrun (SMD-3325): --reapply brings it under
-          // the ledger, every file idempotent, in one transaction after its
-          // checks that the shell agrees with the brain — a plain run gives
-          // each file its own and checks nothing. Without, nothing has been
-          // migrated, as the schema row above says too (SMD-2237).
-          const [{ present: schemaPresent }] = (await sql`
+        // Whether a fork schema is there: public.thoughts (migration 001's
+        // table), by pg_class so a role's search_path does not hide it — the
+        // predicate the schema row's off-path probe uses. With one and a ledger
+        // that records nothing, or none, it was applied without the migrator,
+        // which no longer adopts a schema by recording the ledger unrun
+        // (SMD-3325): --reapply brings it under the ledger, every file
+        // idempotent, in one transaction after its checks that the shell agrees
+        // with the brain — a plain run gives each file its own and checks
+        // nothing. An empty ledger beside it is a dry run's, or a by-hand
+        // CREATE's, and says no more (review pass 3). Without, nothing has been
+        // migrated, as the schema row above says too (SMD-2237).
+        const schemaThere = async () =>
+          ((await sql`
             SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
-          if (schemaPresent)
-            add("migration ledger", "warn", "no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun (SMD-3325)",
-                `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with no ledger it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.`);
+                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[])[0].present;
+        const reapplyOver = `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.` +
+          (pluginNames(env.OB1_PLUGINS).length ? " --reapply leaves the plugins' migrations (OB1_PLUGINS) to a plain run after it." : "");
+        if (!ledgerPresent) {
+          if (await schemaThere())
+            add("migration ledger", "warn", "no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun (SMD-3325)", reapplyOver);
           else
             add("migration ledger", "warn", "no schema_migrations table and no schema — nothing has been migrated here",
                 "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL");
@@ -4519,7 +4523,11 @@ if (configFailed) {
             add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${u.message}) — this server's tree ends at ${tree}`,
                 "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");
         }
-        else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
+        else if (hi === null) {
+          if (await schemaThere())
+            add("migration ledger", "warn", `schema_migrations present, recording none, but the schema is there — applied without the migrator — this server's tree ends at ${tree}`, reapplyOver);
+          else add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
+        }
         else if (status === "behind")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,
               "Apply the pending migrations: cd db && bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");

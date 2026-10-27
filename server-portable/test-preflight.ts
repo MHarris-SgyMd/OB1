@@ -388,7 +388,7 @@ else {
   // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
   // excludes public, and the row a schema-present/no-ledger brain shows.
   const offPathUrl = `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere`;
-  const schemaThereRow = /!\s+migration ledger\s+no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun \(SMD-3325\)\n\s+→ Re-apply the migrations over it with the migrator — cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with no ledger it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain/;
+  const schemaThereRow = /!\s+migration ledger\s+no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun \(SMD-3325\)\n\s+→ Re-apply the migrations over it with the migrator — cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain/;
   // Drop and apply are separate calls on purpose: the two assertions between them
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
@@ -471,6 +471,24 @@ else {
   const afterOffPath = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: offPathUrl });
   assert(schemaThereRow.test(afterOffPath.out),
          "…and reads it so even with public off the role's search_path — the probe finds public.thoughts by pg_class (SMD-2237)");
+  // An empty ledger beside the schema — a dry run's, or a CREATE by hand — is
+  // the same brain: it warns and names --reapply, never "recording none" as
+  // ok (SMD-3325 review pass 3). With a plugin named, the remedy says the
+  // plain run --reapply leaves its migrations to.
+  const emptyLedger = new SQL({ url: LIVE, max: 1 });
+  let recordingNone: { code: number; out: string };
+  try {
+    await emptyLedger.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+    recordingNone = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_PLUGINS: "example" });
+  } finally {
+    await emptyLedger.unsafe(`DROP TABLE IF EXISTS schema_migrations`);
+    await emptyLedger.close();
+  }
+  assert(/!\s+migration ledger\s+schema_migrations present, recording none, but the schema is there — applied without the migrator/.test(recordingNone.out)
+           && /cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with nothing recorded it runs every file again/.test(recordingNone.out)
+           && /--reapply leaves the plugins' migrations \(OB1_PLUGINS\) to a plain run after it\./.test(recordingNone.out),
+         `…and an empty ledger beside the schema warns the same way, naming --reapply and, with a plugin named, the plain run after it (${row(recordingNone.out, "migration ledger")})`);
+  assert(!/--reapply leaves the plugins'/.test(after.out), "…a remedy that names no plugin follow-up when OB1_PLUGINS is unset");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
   /**

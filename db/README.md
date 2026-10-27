@@ -66,7 +66,10 @@ shell agrees with the brain: the embedding width, and the model 006 would
 otherwise re-record in `ob1_config`. A plain run would give each file its own
 transaction, leaving older definitions in place if it stopped part-way, and
 checks nothing. Preflight's `migration ledger` row names `--reapply` where it
-finds `thoughts` and no ledger.
+finds `thoughts` and no ledger, or one recording nothing. A live `--reapply`
+over no ledger makes the table inside its transaction, so a refusal or a
+failure leaves none behind. `--reapply` leaves plugins' migrations to a plain
+run after it.
 
 Recording the ledger without running the files, `--baseline`, was retired with
 its override `--force` (SMD-3325). The compose stack builds every brain by
