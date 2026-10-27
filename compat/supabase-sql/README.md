@@ -111,7 +111,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`259 assertions: 259 passed, 0 failed` and `PASS`. A migrated file behaves
+`295 assertions: 295 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the seven MCP servers with
 a schema of their own — the extensions, forty-five tools — against those
@@ -172,10 +172,59 @@ that row as an object. An array column is read through `to_json`, which is
 PostgREST's own rendering: a `uuid[]` a list of strings (Bun left it as the
 literal text `{…}`), a `real[]` holding a `NULL` a list with a `null` (Bun's
 binary decoder refused the column outright, so the query log's `result_scores`
-never landed through this shim). On a table with an array column a `*` is
-therefore spelled out from the catalog's map, `pg_class.relnatts` read beside
-the rows so a column added under a running client is still seen on the next
-call; a table without one keeps `SELECT *`.
+never landed through this shim).
+
+The shim never sends a `*` it can name (SMD-3329). Bun prepares each statement
+and keeps it, and a `*` over a table a migration widens, or a function it drops
+and makes again with one more OUT column, re-analyses to a different result
+type: Postgres then refuses the cached plan (0A000, "cached plan must not change
+result type") on every call until the process restarts. So a table's `*` — in
+`.select("*")`, a bare `.select()` and a write's `RETURNING` — is spelled out
+from the catalog's map, array columns through `to_json`, with the table's
+shape read beside the rows — its oid, its attribute count and a digest of its
+columns' types — so the call after a column is added, a table is rebuilt under
+its name or a column is retyped has it; a name read from the catalog is quoted as Postgres quotes it, so a
+column named `my col` reads too. `.rpc()` names the columns the function
+declares (`RETURNS TABLE`, OUT parameters, the table of `RETURNS SETOF
+<table>`), and reads `*` for an unnamed OUT parameter, which has no name.
+
+A column dropped, or an OUT column renamed, is a 42703 that Postgres places
+(its error's `position`, in characters, or in bytes on a `SQL_ASCII` server)
+inside the list the shim wrote: the shim reads the catalog again and runs the
+call once more, so the caller sees no error. Postgres refuses the column before
+it executes anything, so nothing runs twice. A 42703 it places anywhere else — a
+filter's column, a payload key, an update's `SET`, a column inside an embed, the
+count query of a page past the end — is the caller's: answered once, and the
+42703 itself causes no re-read. One raised inside a function body or a trigger
+carries no place in the statement and is never retried, so a body that advanced
+a sequence is not run again.
+
+When Postgres refuses a statement's cached plan (0A000) — a column retyped, or
+dropped and added again with another type; a function the catalog read as a
+scalar since made again with columns; overloads that disagree, one made again —
+the shim reads the catalog again and runs the call once more as a new
+statement: a generation number, a trailing comment, kept per table or function
+and URL, since a fresh read may spell the same text and Bun keeps a prepared
+statement under its text, with its old plan and the parameter types it was
+first given. A 42703 in the shim's own list does the same, and so does a
+changed shape read beside a star's rows, so a statement that binds a retyped
+column as a parameter is made new too. Later calls reuse the new statement; the
+calls one change refused at once forget the map, and move the generation, once. Only the plan
+cache's own refusal counts (the error's routine, `RevalidateCachedQuery`, with
+no function's context on it), which comes before the statement runs; a 0A000 a
+running body raised is never retried. A function the catalog read as a scalar
+and made again with columns, met on a connection that had not prepared its
+statement, fails nothing: that call's rows are shaped by the old read, and the
+next call's by a fresh one. An embed's `(*)` stays a star: its rows reach the
+caller as one json column, whose type a new column does not change.
+
+Not mended until the process restarts, as before: a table read only through
+statements that bind a retyped column as a parameter, with no read of its `*`
+that returns rows to carry the new shape (Postgres refuses the old parameter
+type before any plan is refused); a function whose argument was retyped (the
+same, through `.rpc()`); a column retyped in a table read with no parameters at
+all, which Bun never prepares, until a read of its `*` carries the shape back.
+Statements a generation leaves behind stay prepared on their connections.
 
 ## What is deliberately refused
 
@@ -236,9 +285,18 @@ form, so a JavaScript array reached a `text[]` column as its `String()` (`a,b`,
 `""` for `[]`) and was refused as malformed — while the same array into a `jsonb`
 column beside it was right. Value shape cannot decide that (`tags TEXT[]` and
 `instructions JSONB` take the same `string[]`); the column's declared type does.
-A schema change after the first query is not seen until the process restarts,
-as with PostgREST's own cache. `toSQL()` reads the catalog too, so it is a
-promise.
+A table's columns are re-read when the caller names one the map lacks; when a
+query that named a column remembered as absent runs, or fails another way (the
+column is there now); when the shape read beside a star's rows moves (a column
+added, a table rebuilt under its name, a column retyped; a call must return rows
+to carry it); when the shim's own list names one since dropped, which `.rpc()`
+also does for the table a `RETURNS SETOF` returns; or when Postgres refuses a
+statement's cached plan. A function's are re-read when one of its declared
+columns is gone, when a changed plan is refused, or when a scalar's row comes
+back with other columns. Anything else — a foreign key added, a column added to
+a `RETURNS TABLE`, a column added to a `RETURNS SETOF`'s table until a read of
+that table notices the shape — is not seen until the process restarts, as with
+PostgREST's own cache. `toSQL()` reads the catalog too, so it is a promise.
 
 Clients on one connection URL share one pool. The vendored servers build a
 client inside each request and close none — an Edge Function's shape — and
