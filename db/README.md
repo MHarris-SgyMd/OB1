@@ -24,7 +24,11 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   (test-upgrade [23]).
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
-- To run `test-live.ts`: podman or docker, for a throwaway container
+- To run `test-live.ts`: podman or docker, for a throwaway container, and
+  `bun install` in `../server-portable` as well as here: its [9], like
+  `test-search-path.ts`, runs `server-portable/preflight.ts` from that
+  directory, whose `bunfig.toml` turns Bun's auto-install off, so preflight's
+  `zod` must come from that install (SMD-2978)
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows;
   `test-bench-reuse.ts` the same and about three minutes (nine bench runs at

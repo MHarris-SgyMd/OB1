@@ -86,7 +86,7 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38 and 40 parse YAML with Bun.YAML.
+      # 32 to 38, 40 and 44 parse YAML with Bun.YAML.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
@@ -736,6 +736,14 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
+      # test-live's [9] and test-search-path run server-portable/preflight.ts
+      # from server-portable/, where auto-install is off (its bunfig.toml), so
+      # preflight's zod resolves from this install or not at all. Before it,
+      # Bun fetched zod at run time, and a run with no egress hung (SMD-2978).
+      - name: Install the server's pinned packages
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
       # The service carries no health check, so the runner starts these steps
       # as soon as its container does — with the 5 s pg_isready check it
       # carried before, it held them until the check first passed, about 6 s
@@ -897,7 +905,8 @@ jobs:
       # one (change 97, SMD-3152) — and no Supabase configuration present at
       # all. A write records the REST core's door with the MCP server as its
       # carrier. The two installs pin its cross-directory imports, which every
-      # suite below takes too; Bun would otherwise fetch them (SMD-2978).
+      # suite below takes too; without them those imports fail, since
+      # server-portable/'s bunfig.toml turns Bun's auto-install off (SMD-2978).
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
