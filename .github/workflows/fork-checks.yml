@@ -3445,9 +3445,9 @@ jobs:
       # exit 2, naming all three at once — a run beside the rest of the step,
       # since it waits 30 s before its exit (SMD-3200). Meanwhile it comes up
       # healthy, and a client registered by DCR is read back with its
-      # registration token after a restart (the log shows
-      # the second start) and again after a recreate, as an upgrade does: the
-      # SQLite store is in its volume, and the memory adapter forgot both.
+      # registration token after a restart (the log shows the second start)
+      # and again after a recreate, as an upgrade does: the SQLite store is in
+      # its volume, and the memory adapter forgot both.
       # The store's directory is the server's user's alone; an interaction
       # with no session is the library's 400, and a write to a store another
       # connection holds locked answers 500 and is logged; with the cap set to
@@ -3502,18 +3502,19 @@ jobs:
           # auth-data too).
           # The refusal below waits 30 s before its exit 2 (no hot restart
           # loop), so it runs in the background through the rest of the step
-          # (SMD-3200). The image, the volume and the server's container are
-          # made first, so the refusal's run and the server's up race to build
-          # or create nothing. A one-off `run` takes no alias on the networks,
-          # so it never answers for the server, and compose's up, restart, logs
-          # and plain ps pass it over. Exec would not: it sorts by container
-          # number, and the one-off has none, so it reads 0 and comes before the
-          # server's 1 — every `auth exec` here names the server's, --index 1
-          # (review pass 2). It is waited for and asserted before the server's
-          # stop, by when its 30 s are long past. A failure before then removes its container by
-          # name — killing the background job would reach a subshell, not
-          # compose, nor the container — so the teardown meets no one-off
-          # holding the volume.
+          # (SMD-3200). The image and the volume are made first, so the
+          # refusal's run and the server's up race to build or create neither
+          # (the server's up then recreates the container made beside them,
+          # which the one-off never touches). A one-off `run` takes no alias on
+          # the networks, so it never answers for the server, and compose's up,
+          # restart, logs and plain ps pass it over. Exec would not: it sorts by
+          # container number, and the one-off has none, so it reads 0 and comes
+          # before the server's 1 — every `auth exec` here names the server's,
+          # --index 1 (review pass 2). It is waited for and asserted before the
+          # server's stop, by when its 30 s are long past. A failure before then
+          # removes its container by name — killing the background job would
+          # reach a subshell, not compose, nor the container — so the teardown
+          # meets no one-off holding the volume.
           ../.github/ci/auth-settings.sh
           auth up --no-start --build --no-deps auth
           auth run --rm --no-deps --name ob1-auth-refusal -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
