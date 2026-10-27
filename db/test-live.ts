@@ -7012,7 +7012,8 @@ if (want("10h")) {
     assert(slowRun.code === 1 && /: no answer \(timed out after 1 s, the sweep's limit a call, which --timeout sets\); the next sweep asks again/.test(slowRun.stderr) && !/OB1_LLM_TIMEOUT/.test(slowRun.stderr),
       `a call past the limit is unanswered, its line naming --timeout, not OB1_LLM_TIMEOUT (exit ${slowRun.code}: ${slowRun.stderr.trim().split("\n")[0]?.slice(0, 160)})`);
     // The sweep's SQL against subjectCurrent, cell by cell under both settings (review pass 1: an off arm matching
-    // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among them.
+    // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among
+    // them.
     const ways = ["metadata", "first_line", "model", "other", null];
     const passes = ["subject:metadata@r1", "subject:first_line@r2", "subject:first_line@r1", "subject:rules@r1", "subject:x@p2", "subject:x@p2r", "subject:x@p1", "subject:x@p1r",
       "subject:x@p12", "subject:x@p12r", "subject:x@p20", "subject:x@p2rr", "extract:x@p2", "extract:x@p2r", "x@p2", "@p2r", "p2", "", null];

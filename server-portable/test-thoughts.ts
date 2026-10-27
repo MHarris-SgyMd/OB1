@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectReasoning, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -197,7 +197,7 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   const subjectFields = (v: string | undefined) => JSON.stringify(resolveEmbedConfig({ OB1_SUBJECT_REASONING: v }).subjectReasoning);
   assert([undefined, "", "  ", "on", " TRUE ", "1"].every((v) => subjectFields(v) === "{}") && ["off", " Off ", "false", "0", "none"].every((v) => subjectFields(v) === JSON.stringify({ reasoning_effort: "none" }))
       && subjectFields(" high ") === JSON.stringify({ reasoning_effort: "high" }),
-    "OB1_SUBJECT_REASONING: unset or empty is on (the provider's default), off/false/0 none, any other word the effort, trimmed");
+    "OB1_SUBJECT_REASONING: unset or empty is on (the provider's default), off, false, 0 and none send none, any other word the effort, trimmed");
   assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "high" }).subjectReasoning) === "{}" && JSON.stringify(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "on" }).metadataReasoning) === JSON.stringify({ reasoning_effort: "none" })
       && JSON.stringify(unset.metadataReasoning) === JSON.stringify({ reasoning_effort: "none" }),
     "…and it is the subject question's alone: OB1_METADATA_REASONING does not set it, and it leaves extraction's off");
@@ -2775,8 +2775,9 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       && subjectModelKey("qwen3.8:27b", true) === "subject:qwen3.8:27b@p2r" && subjectModelKey("qwen3.8:27b", false) === "subject:qwen3.8:27b@p2",
     "each rule's key and the model's, beside extract's `extract:<model>@p<n>`: `r` when it was asked with its reasoning on (PR 4)");
   assert(subjectReasoning(resolveEmbedConfig({})) === "on" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "0" })) === "off" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })) === "off"
-      && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "Low" })) === "low",
-    "the reasoning's name, for a recipe and the sweep's line: on, off (an effort of none is off), or the effort");
+      && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "Low" })) === "low"
+      && subjectReasoningOn(resolveEmbedConfig({})) && subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "low" })) && !subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })),
+    "the reasoning's name, for a recipe and the sweep's line: on, off (an effort of none is off), or the effort; on at its default or an effort");
   assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 2 })
     && JSON.stringify(subjectRecipe({ by: "metadata" })) === JSON.stringify({ deterministic: true, rule: "metadata", rule_version: 1 }), "a rule's recipe: deterministic, the rule and its version");
   const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, reasoning: "on", answer: "PR 727" });

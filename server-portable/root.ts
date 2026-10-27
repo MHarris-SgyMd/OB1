@@ -185,8 +185,8 @@ export type Env = {
   OB1_METADATA_REASONING?: string;
   /**
    * The same for the subject question alone (`--subjects`, SMD-3306), but on
-   * when unset: off/false/0 (or none) asks it with no reasoning pass. Turning it on asks
-   * again about every subject a model found with it off.
+   * when unset: off/false/0 (or none) asks it with no reasoning pass. Turning
+   * it on asks again about every subject a model found with it off.
    */
   OB1_SUBJECT_REASONING?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */

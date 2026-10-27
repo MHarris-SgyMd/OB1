@@ -55,7 +55,7 @@ import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectReasoning, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
+import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -156,7 +156,7 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
   const resolved = resolveEmbedConfig(env as EmbedEnv);
   // A reasoning call runs long: of 200 the 27B answered with its reasoning on, two took over 300 s, the slowest 369 s,
   // where the slowest of 160 without it took 133 s (SMD-3306 PR 4): each default about 2.4x and 2.3x the slowest.
-  const TIMEOUT_S = opts.timeout ?? (subjectReasoning(resolved) === "off" ? 300 : 900);
+  const TIMEOUT_S = opts.timeout ?? (subjectReasoningOn(resolved) ? 900 : 300);
   if (opts.sql != null && noUrl && env.OB1_WORKER_KEY && !DRY_RUN) {
     // The pass's rule (extract-entities.ts's run): the key resolves on a connection of its own.
     err("extract-entities.ts --subjects resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
@@ -188,8 +188,8 @@ async function sweep(
 ): Promise<number> {
   const { MODEL, DRY_RUN, LIMIT, env, out, err } = o;
   const reasoning = subjectReasoning(cfg);
-  const reasoningOn = reasoning !== "off";
-  /** The effort each question sends, which a refusal names (review pass 2); none is sent with reasoning on. */
+  const reasoningOn = subjectReasoningOn(cfg);
+  /** The effort each question sends, which a refusal names (review pass 2): nothing at the default, with reasoning on. */
   const sentEffort = cfg.subjectReasoning.reasoning_effort;
   const judgeKey = subjectModelKey(cfg.judgeModel, reasoningOn);
   /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
@@ -318,9 +318,12 @@ async function sweep(
           return { egress: e.message };
         }
         const kind = classifyError(e);
-        // A timeout names the sweep's own limit, which --timeout sets, not the provider's knob the message names: the
-        // sweep sets the limit over it (review pass 2).
-        if (kind === "thought") return { unanswered: e instanceof ProviderError && e.kind === "timeout" ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
+        if (kind === "thought") {
+          // A timeout names the sweep's limit, which --timeout sets over the provider's knob the message names (review
+          // pass 2).
+          const timedOut = e instanceof ProviderError && e.kind === "timeout";
+          return { unanswered: timedOut ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
+        }
         if (kind === "transient" && attempt < TRANSIENT_PAUSES_MS.length) {
           await sleepUnless(TRANSIENT_PAUSES_MS[attempt], stop.signal);
           if (stop.signal.aborted) throw e;

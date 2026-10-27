@@ -325,6 +325,8 @@ export function subjectReasoning(cfg: Pick<EmbedConfig, "subjectReasoning">): st
   const effort = cfg.subjectReasoning.reasoning_effort;
   return effort === undefined ? "on" : effort === "none" ? "off" : String(effort);
 }
+/** Whether the question is asked with the model's reasoning on, at its default or an effort (the key's `r`). */
+export const subjectReasoningOn = (cfg: Pick<EmbedConfig, "subjectReasoning">): boolean => subjectReasoning(cfg) !== "off";
 /**
  * How the pass key of a subject the current question found ends, whatever model answered it: `r` after the version
  * when the model's reasoning was on, as decide mode's `@p<n>d<m>` names its own variant. An effort asked for is keyed
@@ -340,9 +342,9 @@ export const subjectModelKey = (model: string, reasoning: boolean): string => `$
  * (`reasoning`). A judge model changed since does not make a subject out of date, and nothing asks it again yet.
  * Reasoning turned on does, since the model's subjects met Verify item 1's bar with it and missed without (SMD-3306),
  * though what it changed was not significant alone; reasoning turned off does not: off spares the asks to come its
- * cost, and keeps what was asked with it on. This is
- * the rule's statement, with no caller at run time: the sweep reads the same in SQL (db/subject-sweep.ts's
- * currentSubjectSql); test-thoughts holds this arm by arm, and test-live [10h] the SQL against it, row by row.
+ * cost, and keeps what was asked with it on. This is the rule's statement, with no caller at run time: the sweep reads
+ * the same in SQL (db/subject-sweep.ts's currentSubjectSql); test-thoughts holds this arm by arm, and test-live [10h]
+ * the SQL against it, row by row.
  */
 export function subjectCurrent(by: string | null, judge: string | null, reasoning: boolean): boolean {
   if (by === "metadata" || by === "first_line") return judge === subjectRuleKey(by);
