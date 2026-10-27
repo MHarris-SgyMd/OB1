@@ -2,17 +2,17 @@
 /**
  * preflight.ts — fail a bad deployment before it serves traffic.
  *
- * Without this the server starts happily when
- * misconfigured: `initialize` succeeds, `tools/list` returns every tool, and the
- * first real tool call returns "Error: OB1_STORE is unset, which selects the SQL
- * store, and DATABASE_URL is not set. …" inside a tool response. Every liveness
- * probe reports green, including the container healthcheck, because the HTTP layer genuinely is fine — the data layer is built
- * lazily on first use.
+ * Without this the REST core starts happily when misconfigured: it listens,
+ * every liveness probe reports green, including the container healthcheck,
+ * because the HTTP layer genuinely is fine, and the first real operation fails
+ * ("Error: OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is
+ * not set. …") — the data layer is built lazily on first use.
  *
- * The settings it reads come from the env file by hand (the database password,
- * from which compose builds DATABASE_URL; the access keys; the model provider's
- * endpoint and key), so any of them can be wrong, and the failure is silent
- * until a user tries to capture a thought.
+ * The settings it reads are environment values someone wrote (in the compose
+ * stack the env file: the database password, from which compose builds
+ * DATABASE_URL, the access keys, the model provider's endpoint and key; in a
+ * pipeline or a checkout, whatever exports them), so any of them can be wrong,
+ * and the failure is silent until a user tries to capture a thought.
  *
  * Run it as a deploy gate, an init container, or a readiness probe:
  *

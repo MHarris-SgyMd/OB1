@@ -96,7 +96,7 @@ That said — the system is yours to extend. A tool the brain lacks is a plugin 
 
 ### "I want the visual editing experience — headings, bullets, drag stuff around, everything visible at once"
 
-That's a fair ask, and you're right — the Open Brain doesn't have one. Its operator GUI at `/dashboard` browses and searches the brain, read-only; a SQL client is functional but it's a database view. Neither is a writing environment.
+That's a fair ask, and you're right — the Open Brain doesn't have one. Its operator GUI at `/dashboard` browses and searches your thoughts but does not edit them; a SQL client is functional but it's a database view. Neither is a writing environment.
 
 Here's how to think about it: the Open Brain is the backend. It's where the data lives, where the vectors live, where your AI connects. Obsidian is a frontend. There's nothing stopping you from having both — use the Open Brain as your storage and retrieval layer, and build (or eventually connect) a nicer interface on top of it.
 

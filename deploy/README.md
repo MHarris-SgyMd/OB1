@@ -952,8 +952,7 @@ The release images carry the tagged commit — the cut's merge commit, in full
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong
-`DATABASE_URL` starts cleanly, answers `initialize`, returns every tool from
-`tools/list`, and passes any HTTP liveness probe — then fails when a user captures
+`DATABASE_URL` starts cleanly and passes any HTTP liveness probe — then fails when a user captures
 their first thought, with the real error buried inside a tool response.
 
 The settings the server needs come from the env file by hand (the database
@@ -3881,9 +3880,11 @@ so the profile builds from a checkout.
   in its log, rather than exiting or failing the thoughts it holds
   (SMD-2599); a model the provider does not serve at start is refused with
   exit 2. Reviewing what consolidation proposes stays a person's job.
-- **Auth.** A client's access is one shared key, in a header or `?key=`: a
-  known weakness, which upstream tracks as
-  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
+- **Auth.** Each client holds a static key of its own, named and scoped in
+  `MCP_ACCESS_KEYS` and sent in a header or `?key=`. A key that leaks works
+  until it is taken out of the list. (Upstream's one shared key,
+  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216), is what
+  these keys replaced.)
   The `auth` profile's authorization server runs behind the proxy's `/auth`;
   the MCP server at `/mcp` is its client (SMD-2287), and only the operator
   signs in there, with no passkey yet ("Authorization server", above).

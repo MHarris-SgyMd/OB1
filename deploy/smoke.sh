@@ -15,10 +15,12 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Checks 2, 3, 4 and 10 are the ones upstream's Edge Function build cannot pass
-# (the fork retired that build in SMD-1800); FORK.md changes 42 and 75 say why,
-# and why those failures are real (10: upstream's server has no keyed health
-# body, SMD-2041).
+# Checks 2, 3, 4 and 10 are the ones upstream's Edge Function deployment cannot
+# pass (the fork retired that build in SMD-1800): 2 because the platform's API
+# gateway answers the OAuth discovery path with 401 before the function sees
+# it, 3, 4 and 10 because of the build. FORK.md changes 42 and 75 say why, and
+# why those failures are real (10: upstream's server has no keyed health body,
+# SMD-2041).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
