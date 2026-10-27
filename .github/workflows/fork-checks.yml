@@ -3440,9 +3440,11 @@ jobs:
           docker rm -f ob1-runner-egress
 
       # SMD-2285: the authorization server as compose runs it. Its secrets are
-      # --init's, into this job's deploy/.env. First, with one setting blanked
-      # and the origin given a path, it refuses to start, exit 2, naming both
-      # at once. Then it comes up healthy, and a client registered by DCR is
+      # --init's, into this job's deploy/.env. With one setting blanked, the
+      # origin given a path and the profiles without auth, it refuses to start,
+      # exit 2, naming all three at once — a run beside the rest of the step,
+      # since it waits 30 s before its exit (SMD-3200). Meanwhile it comes up
+      # healthy, and a client registered by DCR is
       # read back with its registration token after a restart (the log shows
       # the second start) and again after a recreate, as an upgrade does: the
       # SQLite store is in its volume, and the memory adapter forgot both.
@@ -3499,17 +3501,20 @@ jobs:
           # (the failure log, and the teardown's `down -v`, which removes
           # auth-data too).
           # The refusal below waits 30 s before its exit 2 (no hot restart
-          # loop), so it runs in the background while the server comes up and
-          # the MCP server's answers are read (SMD-3200). The image, the volume
-          # and the server's container are made first, so the refusal's run and
-          # the server's up race to build or create nothing. It is waited for,
-          # and asserted, before the server's restart: from there on the step's
-          # compose calls (restart, logs, ps) list the service's containers,
-          # which a one-off `run` alive beside it would be one of.
+          # loop), so it runs in the background through the rest of the step
+          # (SMD-3200). The image, the volume and the server's container are
+          # made first, so the refusal's run and the server's up race to build
+          # or create nothing. A one-off `run` takes no alias on the networks,
+          # so it never answers for the server; compose's up, exec, restart,
+          # logs and plain ps pass it over (exec picks the server first), and it
+          # is waited for and asserted before the server's stop, by when its
+          # 30 s are long past. A failure before then stops it, so the teardown
+          # meets no one-off holding the volume.
           ../.github/ci/auth-settings.sh
           auth up --no-start --build --no-deps auth
           auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
           refusal=$!
+          trap 'kill "$refusal" 2> /dev/null || true' EXIT
           auth up -d --wait --wait-timeout 120 --no-deps auth
           for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
             got=$(via_proxy "http://127.0.0.1:8010$path")
@@ -3544,16 +3549,6 @@ jobs:
             { [ "$c" = 404 ] && [ ! -s /tmp/off-body ]; } || { echo "POST $path at the origin root answered $c '$(head -c 80 /tmp/off-body)', not oauth-fallback-off's bodiless 404"; exit 1; }
           done
           auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
-          # The refusal, started before the server came up: exit 2, naming every bad setting at once.
-          code=0
-          wait "$refusal" || code=$?
-          out=$(cat /tmp/auth-refusal.out)
-          echo "$out" | tail -5
-          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
-          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
-            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
-          done
-          [ "$(auth ps -aq auth | wc -l)" = 1 ] || { echo "compose lists $(auth ps -aq auth | wc -l) auth containers after the refusal, not the server's alone"; exit 1; }
           auth restart auth
           auth up -d --wait --wait-timeout 60 --no-deps auth
           auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
@@ -3605,6 +3600,18 @@ jobs:
           want="20 429 401 401 21 21"
           [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
           grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
+          # The refusal, started before the server came up: exit 2, naming every bad setting at once. Then compose, which
+          # lists a one-off with -a alone, lists the server's container alone: the refusal's is gone with it (SMD-3200).
+          code=0
+          wait "$refusal" || code=$?
+          trap - EXIT
+          out=$(cat /tmp/auth-refusal.out)
+          echo "$out" | tail -5
+          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
+            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
+          done
+          [ "$(auth ps -aq auth | wc -l)" = 1 ] || { echo "compose lists $(auth ps -aq auth | wc -l) auth containers after the refusal, not the server's alone"; exit 1; }
           id=$(auth ps -q auth)
           SECONDS=0
           auth stop auth
