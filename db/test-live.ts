@@ -102,8 +102,8 @@ if (!URL_) {
  * on its own client, to keep the rest under the full-stack jobs. [9f],
  * re-embed's follower outage cases, came out of [9] into extract, so long
  * keeps its time (SMD-2679 PR 4a-2b). [38r], the scheduler's re-embed cases,
- * came out of [38] into long, and [10g] went to sleep, so neither cell sets
- * the run's length (SMD-3392).
+ * came out of [38] into long, and [10g] went to sleep, so that neither cell
+ * sets the run's length (SMD-3392).
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
@@ -14217,7 +14217,8 @@ const liveWrite = (sql: SQL, note: string) =>
  * the brain emptied of thoughts, entities, logged searches, heartbeats and the
  * passes' claims; a stub model and embedding server, whose switches `sw` it
  * reads at each request; the scheduler's env; and the reads and runs both
- * sections' cases share. Each section calls it on its own database, so each
+ * sections' cases share. Each section calls it on a client of its own, and
+ * what it empties and records is all either section's cases need, so each
  * runs alone in its cell. The caller stops `stub` in its finally.
  */
 async function sleepScaffold(sql: SQL) {
@@ -14232,7 +14233,7 @@ async function sleepScaffold(sql: SQL) {
   const modelCalls: { kind: "extract" | "judge"; at: number }[] = [];
   /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first). */
   const embedCalls: { input: string; at: number }[] = [];
-  /** The stub's switches, which it reads at each request: a case sets one, and puts it back in its finally. */
+  /** What the stub reads at each request, which a case sets and puts back, and the counters it bumps (judgesHeld, probes, embedProbes). */
   const sw = {
     slow: 0,
     /** Extraction calls only: a judge started beside extraction would judge before it ends. */
@@ -15847,7 +15848,7 @@ if (want("38")) {
 // the others running on (SMD-2679 PR 4b). Out of [38] into a section of
 // its own, so the two run in different cells (SMD-3392).
 if (want("38r")) {
-  console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on; a model switch, at the start or mid-pass, sets it aside until the record is put right; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
+  console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on, and a timeout past the clock starts no claim pass; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot sleep that leaves its pool exits 1; the dry run counts its backlog, unlabelled and moved rows too; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, stub, capture, claims, beat, lines, sleepRun, bounded } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
@@ -16313,8 +16314,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38] leaves recorded is another model's, which every
-  // pass's start would refuse: set aside, and put back at the end.
+  // The extraction key [38r] leaves recorded, as [38] does before it, is
+  // another model's, which every pass's start would refuse: set aside, and
+  // put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
