@@ -3914,6 +3914,24 @@ jobs:
         with:
           bun-version: "1.4.3"
 
+      # lgtm's image (2.6 GB) and pg-exporter's, pulled while the stack comes up
+      # rather than inside the observability step, where the pull took 21–28 s
+      # (SMD-3199). Both are pinned by digest in compose.yaml, so they are read
+      # from the file with no deploy/.env yet, and a ref not pinned is refused.
+      # The pull writes its log, then its exit code by a rename, which the
+      # observability step waits for before it reads the disk.
+      - name: Pull the observability profile's images, in the background
+        working-directory: deploy
+        run: |
+          # shellcheck disable=SC2016 # Bun's template literal
+          refs=$(bun -e 'const c = Bun.YAML.parse(await Bun.file("compose.yaml").text()); const r = ["lgtm", "pg-exporter"].map((s) => c.services[s]?.image ?? ""); if (r.some((x) => !/@sha256:[0-9a-f]{64}$/.test(x))) { console.error(`an observability image is not pinned by digest in compose.yaml: ${r.join(" ")}`); process.exit(1); } console.log(r.join(" "));')
+          echo "pulling $refs"
+          (
+            rc=0
+            for ref in $refs; do docker pull -q "$ref" || rc=$?; done
+            echo "$rc" > "$RUNNER_TEMP/observability-pull.rc.part" && mv "$RUNNER_TEMP/observability-pull.rc.part" "$RUNNER_TEMP/observability-pull.rc"
+          ) < /dev/null > "$RUNNER_TEMP/observability-pull.log" 2>&1 &
+
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
@@ -3953,7 +3971,7 @@ jobs:
       # every query is run where Grafana would run it, its variables at All
       # and its rate window 5 m. Each Prometheus query must return a series
       # with a number above 0 in it within three minutes (the exporter is
-      # scraped every 30 s) — or 0 itself for the ten that answer 0 where
+      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the ten that answer 0 where
       # their family has series and their filter matches nothing (`or 0 * …`:
       # the failure share, the store's three, the collector's three and its
       # three totals), empty where it has none — but the NO_TRAFFIC panel,
@@ -3963,13 +3981,17 @@ jobs:
       # holds every name, and every label a matcher requires, on the pinned
       # images; check 37 holds the names and labels without a running profile. Loki refuses every record with its
       # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
-      # image is pulled, before Loki starts, and room made where it is tight. The
-      # step puts the stack's containers and deploy/.env back as it found
-      # them (the thought, the job, the query log's rows, pg-monitor-role's
-      # ob1_monitor role, lgtm-data and the telemetry network stay), so a step
-      # added after it meets the stack it found: a collector would lengthen
-      # the servers' stop line, which deploy-stack's last steps read where
-      # this ran until SMD-3170. A capture citing a thought that is not there
+      # image is pulled (in the background since the job's start, SMD-3199),
+      # before Loki starts, and room made where it is tight. The step is the
+      # job's last before the teardown, so it leaves the stack as it ends it:
+      # it put deploy/.env and the servers back as it found them until
+      # SMD-3199, for a step after it that no longer exists — a step added
+      # after it brings that back. CI's clocks are 10 s, not the shipped 30 s:
+      # the collector's scrape of pg-exporter and the alert rules' evaluation,
+      # from an overlay derived from compose's own render, so the rest of the
+      # collector's config is the shipped one, and the step holds that the
+      # overlay changes the interval alone (SMD-3199; checks 37 and 38 hold the
+      # files' text). A capture citing a thought that is not there
       # makes the store's refusals line read above 0, and one tool called
       # once proves Prometheus's zero at a series' start.
       # SMD-3050: compose's render of the alert rules is
@@ -3984,7 +4006,6 @@ jobs:
       - name: The observability profile's dashboard reads every series it names
         working-directory: deploy
         run: |
-          cp .env /tmp/env-before-observability
           printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
           # compose's render prints each `$` doubled again, as compose.yaml has it,
           # so it reads back as the file once undoubled (Grafana's mount has one).
@@ -3993,12 +4014,32 @@ jobs:
             || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
           jq -j '.configs["grafana-alert-rules"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/alert-rules.yaml \
             || { echo "compose renders the grafana-alert-rules config otherwise than deploy/observability/alert-rules.yaml" >&2; exit 1; }
+          # CI's clocks, 10 s where the files say 30 s (SMD-3199): the collector's
+          # scrape of pg-exporter and the rule group's evaluation, written from
+          # the render above into an overlay, so the collector's whole pipeline
+          # and the rules are the shipped ones but for the interval. Each
+          # substitution must have changed its value, and the overlay's render
+          # must differ from the shipped one in those two values alone.
+          ci=$RUNNER_TEMP/observability-ci.json
+          jq '{services: {lgtm: {environment: {OTELCOL_EXTRA_ARGS: (.services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\""))}}},
+               configs: {"grafana-alert-rules": {content: (.configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s"))}}}' /tmp/observability-render.json > "$ci"
+          docker compose -f compose.yaml -f "$ci" --profile observability config --format json > /tmp/observability-render-ci.json
+          jq -e --slurpfile ci /tmp/observability-render-ci.json '
+              (.services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\"")) as $args
+            | (.configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s")) as $rules
+            | $args != .services.lgtm.environment.OTELCOL_EXTRA_ARGS and $rules != .configs["grafana-alert-rules"].content
+            and $ci[0].services.lgtm.environment.OTELCOL_EXTRA_ARGS == $args and $ci[0].configs["grafana-alert-rules"].content == $rules
+            and ($ci[0] | del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)) == del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)' \
+            /tmp/observability-render.json > /dev/null \
+            || { echo "CI's overlay does not change the collector's scrape interval and the alert rules' interval from 30 s to 10 s, and those alone" >&2; exit 1; }
           # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
           # starts on it: Loki refuses every record with the disk under lgtm-data
           # past 90% (PR 3c, measured), and the log query below would fail with
           # no reason given. Where it is tight, the runner image's SDKs this job
-          # never uses (several GB) make room.
-          docker compose -f compose.yaml --profile observability pull lgtm pg-exporter
+          # never uses (several GB) make room. The pull began at the job's start.
+          for _ in $(seq 600); do [ -f "$RUNNER_TEMP/observability-pull.rc" ] && break; sleep 1; done
+          [ "$(cat "$RUNNER_TEMP/observability-pull.rc" 2> /dev/null)" = 0 ] \
+            || { echo "the observability images' pull did not end with 0 within 10 minutes ($(cat "$RUNNER_TEMP/observability-pull.rc" 2> /dev/null || echo "no exit code")):" >&2; cat "$RUNNER_TEMP/observability-pull.log" >&2; exit 1; }
           root=$(docker info -f '{{.DockerRootDir}}')
           used=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
           if [ "$used" -ge 85 ]; then
@@ -4007,7 +4048,7 @@ jobs:
           fi
           df -h "$root"
           [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
-          docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
+          docker compose -f compose.yaml -f "$ci" --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
           ./smoke.sh http://127.0.0.1:8010/mcp "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
           # Each call's tool, status and, where the tool refused, isError;
@@ -4184,9 +4225,9 @@ jobs:
           [ "$signins" = 0 ] || said "Postgres logged $signins failed sign-ins as ob1_monitor: a /probe reached the exporter"
           echo "pg-exporter answers /cgi-bin/metrics alone, on telemetry alone"
           # The ticket's forced condition: the exporter stopped, the collector's
-          # next scrape reads up 0 (within its 30 s), and the Postgres rule is
+          # next scrape reads up 0 (within its 10 s here), and the Postgres rule is
           # pending at an evaluation after it (22–61 s from the stop over three
-          # fresh runs, measured), firing a minute on.
+          # fresh runs on the shipped 30 s, measured), firing a minute on.
           docker compose -f compose.yaml --profile observability stop pg-exporter
           for _ in $(seq 36); do
             st=$(states) || st=""
@@ -4195,13 +4236,6 @@ jobs:
           done
           grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" || said "the Postgres rule did not go pending within 3 minutes of pg-exporter's stop: $(tr '\n' ';' <<<"$st"); Prometheus's up and pg_up for the exporter: $(prom 'up{job="postgres"}') $(prom 'pg_up{job="postgres"}')"
           echo "the Postgres rule pending after pg-exporter's stop"
-          cp /tmp/env-before-observability .env
-          docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
-          for s in api mcp; do
-            endpoint=$(docker compose -f compose.yaml exec -T "$s" printenv OTEL_EXPORTER_OTLP_ENDPOINT) || { echo "could not read $s's OTEL_EXPORTER_OTLP_ENDPOINT after the step" >&2; exit 1; }
-            [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
-          done
 
       - name: Logs on failure
         if: failure()
