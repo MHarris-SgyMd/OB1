@@ -344,7 +344,7 @@ const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
  * statement's tail that builds it, what reads slower without it, and — for a
  * migration that brings more than the index — the object of its schema the
  * reads are, so a brain whose ledger records the migration over a schema
- * without it (--baseline) is sent to the re-apply, never handed a CREATE that
+ * without it is sent to the re-apply, never handed a CREATE that
  * names a column or function that is not there. The HNSW pair has the walk
  * index row and the trigram index its own; ob1_fp_backfill_idx serves only
  * 023's backfill.
@@ -460,11 +460,11 @@ const keyRuleHolds = (trigSrc: string, appendSrc: string): boolean =>
 const PAYLOAD_CENSUS_BOUND = 2000;
 /**
  * Where the ledger already records the migration a check finds absent — a
- * brain adopted with --baseline whose schema is the guide's — "apply it" is a
+ * body removed or replaced from outside the migrations — "apply it" is a
  * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
-const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
+const REAPPLY = `The ledger records that migration but the schema installed is older — a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -2025,14 +2025,15 @@ if (configFailed) {
             if (Number(nullsRaw) === 0) {
               add("fingerprint backfill", "ok", "no thought is missing a fingerprint (a stale key on a row that has one is not read here)");
             } else if (pending && !t.backfill_fn) {
-              // Ledger-aware, as reembed.ts is for 021: a brain adopted with
-              // --baseline says 023 while the function is absent, and "apply
-              // 023" would be a loop — the migrator skips a ledgered file.
+              // Ledger-aware, as reembed.ts is for 021: a ledger can say 023
+              // while the function is absent (dropped from outside the
+              // migrations), and "apply 023" would be a loop — the migrator
+              // skips a ledgered file.
               const byHand = `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — which re-runs every migration in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).`;
               add("fingerprint backfill", "warn",
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
-                    ? `The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): ${byHand}`
+                    ? `The ledger says 023 but backfill_content_fingerprints is absent: ${byHand}`
                     : ledgerRead || !ledgerPresent
                       ? "Apply db/migrations/023_content_fingerprint_backfill.sql."
                       : `Apply db/migrations/023_content_fingerprint_backfill.sql — or, if the ledger already records 023 (${whyUnread}), ${byHand}`);
@@ -2940,11 +2941,12 @@ if (configFailed) {
         // What the ledger says of 039, in apply039's states: recorded; a later
         // file recorded without it (a row deleted or misspelt by hand, where a
         // plain run would apply 039 alone after 074 — review pass 2); read
-        // and pending; no ledger; locked (its read timed out, as a migration
+        // and pending; no ledger, or one recording nothing (SMD-3325); locked (its read timed out, as a migration
         // holding it does — review pass 3); or unread, with whyUnread.
         const ledger039 = (): { state: "recorded" | "hole" | "pending" | "none" | "locked" | "unread"; why?: string } =>
           ledger.has("039") ? { state: "recorded" }
           : [...ledger].some((n) => n > "039") ? { state: "hole" }
+          : ledgerRead && ledger.size === 0 ? { state: "none" }
           : ledgerRead ? { state: "pending" }
           : !ledgerPresent ? { state: "none" }
           : { state: ledgerUnread?.reason === "timeout" ? "locked" : "unread", why: whyUnread };
@@ -3336,7 +3338,7 @@ if (configFailed) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
             if (boundsUnset) {
               add("filtered search", "warn",
-                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are at pgvector's defaults, set nowhere this connection resolves them from (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — on a large table a broad filter's walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are at pgvector's defaults, set nowhere this connection resolves them from (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — on a large table a broad filter's walk returns short. 014's DO block could not seed them: a non-owner role, a ledger recording 014 unrun, or a platform refusing ALTER DATABASE`,
                   seedBounds);
             } else if (staleRecord) {
               add("filtered search", "warn",
@@ -3353,17 +3355,16 @@ if (configFailed) {
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
                 `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
-                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — since a plain run skips a recorded file (--baseline recorded it)` : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
+                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — since a plain run skips a recorded file` : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.
             // Recorded without 014's body in place has two causes and the ledger
-            // cannot tell them apart: `migrate.ts --baseline` records a migration
-            // without running it (the documented route for a database built by
-            // hand from the guide, whose match_thoughts is 007's), or a later
-            // redefinition replaced the body. Name both (eleventh review pass).
+            // cannot tell them apart: a body put there from outside the
+            // migrations (the guide's 007, re-applied by hand), or a later
+            // redefinition. Name both (eleventh review pass).
             const dropped = ledgerHas014
-              ? " although migration 014 is recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body"
+              ? " although migration 014 is recorded as applied — a body put there from outside the migrations, or a later redefinition, replaced its body"
               : " — migration 014 is not applied";
             const setting = declared
               ? `carries hnsw.iterative_scan=${declared} as a SET clause, which cannot help this body, whose LIMIT sits before the filter`
@@ -3738,8 +3739,8 @@ if (configFailed) {
 
         /**
          * The indexes on thoughts the reads are planned around (SMD-3146): an
-         * index the ledger records can still be gone — --baseline over a
-         * hand-built schema, a CONCURRENTLY build or drop that did not finish
+         * index the ledger records can still be gone — a CONCURRENTLY build
+         * or drop that did not finish
          * (INVALID, which the planner ignores and an IF NOT EXISTS re-run
          * keeps), a drop or rename by hand — and then each read is slower,
          * answers right, and nothing says so. Looked up by name in thoughts'
@@ -3930,7 +3931,7 @@ if (configFailed) {
                   [waits.length ? `First wait for ${waits.join("; and ")} to finish (a build or reindex shows in pg_stat_progress_create_index, a drop or ALTER only in pg_locks).` : "",
                    resolveFirst ? `${waits.length ? "Then resolve" : "First resolve"} the fingerprints held twice: ${RESOLVE_TWICE}.` : "",
                    steps.length ? `${waits.length || resolveFirst ? "Then run" : "Run"} in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): ${steps.map((st, k) => `${k + 1}) ${st}`).join(" ")}.` : "",
-                   olderList.length ? `The ledger records ${olderList.join(", ")} but the schema installed is from before ${olderList.length === 1 ? "it" : "them"} (adopted with --baseline, or removed from outside the migrations): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.` : "",
+                   olderList.length ? `The ledger records ${olderList.join(", ")} but the schema installed is from before ${olderList.length === 1 ? "it" : "them"} (removed from outside the migrations): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.` : "",
                    waits.length ? "Then run preflight again: what was waited for has its own remedy once it ends." : ""].filter(Boolean).join(" "));
             }
           }
@@ -4484,22 +4485,26 @@ if (configFailed) {
         const tree = pad3(LATEST_MIGRATION);
         const hi = facts.highestMigration;
         const status = ledgerStatus(hi, LATEST_MIGRATION); // brain_info's rule, one definition
-        if (!ledgerPresent) {
-          // Whether there is a fork schema to adopt: public.thoughts (migration
-          // 001's table), by pg_class so a role's search_path does not hide it —
-          // the predicate the schema row's off-path probe uses, and the basis on
-          // which the ledger's own presence is judged. --baseline records every
-          // migration as applied without running one, so it is adoption only
-          // when the schema is already there; on an empty database it leaves a
-          // ledger over nothing and every later plain run then skips every file
-          // (SMD-2237). There the schema row above says "apply the migrations",
-          // and the ledger row must not contradict it with --baseline.
-          const [{ present: schemaPresent }] = (await sql`
+        // Whether a fork schema is there: public.thoughts (migration 001's
+        // table), by pg_class so a role's search_path does not hide it — the
+        // predicate the schema row's off-path probe uses. With one and a ledger
+        // that records nothing, or none, it was applied without the migrator,
+        // which no longer adopts a schema by recording the ledger unrun
+        // (SMD-3325): --reapply brings it under the ledger, every file
+        // idempotent, in one transaction after its checks that the shell agrees
+        // with the brain — a plain run gives each file its own and checks
+        // nothing. An empty ledger beside it is a dry run's, or a by-hand
+        // CREATE's, and says no more (review pass 3). Without, nothing has been
+        // migrated, as the schema row above says too (SMD-2237).
+        const schemaThere = async () =>
+          ((await sql`
             SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
-          if (schemaPresent)
-            add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
-                "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
+                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[])[0].present;
+        const reapplyOver = `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.` +
+          (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null ? " --reapply leaves the plugins' migrations (OB1_PLUGINS) to a plain run after it." : "");
+        if (!ledgerPresent) {
+          if (await schemaThere())
+            add("migration ledger", "warn", "no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun (SMD-3325)", reapplyOver);
           else
             add("migration ledger", "warn", "no schema_migrations table and no schema — nothing has been migrated here",
                 "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL");
@@ -4513,13 +4518,17 @@ if (configFailed) {
           else if (u.reason === "invisible")
             add("migration ledger", "warn", `${u.message} — the ledger cannot be judged against this server's tree (${tree})`,
                 u.message.includes("reaches")
-                  ? "Put the ledger's schema ahead of the other schema_migrations on the server role's search_path (ALTER ROLE … SET search_path); --baseline would record the ledger a second time."
-                  : "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it; --baseline would record the ledger a second time.");
+                  ? "Put the ledger's schema ahead of the other schema_migrations on the server role's search_path (ALTER ROLE … SET search_path)."
+                  : "Put the ledger's schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it.");
           else
             add("migration ledger", "warn", `could not verify: schema_migrations could not be read (${u.message}) — this server's tree ends at ${tree}`,
                 "A migration or a long transaction may hold the ledger; run preflight again once it has finished.");
         }
-        else if (hi === null) add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
+        else if (hi === null) {
+          if (await schemaThere())
+            add("migration ledger", "warn", `schema_migrations present, recording none, but the schema is there — applied without the migrator — this server's tree ends at ${tree}`, reapplyOver);
+          else add("migration ledger", "ok", `schema_migrations present, recording none — this server's tree ends at ${tree}`);
+        }
         else if (status === "behind")
           add("migration ledger", "warn", `the ledger reaches ${pad3(hi)} but this server's tree ends at ${tree} — the brain is behind the server it serves, and a tool that needs a later migration fails`,
               "Apply the pending migrations: cd db && bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
@@ -4697,6 +4706,8 @@ if (configFailed) {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
+                // A re-embed follower is a hand run — no compose service runs one — so its fix is the row alone (review pass 3).
+                if ((h.stale || h.ended) && sleepRuns && h.worker === "reembed") return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
@@ -4788,7 +4799,14 @@ if (configFailed) {
             // Followers running here keep a scheduler down: it refuses beside
             // them, so "start it again" alone would only refuse again (review pass 3).
             const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
-            if (down && followers.length) {
+            // A re-embed follower run by hand keeps it down too: its fix is to stop that run (review pass 3).
+            const handFollowers = w.heartbeats.filter((b) => b.worker === "reembed" && !b.stale && !b.ended);
+            const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
+            if (down && handFollowers.length && !followers.length) {
+              fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
+            } else if (down && followers.length) {
+              // Beside the workers' followers, named too: their fix alone would leave the scheduler refusing (review pass 4).
+              if (handFollowers.length) fixes.push(`${handFix}.`);
               fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
             } else if (h.restart) {
               fixes.push(heldFix(h, "sleep") as string);

@@ -238,12 +238,16 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   const cases: [string, Record<string, unknown>, string[], Record<string, string>][] = [
     ["no URL", {}, [], {}],
     ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x` }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`], {}],
-    ["--reapply with --baseline", { url: AT, reapply: true, baseline: true }, ["--url", AT, "--reapply", "--baseline"], {}],
+    // Retired, refused first: before the URL, and before --groups' own refusal (review pass 1).
+    ["the retired --baseline with no URL", { baseline: true }, ["--baseline"], {}],
+    ["the retired --force beside --groups", { url: AT, force: true, groups: "capture" }, ["--url", AT, "--force", "--groups", "capture"], {}],
+    ["the retired --baseline beside --reapply",{ url: AT, reapply: true, baseline: true }, ["--url", AT, "--reapply", "--baseline"], {}],
     // connect.ts's whole rule, not only the parse (SMD-2317): Bun would send
     // ?database= to the server and connect to another database (review pass 5).
     ["a URL the readers split (?database=)", { url: `${AT}?database=other` }, ["--url", `${AT}?database=other`], {}],
-    ["--force alone", { url: AT, force: true }, ["--url", AT, "--force"], {}],
-    ["--grant with --baseline", { url: AT, grant: "reader", baseline: true }, ["--url", AT, "--grant", "reader", "--baseline"], {}],
+    ["the retired --force", { url: AT, force: true }, ["--url", AT, "--force"], {}],
+    ["the retired --baseline beside --grant", { url: AT, grant: "reader", baseline: true }, ["--url", AT, "--grant", "reader", "--baseline"], {}],
+    ["--grant with --reapply", { url: AT, grant: "reader", reapply: true }, ["--url", AT, "--grant", "reader", "--reapply"], {}],
   ];
   for (const [what, opts, argv, env] of cases) {
     const r = await inProcess(opts);
@@ -268,8 +272,8 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   ok(process.listenerCount("SIGINT") === 0 && process.listenerCount("SIGTERM") === 0, "…and leaves no signal listener after its refusals");
 
   // An option given as null is absent, as `sql: null` is: `url: null` is no
-  // URL, and `grant: null` is no --grant — so `--baseline` beside it is a
-  // baseline run (which queries the client), not --grant's refusal (review pass 4).
+  // URL, and `grant: null` is no --grant — so `--reapply` beside it is a
+  // re-run (which queries the client), not --grant's refusal (review pass 4).
   const nullUrl = await inProcess({ url: null });
   // `sql: null` beside an unparseable URL: the URL's refusal, not a TypeError
   // reading null's options (review pass 5: nothing passed a null client).
@@ -277,7 +281,7 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   ok(nullSql.code === 2 && nullSql.w.errs[0] === UNPARSEABLE_DATABASE_URL, `migrate run() reads a null sql as absent, refusing the URL beside it (exit ${nullSql.code})`);
   const queried = Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 1 }, close: async () => {}, unsafe: () => { throw new Error("stub queried"); } });
   const nw = capture();
-  const nullGrant = await run({ sql: queried, grant: null, baseline: true, writer: nw } as never).then((c) => String(c), (e: Error) => e.message);
+  const nullGrant = await run({ sql: queried, grant: null, reapply: true, writer: nw } as never).then((c) => String(c), (e: Error) => e.message);
   ok(nullUrl.code === 2 && nullUrl.w.errs[0] === NO_DATABASE_URL && !nw.errs.some((l) => l.startsWith("--grant")) && nullGrant !== "2", `migrate run() reads a null url or grant as absent (url: exit ${nullUrl.code}; grant: ${nullGrant.slice(0, 40)})`);
 }
 
