@@ -4501,7 +4501,7 @@ if (configFailed) {
             SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                             WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[])[0].present;
         const reapplyOver = `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.` +
-          (pluginNames(env.OB1_PLUGINS).length ? " --reapply leaves the plugins' migrations (OB1_PLUGINS) to a plain run after it." : "");
+          (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null ? " --reapply leaves the plugins' migrations (OB1_PLUGINS) to a plain run after it." : "");
         if (!ledgerPresent) {
           if (await schemaThere())
             add("migration ledger", "warn", "no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun (SMD-3325)", reapplyOver);

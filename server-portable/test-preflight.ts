@@ -873,7 +873,7 @@ else {
   // and 039's refusal of the unrendered shape would name a good staging
   // index), so no 074 after it; nothing to build, the indexes being 039's.
   const rawFix = fix(rawBody.out, "walk index");
-  assert(rawFix.includes("→ There is no ledger, so re-apply the migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && rawFix.includes("with nothing recorded it applies every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
+  assert(rawFix.includes("→ The ledger records nothing, or there is none, so re-apply the migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && rawFix.includes("with nothing recorded it applies every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
          `…with the migrator as the remedy: no file by hand, no 074 after it, nothing to build first (${rawFix.trim().slice(0, 60)}…)`);
   /**
    * SMD-2871: 039's window. The raw-column body is 038's, as before 039;

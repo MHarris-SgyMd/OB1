@@ -1866,7 +1866,7 @@ export function apply039(ledger = { state: "pending" }) {
     case "hole": return `The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${reapply}.`;
     case "unread": return `Whether 039 is recorded is unknown (${ledger.why ?? "this role cannot read schema_migrations"}), so re-apply the recorded migrations, which applies 039 either way: ${reapply}.`;
     case "locked": return `The ledger is locked (${ledger.why ?? "its read timed out"}): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.`;
-    case "none": return `There is no ledger, so re-apply the migrations: ${reapply}; with nothing recorded it applies every file, 039 among them, and records each.`;
+    case "none": return `The ledger records nothing, or there is none, so re-apply the migrations: ${reapply}; with nothing recorded it applies every file, 039 among them, and records each.`;
     default: return "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
   }
 }
