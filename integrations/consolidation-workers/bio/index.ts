@@ -49,7 +49,7 @@
  */
 
 import { createClient } from "../../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite, queryOf } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, listenOn, queryOf } from "../_shared/auth.ts";
 import {
   isRecord,
   asString,
@@ -639,5 +639,6 @@ const handler = async (req: Request) => {
 
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: handler,
 };

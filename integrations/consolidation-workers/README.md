@@ -52,7 +52,7 @@ The workers run from a checkout of this repository: each imports the repository'
 > PORT=8788 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/metadata-norm/index.ts
 > ```
 >
-> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts both this way in CI, and `extensions/test-writes.ts` drives the bio worker's two write paths and the metadata worker's review against Postgres.
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Where the scheduler runs on the same machine, add `OB1_LISTEN_HOST=127.0.0.1`, so each worker listens on the loopback alone. `extensions/test-auth.ts` starts both this way in CI, and `extensions/test-writes.ts` drives the bio worker's two write paths and the metadata worker's review against Postgres.
 
 ### 3. Set Environment Variables
 

@@ -49,7 +49,7 @@
 import { createClient } from "../../compat/supabase-sql/index.ts";
 // One name from the shared module, the request rebuilt where its URL will not parse (SMD-2595); the key is
 // still this file's own compare (change 67 left it off the module); deploy ../_shared/auth.ts (integrations/_shared/) with it.
-import { routable } from "../_shared/auth.ts";
+import { listenOn, routable } from "../_shared/auth.ts";
 import {
   embedTextLabelled,
   type LabelledEmbedding,
@@ -1406,5 +1406,6 @@ const handler = (req: Request) => ingest(routable(req));
 
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: handler,
 };

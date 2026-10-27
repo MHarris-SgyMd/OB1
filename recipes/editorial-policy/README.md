@@ -136,7 +136,7 @@ bun recipes/editorial-policy/auditor/index.ts
 
 The two Slack variables are read only when a run posts (`post_to_slack: true` and a critical finding); a run without them stores its report and then fails on the post, so either set them or schedule with `post_to_slack: false`.
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`.
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. Nothing else calls it, so it needs no public URL: the scheduler in Step 6 runs on the same machine and dials `127.0.0.1`, so start it with `OB1_LISTEN_HOST=127.0.0.1` and it listens there alone.
 
 ### Step 6: Schedule the weekly run
 

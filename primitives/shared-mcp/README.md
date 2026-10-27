@@ -123,7 +123,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
-import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, listenOn } from "../_shared/auth.ts";
 import { mcpReply } from "../_shared/sse.ts"; // the reply kept alive while a tool runs (SMD-2001)
 
 const app = new Hono();
@@ -230,9 +230,11 @@ app.post("/mcp", async (c) => {
 
 app.get("/", (c) => c.json({ status: "ok", service: "Household Shared", version: "1.0.0" }));
 
-// Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
+// Bun serves the entry module's default export on PORT (8000 unset), on OB1_LISTEN_HOST's address (every address
+// unset); the suites import `fetch`.
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: app.fetch,
 };
 ```
