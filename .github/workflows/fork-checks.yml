@@ -2807,6 +2807,8 @@ jobs:
           kill "$SQUAT"
           q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
           refused "is stamped tier 'working'" up --port 8011
+          # SMD-3155: with no canary volume, a plain up stands one up from stable, said.
+          grep -F '(open-brain-canary_pgdata does not exist): it is stood up from stable' /tmp/canary-refused.out
           q "DELETE FROM ob1_config WHERE key = 'tier'"
           q "ALTER DATABASE openbrain SET ob1.refresh_target = 'canary'"
           refused "carries the refresh mark 'canary'" up --port 8011
@@ -2842,7 +2844,8 @@ jobs:
       #   profiles, and no other profile's secret, and sets the old canary's
       #   database to that password. Neither password then opens the other
       #   stack's database, and the canary's server holds none of stable's.
-      # - The second `up` names no port, so takes its env file's, under
+      # - The second `up`, `--refresh` (a plain `up` keeps the canary's database
+      #   since SMD-3155), names no port, so takes its env file's, under
       #   SERVER_BIND=0.0.0.0: its forwarder stays on loopback, and stable's
       #   /canary/mcp is the proxy's 404. The stub serves another model: the
       #   thought put on stable just before it reaches the canary, and the
@@ -2852,8 +2855,10 @@ jobs:
       # - A third `up`, with a connector at the port's root: named as one the
       #   canary no longer answers, and the root is the proxy's own 404 with
       #   no Deprecation header, retired at v2.0.0 (SMD-2532).
-      # - A fourth `up`, on --port 8012, then one after 8013 is edited into the
-      #   file by hand, which names the connector left at 8012.
+      # - A fourth `up`, on --port 8012, a plain one, which keeps the database
+      #   (a canary-only row survives, no tier half runs), then refusals of a
+      #   database stamped stable, running and stopped, then one after 8013 is
+      #   edited into the file by hand, which names the connector left at 8012.
       #   On --port 8012: the port is written to the canary's
       #   env file, 8011 is free, and a connector left at 8011 is named.
       # - Then teardown:
@@ -3140,7 +3145,7 @@ jobs:
           grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
           board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
-          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run up --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             http://127.0.0.1:8011/) || root_code="no answer (curl exit $?)"
@@ -3186,6 +3191,15 @@ jobs:
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "the refused up stopped the canary" >&2; exit 1; }
           refused 'one or the other' up --refresh --no-refresh
+          # …and where the canary's Postgres is stopped when the run begins, the
+          # guard is asked once it is started, after the writers stop: exit 1,
+          # saying what is stopped, and the next up brings them back.
+          cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
+          docker compose -p open-brain-canary -f compose.yaml stop postgres
+          rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
+            && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
+          cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           refused 'go with up' down --refresh
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published

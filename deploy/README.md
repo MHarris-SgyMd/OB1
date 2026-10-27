@@ -2627,7 +2627,7 @@ keys, runs this checkout's `migrate` on the canary's own database, and
 recreates the servers, its proxy and forwarder on its own networks. Only
 `up --refresh` replaces that database with stable's, and its own rows with
 it. A canary with no database to keep (no volume, or a running one holding
-no relations) is stood up from stable either way, said. A database stamped
+no relations) is stood up from stable by a plain `up` or `--refresh`, said. A database stamped
 other than `canary` in `ob1_config` is refused, naming `--refresh`: a
 refresh that died before its last step leaves stable's copy, which an
 in-place migration would keep as the canary's. `--no-refresh` is still
@@ -3020,7 +3020,7 @@ is the canary's life, in four `up`s:
   smoke key must list nothing at the canary and the canary's nothing at
   stable, each listing at its own; its probe must pass on a thought whose text
   holds literals, searched for without them;
-- a second `up`, with no `--port` (its env file's) under
+- a second `up`, `--refresh` (a plain `up` keeps since SMD-3155), with no `--port` (its env file's) under
   `SERVER_BIND=0.0.0.0`, against a provider stub serving another model. The
   canary's forwarder must stay on loopback and stable's `/canary/mcp` be the
   proxy's 404; the thought put on stable just before it must reach the
@@ -3028,7 +3028,9 @@ is the canary's life, in four `up`s:
 - a third `up`, with a connector at the port's root: named as one the
   canary no longer answers, and the root the proxy's own 404 with no
   `Deprecation` header (SMD-2532);
-- a fourth `up`, on `--port 8012`: written to the canary's env file (written
+- a fourth `up`, a plain one on `--port 8012`, which keeps the canary's
+  database (a canary-only row survives, no tier half runs); then a database
+  stamped `stable` refused, running and stopped; the port written to the canary's env file (written
   mode 600, compose reading 8012), its forwarder moved, 8011 free, and a
   connector left at 8011 named, one `SERVER_PORT` line left; then 8013
   edited into the file by hand with stable's keys added back to

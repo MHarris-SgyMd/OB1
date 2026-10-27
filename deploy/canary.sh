@@ -127,7 +127,7 @@
 #      another profile (the workers) is refused before anything changes:
 #      stop it first;
 #   4. builds the server image from this checkout (as `api`) and (re)creates
-#      the REST core, so its pool opens on the refreshed database. Standing servers are stopped before the refresh, so
+#      the REST core, so its pool opens on the migrated or refreshed database. Standing servers are stopped before the change, so
 #      nothing serves or writes a half-restored copy. The canary's own proxy
 #      and forwarder are (re)started, its port published on loopback;
 #   5. smoke-tests it with its own key, OB1_CANARY_KEY (a write key: smoke.sh
@@ -317,7 +317,7 @@ is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
 # and a plain `up` otherwise, which keeps the database (SMD-3155). A connector
 # moved after a run that succeeded needs no refresh: `up --connect` keeps.
 RERUN="up"
-RECONNECT="with --connect"
+RECONNECT="up --connect"
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
 # The canary's own env file (SMD-2583) is placed once stable's project is
@@ -1326,30 +1326,39 @@ STABLE_PG="$(container_of "$STABLE" postgres)"
 # refused, naming --refresh (a refresh that died before its last step leaves
 # stable's copy, stamped stable). A stopped one is asked once it is started,
 # below, after the writers stop. --no-refresh keeps or refuses (SMD-3154).
+# The volume list must answer: a failed one read as "no volume" would refresh
+# a canary that has one (review pass 1). A running database holding relations
+# is kept by default whatever the list says.
+volumes="$("$RUNTIME" volume ls --format '{{.Name}}')" \
+  || { echo "$RUNTIME volume ls failed, so up cannot tell whether the canary has a database to keep — re-run up once it answers. Nothing changed." >&2; exit 2; }
 HAS_VOLUME=0
-"$RUNTIME" volume inspect "${CANARY}_pgdata" >/dev/null 2>&1 && HAS_VOLUME=1
+grep -qxF "${CANARY}_pgdata" <<<"$volumes" && HAS_VOLUME=1
 if [ "$REFRESH" = 0 ] && [ $HAS_VOLUME = 0 ]; then
   echo "--no-refresh keeps the canary's database, and $CANARY has none (no volume ${CANARY}_pgdata) — run up without it, which stands one up from stable." >&2
   exit 2
 fi
 HELD=""
 LIVE_PG="$(container_of "$CANARY" postgres)"
-if [ $HAS_VOLUME = 1 ] && [ -n "$LIVE_PG" ]; then
+if [ -n "$LIVE_PG" ]; then
   HELD="$(relations_in "$LIVE_PG" 2>/dev/null)" || HELD=""
 fi
+KEPT_BY_DEFAULT=0
 if [ -z "$REFRESH" ]; then
-  if [ $HAS_VOLUME = 0 ] || [ "$HELD" = 0 ]; then
+  if { [ -z "$HELD" ] || [ "$HELD" = 0 ]; } && { [ $HAS_VOLUME = 0 ] || [ "$HELD" = 0 ]; }; then
     REFRESH=1
     say "no canary database to keep (${CANARY}_pgdata $([ $HAS_VOLUME = 0 ] && echo "does not exist" || echo "holds no relations")): it is stood up from stable"
   else
     REFRESH=0
-    say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
+    KEPT_BY_DEFAULT=1
   fi
 fi
 if [ $REFRESH = 0 ] && [ -n "$HELD" ] && [ "$HELD" != 0 ]; then
   held_stamp="$(stamp_of "$LIVE_PG" 2>/dev/null)" || held_stamp="?"
   [ "$held_stamp" = canary ] || { echo "the canary's database ($LIVE_PG) is stamped '${held_stamp:-nothing}', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one. Nothing changed." >&2; exit 2; }
 fi
+# Said once the database has been asked: here where its Postgres runs, after
+# the checks below where it was stopped.
+[ $KEPT_BY_DEFAULT = 0 ] || [ -z "$HELD" ] || say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
 [ $REFRESH = 0 ] || RERUN="up --refresh"
 # The writers `up` stops are its servers, a sleep worker and board-sync
 # (SMD-3312); one of another profile (the workers) would write through the
@@ -1366,7 +1375,7 @@ STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
 # would take the canary proxy's place.
 taken="$("$RUNTIME" ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}' \
   | awk -F'|' -v p=":$PORT->" -v c="$CANARY" 'index($2, p) && $3 != c { print $1 }')"
-[ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — pick another --port (or, if $taken is a canary stood up by hand, remove it: the new one is refreshed from stable)." >&2; exit 2; }
+[ -z "$taken" ] || { echo "port $PORT is published by $taken, outside project $CANARY — pick another --port (or, if $taken is a canary stood up by hand, remove it: this canary keeps its own database, or is stood up from stable where it has none)." >&2; exit 2; }
 # … or a process on the host, which no container list shows: a connection to
 # the port succeeds while the canary's own proxy does not publish it.
 # Its own proxy's port is read from the container while it runs or is still
@@ -1551,6 +1560,7 @@ if [ $REFRESH = 0 ] && [ "$(stamp_of "$CANARY_PG")" != canary ]; then
   echo "the canary's database ($CANARY_PG) is stamped '$(stamp_of "$CANARY_PG")', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one.$SLEEP_SAID$BOARD_SAID" >&2
   exit 1
 fi
+[ $KEPT_BY_DEFAULT = 0 ] || [ -n "$HELD" ] || say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
 # With its servers stopped, the canary's database takes its env file's
 # password; they come back below on that file.
 set_canary_password "$CANARY_PG"
@@ -1579,6 +1589,10 @@ if [ $REFRESH = 1 ]; then
     echo "the refresh failed (tier.sh exit $refresh_rc). Re-run $RERUN once that is fixed: the canary carries the refresh mark, so the retry resets it; a plain up refuses the copy it left.$SLEEP_SAID$BOARD_SAID" >&2
     exit 1
   fi
+  # The copy is stamped canary now: a later failure's re-run keeps it, and
+  # another refresh would lose what was written since (review pass 1).
+  RERUN="up"
+  [ -z "$STOPPED_SLEEP" ] || SLEEP_SAID=" The sleep worker is stopped too: start it with $SLEEP_START, or re-run $RERUN."
 else
   # In place (SMD-3154): this checkout's migrate on the canary's own database,
   # its rows kept. A one-shot run, not `up`, which would stay attached.
