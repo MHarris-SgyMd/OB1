@@ -3499,18 +3499,18 @@ jobs:
           # (the failure log, and the teardown's `down -v`, which removes
           # auth-data too).
           # The refusal below waits 30 s before its exit 2 (no hot restart
-          # loop), so this step takes that much longer.
+          # loop), so it runs in the background while the server comes up and
+          # the MCP server's answers are read (SMD-3200). The image, the volume
+          # and the server's container are made first, so the refusal's run and
+          # the server's up race to build or create nothing. It is waited for,
+          # and asserted, before the server's restart: from there on the step's
+          # compose calls (restart, logs, ps) list the service's containers,
+          # which a one-off `run` alive beside it would be one of.
           ../.github/ci/auth-settings.sh
-          set +e
-          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth 2>&1)
-          code=$?
-          set -e
-          echo "$out" | tail -5
-          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
-          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
-            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
-          done
-          auth up -d --build --wait --wait-timeout 120 --no-deps auth
+          auth up --no-start --build --no-deps auth
+          auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
+          refusal=$!
+          auth up -d --wait --wait-timeout 120 --no-deps auth
           for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
             got=$(via_proxy "http://127.0.0.1:8010$path")
             [ "$got" = "200 https://brain.example.test/auth" ] || { echo "GET $path through the proxy answered \"$got\", not the server's document"; exit 1; }
@@ -3544,6 +3544,16 @@ jobs:
             { [ "$c" = 404 ] && [ ! -s /tmp/off-body ]; } || { echo "POST $path at the origin root answered $c '$(head -c 80 /tmp/off-body)', not oauth-fallback-off's bodiless 404"; exit 1; }
           done
           auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
+          # The refusal, started before the server came up: exit 2, naming every bad setting at once.
+          code=0
+          wait "$refusal" || code=$?
+          out=$(cat /tmp/auth-refusal.out)
+          echo "$out" | tail -5
+          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
+            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
+          done
+          [ "$(auth ps -aq auth | wc -l)" = 1 ] || { echo "compose lists $(auth ps -aq auth | wc -l) auth containers after the refusal, not the server's alone"; exit 1; }
           auth restart auth
           auth up -d --wait --wait-timeout 60 --no-deps auth
           auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
