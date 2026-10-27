@@ -62,8 +62,8 @@ if (!MAIN || !BG || !ORIGIN || !KEY || !READ_KEY) {
 }
 const BG_ORIGIN = new URL(BG).origin;
 const BG_PORT = new URL(BG).port;
-/** The origin's session cookie, and the break-glass port's own (listener.ts sessionCookieName). */
-const COOKIE = "ob1_dashboard_session";
+/** The origin's session cookie, named for the configured origin's port when it names one (SMD-3352), and the break-glass port's own (listener.ts sessionCookieName). */
+const COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_session_${new URL(ORIGIN).port}` : "ob1_dashboard_session";
 const BG_COOKIE = `ob1_dashboard_breakglass_${BG_PORT}`;
 const AS_UP = args.includes("--as-up");
 

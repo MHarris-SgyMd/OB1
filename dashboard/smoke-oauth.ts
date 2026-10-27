@@ -67,7 +67,8 @@ if (!BASE || !ORIGIN || !PASSWORD) {
 const LOCAL = new URL(BASE).origin;
 const RENEWAL = args.includes("--renewal");
 const REVOKE_CLIENT = flag("revoke-client");
-const COOKIE = "ob1_dashboard_session";
+/** The session cookie, named for the configured origin's port when it names one (listener.ts sessionCookieName, SMD-3352). */
+const COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_session_${new URL(ORIGIN).port}` : "ob1_dashboard_session";
 
 let pass = 0;
 let fail = 0;

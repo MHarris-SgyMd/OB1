@@ -1942,7 +1942,7 @@ jobs:
             --data-urlencode "key=$OB1_SMOKE_KEY" http://127.0.0.1:8010/dashboard/signin)
           echo "a key posted to the configured GUI: $code"
           if [ "$code" != 403 ] || ! grep -q 'Key sign-in is off' /tmp/gui-signin; then echo "the configured GUI did not refuse key sign-in itself" >&2; exit 1; fi
-          if grep -qi '^set-cookie: ob1_dashboard_session=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
+          if grep -qiE '^set-cookie: ob1_dashboard_session(_[0-9]+)?=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
