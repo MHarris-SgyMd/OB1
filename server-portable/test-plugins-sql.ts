@@ -213,11 +213,11 @@ process.env.OB1_HOOK_SECRETS = `example=${HOOK_SECRET}`;
 const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw" } as const;
 process.env.MCP_ACCESS_KEYS = [`writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`, `hook:capture:${hashKey(KEYS.hook)}`].join(",");
 // The MCP server over the REST core (SMD-2287 PR 4a).
-const mcpServer = Bun.serve({ port: 0, fetch: (await mcpUnderTest()).fetch });
+const mcpServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await mcpUnderTest()).fetch });
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
-const MCP = `http://localhost:${mcpServer.port}`;
-const API = `http://localhost:${apiServer.port}`;
+const apiServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await import("./api.ts")).default.fetch });
+const MCP = `http://127.0.0.1:${mcpServer.port}`;
+const API = `http://127.0.0.1:${apiServer.port}`;
 async function rest(method: string, path: string, body: unknown, key: string) {
   const r = await fetch(`${API}${path}`, { method, headers: { "x-brain-key": key, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: r.status, body: (await r.json()) as Record<string, unknown> };
@@ -536,7 +536,7 @@ console.log("\n[8] Preflight: the enabled plugin's tables in place; a migration 
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/_PROXY$/i.test(k)) clean[k] = v;
     return { ...clean, OB1_PLUGINS: plugins, OB1_PLUGIN_DB_PASSWORD: PLUGIN_PW, MCP_ACCESS_KEY: "x".repeat(64), MCP_ACCESS_KEYS: "", OB1_LLM_BASE_URL: `http://127.0.0.1:${localStub.port}/v1` };
   };
-  const localStub = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+  const localStub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ object: "list", data: [] }) });
   const row = (out: string) => out.split("\n").find((l) => /^\s*[✓✗!·]\s+plugin tables\s/.test(l)) ?? "";
   let r = await runScript(["bun", join(HERE, "preflight.ts")], { env: env("example"), cwd: HERE });
   assert(/✓\s+plugin tables\s+example — each plugin's role, schema and migrations in place/.test(row(r.out)), `in place: ok (${row(r.out) || (r.out).slice(-300)})`);
