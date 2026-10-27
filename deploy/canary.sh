@@ -98,19 +98,28 @@
 #      starts the canary's Postgres; once its standing servers are stopped
 #      (4), sets its database's password to that file's, which a canary from
 #      before SMD-2583 had as stable's;
-#   3. refreshes it from stable through deploy/tier.sh, one half in a
-#      container on each project's database network alone (SMD-2875):
+#   3. keeps the canary's database where it has one, and brings it level in
+#      place: this checkout's migrate run on it, its own rows kept (SMD-3155;
+#      SMD-3154 made the path, then behind --no-refresh). Since SMD-3314 a
+#      canary holds rows no other brain has (its own captures, edits and
+#      keys, its passes' proposals), so a plain `up` never replaces them. A
+#      database there but stamped other than canary in ob1_config is refused,
+#      naming --refresh: a refresh that died before its last step leaves
+#      stable's copy, which an in-place migration would take for the canary.
+#      Where it has none (no volume, or a running database holding no
+#      relations: a first up, or one that died before its restore), or with
+#      --refresh, it refreshes it from stable through deploy/tier.sh, one
+#      half in a container on each project's database network alone
+#      (SMD-2875):
 #      stable's half on stable's — `data` (SMD-2583), or `default` for a
 #      stable from before it, read off its Postgres container — with stable's
 #      password alone, from stable's env file; the canary's half on the
 #      canary's `data` with the canary's password alone, from its own. The
 #      refresh copies stable's database settings, 014's HNSW bounds among them
-#      (SMD-2037), and migrates the copy with this checkout. With
-#      --no-refresh it does not: a canary holding rows stable does not (its
-#      own ingests, its own passes' proposals) is brought level in place,
-#      this checkout's migrate run on its own database (SMD-3154). It is
-#      refused, before anything changes, on a canary with no database to
-#      keep. Either way the canary's writers are stopped first, before its
+#      (SMD-2037), and migrates the copy with this checkout. --no-refresh
+#      keeps the database or refuses: on a canary with no database to keep it
+#      is refused before anything changes, where a plain `up` would stand one
+#      up from stable. Either way the canary's writers are stopped first, before its
 #      Postgres is touched: its servers, a running sleep worker, which
 #      comes back on the new build once the servers answer, unless its env
 #      file holds no OB1_WORKER_KEY (then it is left stopped and `up` exits
@@ -185,8 +194,11 @@
 #                         and the canary's env file, and change nothing
 #   up --connect          register the connector (after the smoke, unless --no-smoke)
 #   up --no-smoke         skip step 5
-#   up --no-refresh       keep the canary's database: migrate it in place
-#                         instead of step 3's refresh (SMD-3154)
+#   up --refresh          replace the canary's database with stable's: step
+#                         3's refresh, its own rows lost (SMD-3155)
+#   up --no-refresh       keep the canary's database, migrated in place, as a
+#                         plain up does, and refuse where it has none to keep
+#                         (SMD-3154)
 #   down --volumes        delete the canary's database, and its sleep dumps, as well
 #
 # The server image is built from this checkout, as compose.yaml builds stable's,
@@ -264,7 +276,8 @@ NAME=""
 CMD=""
 CONNECT=0
 SMOKE=1
-REFRESH=1
+# Unset until the canary's database is looked at (SMD-3155): 1 refresh, 0 keep.
+REFRESH=""
 VOLUMES=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -281,7 +294,10 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --connect) CONNECT=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
-    --no-refresh) REFRESH=0; shift ;;
+    --refresh|--no-refresh)
+      want=1; [ "$1" = --refresh ] || want=0
+      [ -z "$REFRESH" ] || [ "$REFRESH" = "$want" ] || { echo "--refresh replaces the canary's database and --no-refresh keeps it: one or the other." >&2; exit 2; }
+      REFRESH=$want; shift ;;
     --volumes) VOLUMES=1; shift ;;
     up|down|names) [ -z "$CMD" ] || { echo "one command: up, down or names." >&2; exit 2; }; CMD="$1"; shift ;;
     -h|--help) usage ;;
@@ -293,14 +309,15 @@ done
 # SERVER_PORT must be.
 is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
 [ -z "$PORT" ] || is_port "$PORT" || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
-[ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ] && [ $REFRESH = 1 ]; } || { echo "--connect, --no-smoke and --no-refresh go with up." >&2; exit 2; }
+[ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ] && [ -z "$REFRESH" ]; } || { echo "--connect, --no-smoke, --refresh and --no-refresh go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
-# What a failed run tells the operator to run again: its own form, so advice
-# after a failed --no-refresh never sends them into the refresh (SMD-3154).
+# What a failed run tells the operator to run again, set once the run knows
+# whether it refreshes (below): a refresh's own form, so advice after a failed
+# refresh never sends them into an in-place migration of a half-restored copy,
+# and a plain `up` otherwise, which keeps the database (SMD-3155). A connector
+# moved after a run that succeeded needs no refresh: `up --connect` keeps.
 RERUN="up"
-[ $REFRESH = 1 ] || RERUN="up --no-refresh"
 RECONNECT="with --connect"
-[ $REFRESH = 1 ] || RECONNECT="with up --no-refresh --connect"
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
 # The canary's own env file (SMD-2583) is placed once stable's project is
@@ -1301,12 +1318,39 @@ esac
 
 STABLE_PG="$(container_of "$STABLE" postgres)"
 [ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE ($FROM_WHERE) — start the stack first, or name it with --stable-project." >&2; exit 2; }
-# --no-refresh keeps the canary's database, so there must be one (SMD-3154):
-# compose's name for the file's `pgdata` volume, as `down --volumes` reads it.
-if [ $REFRESH = 0 ] && ! "$RUNTIME" volume inspect "${CANARY}_pgdata" >/dev/null 2>&1; then
-  echo "--no-refresh keeps the canary's database, and $CANARY has none (no volume ${CANARY}_pgdata) — run up without it, which refreshes one from stable." >&2
+# Whether `up` keeps the canary's database or refreshes it from stable
+# (SMD-3155), decided before anything changes. Its volume is compose's name
+# for the file's `pgdata`, as `down --volumes` reads it. A running Postgres
+# there is asked now: a database holding no relations has nothing to keep, so
+# a plain `up` stands it up from stable, and one stamped other than canary is
+# refused, naming --refresh (a refresh that died before its last step leaves
+# stable's copy, stamped stable). A stopped one is asked once it is started,
+# below, after the writers stop. --no-refresh keeps or refuses (SMD-3154).
+HAS_VOLUME=0
+"$RUNTIME" volume inspect "${CANARY}_pgdata" >/dev/null 2>&1 && HAS_VOLUME=1
+if [ "$REFRESH" = 0 ] && [ $HAS_VOLUME = 0 ]; then
+  echo "--no-refresh keeps the canary's database, and $CANARY has none (no volume ${CANARY}_pgdata) — run up without it, which stands one up from stable." >&2
   exit 2
 fi
+HELD=""
+LIVE_PG="$(container_of "$CANARY" postgres)"
+if [ $HAS_VOLUME = 1 ] && [ -n "$LIVE_PG" ]; then
+  HELD="$(relations_in "$LIVE_PG" 2>/dev/null)" || HELD=""
+fi
+if [ -z "$REFRESH" ]; then
+  if [ $HAS_VOLUME = 0 ] || [ "$HELD" = 0 ]; then
+    REFRESH=1
+    say "no canary database to keep (${CANARY}_pgdata $([ $HAS_VOLUME = 0 ] && echo "does not exist" || echo "holds no relations")): it is stood up from stable"
+  else
+    REFRESH=0
+    say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
+  fi
+fi
+if [ $REFRESH = 0 ] && [ -n "$HELD" ] && [ "$HELD" != 0 ]; then
+  held_stamp="$(stamp_of "$LIVE_PG" 2>/dev/null)" || held_stamp="?"
+  [ "$held_stamp" = canary ] || { echo "the canary's database ($LIVE_PG) is stamped '${held_stamp:-nothing}', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one. Nothing changed." >&2; exit 2; }
+fi
+[ $REFRESH = 0 ] || RERUN="up --refresh"
 # The writers `up` stops are its servers, a sleep worker and board-sync
 # (SMD-3312); one of another profile (the workers) would write through the
 # refresh or the migration, so it is refused here, before anything changes
@@ -1494,10 +1538,17 @@ say "canary Postgres"
 canary_compose up -d --wait postgres
 CANARY_PG="$(container_of "$CANARY" postgres)"
 # A volume whose database holds nothing (a first up that died before its
-# restore, a hand-run postgres) is no canary to keep (SMD-3154).
+# restore, a hand-run postgres) is no canary to keep (SMD-3154), nor one
+# stamped other than canary (SMD-3155): asked here where its Postgres was
+# stopped when the run began.
 if [ $REFRESH = 0 ] && [ "$(relations_in "$CANARY_PG")" = 0 ]; then
   ADVISED=1
-  echo "--no-refresh keeps the canary's database, and $CANARY_PG holds no relations — run up without it, which refreshes one from stable.$SLEEP_SAID$BOARD_SAID" >&2
+  echo "the canary's database ($CANARY_PG) holds no relations, so there is nothing to keep — run up --refresh, which stands one up from stable.$SLEEP_SAID$BOARD_SAID" >&2
+  exit 1
+fi
+if [ $REFRESH = 0 ] && [ "$(stamp_of "$CANARY_PG")" != canary ]; then
+  ADVISED=1
+  echo "the canary's database ($CANARY_PG) is stamped '$(stamp_of "$CANARY_PG")', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one.$SLEEP_SAID$BOARD_SAID" >&2
   exit 1
 fi
 # With its servers stopped, the canary's database takes its env file's
@@ -1525,7 +1576,7 @@ if [ $REFRESH = 1 ]; then
     # before anything changed" — stable may be stamped by now, a server stopped.
     ADVISED=1
     [ -z "$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
-    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it.$SLEEP_SAID$BOARD_SAID" >&2
+    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run $RERUN once that is fixed: the canary carries the refresh mark, so the retry resets it; a plain up refuses the copy it left.$SLEEP_SAID$BOARD_SAID" >&2
     exit 1
   fi
 else
@@ -1778,7 +1829,7 @@ else
     elif [ "$at" != "$(endpoint_of "$BASE")" ]; then
       # Another port, the canary's until this run: from the next one it is
       # not, so --connect there refuses it (review pass 1).
-      say "connector $NAME still points at $(shown "$CONN_URL"), a port this canary no longer answers on: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then $RERUN --connect (an up that changes the port with --connect moves it)"
+      say "connector $NAME still points at $(shown "$CONN_URL"), a port this canary no longer answers on: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect (an up that changes the port with --connect moves it)"
     fi
     # A key minted this run (a file made before SMD-2874 PR 2, or one whose
     # key was taken out of MCP_ACCESS_KEYS): the connector holds another one,
@@ -1803,7 +1854,7 @@ else
       fi
     fi
   elif [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
-    say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then $RERUN --connect"
+    say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect"
   fi
 fi
 
