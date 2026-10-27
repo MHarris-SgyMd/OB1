@@ -80,7 +80,8 @@ if (!BASE || !WRITE_KEY || (NOTES !== undefined && NOTES !== "on" && NOTES !== "
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
-const COOKIE = "ob1_dashboard_session";
+/** The session cookie: its name carries the origin's port when the origin names one (listener.ts sessionCookieName, SMD-3352), written out here, not imported, so a GUI that drops it fails this smoke. */
+const COOKIE = new URL(BASE).port ? `ob1_dashboard_session_${new URL(BASE).port}` : "ob1_dashboard_session";
 
 let pass = 0;
 let fail = 0;
