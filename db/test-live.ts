@@ -6631,6 +6631,8 @@ if (want("10h")) {
   /** The judge's answer by words in the thought; any other thought, an empty subject. */
   const owns: [string, string][] = [["release notes", '{"subject":"OB1 release 2.0.0","deliverables":[]}'], ["merged pull", '{"subject":"PR 727","deliverables":["db/x.ts"]}'], ["garbled", "not json"]];
   let extractCalls = 0, ownCalls = 0;
+  /** Each own question's reasoning_effort, in order ("unsent" for none): the question's own knob (SMD-3306 PR 4). */
+  const ownEfforts: string[] = [];
   let judgeMode: "answer" | "refuse" | "503" = "answer";
   /** While false, the garbled thought's answer is an empty subject of the expected shape instead. */
   let garbledAnswers = true;
@@ -6641,7 +6643,7 @@ if (want("10h")) {
     hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-judge" }] });
-      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[]; reasoning_effort?: string };
       if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
       const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (!user.startsWith("Each item is one stored thought.")) {
@@ -6649,6 +6651,7 @@ if (want("10h")) {
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [], relationships: [] }) } }] });
       }
       ownCalls++;
+      ownEfforts.push(body.reasoning_effort ?? "unsent");
       // The thought alone, not the rules quoted before it.
       const thought = user.slice(user.indexOf("<thought_a>"));
       // Awaited: a case's edit lands before the answer does (the stale case, review pass 4).
@@ -6686,6 +6689,8 @@ if (want("10h")) {
     OB1_LLM_LOCAL: "1",
     OB1_METADATA_MODEL: "stub-meta",
     OB1_JUDGE_MODEL: "stub-judge",
+    // Unset, whatever the shell says: the question's reasoning on, its default (PR 4).
+    OB1_SUBJECT_REASONING: "",
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `subject-worker:write:${hashKey(rawKey)}`,
   };
@@ -6735,7 +6740,7 @@ if (want("10h")) {
     // The sweep: a dry run, then the rules alone, ask no model and write nothing.
     let asked = ownCalls;
     const dry = await sweep({ dryRun: true });
-    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
+    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no current subject: none at their text, or one found under an older rule or question, or by a model with its reasoning off$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
       `--subjects --dry-run counts the five no rule keys, asks nothing and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A dry run reads on: a signal aborted before it changes nothing (review pass 1: it read none and exited 0).
     const dryStopped = await sweep({ dryRun: true, signal: AbortSignal.abort() });
@@ -6764,10 +6769,10 @@ if (want("10h")) {
     const full = await sweep();
     s = await subjects();
     const rel = s.find((x) => x.thought === release && x.standing), pull = s.find((x) => x.thought === pr && x.standing);
-    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p2" && x.produced_by === "subject:stub-judge@p2" && x.fp === x.current && x.agent === agent.id),
-      `the sweep records the model's subjects, read into their keys, under the model's pass key (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
-    assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && rel.recipe.answer === "OB1 release 2.0.0" && pull?.recipe?.answer === "PR 727" && rel.recipe.prompt_hash === promptHash(subjectPrompt()),
-      "…its recipe the model, the question's hash and the subject it answered");
+    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p2r" && x.produced_by === "subject:stub-judge@p2r" && x.fp === x.current && x.agent === agent.id),
+      `the sweep records the model's subjects, read into their keys, under the model's pass key, its reasoning on by default (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
+    assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && rel.recipe.answer === "OB1 release 2.0.0" && pull?.recipe?.answer === "PR 727" && rel.recipe.prompt_hash === promptHash(subjectPrompt()) && rel.recipe.reasoning === "on",
+      "…its recipe the model, the question's hash, the reasoning it was asked with and the subject it answered");
     assert(!s.some((x) => x.thought === none || x.thought === garbled || x.thought === utf) && /answered not as JSON of the expected shape/.test(tally(full)) && /stub-judge's answer was not JSON of the expected shape; the next sweep asks again/.test(full.stderr),
       `an empty subject records nothing, and an answer that is not JSON records nothing, said, exit 1 (${tally(full)})`);
     asked = ownCalls;
@@ -6790,7 +6795,7 @@ if (want("10h")) {
 
     // Version 1's subjects found again (SMD-3306 PR 3): its one rules key and its question's version are no current
     // pass's, so the sweep takes each, and the door replaces it under the current key. One the model now names nothing
-    // for stands, out of date: a close could close one a pass wrote since the sweep read it (PR 4's record).
+    // for stands, out of date: a close could close one a pass wrote since the sweep read it (PR 5's record).
     const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
     const asV1 = async (id: string, key: string, by: string, judge: string) =>
       ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as SubjectWrite).action;
@@ -6804,15 +6809,15 @@ if (want("10h")) {
     const reRun = await sweep();
     const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!, noneNow = (await standingOf(none))!;
     assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one (1 with a new key); 2 the model named nothing for, 1 answered not as JSON of the expected shape — among them, 1 with an out-of-date subject still standing"
-      && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2" && ownCalls === asked + 4,
+      && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2r" && ownCalls === asked + 4,
       `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
     assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
       "…and the one the model now names nothing for stands, out of date and counted, for the next sweep to ask again; no other of version 1's stands");
     // Another model's subject under the current question is current: the sweep's query reads subjectCurrent's "any
     // model" (review pass 1: [10h] held only stub-judge's, so a query keyed to the configured model passed).
-    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2r");
     const anotherDry = await sweep({ dryRun: true });
-    assert(another === "replaced" && /^ {2}3 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(anotherDry.stdout)
+    assert(another === "replaced" && /^ {2}3 thought\(s\) with no current subject: none at their text, or one found under an older rule or question, or by a model with its reasoning off$/m.test(anotherDry.stdout)
       && /ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(anotherDry.stdout),
       `another model's subject at the current question is current, not taken (exit ${anotherDry.code}: ${anotherDry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A stale write (review pass 4): the thought edited while the model answers for it, so the door refuses the write
@@ -6824,7 +6829,7 @@ if (want("10h")) {
     assert(staleRun.code === 1 && tally(staleRun) === "0 subject(s) recorded; 2 the model named nothing for, 1 answered not as JSON of the expected shape, 1 edited mid-sweep — among them, 2 with an out-of-date subject still standing"
       && (await standingOf(pr))?.judge === "subject:stub-judge@p1",
       `a write refused as stale leaves its out-of-date subject standing, counted (exit ${staleRun.code}: ${tally(staleRun)})`);
-    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2r");
 
     // The spawned CLI prints what run() in this process does (masked seconds).
     const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
@@ -6945,10 +6950,33 @@ if (want("10h")) {
     // A model's subject under another pass's key is no current subject, though it ends as the question's version does.
     const asks = (r: { stdout: string }) => Number(/ask stub-judge about (\d+)/.exec(r.stdout)?.[1] ?? Number.NaN);
     const beforeX = await sweep({ dryRun: true });
-    await asV1(pr, "pr:727", "model", "extract:x@p2");
+    await asV1(pr, "pr:727", "model", "extract:x@p2r");
     const withX = await sweep({ dryRun: true });
-    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2r");
     assert(asks(withX) === asks(beforeX) + 1, `a model's subject under extract's key is taken, as no current subject (${asks(beforeX)} → ${asks(withX)})`);
+
+    // SMD-3306 PR 4: the question's own reasoning (OB1_SUBJECT_REASONING, on when unset), named in the pass key and the
+    // recipe. A subject a model found with its reasoning off is taken while it is on, and asked again with it; turning
+    // it off takes none found with it on, and asks with no reasoning pass, under the key without the `r`.
+    const offEnv = { ...env, OB1_SUBJECT_REASONING: "off" };
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    const onDry = await sweep({ dryRun: true }), offDry = await sweep({ dryRun: true }, offEnv), lowDry = await sweep({ dryRun: true }, { ...env, OB1_SUBJECT_REASONING: "low" });
+    assert(asks(onDry) === asks(beforeX) + 1 && asks(offDry) === asks(beforeX) && asks(lowDry) === asks(onDry)
+        && /, reasoning on \(subject:stub-judge@p2r\)$/m.test(onDry.stdout) && /, reasoning off \(subject:stub-judge@p2\)$/m.test(offDry.stdout) && /, reasoning low \(subject:stub-judge@p2r\)$/m.test(lowDry.stdout)
+        && /^ {2}\d+ thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(offDry.stdout),
+      `a model's subject found with its reasoning off is taken while it is on, at any effort, not while it is off, each run naming its reasoning and key (${asks(beforeX)} → ${asks(onDry)} on, ${asks(lowDry)} low, ${asks(offDry)} off)`);
+    asked = ownCalls;
+    const onRun = await sweep();
+    const prOn = (await standingOf(pr))!;
+    assert(prOn.key === "pr:727" && prOn.judge === "subject:stub-judge@p2r" && prOn.recipe?.reasoning === "on" && ownCalls - asked === asks(onDry) && ownEfforts.slice(asked).every((e) => e === "unsent")
+        && /\(1 by stub-judge\), 1 in place of a standing one \(0 with a new key\)/.test(tally(onRun)),
+      `…asked again with its reasoning on, the provider's default (no effort sent), and found again under the key with the \`r\`, its recipe naming it (exit ${onRun.code}: ${tally(onRun)})`);
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
+    asked = ownCalls;
+    const offRun = await sweep({}, offEnv);
+    const prOff = (await standingOf(pr))!;
+    assert(prOff.key === "pr:727" && prOff.judge === "subject:stub-judge@p2" && prOff.recipe?.reasoning === "off" && ownCalls - asked === asks(beforeX) + 1 && ownEfforts.slice(asked).every((e) => e === "none"),
+      `…and with it off, the release note's subject found with it on is not asked again, and one out of date is asked with no reasoning pass and found under the key without the \`r\`, its recipe naming it (exit ${offRun.code}, ${ownCalls - asked} asked: ${tally(offRun)})`);
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;

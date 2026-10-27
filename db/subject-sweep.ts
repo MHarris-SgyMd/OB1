@@ -2,13 +2,15 @@
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought with no current subject is
  * given its own subject, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
  * migration 111's record_thought_subject. A subject is current when it stands at the thought's text and was found
- * under the current rules and question (subjectCurrent).
+ * under the current rules and question, a model's with its reasoning on when the question is asked with it on
+ * (subjectCurrent).
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
  *   bun db/extract-entities.ts --url … --subjects --dry-run      # how many each would find; writes and asks nothing
  *   bun db/extract-entities.ts --url … --subjects --limit 50     # at most this many thoughts
  *   --timeout SECONDS (300, per model call)
+ *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
  *   exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering ·
  *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
  *
@@ -19,13 +21,16 @@
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
  * pass key, so a changed rule finds again the subjects it found, and those alone. Version 1's one key for both rules
  * is taken whole, once: its filed tickets are found again unchanged, under the metadata rule's own key (review pass 5).
+ * The question is asked with the judge model's reasoning on unless OB1_SUBJECT_REASONING says off (PR 4: Verify item
+ * 1 was met that way, and missed without), at about 8x the time a call. A subject a model found with its reasoning off
+ * is taken again while it is on (`@p2` under `@p2r`); turning it off takes none again.
  * It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * Each run reads every thought, its count and its pages, whatever is left to do: a run by hand, at a brain's size
- * today. PR 4 bounds that before sleep runs the sweep (review pass 5: a PGlite run timed the count at 5.9 s over a
+ * today. PR 5 bounds that before sleep runs the sweep (review pass 5: a PGlite run timed the count at 5.9 s over a
  * million synthetic thoughts, so at a billion it alone would outrun sleep's 300 s statement timeout). `--limit` counts
  * each thought taken, in id order from the first, so one a run leaves, to the model or unanswered, is taken first
  * again by the next.
@@ -33,7 +38,7 @@
  * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
  * reading which one, so closing it here could close one a pass wrote since the sweep read the thought. Until SMD-3306
- * PR 4 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
+ * PR 5 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
  * different keys by when each was found. A run's summary says how many of the thoughts it finished keep an
  * out-of-date subject; a dry run, how many of those it would ask hold one, and how many of the rules' replacements
  * would take a new key (a model's it cannot know before asking). So do an answer that is not JSON with
@@ -47,7 +52,7 @@ import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, SUBJECT_MODEL_SUFFIX, subjectModelKey, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
+import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectReasoning, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -158,10 +163,12 @@ async function sweep(
   o: { MODEL: boolean; DRY_RUN: boolean; LIMIT: number; env: Record<string, string | undefined>; url: string; signal?: AbortSignal; onPass?: (stop: PassStop) => void; out: Writer["out"]; err: Writer["err"] },
 ): Promise<number> {
   const { MODEL, DRY_RUN, LIMIT, env, out, err } = o;
-  const judgeKey = subjectModelKey(cfg.judgeModel);
+  const reasoning = subjectReasoning(cfg);
+  const reasoningOn = reasoning !== "off";
+  const judgeKey = subjectModelKey(cfg.judgeModel, reasoningOn);
   /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
   const wouldRefuse: string[] = [];
-  out(`  subjects: the rules (${subjectRuleKey("metadata")}, ${subjectRuleKey("first_line")})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature} (${judgeKey})` : ", no model (--subjects rules)"}`);
+  out(`  subjects: the rules (${subjectRuleKey("metadata")}, ${subjectRuleKey("first_line")})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}, reasoning ${reasoning} (${judgeKey})` : ", no model (--subjects rules)"}`);
   if (MODEL) {
     out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
     // A policy that refuses whatever the row: stop before the first call, as the pass does (SMD-1903).
@@ -213,7 +220,9 @@ async function sweep(
   }
 
   // No current subject: none standing at the thought's text, or one found under another rule's key or an older
-  // question's (subject.ts's subjectCurrent, read here in SQL: a model's at the current question, by any model).
+  // question's, or a model's found with its reasoning off when the question is asked with it on (subject.ts's
+  // subjectCurrent, read here in SQL: a model's at the current question, by any model).
+  const [withReasoning, without] = [subjectModelSuffix(true), subjectModelSuffix(false)];
   const NO_CURRENT_SUBJECT = sql`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
@@ -223,7 +232,8 @@ async function sweep(
                WHEN 'metadata' THEN f.payload->>'judge_key' = ${subjectRuleKey("metadata")}
                WHEN 'first_line' THEN f.payload->>'judge_key' = ${subjectRuleKey("first_line")}
                WHEN 'model' THEN starts_with(f.payload->>'judge_key', ${SUBJECT_KEY_PREFIX})
-                             AND right(f.payload->>'judge_key', ${SUBJECT_MODEL_SUFFIX.length}::int) = ${SUBJECT_MODEL_SUFFIX}
+                             AND (right(f.payload->>'judge_key', ${withReasoning.length}::int) = ${withReasoning}
+                                  OR (${!reasoningOn}::boolean AND right(f.payload->>'judge_key', ${without.length}::int) = ${without}))
                ELSE false END)`;
   let total: number;
   try {
@@ -234,7 +244,7 @@ async function sweep(
     return 2;
   }
   const todo = LIMIT ? Math.min(LIMIT, total) : total;
-  out(`  ${total} thought(s) with no current subject: none at their text, or one found under an older rule or question${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
+  out(`  ${total} thought(s) with no current subject: none at their text, or one found under an older rule or question${reasoningOn ? ", or by a model with its reasoning off" : ""}${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
 
   /**
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
@@ -376,7 +386,7 @@ async function sweep(
       key = a.key;
       by = "model";
       judge = judgeKey;
-      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, answer: a.answer });
+      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, reasoning, answer: a.answer });
     }
     // Past the hard stop nothing more is written.
     if (hardStop.signal.aborted) return false;

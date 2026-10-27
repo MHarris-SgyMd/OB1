@@ -3080,10 +3080,12 @@ migration 111's `record_thought_subject` at the text the claim read, under its
 rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
 no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought with no current subject — none at its text (extracted before 111,
-keyed by no rule, or edited since), or one found under an older rule or question
-— gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`), the door
-replacing the old one. The model is asked the subject's own question about the
-thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
+keyed by no rule, or edited since), or one found under an older rule or question,
+or by a model with its reasoning off while it is on — gets the rules' subject,
+else the judge model's (`OB1_JUDGE_MODEL`), the door replacing the old one. The
+model is asked the subject's own question about the thought alone
+(`server-portable/subject.ts`'s `OWN_RULES`, version 2), with its reasoning on
+unless `OB1_SUBJECT_REASONING` says off, and its
 answer is read into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
@@ -3095,12 +3097,21 @@ any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
 for sessions that did other work, a note's first-line ticket that was only
-context, and vague model phrases among the misses. The sweep takes one thought
+context, and vague model phrases among the misses. Version 2 met that bar on a
+third fresh draw with the judge model reasoning (0.945 against 0.941), and
+missed it without, on that draw and the second (0.933 against 0.941, 0.918
+against 0.930), though what reasoning changed was not significant alone (8
+thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
+(`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
+about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
+summaries. A model's subject found with it off is taken again while it is on
+(`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
+off takes none again. The sweep takes one thought
 at a time without a lease, the door's lock and fingerprint check making a sweep
 beside the pass safe. An answer naming nothing records nothing, so the next
 sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
 its thought is asked again at every sweep, and counted in the summary, until
-SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` counts
+SMD-3306 PR 5 records "asked, got nothing" and closes it safely; `--limit` counts
 each thought taken, in id order from the first, so such a thought is taken first
 again, as is one a `--subjects rules` run leaves to the model. A run's summary
 counts the subjects it recorded in place of a standing one, and how many of those
@@ -3122,7 +3133,7 @@ refuses the sweep before any; the rules alone send nothing. On a brain before
 says so once, its entities standing; the sweep refuses either by name before
 any question, exit 2. A dry run reads on through a signal, as the pass's does.
 Sleep does not run the sweep yet: each run reads every thought, its count and its
-pages, whatever is left to do, which SMD-3306 PR 4 bounds first.
+pages, whatever is left to do, which SMD-3306 PR 5 bounds first.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5558,11 +5569,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1736 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1739 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 111 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 327 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 330 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

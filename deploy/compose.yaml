@@ -882,10 +882,12 @@ services:
       # Metadata extraction: the model (db/config.mjs owns the default —
       # ollama-pull's fallback below is a copy checkEmbeddingDefaults holds
       # equal to it), its sampling temperature, and whether a thinking model
-      # reasons first. The no-fallback rule again.
+      # reasons first; and whether the judge model reasons before a thought's
+      # subject (SMD-3306). The no-fallback rule again.
       OB1_METADATA_MODEL: ${OB1_METADATA_MODEL:-}
       OB1_METADATA_TEMPERATURE: ${OB1_METADATA_TEMPERATURE:-}
       OB1_METADATA_REASONING: ${OB1_METADATA_REASONING:-}
+      OB1_SUBJECT_REASONING: ${OB1_SUBJECT_REASONING:-}
       # The opt-in query log (migration 034): off unless deploy/.env says on,
       # and preflight prints which. Until SMD-1843 nothing here forwarded it, so
       # SETUP.md's switch never reached the container. Every knob the server

@@ -83,6 +83,7 @@ export type EmbedEnv = {
   OB1_EXTRACT_ESCALATE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
+  OB1_SUBJECT_REASONING?: string;
   OB1_LLM_TIMEOUT?: string;
 };
 
@@ -597,8 +598,13 @@ export type EmbedConfig = {
    */
   decider: string;
   metadataTemperature: number;
-  /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
+  /** Extra chat-completion fields controlling reasoning; see reasoningFields. */
   metadataReasoning: Record<string, unknown>;
+  /**
+   * The same fields for the subject question alone (subject.ts's askOwnSubject, SMD-3306): OB1_SUBJECT_REASONING,
+   * read as OB1_METADATA_REASONING is but on when unset; see reasoningFields.
+   */
+  subjectReasoning: Record<string, unknown>;
   /** Per provider call, both endpoints. OB1_LLM_TIMEOUT in seconds; see DEFAULT_LLM_TIMEOUT_S. */
   timeoutMs: number;
   /**
@@ -702,7 +708,8 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     decider: stringOr(env.OB1_CONSOLIDATE_DECIDER, ""),
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
-    metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
+    metadataReasoning: reasoningFields(env.OB1_METADATA_REASONING, "off"),
+    subjectReasoning: reasoningFields(env.OB1_SUBJECT_REASONING, "on"),
     // Seconds, as --ttl and --timeout are elsewhere in this fork; a timeout of
     // zero would fail every call, so zero means the default too.
     timeoutMs: numberOr(env.OB1_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT_S, "positive") * 1000,
@@ -736,16 +743,22 @@ function numberOr(raw: string | undefined, fallback: number, range: "positive" |
  * So reasoning is OFF by default and opt-in. Note that `think: false` is silently
  * IGNORED on the OpenAI-compatible endpoint — `reasoning_effort` is what it
  * honours, and it is harmless to models with no reasoning mode.
+ *
+ * The subject question's own knob, OB1_SUBJECT_REASONING, is ON when unset
+ * (SMD-3306): the judge model's subjects met Verify item 1's bar with the 27B
+ * reasoning, and missed it without, and only the `--subjects` sweep asks the
+ * question, off the capture path. It costs about 8x the time: a median of 71s a
+ * call against 9s, the 27B on 55 canary session summaries asked both ways.
  */
-function metadataReasoning(rawValue: string | undefined): Record<string, unknown> {
+function reasoningFields(rawValue: string | undefined, unset: "on" | "off"): Record<string, unknown> {
   // Trimmed like the model, URL and numeric knobs. Compose's own dotenv trims
   // an unquoted value (measured, v5.5), so the case is a quoted `"low "` in a
   // .env file, or any other loader: that reached the provider as "low " and
   // every extraction 400ed (SMD-1843; the model and URL were trimmed one pass
   // later, on the same finding).
-  const raw = (rawValue ?? "").trim().toLowerCase();
+  const raw = (rawValue ?? "").trim().toLowerCase() || unset;
   if (raw === "on" || raw === "true" || raw === "1") return {};
-  if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
+  if (raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
   return { reasoning_effort: "none" };
 }
 
