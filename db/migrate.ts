@@ -9,19 +9,23 @@
  *   bun db/migrate.ts --url postgres://user:pass@host:5432/dbname
  *   DATABASE_URL=... bun db/migrate.ts
  *   bun db/migrate.ts --dry-run        # show what would run, touch nothing
- *   bun db/migrate.ts --reapply        # re-run every recorded migration, in one transaction
+ *   bun db/migrate.ts --reapply        # re-run every migration, recorded or not, in one transaction
  *   await run({ url, dryRun: true })   # the same, in-process: import { run } from "./migrate.ts" (SMD-2304)
  *
  * Applied migrations are recorded in schema_migrations, so re-running is a no-op.
- * Every migration is also individually idempotent, so a database created by hand
- * from docs/01-getting-started.md can be adopted: mark the ones already applied
- * with --baseline, or just run them — they will not duplicate anything.
+ * Every migration is also individually idempotent, so a schema applied without
+ * the migrator, which has no ledger yet, is brought under it by --reapply:
+ * every file runs again over what is there, in one transaction, after the
+ * checks that this shell agrees with the brain, and is recorded. (A plain run
+ * would give each file its own transaction and check nothing first.)
+ * Recording the ledger without running the files was retired (SMD-3325).
  *
  * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
  * transaction with a lock timeout (LOCK_TIMEOUT_S); recorded rows stay as they are, pending
  * ones are recorded in the same transaction. It is the remedy for a database
- * adopted with --baseline whose schema is older than its ledger says —
- * reembed.ts and preflight name the command where they find that. Every file,
+ * whose schema is older than its ledger says — a body removed or replaced from
+ * outside the migrations — and for a schema with no ledger at all; reembed.ts
+ * and preflight name the command where they find either. Every file,
  * not a range from the one a symptom names: a later migration may redefine what
  * an earlier one created (022, 025, 033 and 035 redefine 021's upsert_thought; 020 drops a
  * form 014 recreates), and a file's body may reference what only an earlier
@@ -112,8 +116,10 @@ export interface MigrateOptions {
   url?: string;
   sql?: SQL;
   dryRun?: boolean;
-  baseline?: boolean;
   reapply?: boolean;
+  /** Retired with --force (SMD-3325): refused by name, nothing changed. */
+  baseline?: boolean;
+  /** Retired with --baseline (SMD-3325): refused by name, nothing changed. */
   force?: boolean;
   /** --grant <role>: issue the capturing-role privileges instead of migrating. */
   grant?: string;
@@ -155,6 +161,11 @@ export interface MigrateOptions {
  */
 export async function run(opts: MigrateOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  const retired = retiredFlagRefusal(opts.baseline, opts.force);
+  if (retired) {
+    err(retired);
+    return 2;
+  }
   if (opts.sql == null) {
     // databaseUrl's two refusals without its exit: none (absent, null or
     // blank), then connect.ts's rule for the URL itself.
@@ -181,22 +192,21 @@ export async function run(opts: MigrateOptions): Promise<number> {
  * or write the refusal and return false — the caller returns 2, and the
  * connection is closed by whoever opened it. --grant's statements are
  * unqualified too, so it runs this before them, as the run does before its
- * ledger; `grant` words the refusal for it, and `adopting` (--baseline) takes
- * public's thoughts alone as the brain there. A brain in another schema is
+ * ledger; `grant` words the refusal for it. A brain in another schema is
  * refused in words, not with statements to run: moving one into public is
  * the operator's, who knows what else public holds (SMD-2247, second review
  * pass: a printed schema rename moved another app out of public).
  */
-async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], grant = false, adopting = false): Promise<boolean> {
-  const pinned = await pinPublicFirst(conn, adopting);
+async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], grant = false): Promise<boolean> {
+  const pinned = await pinPublicFirst(conn);
   if (pinned.refused === "ledger") {
     const other = quoteIdent(pinned.schema);
     const named = pinned.viaUser ? ` (the path's "$user")` : "";
     err(
-      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no brain.\n` +
+      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no brain of its own (a ledger beside thoughts).\n` +
         (grant
           ? "  --grant grants on the brain's objects in public, and there are none there.\n"
-          : "  This migrator builds in public, where preflight and --baseline look; run on, it would start a second brain there.\n") +
+          : "  This migrator builds in public, where preflight looks; run on, it would start a second brain there.\n") +
         `  If ${other} is another brain, take ${other} off this connection's search_path. If it is this brain, built in ${other} by a path that put it first,\n` +
         "  it has to move into public before the migrator can go on: a move by hand, as the owner of both schemas, minding whatever else public holds. Nothing was changed."
     );
@@ -344,6 +354,24 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
   return revokes;
 }
 
+/**
+ * The refusal of --baseline or --force, worded, or null. --baseline recorded
+ * every migration as applied without running one, to adopt a schema built by
+ * hand; --force overrode its refusal on a database with no schema. Both were
+ * retired (SMD-3325): the compose stack builds every brain by running the
+ * files, and a schema with no ledger is brought under the migrator by
+ * --reapply. The CLI asks this before anything else, the URL included, and run()
+ * before its own checks, so an old command is refused in the same words either
+ * way and changes nothing rather than falling through to another mode.
+ */
+export function retiredFlagRefusal(baseline: boolean | undefined | null, force: boolean | undefined | null): string | null {
+  const lines = [
+    baseline === true ? "--baseline was retired (SMD-3325): it recorded every migration as applied without running one, to adopt a schema built by hand. On an empty database run the migrations plainly; to bring a schema with no ledger under the migrator, re-apply them with --reapply, the server and every worker stopped: every file runs again over what is there, in one transaction, and is recorded." : null,
+    force === true ? "--force was retired with --baseline (SMD-3325): its one job was overriding --baseline's refusal on a database with no schema. Drop it." : null,
+  ].filter((line): line is string => line !== null);
+  return lines.length ? `${lines.join("\n")}\nNothing was changed.` : null;
+}
+
 /** A --groups or --exact without --grant, worded, or null: each shapes --grant and does nothing alone. */
 export function lonelyGrantFlag(groups: string | undefined | null, exact: boolean | undefined | null): string | null {
   if ((groups == null && !exact)) return null;
@@ -352,26 +380,12 @@ export function lonelyGrantFlag(groups: string | undefined | null, exact: boolea
 
 async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"]): Promise<number> {
   const dryRun = opts.dryRun === true;
-  const baseline = opts.baseline === true;
   const reapply = opts.reapply === true;
-  const force = opts.force === true;
-
-  if (reapply && baseline) {
-    err("--reapply re-runs what the ledger records; --baseline records without running. One or the other.");
-    return 2;
-  }
-  // --force has one job: override --baseline's empty-database guard below. On its
-  // own it would change nothing, so it is refused rather than dropped — a plain
-  // run "forced" is still a plain run, and an operator who typed it meant --baseline.
-  if (force && !baseline) {
-    err("--force overrides --baseline's empty-database guard; it does nothing on its own. Pass it with --baseline, or drop it.");
-    return 2;
-  }
 
   // --grant <role>: issue exactly the privileges db/config.mjs's ROLE_GRANTS
   // documents — the one executable spelling of db/README.md's "Grants for a
   // capturing role". A standalone mode: it records nothing in the ledger and runs
-  // no migration, so it is refused beside --baseline or --reapply. It grants only
+  // no migration, so it is refused beside --reapply. It grants only
   // objects that already exist — tables, and since SMD-1796 the community
   // schemas' views, sequences and functions too — so it is safe on a partially-migrated
   // database, before a community schema is applied, and again after later
@@ -412,7 +426,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return 2;
   }
   if (grantRole != null) {
-    if (baseline || reapply) {
+    if (reapply) {
       err("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
       return 2;
     }
@@ -644,7 +658,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // refused before anything runs, so a run never applies the core and stops
   // at the plugins. One with nothing of the plugins' to do asks neither (PR 3
   // review pass 2: it blocked a by-hand core-only run).
-  if (!dryRun && !baseline && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
+  if (!dryRun && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
     if (!opts.pluginPassword?.trim()) {
       err(`OB1_PLUGINS names a plugin with migrations, and OB1_PLUGIN_DB_PASSWORD is not set: a plugin's SQL runs as ${PLUGIN_LOGIN_ROLE}, a login role the migrator makes with that password. Set it in deploy/.env (openssl rand -hex 32) and run again.`);
       return 2;
@@ -701,49 +715,35 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       return fn(tx);
     }) as Promise<T>;
 
-  // --baseline records every migration as applied WITHOUT running one: adoption of
-  // a schema already built by hand. On a database with no fork schema that is never
-  // adoption — it leaves a ledger over nothing, and every later plain run then skips
-  // every file (SMD-2237). Judge by public.thoughts (migration 001's table, by
-  // pg_class so a role's search_path does not hide it, as preflight's ledger row
-  // does), before the ledger table is created, so a refused --baseline touches
-  // nothing; --force is the escape hatch for an operator who means to record the
-  // ledger over a schema built some other way.
-  if (baseline && !force) {
-    const [{ present }] = (await sql`
-      SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                      WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
-    if (!present) {
-      err(
-        "--baseline refused: public.thoughts does not exist, so there is no schema to adopt.\n" +
-          "  --baseline records every migration as applied WITHOUT running it; on an empty database that\n" +
-          "  leaves a ledger over no schema, and every later plain run then skips every file.\n" +
-          "  Apply the migrations instead: cd db && bun migrate.ts --url <the same connection string>.\n" +
-          "  To record the ledger over a schema built some other way on purpose, pass --force."
-      );
-      return 2;
-    }
-  }
-
-  // The brain is built in public, where preflight and --baseline look, whatever
+  // The brain is built in public, where preflight looks, whatever
   // the session's search_path puts first (SMD-2247): every migration and the
   // ledger below are unqualified, and land in the path's first schema. Before
   // the ledger, so its CREATE neither fails with 3F000 on a path that names no
   // schema nor lands in another. See pinPublicFirst (config.mjs).
-  if (!(await publicFirst(sql, out, err, false, baseline))) return 2;
+  if (!(await publicFirst(sql, out, err))) return 2;
 
-  await sql`
+  const LEDGER_DDL = `
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name        text PRIMARY KEY,
       sha256      text NOT NULL,
       applied_at  timestamptz NOT NULL DEFAULT now()
-    )
-  `;
+    )`;
+  // A live --reapply over a database with no ledger makes it inside its one
+  // transaction, not here: its checks may refuse and a file may fail, and an
+  // empty ledger left behind reads to preflight as a migrated brain recording
+  // none, so "Nothing was written" must hold (SMD-3325, review pass 3). In
+  // public by name: another tool's schema_migrations further along the path
+  // is not this ledger (review pass 4).
+  const ledgerInTransaction =
+    reapply && !dryRun && ((await sql`SELECT to_regclass('public.schema_migrations') IS NULL AS absent`) as { absent: boolean }[])[0].absent;
+  if (!ledgerInTransaction) await sql.unsafe(LEDGER_DDL);
 
   const applied = new Map<string, string>(
-    (await sql`SELECT name, sha256 FROM schema_migrations`).map(
-      (r: { name: string; sha256: string }) => [r.name, r.sha256]
-    )
+    ledgerInTransaction
+      ? []
+      : (await sql`SELECT name, sha256 FROM schema_migrations`).map(
+          (r: { name: string; sha256: string }) => [r.name, r.sha256]
+        )
   );
 
   /** Recorded in the ledger under --reapply: re-run rather than skipped. */
@@ -757,8 +757,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
    * is judged here, against the version the server's library REPORTS
    * (pg_available_extensions.default_version — the loaded code, whatever
    * pg_extension records for this database), and enforced in the loop: pending
-   * migrations before it still apply and are recorded, --baseline still seeds
-   * the ledger (it executes no SQL), and the migration itself is refused with a
+   * migrations before it still apply and are recorded, and the migration itself is refused with a
    * message that names both versions. --dry-run reports the refusal the same
    * way. Unknown means proceed: a server whose control file is unreadable will
    * still say so on the migration.
@@ -873,9 +872,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
    * client surfaces no warnings. So look at the result rather than trust the
    * protocol. Called outside the applying transaction: the migration is applied
    * and recorded by then, and a catalog this role cannot read must not turn that
-   * into "FAILED". Read on a first apply and on a re-run alike — a brain adopted
-   * with --baseline never had the migrator run 014, so the re-run is the first
-   * time it can say the walk bounds are unseeded.
+   * into "FAILED". Read on a first apply and on a re-run alike — a brain whose
+   * 014 was recorded but never ran here has the re-run as the first time it
+   * can say the walk bounds are unseeded.
    */
   async function reportSeeds(m: Migration): Promise<void> {
     try {
@@ -1030,7 +1029,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // too, and orders after 021, so a fresh upgrade meets the need here first).
   // Then the re-run's own judgements, below.
   const refusals: { code: number; text: string }[] = [];
-  const shadows021 = !baseline && (reapply || !applied.has(FILE_021));
+  const shadows021 = reapply || !applied.has(FILE_021);
   if (shadows021) {
     const [{ temp }] = (await sql`SELECT has_database_privilege(current_database(), 'TEMP') AS temp`) as { temp: boolean }[];
     if (!temp) {
@@ -1163,6 +1162,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const notes = new Map<string, string>();
     try {
       await begin(async (tx: SQL) => {
+        if (ledgerInTransaction) await tx.unsafe(LEDGER_DDL);
         for (const m of migrations) {
           progress.current = m;
           const note = await applyShadowed(tx, m);
@@ -1233,15 +1233,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       else ran++;
       continue;
     }
-    if (baseline) {
-      await sql`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
-      out(`  ✓  ${m.name}  marked applied without running (--baseline)`);
-      ran++;
-      continue;
-    }
-
     // The version floor, enforced only where it bites: earlier pending migrations
-    // have already applied above, and --baseline never reaches here.
+    // have already applied above.
     if (tooOldFor(m)) {
       err(`  ✗  ${m.name}  refused` + floorMessage(m));
       return 1;
@@ -1290,7 +1283,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     if (m.seeds.length) await reportSeeds(m);
   }
 
-  const verb = dryRun ? "would apply" : baseline ? "baselined" : "applied";
+  const verb = dryRun ? "would apply" : "applied";
   out(`\n${verb} ${ran}${reapplied ? `, ${dryRun ? "would re-apply" : "re-applied"} ${reapplied}` : ""}, skipped ${skipped}${drifted ? `, DRIFTED ${drifted}` : ""}`);
 
   // Both conditions can hold in one --dry-run (the live path exits inside the
@@ -1305,11 +1298,11 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     );
   }
   const coreCode = floorBlocked || drifted > 0 ? 1 : 0;
-  if (coreCode === 0 && !dryRun && !baseline) await confineStatStatements();
+  if (coreCode === 0 && !dryRun) await confineStatStatements();
   if (plugins.length === 0) return coreCode;
   const named = plugins.map((p) => p.name).join(", ");
-  if (baseline || reapply) {
-    out(`\nplugins: ${named} — not run under ${baseline ? "--baseline" : "--reapply"}; a plain run applies their migrations`);
+  if (reapply) {
+    out(`\nplugins: ${named} — not run under --reapply; a plain run applies their migrations`);
     return coreCode;
   }
   if (coreCode !== 0 && !dryRun) {
@@ -1597,8 +1590,13 @@ if (import.meta.main) {
   // argument's position, never the argument: a URL carries a password.
   const cli = commandLine("migrate.ts", {
     url: "one", grant: "one", groups: "one", exact: "none", "dry-run": "none", baseline: "none", reapply: "none", force: "none",
-  }, { hints: { url: "<postgres://…>", grant: "<role>", groups: "<group,group…> (with --grant)", exact: "(with --grant)", force: "(with --baseline)" } });
-  // Refused before the URL is read, so a stray --groups or --exact says so rather than "no database URL".
+  }, { hints: { url: "<postgres://…>", grant: "<role>", groups: "<group,group…> (with --grant)", exact: "(with --grant)", baseline: "(retired: refused, SMD-3325)", force: "(retired: refused, SMD-3325)" } });
+  // Refused before the URL is read, so a retired flag, or a stray --groups or --exact, says so rather than "no database URL".
+  const retired = retiredFlagRefusal(cli.has("baseline"), cli.has("force"));
+  if (retired) {
+    console.error(retired);
+    process.exit(2);
+  }
   const lonely = cli.value("grant") === undefined ? lonelyGrantFlag(cli.value("groups"), cli.has("exact")) : null;
   if (lonely) {
     console.error(lonely);
@@ -1611,9 +1609,7 @@ if (import.meta.main) {
     return run({
       sql,
       dryRun: cli.has("dry-run"),
-      baseline: cli.has("baseline"),
       reapply: cli.has("reapply"),
-      force: cli.has("force"),
       grant: cli.value("grant"),
       groups: cli.value("groups"),
       exact: cli.has("exact"),
