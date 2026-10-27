@@ -5107,16 +5107,16 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
   // A plain run over that schema is refused too, its dry run with it (SMD-3425):
   // it would give each file its own transaction and check nothing first.
   // Nothing written, --reapply named; and over an empty ledger beside it, as a
-  // dry run from before SMD-2291 leaves one.
+  // --dry-run on an empty database leaves one (SMD-2291).
   for (const flags of [[], ["--dry-run"]] as const) {
     const r = await migrate(...flags);
-    assert(r.code === 2 && /refused: public\.thoughts is here and the migration ledger records nothing \(no schema_migrations table\)/.test(r.out)
+    assert(r.code === 2 && /refused: public\.thoughts is here and the migration ledger records no migration \(no schema_migrations table\)/.test(r.out)
       && /cd db && bun migrate\.ts --url … --reapply/.test(r.out) && /Nothing was changed\./.test(r.out) && (await ledger()) === null,
       `${flags.length ? "--dry-run" : "a plain run"} over a schema with no ledger is refused naming --reapply, no ledger written (exit ${r.code})${r.code === 2 ? "" : `:\n${r.out}`}`);
   }
   await probe.unsafe("CREATE TABLE public.schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
   const overEmpty = await migrate();
-  assert(overEmpty.code === 2 && /refused: public\.thoughts is here and the migration ledger records nothing \(schema_migrations is empty\)/.test(overEmpty.out) && (await ledger())?.length === 0,
+  assert(overEmpty.code === 2 && /refused: public\.thoughts is here and the migration ledger records no migration \(schema_migrations holds none\)/.test(overEmpty.out) && (await ledger())?.length === 0,
     `a plain run over the schema beside an empty ledger is refused the same way, nothing recorded (exit ${overEmpty.code})`);
   await probe.unsafe("DROP TABLE public.schema_migrations");
   // The remedy the refusal and preflight name, over that schema with a thought

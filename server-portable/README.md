@@ -525,16 +525,15 @@ fewer rows than match; preflight probes the RPC on every start and warns while
 that body is in place. To clear it, run the fork's migrator against the Supabase
 project's **direct** connection string (Project Settings → Database → connection
 string, not the pooler) — every migration is idempotent and 014 needs pgvector
-0.8.0, which Supabase ships:
+0.8.0, which Supabase ships. A schema the dashboard applied has no ledger yet,
+so it takes `--reapply`: every file runs again over what is there, in one
+transaction, and is recorded; a plain run there is refused (`db/README.md` §4,
+SMD-3425). After that, a plain run applies later migrations:
 
 ```bash
-cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
+cd ../db && bun migrate.ts --reapply --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
+cd ../db && bun migrate.ts --reapply --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
 ```
-
-A schema the dashboard applied, with no ledger yet, is brought under it with
-`--reapply`: every file is idempotent and runs again over what is there, in one
-transaction (`db/README.md` §4).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing

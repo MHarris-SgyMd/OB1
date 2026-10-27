@@ -67,7 +67,8 @@ otherwise re-record in `ob1_config`. A plain run there, and its `--dry-run`, is
 refused (exit 2, nothing written, `--reapply` named; SMD-3425): it would give
 each file its own transaction, leaving older definitions in place if it
 stopped part-way, and would check nothing. An empty database (no `thoughts`)
-is a first build and goes on. Preflight's `migration ledger` row names `--reapply` where it
+is a first build and goes on. In the compose stack, with its servers and
+workers stopped: `docker compose run --rm migrate bun migrate.ts --reapply`. Preflight's `migration ledger` row names `--reapply` where it
 finds `thoughts` and no ledger, or one recording nothing. A live `--reapply`
 over no ledger makes the table inside its transaction, so a refusal or a
 failure leaves none behind. `--reapply` leaves plugins' migrations to a plain
