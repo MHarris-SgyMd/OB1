@@ -15345,9 +15345,12 @@ if (want("38")) {
     await capture("A note the CLI is asleep over.", "sync-sleep", 0, 7);
     slow = 8000;
     const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
+    const cliAt = Date.now();
     const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
     try {
-      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 30_000);
+      // The call in hand at the stub, not the claim alone: a signal between the claim and the call let the soft stop
+      // end within the 300 ms, exit 0 (seen once, SMD-2679 PR 4b's merge of main).
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1 && modelCalls.some((c) => c.kind === "extract" && c.at >= cliAt), 30_000);
       cli.kill("SIGINT");
       await Bun.sleep(300);
       cli.kill("SIGINT");
