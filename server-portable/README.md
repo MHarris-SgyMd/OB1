@@ -1,14 +1,12 @@
 # server-portable
 
 The Open Brain REST core (`api.ts`) and the core every brain operation runs
-in, with no dependency on Deno or on Supabase's function host. It began as a
-runtime-neutral build of the MCP server, with the same tools and wire behaviour
-as upstream's Edge Function build (`server/index.ts`, in this fork until
-SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
-PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
-
-This exists so the runtime decision in the Supabase migration could be made
-last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
+in. It began as a runtime-neutral build of the MCP server, so the runtime could
+be chosen last, with the same tools and wire behaviour as upstream's Edge
+Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
+chosen was Bun: the brain runs as the compose stack (`SETUP.md`). That MCP
+server, this directory's `index.ts`, retired in SMD-2287 PR 6b, and `/mcp` is
+`mcp-server/`, a client of this REST core. The
 Cloudflare Workers target and the PostgREST store it needed were retired in
 SMD-3152 — no brain ran them.
 
@@ -31,8 +29,8 @@ Three changes.
 3. **The data layer is an interface.** Every database call goes through the
    `ThoughtStore` interface in `store.ts`; the SQL store is its implementation.
 
-The second change is what makes the file testable; the third is Phase 2 of the
-migration.
+The second change is what makes the file testable; the third is what let the
+SQL store replace the PostgREST one.
 
 ## Choosing a model provider
 
@@ -519,22 +517,13 @@ the atomic capture path: the store writes content, metadata and vector in one
 `upsert_thought` call and has no two-step fallback (that was the retired
 PostgREST store's).
 
-Migration 014 matters here too. The guide's `match_thoughts` applies a metadata
-filter *after* choosing its candidates, so a selective filter silently returns
-fewer rows than match; preflight probes the RPC on every start and warns while
-that body is in place. To clear it, run the fork's migrator against the Supabase
-project's **direct** connection string (Project Settings → Database → connection
-string, not the pooler) — every migration is idempotent and 014 needs pgvector
-0.8.0, which Supabase ships:
-
-```bash
-cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-```
-
-A schema the dashboard applied, with no ledger yet, is brought under it with
-`--reapply`: every file is idempotent and runs again over what is there, in one
-transaction (`db/README.md` §4).
+The schema is the migrator's. In the compose stack its `migrate` service runs
+`db/migrate.ts` on every `up`, before the servers start (`db/README.md`).
+Preflight probes `match_thoughts` on every start and warns while a body from
+before 014 is in place, one that filters metadata *after* choosing its
+candidates and so returns fewer rows than match. A schema applied without the
+migrator takes `--reapply` once; a plain run there is refused (`db/README.md`
+§4, SMD-3425).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing
@@ -544,7 +533,7 @@ the same shape at 020 and 021 — and, for 032, its `reembed.ts` sending you to
 `--reapply` and that older `--reapply` re-creating the dropped form beside the
 current one, after which every shorter call is `function is not unique` until a
 current checkout re-applies. The compose stack is in lockstep by construction; a hand-run server
-or a Supabase brain served from another machine is not (FORK.md change 60;
+is not (FORK.md change 60;
 SMD-1451 is the migrator refusing it).
 
 ## What this brain is: `brain_info` and a keyed `/health`

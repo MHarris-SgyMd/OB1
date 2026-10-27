@@ -260,6 +260,8 @@ export const ACCEPTED_CLAIM_SQL: string;
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 /** The migrator's re-run, as every remedy that names it prints it. */
 export const REAPPLY_COMMAND: string;
+/** SQL: whether public holds the fork's `thoughts` (a table or a partitioned one), by pg_class — read as a column, `SELECT ${PUBLIC_THOUGHTS_EXISTS} AS present`. */
+export const PUBLIC_THOUGHTS_EXISTS: string;
 /** The lock timeout, in seconds, migrate.ts sets for its session and quotes in its messages; test-upgrade derives its expectations from it. */
 export const LOCK_TIMEOUT_S: number;
 /** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */

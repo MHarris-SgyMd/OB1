@@ -13033,7 +13033,7 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
   const RUN = "Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). ";
   const SIZE = "Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (`SELECT count(embedding) FROM <table>`), as `SET maintenance_work_mem = '<size>';`. ";
   const SMALLER = (it: string) => `; on a smaller table the migrator builds ${it} inside its transaction, holding writers, in the migrating role's maintenance_work_mem (\`ALTER ROLE <role> SET maintenance_work_mem = '<size>'\`, RESET after). `;
-  const FREE = (t: string) => `${t}_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`;
+  const FREE = (t: string) => `${t}_embedding_idx is missing, and a re-apply would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`;
   const WAIT = "once that build has finished without error (an interrupted one leaves the index INVALID), ";
   const PENDING = "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
   const LOCKED = "The ledger is locked (schema_migrations could not be read: canceling statement due to lock timeout): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.";

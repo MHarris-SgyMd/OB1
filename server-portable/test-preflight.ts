@@ -982,7 +982,7 @@ else {
   const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/walk index.*thought_chunks_embedding_idx does not exist — the planner has no index path/s.test(missing.out) && !/although migration 039 is recorded/.test(missing.out),
          "a missing index is named, without the ledger's suffix when nothing records 039");
-  const FREE_CHUNKS = "On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own): 1) ";
+  const FREE_CHUNKS = "On any brain, first — on thought_chunks (thought_chunks_embedding_idx is missing, and a re-apply would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own): 1) ";
   const NOTHING_LEFT = ". Then run preflight again: with the body casting and 039's shape under every name, 039 has nothing left to do.";
   assert(fix(missing.out, "walk index").includes(`${FREE_CHUNKS}\`CREATE INDEX CONCURRENTLY thought_chunks_embedding_idx ON thought_chunks USING hnsw ((embedding::halfvec(${EMBEDDING_DIM})) halfvec_cosine_ops);\`${NOTHING_LEFT}`) && !/stop the server/.test(fix(missing.out, "walk index")),
          "…its remedy the free name built under itself on any brain, and under a casting body nothing left for 039: preflight again, no server stopped (SMD-2880)");
