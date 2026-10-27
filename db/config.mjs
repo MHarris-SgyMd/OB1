@@ -1843,7 +1843,9 @@ export function bytesText(bytes) {
  * (SMD-2871, SMD-2880), `ledger.state` one of:
  * - "pending": the ledger is read and records neither 039 nor a later file
  *   — a plain migrator run applies the pending files, 039 among them;
- * - "none": no ledger — a plain run runs every file and records them;
+ * - "none": no ledger, or one recording nothing — the re-apply, which runs
+ *   every file in one transaction after its checks and records them (a plain
+ *   run would check nothing first, SMD-3325);
  * - "recorded": it records 039 — the re-apply, since a plain run skips it;
  * - "hole": it records a later file without 039 (a row removed or misspelt
  *   by hand) — the re-apply, since a plain run would apply 039 alone after
@@ -1864,7 +1866,7 @@ export function apply039(ledger = { state: "pending" }) {
     case "hole": return `The ledger records later migrations but not 039 (a row removed or misspelt by hand), and a plain run would apply 039 alone after 074, leaving two match_thoughts forms: re-apply the recorded migrations instead: ${reapply}.`;
     case "unread": return `Whether 039 is recorded is unknown (${ledger.why ?? "this role cannot read schema_migrations"}), so re-apply the recorded migrations, which applies 039 either way: ${reapply}.`;
     case "locked": return `The ledger is locked (${ledger.why ?? "its read timed out"}): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.`;
-    case "none": return "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each.";
+    case "none": return `There is no ledger, so re-apply the migrations: ${reapply}; with nothing recorded it applies every file, 039 among them, and records each.`;
     default: return "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
   }
 }

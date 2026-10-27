@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -873,7 +873,7 @@ else {
   // and 039's refusal of the unrendered shape would name a good staging
   // index), so no 074 after it; nothing to build, the indexes being 039's.
   const rawFix = fix(rawBody.out, "walk index");
-  assert(rawFix.includes("→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
+  assert(rawFix.includes("→ There is no ledger, so re-apply the migrations: stop the server and every worker, run `cd db && bun migrate.ts --url … --reapply`") && rawFix.includes("with nothing recorded it applies every file, 039 among them") && !/file alone|direct connection|074_min_trust|CONCURRENTLY/.test(rawFix),
          `…with the migrator as the remedy: no file by hand, no 074 after it, nothing to build first (${rawFix.trim().slice(0, 60)}…)`);
   /**
    * SMD-2871: 039's window. The raw-column body is 038's, as before 039;
@@ -950,7 +950,7 @@ else {
   const castRun = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(new RegExp(`${memRow(underCast.total)}\\s*$`, "m").test(castRun.out),
          `…and a staging index built under the cast body, the walk index remedy's way, is the one walked: counted with the rest, no clause (${bytesText(underCast.total)})`);
-  assert(fix(castRun.out, "walk index").trim() === "→ Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each.",
+  assert(fix(castRun.out, "walk index").trim() === `→ ${apply039({ state: "none" })}` && apply039({ state: "none" }).includes("--reapply"),
          "…and the walk index remedy, the staging index built, asks for 039 alone: nothing left to build first (SMD-2880)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
   const paired = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });

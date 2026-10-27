@@ -2941,11 +2941,12 @@ if (configFailed) {
         // What the ledger says of 039, in apply039's states: recorded; a later
         // file recorded without it (a row deleted or misspelt by hand, where a
         // plain run would apply 039 alone after 074 — review pass 2); read
-        // and pending; no ledger; locked (its read timed out, as a migration
+        // and pending; no ledger, or one recording nothing (SMD-3325); locked (its read timed out, as a migration
         // holding it does — review pass 3); or unread, with whyUnread.
         const ledger039 = (): { state: "recorded" | "hole" | "pending" | "none" | "locked" | "unread"; why?: string } =>
           ledger.has("039") ? { state: "recorded" }
           : [...ledger].some((n) => n > "039") ? { state: "hole" }
+          : ledgerRead && ledger.size === 0 ? { state: "none" }
           : ledgerRead ? { state: "pending" }
           : !ledgerPresent ? { state: "none" }
           : { state: ledgerUnread?.reason === "timeout" ? "locked" : "unread", why: whyUnread };

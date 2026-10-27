@@ -5084,8 +5084,8 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
   // recorded the ledger over nothing anyway (SMD-2237). Now each is refused by
   // name before the run reads anything, so no ledger is created.
   const empty = await migrate("--baseline");
-  assert(empty.code === 2 && retiredBaseline.test(empty.out) && /re-apply the migrations with --reapply/.test(empty.out) && /Nothing was changed\./.test(empty.out) && !retiredForce.test(empty.out),
-         `--baseline on an empty database is refused as retired, naming --reapply (exit ${empty.code})`);
+  assert(empty.code === 2 && retiredBaseline.test(empty.out) && /On an empty database run the migrations plainly; to bring a schema with no ledger under the migrator, re-apply them with --reapply/.test(empty.out) && /Nothing was changed\./.test(empty.out) && !retiredForce.test(empty.out),
+         `--baseline on an empty database is refused as retired, naming the plain run there and --reapply over a schema (exit ${empty.code})`);
   assert((await ledger()) === null, "…and creates no schema_migrations table");
   const forceAlone = await migrate("--force");
   assert(forceAlone.code === 2 && retiredForce.test(forceAlone.out) && !retiredBaseline.test(forceAlone.out) && (await ledger()) === null,
@@ -5110,10 +5110,19 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
   // which a live --reapply makes inside its transaction: an empty one left
   // behind reads to preflight as a ledger recording none (review pass 3). 006
   // would re-record the model, which a plain run does unasked (review pass 2).
+  // Another tool's schema_migrations (Rails': a version, no sha256) on the
+  // path is not this ledger: the run still makes public's inside its
+  // transaction, so the refusal leaves none there either (review pass 4).
   await probe`INSERT INTO thoughts (content, metadata) VALUES ('written with no ledger', '{}'::jsonb)`;
-  const otherShell = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
+  await probe.unsafe("DROP SCHEMA IF EXISTS tu_rails_22 CASCADE; CREATE SCHEMA tu_rails_22; CREATE TABLE tu_rails_22.schema_migrations (version text PRIMARY KEY)");
+  let otherShell: { code: number; out: string };
+  try {
+    otherShell = await runMigrator(`${URL_}${URL_.includes("?") ? "&" : "?"}options=-csearch_path%3Dtu_rails_22%2Cpublic`, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
+  } finally {
+    await probe.unsafe("DROP SCHEMA IF EXISTS tu_rails_22 CASCADE");
+  }
   assert(otherShell.code === 2 && /this shell would re-record it as other-embed/.test(otherShell.out) && /Nothing was written\./.test(otherShell.out) && (await ledger()) === null,
-         `--reapply over a schema with no ledger from a shell of another model refuses up front, and no ledger table is left (exit ${otherShell.code})`);
+         `--reapply over a schema with no ledger from a shell of another model, another tool's schema_migrations on the path, refuses up front, and no ledger table is left in public (exit ${otherShell.code})`);
   // From the brain's shell, with public off the connection's path (the brain
   // preflight reads off-path is told the same): every file again, in one
   // transaction, each recorded — in public, which the migrator puts first.
@@ -5227,7 +5236,7 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE; ALTER SCHEMA public RENAME TO tu_brain; CREATE SCHEMA public");
     try {
       const second = await runMigrator(withPath("tu_brain,public"), MIGRATOR_ENV);
-      assert(second.code === 2 && /Refused: this connection's search_path reaches a brain in schema "tu_brain" — this migrator's ledger — and public holds no ledger of its own/.test(second.out)
+      assert(second.code === 2 && /Refused: this connection's search_path reaches a brain in schema "tu_brain" — this migrator's ledger — and public holds no brain of its own \(a ledger beside thoughts\)/.test(second.out)
                && /take "tu_brain" off this connection's search_path/.test(second.out) && /a move by hand, as the owner of both schemas, minding whatever else public holds\. Nothing was changed\./.test(second.out)
                && !/ALTER SCHEMA/.test(second.out) && (await schemasOf("schema_migrations")) === "tu_brain",
              `a brain in another schema on the path, none in public: refused in words — take it off the path, or move it by hand — no statement printed, and nothing created in public (exit ${second.code})`);

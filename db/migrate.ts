@@ -203,7 +203,7 @@ async function publicFirst(conn: SQL, out: Writer["out"], err: Writer["err"], gr
     const other = quoteIdent(pinned.schema);
     const named = pinned.viaUser ? ` (the path's "$user")` : "";
     err(
-      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no ledger of its own.\n` +
+      `Refused: this connection's search_path reaches a brain in schema ${other}${named} — this migrator's ledger — and public holds no brain of its own (a ledger beside thoughts).\n` +
         (grant
           ? "  --grant grants on the brain's objects in public, and there are none there.\n"
           : "  This migrator builds in public, where preflight looks; run on, it would start a second brain there.\n") +
@@ -366,7 +366,7 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
  */
 export function retiredFlagRefusal(baseline: boolean | undefined | null, force: boolean | undefined | null): string | null {
   const lines = [
-    baseline === true ? "--baseline was retired (SMD-3325): it recorded every migration as applied without running one, to adopt a schema built by hand. To bring a schema with no ledger under the migrator, re-apply the migrations with --reapply, the server and every worker stopped: every file runs again over what is there, in one transaction, and is recorded." : null,
+    baseline === true ? "--baseline was retired (SMD-3325): it recorded every migration as applied without running one, to adopt a schema built by hand. On an empty database run the migrations plainly; to bring a schema with no ledger under the migrator, re-apply them with --reapply, the server and every worker stopped: every file runs again over what is there, in one transaction, and is recorded." : null,
     force === true ? "--force was retired with --baseline (SMD-3325): its one job was overriding --baseline's refusal on a database with no schema. Drop it." : null,
   ].filter((line): line is string => line !== null);
   return lines.length ? `${lines.join("\n")}\nNothing was changed.` : null;
@@ -731,9 +731,11 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // A live --reapply over a database with no ledger makes it inside its one
   // transaction, not here: its checks may refuse and a file may fail, and an
   // empty ledger left behind reads to preflight as a migrated brain recording
-  // none, so "Nothing was written" must hold (SMD-3325, review pass 3).
+  // none, so "Nothing was written" must hold (SMD-3325, review pass 3). In
+  // public by name: another tool's schema_migrations further along the path
+  // is not this ledger (review pass 4).
   const ledgerInTransaction =
-    reapply && !dryRun && ((await sql`SELECT to_regclass('schema_migrations') IS NULL AS absent`) as { absent: boolean }[])[0].absent;
+    reapply && !dryRun && ((await sql`SELECT to_regclass('public.schema_migrations') IS NULL AS absent`) as { absent: boolean }[])[0].absent;
   if (!ledgerInTransaction) await sql.unsafe(LEDGER_DDL);
 
   const applied = new Map<string, string>(
