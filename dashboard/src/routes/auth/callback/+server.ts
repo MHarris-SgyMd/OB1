@@ -5,7 +5,7 @@ import type { RequestHandler } from './$types';
 import { HOME } from '$lib/paths';
 import { exchangeCode, oauthSettings, signedInSince, signInFrom } from '$lib/server/oauth';
 import { revocations, rest } from '$lib/server/rest';
-import { closeSession, cookieOptions, openSession, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
+import { closeSession, cookieOptions, openSession, SESSION_MAX_AGE, signInCookieName, signInCookieOptions, spendSignIn } from '$lib/server/session';
 import { FIRST_READ, whoAmI } from '$lib/server/signin';
 
 // The authorization server's answer (SMD-3307): the redirect URI the AS
@@ -29,10 +29,10 @@ export const GET: RequestHandler = async ({ cookies, url, request, locals }) => 
 	// Never on the break-glass port, as the start never is: the AS answers at the origin alone, and a session opened here would be the origin's under the port's cookie (review pass 2).
 	if (locals.breakglass) back('stale');
 	const state = url.searchParams.get('state');
-	const held = signInFrom(cookies.get(SIGNIN_COOKIE));
+	const held = signInFrom(cookies.get(signInCookieName(url)));
 	// The cookie goes only with its own answer: a stray or stale callback leaves a sign-in in flight alone (review pass 1).
 	if (!state || !held || state !== held.state) back('stale');
-	cookies.delete(SIGNIN_COOKIE, signInCookieOptions(url));
+	cookies.delete(signInCookieName(url), signInCookieOptions(url));
 	if (!spendSignIn(state!)) back('stale');
 	const error = url.searchParams.get('error');
 	if (error) back(error === 'access_denied' ? 'denied' : 'refused');

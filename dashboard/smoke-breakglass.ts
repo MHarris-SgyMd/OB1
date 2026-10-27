@@ -64,6 +64,8 @@ const BG_ORIGIN = new URL(BG).origin;
 const BG_PORT = new URL(BG).port;
 /** The origin's session cookie, named for the configured origin's port when it names one (SMD-3352), and the break-glass port's own (listener.ts sessionCookieName). */
 const COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_session_${new URL(ORIGIN).port}` : "ob1_dashboard_session";
+/** The origin's sign-in binding cookie, named by the same rule (session.ts signInCookieName). */
+const SIGNIN_COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_signin_${new URL(ORIGIN).port}` : "ob1_dashboard_signin";
 const BG_COOKIE = `ob1_dashboard_breakglass_${BG_PORT}`;
 const AS_UP = args.includes("--as-up");
 
@@ -92,9 +94,9 @@ if (AS_UP) {
   // The origin's own sign-in, its cookie and state, brought to the break-glass port's callback: refused there before
   // anything is read (stale), where without the guard it would reach the code's exchange (review pass 3).
   const started = await fetch(`${MAIN}/auth/start`, { method: "POST", redirect: "manual", headers: { origin: ORIGIN } });
-  const binding = (started.headers.getSetCookie?.() ?? []).map((l) => /^ob1_dashboard_signin=([^;]+)/.exec(l)?.[1]).find(Boolean) ?? "";
+  const binding = (started.headers.getSetCookie?.() ?? []).map((l) => (l.startsWith(`${SIGNIN_COOKIE}=`) ? l.slice(SIGNIN_COOKIE.length + 1).split(";")[0] : undefined)).find(Boolean) ?? "";
   const state = new URL(started.headers.get("location") ?? `${ORIGIN}/`).searchParams.get("state") ?? "";
-  const bgCallback = await req(`${BG}/auth/callback?state=${encodeURIComponent(state)}&code=not-a-code`, { headers: { cookie: `ob1_dashboard_signin=${binding}` } });
+  const bgCallback = await req(`${BG}/auth/callback?state=${encodeURIComponent(state)}&code=not-a-code`, { headers: { cookie: `${SIGNIN_COOKIE}=${binding}` } });
   assert(binding.length > 20 && state.length > 20 && bgCallback.status === 303 && bgCallback.location === "/dashboard/signin?refused=stale", `…nor does a callback complete there, the origin's own sign-in cookie and state brought to it (${bgCallback.status} → ${bgCallback.location})`);
   const bgUp = await req(`${BG}/signin`);
   assert(bgUp.status === 200 && bgUp.html.includes('data-testid="breakglass"') && bgUp.html.includes('name="key"'), `…which offers the key all the same (${bgUp.status})`);
