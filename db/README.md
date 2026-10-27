@@ -63,9 +63,12 @@ migration is individually idempotent, so `--reapply` (§5) brings it under the
 ledger: every file runs again over what is there, in one transaction, and is
 recorded. Stop the server and every worker first. It checks first that this
 shell agrees with the brain: the embedding width, and the model 006 would
-otherwise re-record in `ob1_config`. A plain run would give each file its own
-transaction, leaving older definitions in place if it stopped part-way, and
-checks nothing. Preflight's `migration ledger` row names `--reapply` where it
+otherwise re-record in `ob1_config`. A plain run there, and its `--dry-run`, is
+refused (exit 2, nothing written, `--reapply` named; SMD-3425): it would give
+each file its own transaction, leaving older definitions in place if it
+stopped part-way, and would check nothing. An empty database (no `thoughts`)
+is a first build and goes on. In the compose stack, with its servers and
+workers stopped: `docker compose run --rm migrate bun migrate.ts --reapply`. Preflight's `migration ledger` row names `--reapply` where it
 finds `thoughts` and no ledger, or one recording nothing. A live `--reapply`
 over no ledger makes the table inside its transaction, so a refusal or a
 failure leaves none behind. `--reapply` leaves plugins' migrations to a plain
@@ -127,8 +130,8 @@ signature`, `vector models` and `atomic capture` remedies name it where the
 ledger records the migration they find absent.
 
 **021's evidence backfill runs with the operator's acceptances out of its
-sight** — on the re-run, and on a plain run where 021 is pending (a brain built
-by hand through 021 and adopted by "just run them", or a ledger hole). 021
+sight** — on the re-run, and on a plain run where 021 is pending (a ledger
+hole; a brain built by hand with no ledger takes the re-run, SMD-3425). 021
 labels an unlabelled thought from its latest succeeded claim row under a key
 naming a model, and the file is hashed and applied as written, from before a
 succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
