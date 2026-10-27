@@ -1,14 +1,12 @@
 # server-portable
 
 The Open Brain REST core (`api.ts`) and the core every brain operation runs
-in, on Bun. It began as a
-runtime-neutral build of the MCP server, with the same tools and wire behaviour
-as upstream's Edge Function build (`server/index.ts`, in this fork until
-SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
-PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
-
-It was built runtime-neutral so the runtime could be chosen last, and it was:
-the brain runs on Bun, as the compose stack (`SETUP.md`). The
+in. It began as a runtime-neutral build of the MCP server, so the runtime could
+be chosen last, with the same tools and wire behaviour as upstream's Edge
+Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
+chosen was Bun: the brain runs as the compose stack (`SETUP.md`). That MCP
+server, this directory's `index.ts`, retired in SMD-2287 PR 6b, and `/mcp` is
+`mcp-server/`, a client of this REST core. The
 Cloudflare Workers target and the PostgREST store it needed were retired in
 SMD-3152 — no brain ran them.
 

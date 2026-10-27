@@ -15,9 +15,10 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Checks 2, 3, 4 and 10 are the ones a Supabase Edge Function deployment cannot
-# pass; FORK.md changes 42 and 75 say why, and why those failures are real (10:
-# upstream's server has no keyed health body, SMD-2041).
+# Checks 2, 3, 4 and 10 are the ones upstream's Edge Function build cannot pass
+# (the fork retired that build in SMD-1800); FORK.md changes 42 and 75 say why,
+# and why those failures are real (10: upstream's server has no keyed health
+# body, SMD-2041).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -222,8 +223,8 @@ esac
 #    closed). Probed with NO key — the answer comes before authenticate(), and
 #    status() follows redirects, on which curl forwards a custom header to
 #    whatever host comes next. A 200 is the method guard missing, or a front
-#    proxy answering GET / itself. A Supabase Edge Function fails here:
-#    upstream's server has no method guard (#424, their PR #425).
+#    proxy answering GET / itself. Upstream's Edge Function build fails here:
+#    it has no method guard (#424, their PR #425).
 code=$(status "$BASE/")
 [ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (POST only; the SDK client's expected answer to its stream probe)" \
                     || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 75)"
@@ -305,7 +306,7 @@ esac
 #     not asserted: smoke.sh is pointed at pinned deployments from any
 #     checkout. No -L: curl forwards a custom header to whatever host a
 #     redirect names, and this one carries the key.
-#     A Supabase Edge Function fails here too: upstream has no such body.
+#     Upstream's Edge Function build fails here too: it has no such body.
 #     Read at check 2, which reads the edge's view from it and reads it again
 #     after one warming call when the first read gave no record (SMD-2382);
 #     once more here if it still gave none, now that checks 5–9 have run.

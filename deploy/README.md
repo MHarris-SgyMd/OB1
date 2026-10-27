@@ -113,7 +113,7 @@ The services, in order, the last two with the profile:
 | `app` | The operator GUI at `/dashboard`, a client of the REST core, on the mesh alone (SMD-2280; `dashboard/README.md`) |
 | `proxy` | The stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
 | `forwarder` | The stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
-| `ollama` (profile) | The stack's own model endpoint, where `OB1_LLM_BASE_URL` points unless the env file names another provider (`http://ollama:11434/v1`) |
+| `ollama` (profile) | The stack's own model endpoint: `OB1_LLM_BASE_URL` defaults to `http://ollama:11434/v1`, unless the env file names another provider |
 | `ollama-pull` (profile) | Pulls both models; runs once, then exits |
 
 ### 3. Verify
@@ -963,7 +963,7 @@ provider's endpoint and key), so any of them can be wrong.
 So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun api.ts`, the image's default command (`index.ts` until SMD-2287 PR 6b); the MCP server and the operator GUI run their own entries from the image without it, as they read no store. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
-OpenRouter and checks the embedding width still matches the schema.
+the configured model providers and checks the embedding width still matches the schema.
 
 One check that matters most on a database brought from a managed provider (a
 restored dump, say): `vector extension`. If pgvector sits in a schema off the
@@ -3881,8 +3881,9 @@ so the profile builds from a checkout.
   in its log, rather than exiting or failing the thoughts it holds
   (SMD-2599); a model the provider does not serve at start is refused with
   exit 2. Reviewing what consolidation proposes stays a person's job.
-- **Auth.** Clients send a shared key, in a header or `?key=` (upstream
-  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216)).
+- **Auth.** A client's access is one shared key, in a header or `?key=`: a
+  known weakness, which upstream tracks as
+  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
   The `auth` profile's authorization server runs behind the proxy's `/auth`;
   the MCP server at `/mcp` is its client (SMD-2287), and only the operator
   signs in there, with no passkey yet ("Authorization server", above).

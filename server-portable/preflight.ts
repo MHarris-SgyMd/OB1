@@ -9,9 +9,10 @@
  * probe reports green, including the container healthcheck, because the HTTP layer genuinely is fine — the data layer is built
  * lazily on first use.
  *
- * The settings it reads are hand-written environment variables, so any of them
- * can be wrong, and the failure is silent until a user tries to capture a
- * thought.
+ * The settings it reads come from the env file by hand (the database password,
+ * from which compose builds DATABASE_URL; the access keys; the model provider's
+ * endpoint and key), so any of them can be wrong, and the failure is silent
+ * until a user tries to capture a thought.
  *
  * Run it as a deploy gate, an init container, or a readiness probe:
  *

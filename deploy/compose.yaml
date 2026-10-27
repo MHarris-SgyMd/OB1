@@ -1,6 +1,7 @@
-# The Open Brain stack: Postgres, the schema, the REST core, the MCP server and
-# the profiles beside them. A change reaches a running system through an
-# ordinary pipeline: build, migrate, start.
+# The Open Brain stack: the forwarder and proxy in front, the REST core, the MCP
+# server, the operator GUI, Postgres and the migrator, and the profiles beside
+# them. A change reaches a running system through an ordinary pipeline: build,
+# migrate, start.
 #
 #   podman compose -f deploy/compose.yaml --profile local-models up --build
 #   docker compose -f deploy/compose.yaml --profile local-models up --build
