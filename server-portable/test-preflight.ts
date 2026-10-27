@@ -3958,8 +3958,12 @@ else {
       assert(/waiting for the provider, at a pass's start and mid-pass, its last pass failed .*; asleep, consolidate waiting for the provider at its start, and extract waiting for the provider mid-pass — the sleep began/.test(row(startAndMid.out, "sleep"))
              && /Consolidate waiting for the provider at its start: .* Extract waiting for the provider mid-pass: the provider stopped answering/.test(fix(startAndMid.out, "sleep")),
         `a start wait and a mid-pass wait are both said, each with its fix (${row(startAndMid.out, "sleep")} | ${fix(startAndMid.out, "sleep")})`);
+      // Re-embed's, since the scheduler runs it (SMD-2679 PR 4b): carried and said by its name.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], slept: { from: await at(130), to: null } }), 10);
+      const reembedRow = row((await run(LOG_ON)).out, "sleep");
+      assert(/asleep, reembed waiting for the provider mid-pass/.test(reembedRow), `the scheduler's re-embed pass waiting mid-pass is said by its name (${reembedRow})`);
       // Not of the shape — a pass it does not run, a name twice — left off: the row reads as it did before.
-      for (const bad of [["reembed"], ["extract", "extract"], "extract"]) {
+      for (const bad of [["board-sync"], ["extract", "extract"], "extract"]) {
         await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: bad, slept: { from: await at(130), to: null } }), 10);
         const badRow = row((await run(LOG_ON)).out, "sleep");
         assert(/running a pass/.test(badRow) && !/mid-pass/.test(badRow), `a waitingMidPass not of the shape is left off, the row reading as before (${JSON.stringify(bad)}: ${badRow})`);
@@ -4009,6 +4013,25 @@ else {
       const retired = await run(LOG_ON);
       assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
         `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
+      // A re-embed follower is a hand run, no workers profile's (SMD-2679 PR 4b, review pass 3): stopped beside a running
+      // scheduler, its fix is the row alone; running, it keeps the scheduler down, and its fix is to stop that run.
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const handRetired = await run(LOG_ON);
+      const handRetiredFix = fix(handRetired.out, "workers");
+      assert(/it was a reembed\.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:stub-embed@1024'/.test(handRetiredFix) && !/COMPOSE_PROFILES/.test(handRetiredFix),
+        `a re-embed follower stopped beside a running scheduler is a hand run: retire its row, with no profile to change (${handRetiredFix})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, running: true, outcome: null }), 10);
+      const handDown = await run(LOG_ON);
+      const handDownFix = fix(handDown.out, "sleep");
+      assert(/A re-embed follower run by hand runs here \(heartbeat:reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(handDownFix) && !/workers profile/.test(handDownFix),
+        `a scheduler kept down by a hand re-embed follower is told to stop that run, not to choose a profile (${handDownFix})`);
+      // Beside the workers' followers too, the hand run is named as well: their fix alone leaves the scheduler refusing (review pass 4).
+      await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
+      const bothDownFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/A re-embed follower run by hand runs here \(heartbeat:reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /The workers profile's followers run here \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
+        `a scheduler kept down by a hand re-embed follower and the workers' is told of both (${bothDownFix})`);
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
 
       // The thoughts its wakes hold back (SMD-2694): one gaining windows across

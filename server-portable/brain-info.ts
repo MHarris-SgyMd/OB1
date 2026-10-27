@@ -198,13 +198,13 @@ export interface WorkerHeartbeat {
    */
   slept?: { from: string; to: string | null; budget?: BudgetStop; limit?: number };
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
-  waiting?: ("extract" | "consolidate")[];
+  waiting?: ("reembed" | "extract" | "consolidate")[];
   /**
    * The passes waiting mid-pass for a provider that stopped answering
    * (SMD-2905): the sleep scheduler's by name, a follower its own; absent
    * while none is, and for board-sync.
    */
-  waitingMidPass?: ("extract" | "consolidate" | "reembed")[];
+  waitingMidPass?: ("reembed" | "extract" | "consolidate")[];
   /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
@@ -239,7 +239,25 @@ export interface WorkerHeartbeat {
   budget?: SleepBudget;
   /** The sleep scheduler waiting for a live call before its next sleep, its last stopped on its budget (SMD-2679); absent otherwise. */
   resting?: true;
+  /**
+   * The sleep scheduler's re-embed pass set aside or down (SMD-2679 PR 4b),
+   * while extraction and consolidation run on: aside on a model switch it
+   * will not make — the embedding model the brain records unlike the stack's,
+   * re-read at each sleep's start and each poll while aside, so a record put
+   * right clears it — or down
+   * for this sleep on anything else that ended it: refused (a key, credit,
+   * the model not served, the egress policy, a refusal mid-pass), a
+   * statement past its timeout, its provider not answering. Absent while
+   * re-embed runs, and for the other workers.
+   */
+  aside?: SleepAside;
 }
+
+/** What set the scheduler's re-embed pass down for a sleep (WorkerHeartbeat.aside), beside a model switch, which sets it aside. */
+export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "statement", "outage", "failed"] as const;
+/** The sleep scheduler's re-embed pass set aside or down (WorkerHeartbeat.aside). */
+export type ReembedDown = (typeof REEMBED_DOWN)[number];
+export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string } | { kind: ReembedDown } };
 
 /** Why a sleep stopped on its budget: its clock spent, or a pass's statement cancelled past statement_timeout (SMD-2679). */
 export const BUDGET_STOPS = ["clock", "statement"] as const;
@@ -250,6 +268,18 @@ export type SleepBudget = { minutes: number; statementTimeoutS: number; workMemM
 /** A budget in words, the scheduler's and preflight's: "a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB". */
 export function budgetWords(b: SleepBudget): string {
   return `${b.minutes ? `a ${b.minutes} min clock` : "no clock"}, statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
+}
+
+/** A model name as the row carries one: a non-empty line of at most 200 characters. */
+const modelName = (m: unknown): m is string => typeof m === "string" && m.length > 0 && m.length <= 200 && !/[\u0000-\u001f]/.test(m);
+
+/** The scheduler's passes set aside (WorkerHeartbeat.aside), left off when not of the shape. */
+function parseAside(a: unknown): SleepAside | undefined {
+  const r = a !== null && typeof a === "object" ? (a as { reembed?: unknown }).reembed : undefined;
+  if (r === null || typeof r !== "object") return undefined;
+  const { kind, recorded, configured } = r as Record<string, unknown>;
+  if (kind === "model-switch") return modelName(recorded) && modelName(configured) && recorded !== configured ? { reembed: { kind, recorded, configured } } : undefined;
+  return (REEMBED_DOWN as readonly unknown[]).includes(kind) ? { reembed: { kind: kind as ReembedDown } } : undefined;
 }
 
 /** A `budget` value as db/sleep.ts writes it, or undefined: counts, each within its flag's bound. */
@@ -388,16 +418,16 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Its waiting passes and its refusal (SMD-2752), each left off when not
     // of the shape: the passes by name, each once; the refusal of the list.
     const w = worker === "sleep" ? v!.waiting : undefined;
-    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "extract" || p === "consolidate")
-      ? (w as ("extract" | "consolidate")[])
+    const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "reembed" || p === "extract" || p === "consolidate")
+      ? (w as ("reembed" | "extract" | "consolidate")[])
       : undefined;
     // Its passes waiting mid-pass (SMD-2905), left off when not of the shape:
-    // the scheduler's by name, each once; a follower's its own name alone
-    // (reembed a follower's alone until sleep runs it, SMD-2679 PR 4b).
+    // the scheduler's by name, each once — re-embed among them since it runs
+    // it (SMD-2679 PR 4b); a follower's its own name alone.
     const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" || worker === "reembed" ? v!.waitingMidPass : undefined;
     const waitingMidPass = Array.isArray(mid) && mid.length > 0 && new Set(mid).size === mid.length
-        && mid.every((p) => p === "extract" || p === "consolidate" || (p === "reembed" && worker === "reembed")) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
-      ? (mid as ("extract" | "consolidate" | "reembed")[])
+        && mid.every((p) => p === "reembed" || p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
+      ? (mid as ("reembed" | "extract" | "consolidate")[])
       : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
@@ -409,6 +439,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
     // Its budget and the sleeps stopped on it (SMD-2679), left off when not of the shape.
     const budget = worker === "sleep" ? parseBudget(v!.budget) : undefined;
+    // Its passes set aside (SMD-2679 PR 4b), left off when not of the shape.
+    const aside = worker === "sleep" ? parseAside(v!.aside) : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -428,6 +460,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(restart ? { restart } : {}),
       ...(held ? { held } : {}),
       ...(budget ? { budget } : {}),
+      ...(aside ? { aside } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
       ...(worker === "sleep" && v!.resting === true && v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS) ? { resting: true as const } : {}),
     });

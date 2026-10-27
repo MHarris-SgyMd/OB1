@@ -499,7 +499,7 @@ export function restartCommand(worker, job) {
   if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with (docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy/.env); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
-  // No compose service runs a re-embed follower: the sleep scheduler will (SMD-2679 PR 4b).
+  // No compose service runs a re-embed follower: the sleep scheduler does (SMD-2679 PR 4b).
   // The model's own key is what a follower without --job takes, and pinning it
   // would be refused once the model is switched (review pass 1); a backfill
   // key is given as it was.
