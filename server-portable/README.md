@@ -532,8 +532,9 @@ cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.sup
 cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
 ```
 
-A schema the dashboard applied, with no ledger yet, is brought under it the same
-way: every file is idempotent and runs again over what is there (`db/README.md` §4).
+A schema the dashboard applied, with no ledger yet, is brought under it with
+`--reapply`: every file is idempotent and runs again over what is there, in one
+transaction (`db/README.md` §4).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing

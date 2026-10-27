@@ -4489,15 +4489,17 @@ if (configFailed) {
           // table), by pg_class so a role's search_path does not hide it — the
           // predicate the schema row's off-path probe uses. With one, it was
           // applied without the migrator, which no longer adopts a schema by
-          // recording the ledger unrun (SMD-3325): a plain run brings it under
-          // the ledger, every file idempotent. Without, nothing has been
+          // recording the ledger unrun (SMD-3325): --reapply brings it under
+          // the ledger, every file idempotent, in one transaction after its
+          // checks that the shell agrees with the brain — a plain run gives
+          // each file its own and checks nothing. Without, nothing has been
           // migrated, as the schema row above says too (SMD-2237).
           const [{ present: schemaPresent }] = (await sql`
             SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                             WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[];
           if (schemaPresent)
             add("migration ledger", "warn", "no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun (SMD-3325)",
-                "Apply the migrations over it: cd db && bun migrate.ts --url $DATABASE_URL — with no ledger a plain run runs every file again over what is there, each idempotent, and records it (--dry-run lists them).");
+                `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with no ledger it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.`);
           else
             add("migration ledger", "warn", "no schema_migrations table and no schema — nothing has been migrated here",
                 "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL");

@@ -14,17 +14,18 @@
  *
  * Applied migrations are recorded in schema_migrations, so re-running is a no-op.
  * Every migration is also individually idempotent, so a schema applied without
- * the migrator, which has no ledger yet, is brought under it by a plain run:
- * every file runs again over what is there, duplicating nothing, and is
- * recorded. Recording the ledger without running the files was retired
- * (SMD-3325).
+ * the migrator, which has no ledger yet, is brought under it by --reapply:
+ * every file runs again over what is there, in one transaction, after the
+ * checks that this shell agrees with the brain, and is recorded. (A plain run
+ * would give each file its own transaction and check nothing first.)
+ * Recording the ledger without running the files was retired (SMD-3325).
  *
  * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
  * transaction with a lock timeout (LOCK_TIMEOUT_S); recorded rows stay as they are, pending
  * ones are recorded in the same transaction. It is the remedy for a database
  * whose schema is older than its ledger says — a body removed or replaced from
- * outside the migrations — reembed.ts and preflight name the command where
- * they find that. Every file,
+ * outside the migrations — and for a schema with no ledger at all; reembed.ts
+ * and preflight name the command where they find either. Every file,
  * not a range from the one a symptom names: a later migration may redefine what
  * an earlier one created (022, 025, 033 and 035 redefine 021's upsert_thought; 020 drops a
  * form 014 recreates), and a file's body may reference what only an earlier
@@ -358,14 +359,14 @@ async function exactTransaction(tx: any, role: string): Promise<string[]> {
  * every migration as applied without running one, to adopt a schema built by
  * hand; --force overrode its refusal on a database with no schema. Both were
  * retired (SMD-3325): the compose stack builds every brain by running the
- * files, and a schema with no ledger is brought under the migrator by a plain
- * run. The CLI asks this before anything else, the URL included, and run()
+ * files, and a schema with no ledger is brought under the migrator by
+ * --reapply. The CLI asks this before anything else, the URL included, and run()
  * before its own checks, so an old command is refused in the same words either
  * way and changes nothing rather than falling through to another mode.
  */
 export function retiredFlagRefusal(baseline: boolean | undefined | null, force: boolean | undefined | null): string | null {
   const lines = [
-    baseline === true ? "--baseline was retired (SMD-3325): it recorded every migration as applied without running one, to adopt a schema built by hand. To bring a schema with no ledger under the migrator, run it plainly: every file is idempotent, runs again over what is there, and is recorded." : null,
+    baseline === true ? "--baseline was retired (SMD-3325): it recorded every migration as applied without running one, to adopt a schema built by hand. To bring a schema with no ledger under the migrator, re-apply the migrations with --reapply, the server and every worker stopped: every file runs again over what is there, in one transaction, and is recorded." : null,
     force === true ? "--force was retired with --baseline (SMD-3325): its one job was overriding --baseline's refusal on a database with no schema. Drop it." : null,
   ].filter((line): line is string => line !== null);
   return lines.length ? `${lines.join("\n")}\nNothing was changed.` : null;
@@ -1597,9 +1598,7 @@ if (import.meta.main) {
     return run({
       sql,
       dryRun: cli.has("dry-run"),
-      baseline: cli.has("baseline"),
       reapply: cli.has("reapply"),
-      force: cli.has("force"),
       grant: cli.value("grant"),
       groups: cli.value("groups"),
       exact: cli.has("exact"),

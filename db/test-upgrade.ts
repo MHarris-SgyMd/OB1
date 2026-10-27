@@ -5072,7 +5072,7 @@ console.log("\n[21] test-support's schema reset leaves nothing of the fork's in 
   await applyMigrations(URL_, OPTS);
 }
 
-console.log("\n[22] --baseline and --force are retired: each is refused by name, on an empty database and over a schema with no ledger alike, changing nothing; a plain run brings that schema under the ledger (SMD-3325)");
+console.log("\n[22] --baseline and --force are retired: each is refused by name, on an empty database and over a schema with no ledger alike, changing nothing; --reapply brings that schema under the ledger, refusing first from a shell unlike the brain (SMD-3325)");
 {
   await dropSchema(URL_);
   const ledgerHere = async () => {
@@ -5084,13 +5084,31 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
     }
   };
   const retiredBaseline = /--baseline was retired \(SMD-3325\): it recorded every migration as applied without running one/;
+  /** The ledger's rows, or -1 with no ledger table (--reapply creates the table before its checks refuse). */
+  const ledgerRows = async () => {
+    const probe = new SQL({ url: URL_, max: 1 });
+    try {
+      if (!((await probe`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present`) as { present: boolean }[])[0].present) return -1;
+      return Number(((await probe`SELECT count(*)::int AS c FROM public.schema_migrations`) as { c: number }[])[0].c);
+    } finally {
+      await probe.close();
+    }
+  };
+  const thoughtsNamed = async (content: string) => {
+    const probe = new SQL({ url: URL_, max: 1 });
+    try {
+      return Number(((await probe`SELECT count(*)::int AS c FROM thoughts WHERE content = ${content}`) as { c: number }[])[0].c);
+    } finally {
+      await probe.close();
+    }
+  };
   const retiredForce = /--force was retired with --baseline \(SMD-3325\)/;
   // An empty database: before SMD-3325 --baseline refused here and --force
   // recorded the ledger over nothing anyway (SMD-2237). Now each is refused by
   // name before the run reads anything, so no ledger is created.
   const empty = await migrate("--baseline");
-  assert(empty.code === 2 && retiredBaseline.test(empty.out) && /run it plainly/.test(empty.out) && /Nothing was changed\./.test(empty.out) && !retiredForce.test(empty.out),
-         `--baseline on an empty database is refused as retired, naming the plain run (exit ${empty.code})`);
+  assert(empty.code === 2 && retiredBaseline.test(empty.out) && /re-apply the migrations with --reapply/.test(empty.out) && /Nothing was changed\./.test(empty.out) && !retiredForce.test(empty.out),
+         `--baseline on an empty database is refused as retired, naming --reapply (exit ${empty.code})`);
   assert((await ledgerHere()) === false, "…and creates no schema_migrations table");
   const forceAlone = await migrate("--force");
   assert(forceAlone.code === 2 && retiredForce.test(forceAlone.out) && !retiredBaseline.test(forceAlone.out) && (await ledgerHere()) === false,
@@ -5109,15 +5127,24 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
     assert(r.code === 2 && retiredBaseline.test(r.out) && (await ledgerHere()) === false,
            `${flags.join(" ")} over a schema with no ledger is refused as retired, no ledger written (exit ${r.code})`);
   }
-  // The remedy the refusal names: a plain run over that schema runs every file
-  // again, each idempotent, and records it. Every file applies, none fails.
-  const plain = await migrate();
-  assert(plain.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(plain.out) && (await ledgerHere()) === true,
-         `a plain run over a schema with no ledger applies every file again and records it (exit ${plain.code})${plain.code === 0 ? "" : `:\n${plain.out}`}`);
+  // The remedy the refusal and preflight name, over that schema with a thought
+  // in it: --reapply. From a shell whose model is not the one ob1_config
+  // records it refuses first and writes nothing — 006 would re-record the
+  // model, which a plain run does unasked (review pass 2).
+  const fill = new SQL({ url: URL_, max: 1 });
+  await fill`INSERT INTO thoughts (content, metadata) VALUES ('written with no ledger', '{}'::jsonb)`;
+  await fill.close();
+  const otherShell = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
+  assert(otherShell.code === 2 && /this shell would re-record it as other-embed/.test(otherShell.out) && (await ledgerRows()) <= 0,
+         `--reapply over a schema with no ledger from a shell of another model refuses up front, recording nothing (exit ${otherShell.code})`);
+  const reapplied = await migrate("--reapply");
+  assert(reapplied.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(reapplied.out) && (await ledgerRows()) === MIGRATIONS.length,
+         `--reapply over a schema with no ledger runs every file again in one transaction and records each (exit ${reapplied.code})${reapplied.code === 0 ? "" : `:\n${reapplied.out}`}`);
+  assert((await thoughtsNamed("written with no ledger")) === 1, "…and the thought written before it is there once");
   const again = await migrate();
   assert(again.code === 0 && new RegExp(`applied 0, skipped ${MIGRATIONS.length}`).test(again.out), `…and the next plain run finds every file recorded (exit ${again.code})`);
   // The schema the guide built, older: the files through 007 applied bare, a
-  // thought in it, no ledger. The same plain run runs every file in order over
+  // thought in it, no ledger. The same --reapply runs every file in order over
   // it, the first seven again, and the thought comes through (review pass 1:
   // only the whole-schema case was driven).
   await dropSchema(URL_);
@@ -5125,9 +5152,9 @@ console.log("\n[22] --baseline and --force are retired: each is refused by name,
   const older = new SQL({ url: URL_, max: 1 });
   try {
     await older`INSERT INTO thoughts (content, metadata) VALUES ('written before any ledger', '{}'::jsonb)`;
-    const fromOlder = await migrate();
-    assert(fromOlder.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(fromOlder.out) && (await ledgerHere()) === true,
-           `a plain run over the schema through 007 with no ledger applies every file and records it (exit ${fromOlder.code})${fromOlder.code === 0 ? "" : `:\n${fromOlder.out}`}`);
+    const fromOlder = await migrate("--reapply");
+    assert(fromOlder.code === 0 && new RegExp(`applied ${MIGRATIONS.length}, skipped 0`).test(fromOlder.out) && (await ledgerRows()) === MIGRATIONS.length,
+           `--reapply over the schema through 007 with no ledger applies every file and records each (exit ${fromOlder.code})${fromOlder.code === 0 ? "" : `:\n${fromOlder.out}`}`);
     const [{ c }] = (await older`SELECT count(*)::int AS c FROM thoughts WHERE content = 'written before any ledger'`) as { c: number }[];
     assert(c === 1, `…and the thought written before it is there once (${c})`);
   } finally {

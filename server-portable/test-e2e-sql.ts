@@ -2837,7 +2837,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 
     // A role whose search path does not reach public: every table exists and
     // none resolves. The ledger is present and invisible — never "no table",
-    // the shape preflight answers with a plain run — and nothing is queried.
+    // the shape preflight answers with --reapply — and nothing is queried.
     await sql.unsafe(`ALTER ROLE brain_reader SET search_path = nowhere`);
     const lost = new SQL({ url: roleUrl, max: 1 });
     try {

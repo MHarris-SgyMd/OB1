@@ -59,10 +59,14 @@ so re-running is a no-op and a failure part-way resumes rather than restarting.
 ### 4. A schema with no ledger
 
 A schema applied without the migrator has no `schema_migrations` yet. Every
-migration is individually idempotent, so a plain run (step 3) brings it under the
-ledger: every file runs again over what is there, duplicating nothing, and is
-recorded. Preflight's `migration ledger` row names that run where it finds
-`thoughts` and no ledger.
+migration is individually idempotent, so `--reapply` (§5) brings it under the
+ledger: every file runs again over what is there, in one transaction, and is
+recorded. Stop the server and every worker first. It checks first that this
+shell agrees with the brain: the embedding width, and the model 006 would
+otherwise re-record in `ob1_config`. A plain run would give each file its own
+transaction, leaving older definitions in place if it stopped part-way, and
+checks nothing. Preflight's `migration ledger` row names `--reapply` where it
+finds `thoughts` and no ledger.
 
 Recording the ledger without running the files, `--baseline`, was retired with
 its override `--force` (SMD-3325). The compose stack builds every brain by
@@ -72,7 +76,7 @@ refused by name, exit 2, before the run reads anything.
 To record a single migration you applied by hand, insert its one
 `schema_migrations` row; `--dry-run` prints the `sha256` to use beside each name.
 
-Migrations 030–111 open with a guard that refuses, naming what the file needs
+Fifty-two migrations between 030 and 111 open with a guard that refuses, naming what the file needs
 and `--reapply`, where the ledger records a file the schema lacks. That was the
 state `--baseline` left; their hint still asks "adopted with --baseline?", the
 files being hashed. A new migration does not paste the guard.
@@ -80,7 +84,7 @@ files being hashed. A new migration does not paste the guard.
 ### 5. Re-applying what the ledger already records
 
 A ledger can record a file whose objects the schema lacks: a body removed or
-replaced from outside the migrations. A plain run skips every recorded file,
+replaced from outside the migrations. Or there is no ledger at all (§4). A plain run skips every recorded file,
 and `reembed.ts` and preflight refuse or warn on the body they find and name
 this:
 

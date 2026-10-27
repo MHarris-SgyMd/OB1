@@ -388,7 +388,7 @@ else {
   // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
   // excludes public, and the row a schema-present/no-ledger brain shows.
   const offPathUrl = `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere`;
-  const schemaThereRow = /!\s+migration ledger\s+no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun \(SMD-3325\)\n\s+→ Apply the migrations over it: cd db && bun migrate\.ts --url \$DATABASE_URL — with no ledger a plain run runs every file again over what is there, each idempotent, and records it/;
+  const schemaThereRow = /!\s+migration ledger\s+no schema_migrations table, but the schema is there — applied without the migrator, which no longer adopts one by recording it unrun \(SMD-3325\)\n\s+→ Re-apply the migrations over it with the migrator — cd db && bun migrate\.ts --url … --reapply — with the server and every worker stopped: with no ledger it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain/;
   // Drop and apply are separate calls on purpose: the two assertions between them
   // observe the un-migrated state, which is the thing this section tests.
   await dropSchema(LIVE);
@@ -455,13 +455,13 @@ else {
   assert(/✓  audit events\s+046's event shape present — the columns, the trigger that derives the kind from the key, the one lawful amendment — and every key classified/.test(after.out), "…and that 046's event shape is present, with no key waiting on a kind (SMD-1730)");
   // The schema is present (applyMigrations installs it) but writes no ledger:
   // the row says the schema is there, that adopting it unrun was retired, and
-  // the plain run that brings it under the ledger (SMD-3325). Pinning the
+  // the --reapply that brings it under the ledger (SMD-3325). Pinning the
   // wording — not merely "no schema_migrations table", which the
   // empty-database message also contains — keeps the SMD-2237 split honest
   // from the other side: a probe that always read "no schema" would say
   // nothing had been migrated over a whole schema.
   assert(schemaThereRow.test(after.out),
-         "…and, with the schema present but no ledger, says so and names the plain run over it, not --baseline (SMD-3325)");
+         "…and, with the schema present but no ledger, says so and names --reapply over it (SMD-3325)");
   // The protective direction of the public-qualified probe: the same
   // migrated-but-no-ledger brain, read from a role whose search_path excludes
   // public, still reads the schema as there. The probe is pg_class-qualified to public,
