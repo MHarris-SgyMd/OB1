@@ -14214,8 +14214,8 @@ const liveWrite = (sql: SQL, note: string) =>
 
 /**
  * [38]'s and [38r]'s scaffolding, on a client the section opens (SMD-3392):
- * the brain emptied of thoughts, entities, logged searches, heartbeats and the
- * passes' claims; a stub model and embedding server, whose switches `sw` it
+ * the brain emptied of thoughts, entities, logged searches, heartbeats, the
+ * extraction key and the passes' claims; a stub model and embedding server, whose switches `sw` it
  * reads at each request; the scheduler's env; and the reads and runs both
  * sections' cases share. Each section calls it on a client of its own, and
  * what it empties and records is all either section's cases need, so each
@@ -14226,6 +14226,10 @@ async function sleepScaffold(sql: SQL) {
   await sql`DELETE FROM ob1_entities`;
   await sql`DELETE FROM query_log`;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+  // No extraction key recorded: extraction's first pass records the stub
+  // model's. [38]'s dry run reads its pool unbuilt, and another model's key
+  // would refuse every pass (SMD-3392 review pass 2).
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
   await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
@@ -15848,13 +15852,13 @@ if (want("38")) {
 // the others running on (SMD-2679 PR 4b). Out of [38] into a section of
 // its own, so the two run in different cells (SMD-3392).
 if (want("38r")) {
-  console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on, and a timeout past the clock starts no claim pass; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot sleep that leaves its pool exits 1; the dry run counts its backlog, unlabelled and moved rows too; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
+  console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on, and a timeout past the clock starts no claim pass; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot sleep that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, stub, capture, claims, beat, lines, sleepRun, bounded } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
-  // 5 s too. They need no extraction key either, which [38] left recorded:
-  // extraction's first pass records it on a brain with none.
+  // 5 s too. The extraction key [38] left recorded the scaffold clears, as
+  // for [38]: extraction's first pass records it again.
   const restoreOutage = shortenOutage();
   try {
     /** A thought at another embedding model (or with no vector), written by the sync key, which wakes nothing. */
@@ -16314,8 +16318,8 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded, as [38] does before it, is
-  // another model's, which every pass's start would refuse: set aside, and
+  // The extraction key [38r] leaves recorded, as [38] does before it in a
+  // full run, is another model's, which every pass's start would refuse: set aside, and
   // put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;

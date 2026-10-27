@@ -4149,7 +4149,7 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 test-live [38] drives it against a stub model, and [38r] its re-embed first
-on the same stub (SMD-3392).
+on the helper's stub (SMD-3392).
 
 ## Extensions
 
