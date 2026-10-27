@@ -98,8 +98,9 @@ if (!URL_) {
  * A shard without [1] migrates in the preamble without asserting.
  * [33] and [35] check the projection after the sections that write tickets
  * and sources, which are the rest's, so they stay there; [end] checks it again
- * at every run's end. Extract takes four short sections of the rest's, each
- * on its own client, to keep the rest under the full-stack jobs. [9f],
+ * at every run's end. Extract takes short sections of the rest's too ([37],
+ * [37b], [39], [41], [43]), each on its own client, to keep the rest under
+ * the full-stack jobs. [9f],
  * re-embed's follower outage cases, came out of [9] into extract, so long
  * keeps its time (SMD-2679 PR 4a-2b). [38r], the scheduler's re-embed cases,
  * came out of [38] into long, and [10g] went to sleep, so that neither cell
@@ -14219,7 +14220,7 @@ const liveWrite = (sql: SQL, note: string) =>
  * reads at each request; the scheduler's env; and the reads and runs both
  * sections' cases share. Each section calls it on a client of its own, and
  * what it empties and records is all either section's cases need, so each
- * runs alone in its cell. The caller stops `stub` in its finally.
+ * runs alone in its cell. The caller awaits `done()` last in its finally.
  */
 async function sleepScaffold(sql: SQL) {
   await sql`DELETE FROM thoughts`;
@@ -14374,14 +14375,21 @@ async function sleepScaffold(sql: SQL) {
     }) as unknown as SQL;
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop during a start read. */
   const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
-  return { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, stub, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around };
+  /** A section's last step: the stub stopped, the heartbeats and logged searches cleared, the client closed. */
+  const done = async () => {
+    stub.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await sql`DELETE FROM query_log`;
+    await sql.close();
+  };
+  return { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around, done };
 }
 
 if (want("38")) {
   console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live write wakes it and the passes stop at once, their leases returned; a search and a sync write do not (SMD-3315); the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, CO, modelCalls, sw, stub, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around } = await sleepScaffold(sql);
+  const { EX, CO, modelCalls, sw, env, capture, claims, auditRows, beat, lines, sleepRun, bounded, intercept, around, done } = await sleepScaffold(sql);
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
   // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
   // to see the row re-stamped through a wait, and the schedule still doubling
@@ -15841,10 +15849,7 @@ if (want("38")) {
     }
   } finally {
     restoreOutage();
-    stub.stop(true);
-    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    await sql`DELETE FROM query_log`;
-    await sql.close();
+    await done();
   }
 }
 
@@ -15855,7 +15860,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on, and a timeout past the clock starts no claim pass; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot sleep that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, stub, capture, claims, beat, lines, sleepRun, bounded } = await sleepScaffold(sql);
+  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, capture, claims, beat, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -16288,15 +16293,9 @@ if (want("38r")) {
     assert(outsideCode === 2 && lines.some((l) => /refused: a re-embed follower is running outside sleep[^:]*: heartbeat:reembed:stub-embed@\S+ — a reembed\.ts --follow run by hand: stop it/.test(l)) && !lines.some((l) => /--profile workers stop/.test(l)),
       `a re-embed follower running outside sleep refuses the scheduler, as the claim followers do, its words saying it is a hand run to stop (exit ${outsideCode})`);
   } finally {
-    sw.embedDown = false;
-    sw.embedKeyRefused = false;
-    sw.embedSlowMs = 0;
     await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
     restoreOutage();
-    stub.stop(true);
-    await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    await sql`DELETE FROM query_log`;
-    await sql.close();
+    await done();
   }
 }
 
