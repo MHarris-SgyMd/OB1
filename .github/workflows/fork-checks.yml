@@ -3385,7 +3385,7 @@ jobs:
           if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
           echo "$out"
           if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
-          docker run -d --name ob1-mcp-image --network none --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
+          OB1_FORWARDER_KEY=$(openssl rand -hex 32) docker run -d --name ob1-mcp-image --network none --entrypoint bun -e OB1_FORWARDER_KEY -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
           up=""
           for _ in $(seq 1 40); do [ "$(docker exec ob1-mcp-image wget -qO- http://127.0.0.1:8000/health 2> /dev/null)" = ok ] && { up=1; break; }; sleep 0.25; done
           docker exec ob1-mcp-image wget -qO- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' \
@@ -3553,9 +3553,11 @@ jobs:
           auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
           auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
           # The session cookie a sign-in sets is the issuer's path alone, so on
-          # the shared origin it never rides a request to /mcp or the rest.
-          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
-          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
+          # the shared origin it never rides a request to /mcp or the rest. The
+          # password goes by name, as in the steps below (check 43, SMD-3351).
+          OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          export OB1_AUTH_OPERATOR_PASSWORD
+          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
           [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
           [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
           bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')

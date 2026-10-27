@@ -2801,6 +2801,7 @@ if (want("9")) {
   const tarpitText = "the tarpit note";
   const provider = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       // preflight's reachability probe (SMD-1875): a bare GET of /models.
       if (req.method === "GET") return Response.json({ object: "list", data: [] });
@@ -4106,6 +4107,7 @@ if (want("9f")) {
   };
   const provider = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [] });
       const input = String(((await req.json()) as { input?: string }).input ?? "");
@@ -4709,6 +4711,7 @@ if (want("10")) {
   const modelsNamed: string[] = [];
   const model = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       // GET /models, the escalation model's start check: what an Ollama lists (review pass 3).
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-escalate:latest" }] });
@@ -6010,6 +6013,7 @@ if (want("10e")) {
   let goneServed = false;
   const escModel = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: listedIds.map((id) => ({ id })) });
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages?: { role: string; content: string }[] };
@@ -6127,6 +6131,7 @@ if (want("10f")) {
   // "always" thought Ollama cuts that too (finish_reason null, measured).
   const loopModel = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { stream?: boolean; frequency_penalty?: number; messages?: { role: string; content: string }[] };
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -6202,6 +6207,7 @@ if (want("10g")) {
   let slowMs = 0;
   const atlasModel = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[] };
       if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -6271,6 +6277,7 @@ if (want("10g")) {
   let hangPart = "3";
   const hanging = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[] };
       if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -6631,6 +6638,7 @@ if (want("10h")) {
   let onOwn: ((thought: string) => void | Promise<unknown>) | null = null;
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-judge" }] });
       const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
@@ -7348,6 +7356,7 @@ if (want("16")) {
   let swapDoorOnRota: string | null = null;
   const judge = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
@@ -9226,6 +9235,7 @@ if (want("16")) {
     let tierCalls = 0;
     const tier = Bun.serve({
       port: 0,
+      hostname: "127.0.0.1",
       async fetch(req) {
         const path = new URL(req.url).pathname;
         const model = { name: tierServes, source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
@@ -9252,6 +9262,7 @@ if (want("16")) {
     const writerModels = new Set<string>();
     const writer = Bun.serve({
       port: 0,
+      hostname: "127.0.0.1",
       async fetch(req) {
         const body = (await req.json()) as { model?: string; messages?: { content: string }[] };
         const prompt = body.messages?.[0]?.content ?? "";
@@ -10115,6 +10126,7 @@ if (want("19b")) {
   };
   const provider = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [] });
       const body = (await req.json()) as { input?: string };
@@ -14238,6 +14250,7 @@ if (want("38")) {
   let embedSlowMs = 0;
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; input?: string };
@@ -16301,6 +16314,7 @@ if (want("38b")) {
   }) as unknown as SQL;
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
       const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[]; input?: string };

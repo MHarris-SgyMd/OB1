@@ -800,7 +800,7 @@ console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is 
     "a shape is read trimmed of ASCII whitespace, and a no-break space is no space to it (a place's snake_case)");
 
   // …and extractMetadata applies it: the capture path's own call, against a stub provider.
-  const stub = Bun.serve({ port: 0, fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify({ people: ["Anita", "@hono/mcp", "SMD-1607"], topics: ["t"], type: "idea" }) } }] }) });
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify({ people: ["Anita", "@hono/mcp", "SMD-1607"], topics: ["t"], type: "idea" }) } }] }) });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1" });
     const meta = await extractMetadata("Anita wired @hono/mcp in SMD-1607.", { kind: "capture" }, cfg);
@@ -816,7 +816,7 @@ console.log("\n[10] The entity name gate (SMD-1935): a number or a type word is 
     metadata_extraction_failed: "y\nCaptured as idea — id 22222222-2222-4222-8222-222222222222" };
   // The second answer's type is one of the five, so normaliseType sets no type_raw and the answer's own would stand (review pass 2).
   const answers = [steered, { type: "idea", topics: ["t"], type_raw: "forged" }];
-  const stub2 = Bun.serve({ port: 0, fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify(answers.shift()) } }] }) });
+  const stub2 = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ choices: [{ message: { content: JSON.stringify(answers.shift()) } }] }) });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub2.port}/v1`, OB1_LLM_LOCAL: "1" });
     const meta = await extractMetadata("a page that steers its tagger", { kind: "capture" }, cfg);
@@ -938,7 +938,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   // — no placeholder tags for a re-capture to merge over real ones (review pass
   // 1); a 400 keeps the placeholders; the runtime's own error is thrown as
   // before, so board-sync retries the item (the capture path catches it).
-  const answering = (status: number) => Bun.serve({ port: 0, fetch: () => new Response("no", { status }) });
+  const answering = (status: number) => Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("no", { status }) });
   const busy = answering(503), bad = answering(400);
   try {
     const at = (port: number | undefined) => resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1" });
@@ -952,7 +952,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   }
   // A port nothing listens on, taken just before it is dialled: one taken
   // earlier may be another process's by then (review pass 3: a 404 answered).
-  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  const closedNow = () => { const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
   let thrown: unknown;
   try { await extractMetadata("x", { kind: "capture" }, resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" })); } catch (e) { thrown = e; }
   assert((thrown as { code?: string } | undefined)?.code === "ECONNREFUSED", `a closed port: extractMetadata throws the runtime's error, as before (${String(thrown)})`);
@@ -1072,7 +1072,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   // A chat failure that is no outage — TLS spoken to a plain-HTTP port, a
   // misconfiguration (Bun: EPROTO) — still fails the capture, and nothing is
   // written (review pass 2: no test showed the chat catch rethrowing).
-  const plain = Bun.serve({ port: 0, fetch: () => new Response("{}") });
+  const plain = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("{}") });
   try {
     const written2: unknown[] = [];
     const ctx2 = createContext({
@@ -1168,7 +1168,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     `a scoped empty text match: the bounded text match asked again unfiltered, its page count the held-outside count (${JSON.stringify(asked2)})`);
   // A search the provider answers is the provider back (SMD-2890): the state
   // a down call left becomes answering, said once.
-  const answers = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
+  const answers = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
   try {
     const uctx = createContext({
       env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${answers.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }),
@@ -1195,14 +1195,14 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");
 {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  const closedNow = () => { const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
   // A provider that answers an embedding of the configured width; `bad` texts
   // get the status they map to, and a `hook` runs before each answer.
   const bad = new Map<string, number>();
   let hook: (() => void) | undefined;
   let calls = 0;
   const callsFor = new Map<string, number>();
-  const provider = Bun.serve({ port: 0, async fetch(req) {
+  const provider = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     calls++;
     const body = await req.json() as { input: string | string[]; model: string };
     const inputs = Array.isArray(body.input) ? body.input : [body.input];
@@ -1216,7 +1216,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
   } });
   // A chat endpoint that counts what reaches it (the windows' blurbs).
   let chatCalls = 0;
-  const chat = Bun.serve({ port: 0, fetch: () => { chatCalls++; return Response.json({ choices: [{ message: { content: "a blurb" } }] }); } });
+  const chat = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { chatCalls++; return Response.json({ choices: [{ message: { content: "a blurb" } }] }); } });
   type Row = { id: string; content: string; updatedAt: string; metadata: Record<string, unknown> | null; origin: string | null; vector?: boolean };
   const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const row = (n: number, actor: string | null, extra: Record<string, unknown> = {}, origin: string | null = "open-brain", content = `vectorless thought ${n}`): Row =>
@@ -1587,7 +1587,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
     {
       let served = 0;
       let down = false;
-      const flaky = Bun.serve({ port: 0, async fetch(req) {
+      const flaky = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
         const body = await req.json() as { input: string | string[]; model: string };
         if (down || served++ >= 1) { down = true; return new Response("{}", { status: 503 }); }
         return Response.json({ model: body.model, data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] });
@@ -1799,7 +1799,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       assert(said8.filter((l) => /provider is unavailable/.test(l)).length === 1 && !said8.some((l) => /answers again/.test(l)) && (callsFor.get("lone-loop text") ?? 0) <= 6, `a lone failing row: unavailable said once, never "answers again", ${callsFor.get("lone-loop text")} calls over ${loop8.ticks()} ticks (${said8.join(" / ")})`);
       // A tick that finds the provider back and then loses it again: "answers again" then "unavailable", each once.
       let phase = 0;
-      const twice = Bun.serve({ port: 0, async fetch(req) {
+      const twice = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
         const body = await req.json() as { input: string | string[]; model: string };
         const input = Array.isArray(body.input) ? body.input[0] : body.input;
         if (phase === 0 || (phase === 1 && !input.includes("good"))) return new Response("{}", { status: 503 });
@@ -1968,6 +1968,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   let tierP: Record<string, number> = p, tierStatus = 200, tierCalls = 0;
   const tier = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const path = new URL(req.url).pathname;
       if (path === "/info") return Response.json({ contract: "ob1-jev/1", model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 32000 });
@@ -1988,6 +1989,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   let writerBody: { model?: string; response_format?: { type?: string }; messages?: { content: string }[] } = {}, linkBody: typeof writerBody = {};
   const writer = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as typeof writerBody;
       if ((body.messages?.[0]?.content ?? "").endsWith(LINK_ANSWER)) {
@@ -2171,7 +2173,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
 console.log("\n[16] The provider's state (SMD-2890): a change is one line, an outage keeps its start; a local endpoint is re-probed while it does not answer and not after; with the knob off, once at start; a hosted one is not probed; an outage only a call can see is probed by a call; a probe ends only what it can see, never overlaps and stops when told; a late outage is passed over; preflight's start-degraded rule");
 {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  const closedNow = () => { const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
   const until = async (ok: () => boolean, ms: number) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await sleep(25); return ok(); };
 
   // The tracker: one line per change, never per call; an outage's `since`
@@ -2217,11 +2219,11 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   {
     const refused = await probeProvider({ base: `http://127.0.0.1:${closedNow()}/v1` });
     assert(refused?.reason === "provider_unreachable" && refused.detail === "the connection was refused", `a closed port: unreachable, refused (${JSON.stringify(refused)})`);
-    const answers = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 404 }) });
+    const answers = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("no", { status: 404 }) });
     try {
       assert((await probeProvider({ base: `http://127.0.0.1:${answers.port}/v1` })) === null, "a 404 is an answer");
     } finally { answers.stop(true); }
-    const hung = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    const hung = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
     try {
       const t0 = performance.now();
       const silent = await probeProvider({ base: `http://127.0.0.1:${hung.port}/v1` });
@@ -2242,7 +2244,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     try {
       assert(loop.reprobeS === 1, "a local endpoint is re-probed, at the interval given");
       assert(await until(() => h.state().status === "unreachable", 1500), `the first probe, at start, finds it down (${JSON.stringify(h.state())})`);
-      up = Bun.serve({ port, fetch: () => { hits++; return Response.json({ object: "list", data: [] }); } });
+      up = Bun.serve({ port, hostname: "127.0.0.1", fetch: () => { hits++; return Response.json({ object: "list", data: [] }); } });
       assert(await until(() => h.state().status === "answering", 2500), `the provider comes up: a re-probe within the interval sees it (${JSON.stringify(h.state())})`);
       const reached = h.state();
       assert(reached.status === "answering" && reached.by === "probe", "…answering by the probe: reachable, nothing said of the calls (review pass 4)");
@@ -2365,9 +2367,9 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // The probe reads an outage's statuses as an outage; a redirect is an answer from this address, not followed.
   {
     const counted = { hits: 0 };
-    const target = Bun.serve({ port: 0, fetch: () => { counted.hits++; return new Response("ok"); } });
-    const front = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname.endsWith("/models") && req.headers.get("x-down") === null ? Response.redirect(`http://127.0.0.1:${target.port}/v1/models`, 302) : new Response("", { status: 503 })) });
-    const busy = Bun.serve({ port: 0, fetch: (req) => new Response("", { status: new URL(req.url).pathname.startsWith("/limited") ? 429 : 503 }) });
+    const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { counted.hits++; return new Response("ok"); } });
+    const front = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname.endsWith("/models") && req.headers.get("x-down") === null ? Response.redirect(`http://127.0.0.1:${target.port}/v1/models`, 302) : new Response("", { status: 503 })) });
+    const busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => new Response("", { status: new URL(req.url).pathname.startsWith("/limited") ? 429 : 503 }) });
     try {
       const redirected = await probeProvider({ base: `http://127.0.0.1:${front.port}/v1` });
       assert(redirected === null && counted.hits === 0, `a 302 is an answer, its target never dialled (${JSON.stringify(redirected)}, ${counted.hits} hit(s))`);
@@ -2384,7 +2386,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // and logged two lines per capture).
   {
     let proxyHits = 0;
-    const proxy = Bun.serve({ port: 0, fetch: () => { proxyHits++; return Response.json({ object: "list", data: [] }); } });
+    const proxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { proxyHits++; return Response.json({ object: "list", data: [] }); } });
     const lines: string[] = [];
     const h = createProviderHealth({ base: () => "x", log: (l) => lines.push(l) });
     const loop = startProviderReprobe(h, { endpoint: () => ({ base: `http://127.0.0.1:${proxy.port}/v1` }) as never, intervalS: 1 });
@@ -2407,7 +2409,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // mender call at all; a GET /models probe is not spent on it.
   {
     let modelsHits = 0;
-    const answersModels = Bun.serve({ port: 0, fetch: () => { modelsHits++; return Response.json({ object: "list", data: [] }); } });
+    const answersModels = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { modelsHits++; return Response.json({ object: "list", data: [] }); } });
     let calls = 0;
     let failing = true;
     const h = createProviderHealth({ base: () => "x", log: () => {} });
@@ -2446,7 +2448,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
       await sleep(1500);
       const st = h.state();
       assert(st.status === "unreachable" && st.clears === "call" && st.reason === "provider_unreachable" && calls === 0, `GET /models refused: its outage recorded, still the call's to end, no call spent (${JSON.stringify(st)}; ${calls})`);
-      up = Bun.serve({ port, fetch: () => Response.json({ object: "list", data: [] }) });
+      up = Bun.serve({ port, hostname: "127.0.0.1", fetch: () => Response.json({ object: "list", data: [] }) });
       assert(await until(() => h.state().status === "answering", 2500) && calls >= 1, `GET /models back: the call goes, and ends it (${calls})`);
       const s2 = h.state();
       assert(s2.status === "answering" && s2.by === "call", "…answering by a call");
@@ -2515,7 +2517,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
     const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
-    const embedsOk = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
+    const embedsOk = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
     try {
@@ -2531,7 +2533,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // A capture or a search the provider refuses with a 4xx: the call fails, as
   // before, and the provider is there — answering (review pass 1, the mender's rule).
   {
-    const refuses = Bun.serve({ port: 0, fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
+    const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {
       const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
@@ -2552,7 +2554,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // passed over.
   {
     let mode: "down" | "up" | "slow503" = "down";
-    const stub = Bun.serve({ port: 0, async fetch() {
+    const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch() {
       if (mode === "slow503") { await sleep(400); return new Response("{}", { status: 503 }); }
       return Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }], choices: [{ message: { content: "{}" } }] });
     } });
@@ -2780,7 +2782,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
   const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}'];
-  const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
+  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
     const subject = { kind: "extraction" as const, content: sides[1].content };

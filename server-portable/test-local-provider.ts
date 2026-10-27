@@ -68,6 +68,7 @@ let replyType = "idea";
 
 const provider = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
     const body = (await req.json()) as { model: string; input?: string; response_format?: { type: string } };
@@ -112,8 +113,8 @@ delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const worker = await mcpUnderTest();
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 const H = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": "local-key" };
 
 let id = 1;
@@ -268,6 +269,7 @@ console.log("\n[8] The chat calls have an endpoint of their own only when OB1_CH
   let failB = false;
   const providerB = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
       await req.json();
@@ -416,6 +418,7 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   const models: { path: string; model: string }[] = [];
   const providerC = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { model: string };
       models.push({ path: new URL(req.url).pathname, model: body.model });
@@ -456,6 +459,7 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   const asked: boolean[] = [];
   const strict = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { logprobs?: boolean };
       asked.push(body.logprobs === true);
@@ -478,6 +482,7 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   let status = 400;
   const fussy = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { logprobs?: boolean };
       seen.push({ logprobs: body.logprobs === true, status });
@@ -494,6 +499,7 @@ console.log("\n[9] The supersession judge has a model of its own — OB1_JUDGE_M
   const tgi: boolean[] = [];
   const tgiServer = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { logprobs?: boolean };
       tgi.push(body.logprobs === true);
@@ -537,6 +543,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let holdMs = 0;
   const providerD = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { messages: { content: string }[]; max_tokens?: number };
       const user = body.messages[0].content;
@@ -828,6 +835,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let onRetry: (() => void) | null = null;
   const providerE = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number };
       penalties.push(body.frequency_penalty);
@@ -887,6 +895,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const penaltiesX: (number | undefined)[] = [];
   const providerX = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { model?: string; frequency_penalty?: number };
       modelsX.push(body.model ?? "");
@@ -925,6 +934,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   // unpenalised call; the larger model and the other window converge.
   const providerMW = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { model?: string; frequency_penalty?: number; messages: { content: string }[] };
       const user = body.messages[0].content;
@@ -952,6 +962,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   let lenCalls = 0;
   const providerLen = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch() {
       lenCalls++;
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "Complete", type: "person", confidence: 0.9 }], relationships: [] }) }, finish_reason: "length" }] });
@@ -986,6 +997,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const frame = (content: string, finish: string | null = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
   const providerG = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as Run["body"] & { messages?: { role: string; content: string }[] };
       const run: Run = { sent: 0, total: 0, cancelled: false, body };
@@ -1384,6 +1396,7 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const maxTokensSeen: (number | undefined)[] = [];
   const providerF = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       const body = (await req.json()) as { max_tokens?: number; frequency_penalty?: number; reasoning_effort?: string };
       maxTokensSeen.push(body.max_tokens);

@@ -151,8 +151,8 @@ const worker = await mcpUnderTest();
 const DOOR = "open-brain-api";
 const CARRIER = SUITE_CARRIER;
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 const H = {
   "Content-Type": "application/json",
   Accept: "application/json, text/event-stream",
@@ -3398,7 +3398,7 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
-    env: { ...process.env, PORT: "0", MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
+    env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
     stdout: "pipe", stderr: "pipe",
   });
   const { port } = await childPort(child, 20_000);
