@@ -9744,7 +9744,7 @@ function autoInstallLeftOn(text: string | null): string | null {
 }
 function checkNoAutoInstall() {
   if (typeof Bun === "undefined" || typeof Bun.TOML?.parse !== "function" || typeof Bun.YAML?.parse !== "function") {
-    fail(SELF, `check 44 parses bunfig.toml with Bun.TOML and the workflow with Bun.YAML, and this runtime has neither — run \`bun ${SELF}\`, as CI does (SMD-2978)`);
+    fail(SELF, `check 44 parses bunfig.toml with Bun.TOML and the workflow with Bun.YAML, and this runtime lacks one — run \`bun ${SELF}\`, as CI does (SMD-2978)`);
     return;
   }
   const cases: [string, string | null, boolean][] = [
@@ -9762,7 +9762,8 @@ function checkNoAutoInstall() {
   let runs: ScriptRun[] = [];
   try { runs = scriptRunsIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8"))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 44 cannot read where its steps run: ${(e as Error).message}`); return; }
   const dirs = [...new Set(runs.flatMap((r) => r.dirs))].filter((d) => existsSync(join(ROOT, d, "package.json"))).sort();
-  // db/ from a step's working-directory, server-portable/ from a cd as well: were either missed, the reading is broken.
+  // Three directories many steps run from: were any missed, the reading is broken. A cd's directory is check 34's
+  // probe's to hold ("a cd in a subshell, behind a timeout"); no package directory is reached by a cd alone today.
   for (const known of ["db", "server-portable", "extensions"]) {
     if (!dirs.includes(known)) fail(SELF, `check 44 does not read ${known}/ as a directory fork-checks.yml runs a script from — the reading is broken, not the tree clean`);
   }

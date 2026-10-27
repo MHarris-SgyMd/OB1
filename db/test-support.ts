@@ -1108,8 +1108,17 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const stdout = await new Response(p.stdout).text();
   const stderr = await new Response(p.stderr).text();
+  // A package the child's directory has not installed fails its import, auto-install being off there (SMD-2978);
+  // the suite's assertions see only the exit code and what is missing from the output, so name it here, once.
+  const missing = /^error: Cannot find (?:package|module) '[^']+' from '[^']+'/m.exec(stderr)?.[0];
+  if (missing && !missingReported.has(missing)) {
+    missingReported.add(missing);
+    console.error(`  !! ${basename(cmd.find((a) => /\.[mc]?[jt]s$/.test(a)) ?? cmd[0])}, run from ${opts.cwd}: ${missing} — is that directory's \`bun install\` done?`);
+  }
   return { code: await p.exited, out: stdout + stderr, stdout, stderr };
 }
+/** The missing-package lines runScript has printed, so each is printed once a run. */
+const missingReported = new Set<string>();
 
 /** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
 export function shellWithoutOb1(): Record<string, string> {
