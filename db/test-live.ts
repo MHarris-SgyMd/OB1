@@ -40,7 +40,7 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { sweepSubjects, type SubjectSweepOptions } from "./subject-sweep.ts";
+import { DOOR_GRANTS, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -153,15 +153,17 @@ function shortenPauses(): () => void {
 
 /**
  * Cut the first wait of a follower's outage schedule to `firstMs` in this
- * process, still doubling (SMD-3048): the worker reads OUTAGE_MS as it runs.
- * A case that spawns its worker keeps the real 5 s, so the shipped schedule
- * stays held ([10]'s and [16]'s database cuts, [38]'s CLI). Returns the
- * restore, for the case's finally.
+ * process, still doubling (SMD-3048), and its longest to `maxMs` when given
+ * (SMD-3196): the worker reads OUTAGE_MS as it runs. A case that spawns its
+ * worker keeps the real 5 s, so the shipped schedule stays held ([10]'s and
+ * [16]'s database cuts, [38]'s CLI). Returns the restore, for the case's
+ * finally.
  */
-function shortenOutage(firstMs = 1000): () => void {
-  const saved = OUTAGE_MS.first;
+function shortenOutage(firstMs = 1000, maxMs?: number): () => void {
+  const saved = { ...OUTAGE_MS };
   OUTAGE_MS.first = firstMs;
-  return () => { OUTAGE_MS.first = saved; };
+  if (maxMs !== undefined) OUTAGE_MS.max = maxMs;
+  return () => { Object.assign(OUTAGE_MS, saved); };
 }
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
@@ -4699,6 +4701,8 @@ if (want("10")) {
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
+  let probesAsked = 0;
   /** An outage paced by probes, not the clock (SMD-3048): `down` answers each request while it lasts. */
   const outage = probePacedOutage();
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
@@ -4711,6 +4715,7 @@ if (want("10")) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       modelsNamed.push(body.model ?? "");
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
@@ -4946,11 +4951,22 @@ if (want("10")) {
 
   // The one-shot runs above stamped no heartbeat: only a follower does (SMD-2261).
   const beatsOf = async (worker: string) => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE ${`heartbeat:${worker}:%`}`) as { key: string; value: string }[];
+  /**
+   * Whether a follower's row says it polls: its first pass stamped, not ended, not running, with an outcome — its
+   * start stamps it running with none (SMD-3196: a 1.5 s sleep stood in for its polling).
+   */
+  const polling = (value: string | undefined): boolean => {
+    const b = JSON.parse(value ?? "{}") as { ended?: boolean; running?: boolean; outcome?: string | null };
+    return b.ended !== true && b.running === false && typeof b.outcome === "string";
+  };
+  /** This key's own heartbeat row: once the probe cases below run, another model's row stands beside it. */
+  const ownBeat = async (): Promise<string | undefined> => (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value;
   assert((await beatsOf("extract")).length === 0, "no one-shot extraction run left a heartbeat row");
   // --follow: a capture made while the worker is polling is extracted without a
   // new run, and the first signal ends the process with exit 0.
   const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
-  await Bun.sleep(1500);
+  // Polling once its first pass has stamped its row (SMD-3196: a 1.5 s sleep stood in for it).
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const sam = await seed("Sam adopted grafana for the on-call dashboards.");
   let extracted = false;
   for (let i = 0; i < 40 && !extracted; i++) {
@@ -4981,14 +4997,19 @@ if (want("10")) {
   {
     const relay = await cuttableRelay(URL_!);
     const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relay.url, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const [cutStdout, cutStderr] = [watchStream(cutFollower.stdout), watchStream(cutFollower.stderr)];
+    const cutSaid = () => cutStdout.sofar() + cutStderr.sofar();
     // Deleted at the end, so the sections after count the thoughts they did.
     let idle = "";
     let inHand = "";
     try {
-      await Bun.sleep(1500);
+      // Polling once its first pass has stamped the row the follower before it
+      // ended, and the cut met once it says so, where 1.5 s and 2.5 s sleeps
+      // stood in for both (SMD-3196).
+      await pollUntil(async () => polling(await ownBeat()), 15_000);
       await relay.cut();
       idle = await seed("Quinn moved the alert rules to grafana while the database was away.");
-      await Bun.sleep(2500);
+      await pollUntil(async () => /the database is not answering/.test(cutSaid()), 15_000);
       const aliveIdle = cutFollower.exitCode === null;
       await relay.restore();
       const idleDone = await pollUntil(() => extractedNow(idle), 15_000);
@@ -5006,7 +5027,7 @@ if (want("10")) {
       const beatAfterCuts = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { v?: number; ended?: boolean };
       slowMs = 0;
       cutFollower.kill("SIGINT");
-      const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
+      const cutOut = (await cutStdout.rest()) + (await cutStderr.rest());
       const cutCode = await cutFollower.exited;
       const [claim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`;
       assert(aliveIdle && idleDone, `a follower whose database is cut while it polls keeps running, and extracts the thought captured meanwhile once it is back (alive ${aliveIdle}, extracted ${idleDone}; ${cutOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
@@ -5336,28 +5357,37 @@ if (want("10")) {
         }
       }
 
-      // A stop ends a probe in flight: after a timeout of 8 s the probe has the
-      // call's whole timeout, and a first stop 2 s into it returns at once
-      // (review pass 1).
+      // A stop ends a probe in flight: after a timeout of 4 s the probe has the
+      // call's whole timeout, and a first stop 1 s into it returns at once,
+      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
+      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // stop during the hung call takes another path, the call left to time out,
+      // no probe after it and the thought recorded failed. The hang begins once
+      // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
         const probeLines: string[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
-        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 8, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        const startProbes = probes;
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
-          await Bun.sleep(1000);
+          // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
+          await pollUntil(async () => probes > startProbes, 10_000);
+          await Bun.sleep(500);
           down = "hang";
           downUntil = Date.now() + 60_000;
           slow = await seed("Yara watched the pager while the provider hung.");
-          await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
-          await Bun.sleep(10_000);
+          const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
+          const askedBefore = probesAsked;
+          const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
+          await Bun.sleep(1000);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status})`);
+          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -5689,8 +5719,17 @@ if (want("10")) {
     const ac2 = new AbortController();
     let st: PassStop | undefined;
     const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
-    await Bun.sleep(1500);
-    const asleep = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+    // Asleep once its pass has stamped the row done and not running — its start
+    // stamps it running with no outcome — and a moment more to be inside the
+    // sleep, where a 1.5 s sleep stood in for it (SMD-3196). A follower that
+    // never stamps it so fails the assertion below after 15 s.
+    let asleep: { outcome?: string | null; running?: boolean; ended?: boolean } = {};
+    await pollUntil(async () => {
+      const value = await ownBeat();
+      asleep = JSON.parse(value ?? "{}");
+      return polling(value) && asleep.outcome === "ok";
+    }, 15_000);
+    await Bun.sleep(300);
     const at = Date.now();
     stopIt(st, ac2);
     // A stop that does not reach the follower fails here rather than hanging the suite.
@@ -5899,14 +5938,16 @@ if (want("10")) {
   // polls in two halves a poll apart: under the floor each, they are judged
   // together, not dropped one poll at a time.
   const alarmFollower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
-  await Bun.sleep(1500);
+  // Polling once its first pass has stamped the row the run before it ended (SMD-3196: a 1.5 s sleep stood in for it).
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const failedNow = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0].c);
   for (const half of [0, 24]) {
     for (let i = half; i < half + 24; i++) await seed(`A followed reference-list page, number ${i}.`);
     for (let i = 0; i < 100 && (await failedNow()) < 36 + half; i++) await Bun.sleep(200);
     await Bun.sleep(1500);
   }
-  await Bun.sleep(2500);
+  // The poll after the second half stamps the tripped block (SMD-3196: a 2.5 s sleep stood in for it).
+  await pollUntil(async () => JSON.parse((await ownBeat()) ?? "{}").malformed?.alarm === true, 15_000);
   // Every row failed, but on documents the model cannot read, not a down
   // provider: the passes are ok, and the alarm rides the poll's stamp, which
   // is what preflight warns on (review pass 2: rows failed against rows done
@@ -6577,7 +6618,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities, no model asked, again at an edited text, and a first line's UTF-8 no ticket; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 111's door and a role without its grants, as the pass meets each (migration 111, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 111's door and a role without its grants, as the pass meets each (migration 111, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** The judge's answer by words in the thought; any other thought, an empty subject. */
@@ -6587,7 +6628,7 @@ if (want("10h")) {
   /** While false, the garbled thought's answer is an empty subject of the expected shape instead. */
   let garbledAnswers = true;
   /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
-  let onOwn: ((thought: string) => void) | null = null;
+  let onOwn: ((thought: string) => void | Promise<unknown>) | null = null;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -6602,7 +6643,8 @@ if (want("10h")) {
       ownCalls++;
       // The thought alone, not the rules quoted before it.
       const thought = user.slice(user.indexOf("<thought_a>"));
-      onOwn?.(thought);
+      // Awaited: a case's edit lands before the answer does (the stale case, review pass 4).
+      await onOwn?.(thought);
       if (body.model !== "stub-judge") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
       if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
       if (judgeMode === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -6612,12 +6654,20 @@ if (want("10h")) {
   });
   const seed = async (content: string, metadata: Record<string, unknown> = {}) =>
     ((await sql`SELECT upsert_thought(${content}, ${{ metadata }}::jsonb) AS r`)[0].r as { id: string }).id;
+  /** A session summary as the capture hook writes one (renderSummary): its header, then each part a blank line apart. */
+  const summary = (ticket: string, prompt: string, outcome = "The work done in it.") =>
+    [`Session summary — ${ticket} — claude-code — ob1 (michaelharris/${ticket.toLowerCase()}-work) — 2026-10-01`, `Title: ${prompt}`, `Asked (1 prompt):\n- ${prompt}`,
+      `Outcome (the assistant's last message):\n${outcome}`, "Brain: no thoughts read or written this session."].join("\n\n");
   const filed = await seed("The ticket row's own text, its id in its metadata alone.", { issue: "SMD-7" });
-  const session = await seed("SMD-8 session summary\n\nThe work done in it.");
-  const release = await seed("OB1 release notes: what shipped this week.");
-  const pr = await seed("Reviewed and merged pull work for the dashboard.");
-  const none = await seed("A passing remark, nothing here to name.");
-  const garbled = await seed("A garbled answer comes back for this one.");
+  const session = await seed(summary("SMD-8", "start smd-8"));
+  // Each names what the stub answers for it: a model's PR or release counts only when its thought names it (review pass 4).
+  const release = await seed("OB1 release notes: what shipped in 2.0.0 this week.");
+  const pr = await seed("Reviewed and merged pull request 727 for the dashboard.");
+  // A session whose prompts name no ticket: its header's is its branch's, and its work may be another's (version 2's
+  // rule 1), so it is the model's. Version 1 took the header's ticket.
+  const none = await seed(summary("SMD-11", "a passing remark", "Nothing here to name."));
+  // A note whose first line names a ticket as context: the model's in version 2, the first line's in version 1.
+  const garbled = await seed("SMD-12 process note: a garbled answer comes back for this one.");
   // Ticket-shaped words on a first line whose prefixes are denied (an encoding, a model name): no ticket.
   const utf = await seed("UTF-8 handling for the GPT-4 export, nothing filed.");
   const rawKey = "c".repeat(64);
@@ -6658,14 +6708,16 @@ if (want("10h")) {
     assert(first.code === 0 && /7 extracted, 0 failed/.test(first.stdout) && /; recorded 2 thought\(s\)' own subject by its ticket\n/.test(first.stdout) && ownCalls === 0 && extractCalls === 7,
       `the pass extracts the seven and records the two subjects a rule finds, asking no own question (exit ${first.code}, ${ownCalls} own question(s): ${first.stdout.split("\n").find((l) => /wrote /.test(l))?.trim()})`);
     const byFiled = s.find((x) => x.thought === filed), bySession = s.find((x) => x.thought === session);
-    assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === "subject:rules@r1"),
-      `the ticket filed under, and the first line's: standing, under the rules' key (${JSON.stringify(s.map((x) => [x.key, x.by]))})`);
-    assert(!s.some((x) => x.thought === utf), "a first line's UTF-8 and GPT-4, denied prefixes, are no ticket: the thought is left to the model");
-    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === "subject:rules@r1" && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rules_version === 1 && x.agent === agent.id),
-      "…each with its lineage row: the text read, the rules' key and recipe, the worker's agent");
+    const ruleKeyOf = (by: string) => (by === "metadata" ? "subject:metadata@r1" : "subject:first_line@r2");
+    assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === ruleKeyOf(x.by)),
+      `the ticket filed under, and the session header's its prompt names: standing, each under its rule's key (${JSON.stringify(s.map((x) => [x.key, x.by, x.judge]))})`);
+    assert(!s.some((x) => x.thought === utf || x.thought === none || x.thought === garbled),
+      "a first line's UTF-8 and GPT-4, denied prefixes, a session whose prompts name no ticket, and a note's first-line ticket: each left to the model");
+    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === ruleKeyOf(x.by) && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rule_version === (x.by === "metadata" ? 1 : 2) && x.agent === agent.id),
+      "…each with its lineage row: the text read, its rule's key and recipe, the worker's agent");
 
     // An edit: 016's trigger re-queues it, and the next pass finds its subject again at the new text.
-    await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, retitled\n\nThe work done in it."})`;
+    await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "retitled: start smd-9")})`;
     const second = await extractRun();
     s = await subjects();
     const now = s.find((x) => x.thought === session && x.standing), was = s.find((x) => x.thought === session && !x.standing);
@@ -6675,7 +6727,7 @@ if (want("10h")) {
     // The sweep: a dry run, then the rules alone, ask no model and write nothing.
     let asked = ownCalls;
     const dry = await sweep({ dryRun: true });
-    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no subject at their text$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
+    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
       `--subjects --dry-run counts the five no rule keys, asks nothing and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A dry run reads on: a signal aborted before it changes nothing (review pass 1: it read none and exited 0).
     const dryStopped = await sweep({ dryRun: true, signal: AbortSignal.abort() });
@@ -6704,7 +6756,7 @@ if (want("10h")) {
     const full = await sweep();
     s = await subjects();
     const rel = s.find((x) => x.thought === release && x.standing), pull = s.find((x) => x.thought === pr && x.standing);
-    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p1" && x.produced_by === "subject:stub-judge@p1" && x.fp === x.current && x.agent === agent.id),
+    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p2" && x.produced_by === "subject:stub-judge@p2" && x.fp === x.current && x.agent === agent.id),
       `the sweep records the model's subjects, read into their keys, under the model's pass key (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
     assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && rel.recipe.answer === "OB1 release 2.0.0" && pull?.recipe?.answer === "PR 727" && rel.recipe.prompt_hash === promptHash(subjectPrompt()),
       "…its recipe the model, the question's hash and the subject it answered");
@@ -6722,11 +6774,49 @@ if (want("10h")) {
 
     // A moved text the model names the same: the facet kept, its lineage moved to the text read now.
     const relBefore = (await standingOf(release))!;
-    await sql`SELECT update_thought(${release}::uuid, ${"OB1 release notes: what shipped this week, and one fix."})`;
+    await sql`SELECT update_thought(${release}::uuid, ${"OB1 release notes: what shipped in 2.0.0 this week, and one fix."})`;
     const moved = await sweep();
     const relAfter = (await standingOf(release))!;
     assert(/^0 subject\(s\) recorded; 1 kept, at the text read now/.test(tally(moved)) && relAfter.id === relBefore.id && relAfter.fp === relAfter.current && relAfter.fp !== relBefore.fp,
       `a moved text named the same: the facet kept, its lineage at the new text (exit ${moved.code}: ${tally(moved)})`);
+
+    // Version 1's subjects found again (SMD-3306 PR 3): its one rules key and its question's version are no current
+    // pass's, so the sweep takes each, and the door replaces it under the current key. One the model now names nothing
+    // for stands, out of date: a close could close one a pass wrote since the sweep read it (PR 4's record).
+    const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
+    const asV1 = async (id: string, key: string, by: string, judge: string) =>
+      ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as SubjectWrite).action;
+    // The filed thought's version 1 key is another ticket's, so the run reports a new key (review pass 3).
+    const v1 = [await asV1(filed, "ticket:SMD-70", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
+    assert(v1.join() === "replaced,replaced,added", `version 1's subjects written as PR 2 wrote them: its rules key, its question's (${v1.join(", ")})`);
+    const reDry = await sweep({ dryRun: true });
+    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject, 1 with a new key\); ask stub-judge about 4 \(2 with an out-of-date subject\)\./.test(reDry.stdout),
+      `a dry run counts them as a run would: the filed ticket found again in place of version 1's, the rest the model's (exit ${reDry.code}: ${reDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    asked = ownCalls;
+    const reRun = await sweep();
+    const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!, noneNow = (await standingOf(none))!;
+    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one (1 with a new key); 2 the model named nothing for, 1 answered not as JSON of the expected shape — among them, 1 with an out-of-date subject still standing"
+      && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2" && ownCalls === asked + 4,
+      `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
+    assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
+      "…and the one the model now names nothing for stands, out of date and counted, for the next sweep to ask again; no other of version 1's stands");
+    // Another model's subject under the current question is current: the sweep's query reads subjectCurrent's "any
+    // model" (review pass 1: [10h] held only stub-judge's, so a query keyed to the configured model passed).
+    const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    const anotherDry = await sweep({ dryRun: true });
+    assert(another === "replaced" && /^ {2}3 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(anotherDry.stdout)
+      && /ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(anotherDry.stdout),
+      `another model's subject at the current question is current, not taken (exit ${anotherDry.code}: ${anotherDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    // A stale write (review pass 4): the thought edited while the model answers for it, so the door refuses the write
+    // as found in a text that is gone, and the out-of-date subject it leaves standing is counted. Then made current
+    // again at its new text, so the cases after see what they saw.
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
+    onOwn = (t) => (t.includes("merged pull") ? sql`SELECT update_thought(${pr}::uuid, ${"Reviewed and merged pull request 727 for the dashboard, edited."})` : undefined);
+    const staleRun = await sweep().finally(() => { onOwn = null; });
+    assert(staleRun.code === 1 && tally(staleRun) === "0 subject(s) recorded; 2 the model named nothing for, 1 answered not as JSON of the expected shape, 1 edited mid-sweep — among them, 2 with an out-of-date subject still standing"
+      && (await standingOf(pr))?.judge === "subject:stub-judge@p1",
+      `a write refused as stale leaves its out-of-date subject standing, counted (exit ${staleRun.code}: ${tally(staleRun)})`);
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
 
     // The spawned CLI prints what run() in this process does (masked seconds).
     const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
@@ -6746,7 +6836,7 @@ if (want("10h")) {
       `…and a dry run under it counts, and says a run would be refused (review pass 2) (exit ${gatedDry.code})`);
     // A policy that lets one row out: the others refused before their question and counted, exit 1, as the pass fails a refused row.
     const perRow = await sweep({}, { ...gatedEnv, OB1_EGRESS_ALLOW: "marker:garbled" });
-    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate" && /refused by the egress gate: /.test(perRow.stderr),
+    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate — among them, 1 with an out-of-date subject still standing" && /refused by the egress gate: /.test(perRow.stderr),
       `rows the policy keeps in are refused before their question and counted, the row it lets out asked, exit 1 (exit ${perRow.code}: ${tally(perRow)})`);
     asked = ownCalls;
     judgeMode = "refuse";
@@ -6766,7 +6856,7 @@ if (want("10h")) {
       const noDoor = await sweep();
       assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 111's/.test(noDoor.stderr), `--subjects without 111's door refuses, naming the migration (exit ${noDoor.code})`);
       await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
-      await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, edited again."})`;
+      await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-9", "edited again: start smd-9")})`;
       const noDoorPass = await extractRun();
       const said = noDoorPass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
       // Three: the two just edited, two subjects for a rule, and the release note, edited above.
@@ -6777,7 +6867,7 @@ if (want("10h")) {
     }
     // A dry run counts as a run would: the two whose text moved under the same ticket are kept, not recorded (review pass 2).
     const keepDry = await sweep({ dryRun: true });
-    assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3\./.test(keepDry.stdout),
+    assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(keepDry.stdout),
       `a dry run counts a subject the door would keep as kept (exit ${keepDry.code}: ${keepDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
     // A role without the door's grants (review pass 1: the sweep crashed on its first write, a question spent). Granted
@@ -6804,12 +6894,12 @@ if (want("10h")) {
         const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
         assert(roleDry.code === 0 && /A run would be refused: this role cannot write a thought's subject\./.test(roleDry.stdout),
           `…and a dry run under it counts, and says a run would be refused (exit ${roleDry.code})`);
-        // A new ticket on its first line, so the door inserts a facet: the same subject kept would write no facet.
-        await sql`SELECT update_thought(${session}::uuid, ${"SMD-10 session summary, as the role reads it."})`;
+        // A new ticket in its header and prompt, so the door inserts a facet: the same subject kept would write no facet.
+        await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-10", "as the role reads it: smd-10")})`;
         const rolePass = await extractRun({}, sUrl, sEnv);
         const saidRole = rolePass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
-        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]),
-          `…and the pass under it extracts, its entities standing, and says once that it records no subject (exit ${rolePass.code}, ${saidRole.length} line(s))`);
+        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]) && /UPDATE on thoughts \(its row lock\)/.test(saidRole[0]) && saidRole[0].includes(DOOR_GRANTS),
+          `…and the pass under it extracts, its entities standing, and says once that it records no subject, naming every grant the door needs (exit ${rolePass.code}, ${saidRole.length} line(s))`);
         const structure = await migrateInProcess({ grant: SROLE, groups: "structure" });
         assert(structure.code === 0, `the role is granted structure too (exit ${structure.code})`);
         await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
@@ -6825,6 +6915,32 @@ if (want("10h")) {
         await dropS();
       }
     }
+
+    // Review pass 6 (independent mutants): the sweep's own rule writes and the dry run's counts, where [10h] had held the
+    // pass's rule writes alone, a version 1 key of another ticket, and runs that only replace. Version 1's subjects at
+    // their own keys, the most common upgrade: a session summary's under its first line, a filed ticket's under the
+    // rules key; and a filed ticket never extracted, which the sweep adds.
+    await sql`SELECT update_thought(${session}::uuid, ${summary("SMD-81", "start smd-81")})`;
+    const sameV1 = [await asV1(session, "ticket:SMD-81", "first_line", "subject:rules@r1"), await asV1(filed, "ticket:SMD-7", "metadata", "subject:rules@r1")];
+    const fresh = await seed("A ticket row filed under its id, never extracted.", { issue: "SMD-91" });
+    const sameDry = await sweep({ dryRun: true, model: false });
+    assert(sameV1.every((a) => a === "added" || a === "replaced")
+        && /record 2 by the ticket each is filed under, 1 by its session header's ticket \(2 in place of a standing subject, 0 with a new key\)/.test(sameDry.stdout),
+      `a dry run counts version 1's subjects at their own keys in place of a standing subject, none with a new key (exit ${sameDry.code}: ${sameDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    const sameRun = await sweep({ model: false });
+    const sessionNow = (await standingOf(session))!, filedAgain = (await standingOf(filed))!, freshNow = (await standingOf(fresh))!;
+    assert(/^3 subject\(s\) recorded \(2 by the ticket filed under, 1 by the session header's ticket\), 2 in place of a standing one \(0 with a new key\)/.test(tally(sameRun))
+        && sessionNow.key === "ticket:SMD-81" && sessionNow.judge === "subject:first_line@r2" && filedAgain.judge === "subject:metadata@r1" && freshNow.judge === "subject:metadata@r1",
+      `--subjects rules records each under its rule's key now, the session's under the first line's, and adds the one never found (exit ${sameRun.code}: ${tally(sameRun)})`);
+    const afterDry = await sweep({ dryRun: true, model: false });
+    assert(/record none by the rules/.test(afterDry.stdout), `…and a dry run after takes none of them, each current (exit ${afterDry.code}: ${afterDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    // A model's subject under another pass's key is no current subject, though it ends as the question's version does.
+    const asks = (r: { stdout: string }) => Number(/ask stub-judge about (\d+)/.exec(r.stdout)?.[1] ?? Number.NaN);
+    const beforeX = await sweep({ dryRun: true });
+    await asV1(pr, "pr:727", "model", "extract:x@p2");
+    const withX = await sweep({ dryRun: true });
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
+    assert(asks(withX) === asks(beforeX) + 1, `a model's subject under extract's key is taken, as no current subject (${asks(beforeX)} → ${asks(withX)})`);
   } finally {
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -7961,6 +8077,7 @@ if (want("16")) {
     assert((await consolidateBeats()).length === 0, "no one-shot consolidation run left a heartbeat row (SMD-2261)");
     const relay = await cuttableRelay(URL_!);
     const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relay.url, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const [followStdout, followStderr] = [watchStream(follower.stdout), watchStream(follower.stderr)];
     let followSettled = false;
     let aliveCut = false;
     try {
@@ -7968,7 +8085,8 @@ if (want("16")) {
       assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
       await relay.cut();
       await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
-      await Bun.sleep(2500);
+      // The cut met once the follower says so (SMD-3196: a 2.5 s sleep stood in for it).
+      await pollUntil(async () => /the database is not answering/.test(followStdout.sofar() + followStderr.sofar()), 15_000);
       aliveCut = follower.exitCode === null;
       await relay.restore();
       for (let i = 0; i < 80 && !followSettled; i++) {
@@ -7978,7 +8096,7 @@ if (want("16")) {
     } finally {
       follower.kill("SIGINT");
     }
-    const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+    const followOut = (await followStdout.rest()) + (await followStderr.rest());
     const followCode = await follower.exited;
     await relay.close();
     assert(aliveCut && /the database is not answering \([^)]*\) — the follower waits for it/.test(followOut) && /the database answers again after \d+ s; polling resumes/.test(followOut),
@@ -12860,11 +12978,19 @@ if (want("33")) {
   // sequential scan (mutation testing: a scan count alone let it pass), so the
   // rows read are counted too — of the projection's tables as well, which a
   // hash join over every superseded thought scanned per write (third review
-  // pass).
-  await db`INSERT INTO thoughts (content, metadata) SELECT '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
-  await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
-            WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
-              AND (t.metadata->>'n')::int <= 5000 AND (s.metadata->>'n')::int = (t.metadata->>'n')::int + 10000`;
+  // pass). Each filler's id is derived from its number, so the pointer write
+  // names its target with no join. A self-join on metadata->>'n' was planned
+  // on estimates of tens of rows against 20,000 and 5,000 — the last ANALYZE
+  // saw some sixty rows, and the jsonb predicates have no statistics at all —
+  // and in some runs became a nested loop of a hundred million jsonb reads:
+  // 30 s of [33]'s 36 on CI (SMD-3196). Don't put a join back here.
+  await db`INSERT INTO thoughts (id, content, metadata) SELECT md5('[33] filler ' || g)::uuid, '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
+  await db`UPDATE thoughts SET supersedes = md5('[33] filler ' || ((metadata->>'n')::int + 10000))::uuid
+            WHERE metadata->>'kind' = 'race2256' AND (metadata->>'n')::int <= 5000`;
+  // Counted, with no join either, so an UPDATE whose WHERE no longer matches
+  // the filler fails the assertion below, not passes on no pointers (a target
+  // id that matches no thought is the foreign key's to refuse).
+  const [{ pointers }] = await db`SELECT count(*)::int AS pointers FROM thoughts WHERE content LIKE '[33] filler %' AND supersedes IS NOT NULL`;
   await db`ANALYZE thoughts`;
   const reads = async () => {
     await db`SELECT pg_stat_force_next_flush()`;
@@ -12881,8 +13007,8 @@ if (want("33")) {
   const [th, sb, hd] = [delta("thoughts"), delta("ob1_superseded_by"), delta("ob1_ticket_head")];
   // The heads table holds a dozen rows here, which the planner rightly scans;
   // the superseders hold five thousand, which a hash join used to scan whole.
-  assert(th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
-    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
+  assert(pointers === 5000 && th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
+    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers (${pointers}), scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
 
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
@@ -14062,8 +14188,17 @@ if (want("37b")) {
   }
 }
 
+/**
+ * A live write and nothing else, which [38] and [38b] wake the sleep scheduler
+ * with: an audit row an operator's key wrote, on no thought — what sleep.ts's
+ * newestLive reads as a write — so no pass gains work. A search wakes it no
+ * longer (SMD-3315).
+ */
+const liveWrite = (sql: SQL, note: string) =>
+  sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'update', 'op-sleep', ${{ note }}::jsonb)`;
+
 if (want("38")) {
-  console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
+  console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live write wakes it and the passes stop at once, their leases returned; a search and a sync write do not (SMD-3315); the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -14174,7 +14309,7 @@ if (want("38")) {
   const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
-    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: string } : null;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: unknown } : null;
   };
   const lines: string[] = [];
   // The passes look for new work every second, not every 15 s (SMD-3048);
@@ -14208,7 +14343,10 @@ if (want("38")) {
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop during a start read. */
   const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
-  // the refusal retried and its reset, which read the real 5 s and 10 s.
+  // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
+  // to see the row re-stamped through a wait, and the schedule still doubling
+  // and reset. test-worker-bootstrap.ts holds the shipped 5 s and 10 s
+  // (SMD-3196; they read the real schedule before it).
   let restoreOutage = shortenOutage();
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
@@ -14226,12 +14364,12 @@ if (want("38")) {
     const dryText = lines.join("\n");
     assert(dry === 0 && /awake: a sleep would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
       `--dry-run reads the brain awake, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /awake|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
-    // An empty query log is said: with OB1_QUERY_LOG off a search never wakes it.
+    // It reads no query log (SMD-3315): its start names none.
     // --poll past a minute is refused: the awake wait is at most a minute.
     lines.length = 0;
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
-    assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
-      `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+    assert(!/query_log|last read/.test(dryText) && /a search does not wake it/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
+      `its start names no query log and says a search does not wake it, and --poll 61 is refused with 2 (exit ${longPoll})`);
     // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
     lines.length = 0;
     const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
@@ -14302,7 +14440,7 @@ if (want("38")) {
     assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
       `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
     assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
-        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
+        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && !("reads" in refusedBeat) && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
         && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
         && endedDry === 0 && !/outside sleep/.test(endedDryText),
       `a fresh follower outside refuses a run (2, no sleep, its row ended failed, its last sleep kept), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
@@ -14392,7 +14530,7 @@ if (want("38")) {
       `with --dump-dir the sleep's pass writes each of its three verdicts to the consolidation key's file, created 0600, which its start names (${dumpedPairs || "no file"}, mode ${dumpMode.toString(8)})`);
     rmSync(onceDumps, { recursive: true, force: true });
 
-    // --follow: a live read wakes it mid-call; the passes stop at once.
+    // --follow: a search leaves the pass running (SMD-3315); a live write wakes it mid-call, and the passes stop at once.
     lines.length = 0;
     for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
     slow = 5000;
@@ -14402,9 +14540,16 @@ if (want("38")) {
     await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
     const asleepBeat = await beat();
     const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    // A logged search, two polls and a half inside the 5 s call: the lease stays where it is.
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a search during a pass')`;
+    await Bun.sleep(2500);
+    const [searchedHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    const searchWoke = lines.some((l) => /awake:/.test(l));
+    assert(searchedHand?.id === inHand?.id && !searchWoke,
+      `a search during a pass leaves it running, the thought in hand still claimed and no wake said (${searchedHand?.id === inHand?.id ? "same claim" : `claim ${searchedHand?.id ?? "none"}`}; woke ${searchWoke})`);
     const wokenAt = Date.now();
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
-    await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
+    await liveWrite(sql, "a live write");
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)) && !(await claims(EX)).claimed, 10_000);
     const wakeMs = Date.now() - wokenAt;
     // The awake stamp lands after the wake's line and the leases' return (the
     // passes stop, their claims move to the tail, then the sleep is stamped
@@ -14415,7 +14560,7 @@ if (want("38")) {
     let awakeBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (awakeBeat = await beat())?.running === false, 3_000);
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
-      `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
+      `a live write wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
     // The thought the wake left goes to the back of the queue: claims are taken
     // oldest first and the release keeps its place, so a thought longer than
     // the sleeps would be every sleep's first (review pass 1).
@@ -14442,8 +14587,9 @@ if (want("38")) {
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
-    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
-    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
+    // A wake line of its own: the planted write's above says "a live write" too (SMD-3315).
+    const capturedWoke = await pollUntil(async () => lines.filter((l) => /awake: a live write/.test(l)).length > wakesAfterSync, 10_000);
+    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && capturedWoke,
       `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
     assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
       `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
@@ -14454,23 +14600,42 @@ if (want("38")) {
     assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
       `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
     // The row carries its last sleep (SMD-2678): when it began and when it
-    // ended, the database's instants, the end past the start; and its word on
-    // reading the query log, the owner's here (review pass 1).
+    // ended, the database's instants, the end past the start; and no word on
+    // reading the query log, which it reads no longer (SMD-3315).
     const mark = endBeat?.slept;
     const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat?.reads === "yes",
-      `the heartbeat carries the last sleep's start and end, and that it reads the log (${JSON.stringify(mark)}; reads ${endBeat?.reads})`);
+    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat !== null && !("reads" in endBeat),
+      `the heartbeat carries the last sleep's start and end, and no reads word (${JSON.stringify(mark)}; reads ${JSON.stringify(endBeat?.reads)})`);
 
     // A capture whose transaction began before the sleep and commits after it
-    // is dated before the sleep: it still wakes it.
+    // is dated before the sleep: it still wakes it. The quiet is 5 s, where it
+    // was 10 (SMD-3196): the sleep reads back as far as its quiet, so the
+    // transaction must begin within it, and the row's sleep start says it did.
+    // The sleep begins the quiet after the capture above, and the transaction
+    // about half a second after that capture, so it leads the sleep by the
+    // quiet less that half second. It fails if the scheduler's own start, its
+    // passes' start checks, outlasts the quiet less a poll (its first wait is
+    // at least one), or if more than the quiet passes between that capture and
+    // the transaction (the follower before stopping): the sleep then begins at
+    // once, and the lead is 0 or less.
     lines.length = 0;
+    const lateQuiet = 5;
     const ac2 = new AbortController();
-    const late = sleepRun({ follow: true, quiet: 10, signal: ac2.signal });
+    const late = sleepRun({ follow: true, quiet: lateQuiet, signal: ac2.signal });
     const tx = await sql.reserve();
+    let txBegan = "";
+    let sleptFrom: string | undefined;
     try {
       await tx`BEGIN`;
+      [{ t: txBegan }] = await tx`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`;
       await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
+      // The line comes before the row's write: polled for this sleep's mark, open (review pass 1).
+      await pollUntil(async () => {
+        const mark = (await beat())?.slept;
+        sleptFrom = mark?.to === null ? mark.from : undefined;
+        return sleptFrom !== undefined;
+      }, 5000);
       await tx`COMMIT`;
     } finally {
       tx.release();
@@ -14478,7 +14643,8 @@ if (want("38")) {
     const lateWoke = await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 8_000);
     ac2.abort();
     await late;
-    assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    const lead = sleptFrom === undefined ? NaN : (Date.parse(sleptFrom) - Date.parse(txBegan)) / 1000;
+    assert(lateWoke && lead > 0 && lead < lateQuiet, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its ${lateQuiet} s quiet${sleptFrom === undefined ? "; no open sleep mark within 5 s" : ""}; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
     // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
     // A lineage row whose windows a raw delete took is swept before
@@ -14542,8 +14708,8 @@ if (want("38")) {
       // land it before the first, the grace spent with the call still running).
       for (const until = Date.now() + 15_000; !lines.some((l) => /asleep:/.test(l)) && Date.now() < until;) await Bun.sleep(3);
       await Bun.sleep(1500);
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read during the sweep')`;
-      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
+      await liveWrite(sql, "a live write during the sweep");
+      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
       extractedAtWake = extractedDuringSweep;
       leftByWake = await rowsBy("zz-wake");
       wakeMark = (await beat())?.slept;
@@ -14587,8 +14753,8 @@ if (want("38")) {
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 15_000);
       await Bun.sleep(1000);
       const wokeAt = Date.now();
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read while the sweep runs long')`;
-      if (await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
+      await liveWrite(sql, "a live write while the sweep runs long");
+      if (await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
       heldExtractedAtWake = heldExtracted;
       // The supersession lock, which rebuild_derived takes first: free once the call is cancelled, held while it still runs on the server.
       lockFreeAtWake = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
@@ -14656,7 +14822,7 @@ if (want("38")) {
       let twoSleeps = false;
       try {
         await pollUntil(async () => lines.filter(failedSummary).length >= 1, 20_000);
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between two failing sweeps')`;
+        await liveWrite(sql, "a live write between two failing sweeps");
         twoSleeps = await pollUntil(async () => lines.filter(failedSummary).length >= 2, 20_000);
       } finally {
         acAllFailed.abort();
@@ -14695,7 +14861,7 @@ if (want("38")) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorLow}::uuid`;
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('00000000-0000-4000-8000-000000000001', 'chunks', ${cursorLow}::uuid, ARRAY[${cursorLow}::uuid], ARRAY['fp'], 'zz-cursor-b', '{"deterministic": true}')`;
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after a whole sweep')`;
+      await liveWrite(sql, "a live write after a whole sweep");
       lowSwept = await pollUntil(async () => (await rowsBy("zz-cursor-b")) === 0, 20_000);
     } finally {
       acCursor.abort();
@@ -14724,7 +14890,7 @@ if (want("38")) {
       const deepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acDeep.signal });
       const firstWindow = await pollUntil(async () => lines.some((l) => /re-derive: the lineage table holds more than one window of 10,001 rows — each sleep sweeps the next/.test(l)), 20_000);
       const afterFirst = await rowsBy("zz-deep");
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between the windows')`;
+      await liveWrite(sql, "a live write between the windows");
       const secondWindow = await pollUntil(async () => (await rowsBy("zz-deep")) === 0, 30_000);
       acDeep.abort();
       await deepRun;
@@ -14805,7 +14971,7 @@ if (want("38")) {
     slowExtract = 0;
     await Bun.sleep(2500);
     const noSleep = asleepCount();
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the budget')`;
+    await liveWrite(sql, "a live write after the budget");
     // The next sleep runs on the same 3 s clock, so the work moving
     // is what proves the resume, not the pool drained (review pass 2).
     const doneBefore = afterClock.succeeded ?? 0;
@@ -14860,7 +15026,7 @@ if (want("38")) {
       await dropSlow();
       await Bun.sleep(1500);
       const quietSleeps = asleepCount();
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the slow statement')`;
+      await liveWrite(sql, "a live write after the slow statement");
       const after = await pollUntil(async () => asleepCount() === quietSleeps + 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
       assert(quietSleeps === 1 && after, `…and after a live call the next sleep, the statement no longer slow, does the work (${quietSleeps} sleep(s) before the call; ${JSON.stringify(await claims(EX))})`);
     } finally {
@@ -14880,7 +15046,7 @@ if (want("38")) {
     const idled = await pollUntil(async () => (idleBeat = await budgetBeat())?.resting === true, 30_000);
     assert(idled && lines.some((l) => /the sleep's clock is spent \(6000 ms\) with nothing left to do — it ends; the next begins after a live call/.test(l)) && idleBeat?.slept?.budget === undefined && typeof idleBeat?.slept?.to === "string" && idleBeat.budget?.stops === 0,
       `a clock spent on drained pools ends the sleep with no stop counted or marked, the row resting until a live call (${JSON.stringify(idleBeat)})`);
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the idle clock')`;
+    await liveWrite(sql, "a live write after the idle clock");
     let nextBeat = null as BudgetBeat | null;
     const rested = await pollUntil(async () => asleepCount() === 2 && (nextBeat = await budgetBeat())?.running === true && nextBeat?.resting === undefined, 15_000);
     assert(rested, `…and once a live call and the quiet begin the next sleep, the row rests no longer (${JSON.stringify(nextBeat)})`);
@@ -15070,9 +15236,10 @@ if (want("38")) {
     // The same refusal after the pass has run in this process — a model
     // re-pulled, a credit top-up — is retried on the outage schedule, the row
     // failed meanwhile, and the next sleep that runs puts it back to ok. The
-    // real schedule here: its 5 s, its doubling and its reset are read from
-    // the lines, and the row is re-stamped 4 s into a 10 s wait.
+    // schedule from 2.5 s here: its first wait, its doubling and its reset are
+    // read from the lines, and the row is re-stamped 3 s into a 5 s wait.
     restoreOutage();
+    restoreOutage = shortenOutage(2500);
     lines.length = 0;
     // Two synced notes beside the March billing note: consolidation has pairs
     // to judge once extraction drains, and a slow judge holds one in hand.
@@ -15097,25 +15264,25 @@ if (want("38")) {
     }, 40_000);
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
-    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
+    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
     slowJudge = 0;
     const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
     assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
       `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}${held ? "" : "; no judge call was held within 40 s"})`);
     const laterBeat = await beat();
-    // Still refused at the next try: the wait doubles (5 s, then 10 s).
-    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
-    // Four seconds into the 10 s wait the row is fresh — re-stamped through
-    // the wait — not three of its 1 s intervals old (review pass 2).
-    await Bun.sleep(4000);
+    // Still refused at the next try: the wait doubles (2.5 s, then 5 s).
+    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 30_000);
+    // Three seconds into the 5 s wait the row is fresh — re-stamped through
+    // the wait — not two of its 1 s intervals old (review pass 2).
+    await Bun.sleep(3000);
     const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
     const stillRunning = !retryDone;
     missing = false;
     const at = lines.length;
     const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
-    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
+    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 2,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
-    // A sleep that ran resets the schedule: the next refusal waits 5 s again.
+    // A sleep that ran resets the schedule: the next refusal waits 2.5 s again.
     // The model goes only once the capture has woken the recovered sleep, so
     // that sleep ends as one that ran: flipped before, consolidation joining
     // it could meet the 404 at its own start, a refusal retried on the same
@@ -15128,14 +15295,16 @@ if (want("38")) {
       if (woke) missing = true;
       return woke;
     }, 20_000);
-    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
-    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
+    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in [\d.]+ s/.test(l)), 20_000);
+    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in [\d.]+ s/.test(l))?.match(/in ([\d.]+) s/)?.[1];
     missing = false;
     const at3 = lines.length;
     const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
     // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
+    // The 2.5 s schedule restored first, so the section's own restore puts back the shipped one, not 2.5 s.
+    restoreOutage();
     restoreOutage = shortenOutage();
-    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
+    assert(resetWait && firstWaitAgain === "2.5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 2.5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "2.5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
 
     // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
     // row reads failed while it does and ok once a pass runs again — the
@@ -15439,14 +15608,14 @@ if (want("38")) {
       await setKey(EX);
 
       // The banner once per process, from the check, and no summary at a wake:
-      // two sleeps, a live read between them.
+      // two sleeps, a live write between them.
       await capture("A note for the quiet passes.", "sync-sleep", 0, 10);
       const quietRun = followRun();
       await pollUntil(async () => count(/asleep:/) >= 1, 20_000);
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake between sleeps')`;
+      await liveWrite(sql, "a wake between sleeps");
       await pollUntil(async () => count(/asleep:/) >= 2, 30_000);
       const quietCode = await quietRun.stop();
-      const banners = { exJob: count(/\[extract\]\s+job:/), coJob: count(/\[consolidate\]\s+job:/), exEgress: count(/\[extract\]\s+egress:/), noKey: count(/\[extract\]\s+⚠  OB1_WORKER_KEY is not set/), workersLine: count(/worker\(s\), \d+ per claim/), summaries: count(/\[(extract|consolidate)\]\s+(after:|graph:)/), wakes: count(/awake: a live read/), sleeps: count(/asleep:/) };
+      const banners = { exJob: count(/\[extract\]\s+job:/), coJob: count(/\[consolidate\]\s+job:/), exEgress: count(/\[extract\]\s+egress:/), noKey: count(/\[extract\]\s+⚠  OB1_WORKER_KEY is not set/), workersLine: count(/worker\(s\), \d+ per claim/), summaries: count(/\[(extract|consolidate)\]\s+(after:|graph:)/), wakes: count(/awake: a live write/), sleeps: count(/asleep:/) };
       assert(quietCode === 0 && banners.exJob === 1 && banners.coJob === 1 && banners.exEgress === 1 && banners.noKey === 1 && banners.workersLine === 0 && banners.summaries === 0 && banners.wakes >= 1 && banners.sleeps >= 2,
         `across two sleeps and a wake each pass's banner is said once, by the start's check, and no pass runs its end-of-run summary (exit ${quietCode}; ${JSON.stringify(banners)})`);
 
@@ -15516,7 +15685,7 @@ if (want("38")) {
       const switchRun = followRun();
       await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
       await setKey("extract:another-model@p2");
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the switched key')`;
+      await liveWrite(sql, "a wake before the switched key");
       const switchCode = await switchRun.settle();
       slowExtract = 0;
       await setKey(EX);
@@ -15532,7 +15701,7 @@ if (want("38")) {
       const revokeRun = followRun({ env: keyedEnv });
       await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
       await sql`SELECT revoke_agent_key(${hashKey(rawKey)}, 'SMD-2752 live')`;
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the revoked key')`;
+      await liveWrite(sql, "a wake before the revoked key");
       const revokeCode = await revokeRun.settle();
       slowExtract = 0;
       // A permanent refusal at a later sleep's start names its kind on the row too (SMD-2752 PR 3).
@@ -15545,10 +15714,10 @@ if (want("38")) {
       // pulling it again): the check got that pass through its start, so the
       // refusal is retried, as one after a sleep that ran is (item 6).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-      // A live read now: the scheduler stays awake its 8 s quiet, through the
+      // A live write now: the scheduler stays awake its 8 s quiet, through the
       // check and stamping as it waits, so the model goes before the first
       // sleep however long a loaded runner takes over the check (review pass 3).
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check')`;
+      await liveWrite(sql, "awake through the check");
       const checkedRun = followRun({ quiet: 8 });
       await pollUntil(async () => (await beat()) !== null, 10_000);
       missing = true;
@@ -15591,7 +15760,7 @@ if (want("38")) {
       try {
         // Both passes wait here, extraction having no work: > 0, where `=== 1` waited out its 15 s every run (SMD-3048).
         await pollUntil(async () => (((await beat()) as { waiting?: string[] } | null)?.waiting?.length ?? 0) > 0, 15_000);
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake while the pass waits')`;
+        await liveWrite(sql, "a wake while the pass waits");
         let wokenBeat = null as { running?: boolean; outcome?: string | null; waiting?: string[] } | null;
         await pollUntil(async () => (wokenBeat = (await beat()) as typeof wokenBeat) !== null && wokenBeat.running === false, 15_000);
         const wokenCode = await wokenRun.stop();
@@ -15687,8 +15856,8 @@ if (want("38")) {
           inHand = await pollUntil(async () => (await reClaimed()) > 0, 15_000);
           const [{ before }] = await sql`SELECT now() AS before`;
           const wakeAt = Date.now();
-          await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read while re-embedding')`;
-          if (await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)), 10_000)) wakeMs = Date.now() - wakeAt;
+          await liveWrite(sql, 'a live write while re-embedding');
+          if (await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000)) wakeMs = Date.now() - wakeAt;
           afterWake = await claims(EMBED_JOB);
           heldBack = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EMBED_JOB} AND status = 'pending' AND enqueued_at >= ${before}::timestamptz`)[0].c) > 0;
         } finally {
@@ -15774,7 +15943,7 @@ if (want("38")) {
             takenUpAsleep = await pollUntil(async () => lines.some((l) => /re-embed's set-aside cleared: the brain records no embedding model now — the next sleep with work re-embeds, and records stub-embed/.test(l)), 10_000)
               && !lines.some((l) => /awake:/.test(l));
             late = await reCapture("An old note re-embed takes up again.", 22);
-            await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read to end the set-aside sleep')`;
+            await liveWrite(sql, 'a live write to end the set-aside sleep');
             takenUp = await pollUntil(() => atEmbed(late), 20_000);
             recordAfter = ((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0]?.value as string | undefined) ?? "";
             rowAfter = (await sleepBeat())?.aside;
@@ -15796,7 +15965,7 @@ if (want("38")) {
         const awakeRun = follow({ quiet: 3 });
         try {
           await pollUntil(async () => lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)), 15_000);
-          await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read to wake the set-aside sleep')`;
+          await liveWrite(sql, 'a live write to wake the set-aside sleep');
           await pollUntil(async () => lines.some((l) => /awake:/.test(l)), 10_000);
           await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
           startCleared = await pollUntil(async () => lines.some((l) => /re-embed's set-aside cleared: the brain records stub-embed, this stack's — re-embed runs in this sleep when it has work/.test(l)), 15_000);
@@ -15869,7 +16038,7 @@ if (want("38")) {
           keyWord = keyBeat?.aside;
           keyOutcome = keyBeat?.outcome;
           embedKeyRefused = false;
-          await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read once the key is right')`;
+          await liveWrite(sql, 'a live write once the key is right');
           keyRetaken = await pollUntil(() => atEmbed(keyOld), 20_000);
           // The next sleep's word: set down no longer, so gone (review pass 2: no case held it).
           keyCleared = await pollUntil(async () => (await sleepBeat())?.aside === undefined, 10_000);
@@ -16075,13 +16244,24 @@ if (want("38")) {
 }
 
 if (want("38b")) {
-  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
+  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 2.45 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM query_log`;
   await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
   const MODEL = "stub-long";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
+  /**
+   * The woken-every-sleep cases' clock (SMD-3196): the scheduler's quiet and
+   * poll, the wake into each sleep, the stub's windows and the stall floor,
+   * each at this share of the seconds the cases were written in (quiet and
+   * poll 1 s, wakes 3.5 s in, windows of 1 s and 8 s, a 1 s floor), so their
+   * ratios hold. A pass's own start doesn't scale: on a slow runner it takes a
+   * second or more of each wake's 2.45 s, which leaves the stuck window
+   * in hand about 1.4 s against the 0.7 s floor (2.5 s against 1 s before).
+   */
+  const SCALE = 0.7;
+  const scaled = (ms: number) => Math.round(ms * SCALE);
   // The extraction key [38] leaves recorded is another model's, which every
   // pass's start would refuse: set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
@@ -16150,14 +16330,15 @@ if (want("38b")) {
       if (marker === "stuck") {
         // Its call as the slot sees it: from its start to its answer, or to the abort a stop sends.
         const t0 = Date.now();
-        await Promise.race([Bun.sleep(8000), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        await Promise.race([Bun.sleep(scaled(8000)), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
         stuckCalls.push([t0, Date.now()]);
         return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
       }
       if (/parkednote/.test(prompt)) noteStarts.push(Date.now());
-      // A window of the long document takes a second (the stuck thought's one window eight, above), a judgenote's
-      // longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2); the rest are quick.
-      await Bun.sleep(marker === "long" ? 1000 : marker === "judgenote" ? 1500 : 100);
+      // A window of the long document takes a second scaled (the stuck thought's one window eight, above), a
+      // judgenote's longer than a poll, so a set-aside that took it for a stalled thought would cut it (review pass 2);
+      // the rest are quick.
+      await Bun.sleep(marker === "long" ? scaled(1000) : marker === "judgenote" ? 1500 : 100);
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -16180,18 +16361,19 @@ if (want("38b")) {
   };
   const lines: string[] = [];
   /**
-   * A --follow scheduler (quiet 1 s, poll 1 s) woken 3.5 s into every sleep
-   * by a logged search, until `done` holds or `cap` sleeps have begun: the
-   * sleeps it took, and its exit code once stopped — bounded, so a scheduler
-   * that never gets there fails its assertion rather than hanging the suite.
+   * A --follow scheduler (quiet and poll 1 s, scaled) woken 3.5 s, scaled,
+   * into every sleep by a logged search, until `done` holds or `cap` sleeps have
+   * begun: the sleeps it took, and its exit code once stopped — bounded, so a
+   * scheduler that never gets there fails its assertion rather than hanging
+   * the suite.
    */
   const wokenEvery = async (done: () => Promise<boolean>, cap: number, whileRunning?: () => Promise<void>, onWake?: () => Promise<void>): Promise<{ sleeps: number; code: number; reached: boolean }> => {
     lines.length = 0;
     lineAt.length = 0;
     const ac = new AbortController();
-    // A 1 s stall floor for a stop: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
+    // A 1 s stall floor for a stop, scaled: the stuck window is 8 s against wakes 3.5 s in, a pass's own start on a slow runner taking a second or more of that (review pass 4); the minute's floor is for the brain's real sleeps.
     wakeReads.length = 0;
-    const run = runSleep({ url: URL_!, sql: counting, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 1, stallFloorMs: 1000, signal: ac.signal, writer: { out: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); }, err: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); } } });
+    const run = runSleep({ url: URL_!, sql: counting, env, quietMs: scaled(1000), pollMs: scaled(1000), follow: true, minStampEveryS: 1, stallFloorMs: scaled(1000), signal: ac.signal, writer: { out: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); }, err: (l) => { lines.push(l); lineAt.push({ l, at: Date.now() }); } } });
     let sleeps = 0, reached = false;
     const asleep = () => lines.filter((l) => /asleep: no live call/.test(l)).length;
     const deadline = Date.now() + cap * 8000;
@@ -16200,9 +16382,9 @@ if (want("38b")) {
       if (asleep() > sleeps) {
         sleeps = asleep();
         if (sleeps > cap) break;
-        await Bun.sleep(3500);
+        await Bun.sleep(scaled(3500));
         if (await done()) { reached = true; break; }
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake 3.5 s into the sleep')`;
+        await liveWrite(sql, "a wake into the sleep");
         // Awake now: work captured in the awake period, before the next sleep —
         // after the scheduler has taken the wake (its tail move done), as an
         // awake period's captures come, not in the poll before it noticed.
@@ -16224,8 +16406,8 @@ if (want("38b")) {
   try {
     // The ticket's reproduction (review pass 2 of SMD-1794): one thought
     // longer than every sleep — six windows of a second each against sleeps
-    // of 3.5 s — captured first, so it is the first claim; six short ones; a
-    // pair for consolidation to judge, days apart on one axis.
+    // of 3.5 s, both scaled — captured first, so it is the first claim; six
+    // short ones; a pair for consolidation to judge, days apart on one axis.
     const longText = Array.from({ length: 6 }, (_, p) => `The longdoc chapter ${p}. ${Array.from({ length: 24 }, (__, i) => `Line ${p}.${i} of the longdoc.`).join(" ")}`).join("\n\n");
     const long = await capture(longText, 0, 5);
     const shorts: string[] = [];
@@ -16239,13 +16421,13 @@ if (want("38b")) {
     const all = [long, ...shorts];
     const statuses = await Promise.all(all.map(status));
     assert(a.reached && statuses.every((s) => s === "succeeded") && judged.length > 0 && a.code === 0,
-      `woken 3.5 s into every sleep, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} sleep(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
+      `woken ${scaled(3500) / 1000} s into every sleep, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} sleep(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
     assert(a.sleeps >= 2 && longCalls.length <= 6 + wakes && new Set(longCalls.map((c) => c.part)).size === 6,
       `…across more than one sleep, no window sent again but the one each wake took in hand: ${longCalls.length} window calls for 6 windows over ${wakes} sleep(s) (${longCalls.map((c) => c.part).join(",")})`);
     assert(lines.some((l) => /extraction drained — consolidating beside it/.test(l)) && !lines.some((l) => /extraction holds only/.test(l)),
       "…consolidation joined because extraction drained, not past a stalled thought — the document gained windows at every sleep");
 
-    // A single window longer than every sleep: eight seconds against 3.5 s.
+    // A single window longer than every sleep: eight seconds against 3.5 s, both scaled.
     // Its stops gain nothing, so after three in a row consolidation joins past
     // it while it is still pending, and the row names it.
     await sql`DELETE FROM thoughts`;
@@ -16269,7 +16451,12 @@ if (want("38b")) {
       heldSeen = await beat();
       stuckStatus = await status(stuck);
       [prog] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${stuck}::uuid AND work_type = ${EX}`) as typeof prog[];
-      // The dry run beside the scheduler: it reads, and names what is held.
+      // The dry run beside the scheduler: it reads, and names what is held —
+      // once the note a sync wrote while extraction was set aside is extracted,
+      // so the stalled thought is all extraction holds. Read at once, it raced
+      // the drain the scheduler sees a poll after the judgement: on a starved
+      // runner it read the note still pending (review pass 1 of SMD-3196 PR 3).
+      await pollUntil(async () => parkedNote !== "" && (await status(parkedNote)) === "succeeded", 3000);
       dryHeld = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => dryLines.push(l), err: (l) => dryLines.push(l) } });
       return true;
     };
@@ -16344,17 +16531,20 @@ if (want("38b")) {
       `a capture in every awake period is extracted ahead of the stalled thought, and consolidation still joins past it (reached ${c.reached} in ${c.sleeps} sleep(s), ${awakeNotes.length} captured, earlier ones ${notesAt.join(",")})`);
     // Joined mid-sleep, the captures done first: the stuck call in hand is
     // stopped, and none is in flight while consolidation judges (review pass 5).
-    // The first join and the judgement that answered after it: a later sleep's
-    // ordinary extraction is no overlap.
-    const joinAtC = lineAt.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
-    const judgedC = judgedEnd.find((t) => t > joinAtC) ?? -Infinity;
+    // The first judgement and the join it answered, the last before it — a
+    // capture of the awake period landing after the next sleep began can wake
+    // that sleep and cut its first join (review pass 1 of SMD-3196 PR 3): a
+    // later sleep's ordinary extraction is no overlap.
+    const joinsC = lineAt.filter((x) => /consolidating first/.test(x.l)).map((x) => x.at);
+    const judgedC = judgedEnd.find((t) => joinsC.some((j) => j < t)) ?? -Infinity;
+    const joinAtC = joinsC.filter((j) => j < judgedC).at(-1) ?? Infinity;
     const overlapC = stuckCalls.filter(([a, b]) => a < judgedC && b > joinAtC + 1500).length;
     const relC = (t: number) => t - joinAtC;
     const resumeAtC = lineAt.find((x) => x.at > joinAtC && /consolidation drained — extracting beside it/.test(x.l))?.at ?? Infinity;
     // A poll a second after the join, not a spin: the stopped extraction's
     // settling aborted the poll's wait for the rest of the sleep (review pass 5).
     const readsAfterJoin = wakeReads.filter((t) => t > joinAtC && t < joinAtC + 3000).length;
-    assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
+    assert(readsAfterJoin <= 8, `after the join the scheduler polls at its pace, once every ${scaled(1000)} ms, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
     assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
 
     // Work that lands during a sleep — a sync's capture, which wakes nothing —
@@ -16416,7 +16606,7 @@ if (want("38b")) {
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
-    // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
+    // The first call for the stalled window, start to end: an abort ends it a second or more before its eight seconds (scaled).
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
     const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
     const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
@@ -16426,7 +16616,7 @@ if (want("38b")) {
       `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
     // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
     const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
-    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < scaled(8000) - 1000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
       `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
     assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) === 3 && Number(prog3?.cuts) === 2,
       `…the restart's stop and the join's set-aside each counted as the scheduler's cut, apart from the stops, which say the wakes — none here — and no stall (SMD-3060) (stops ${prog3?.stops}, stalled ${prog3?.stalled}, cuts ${prog3?.cuts})`);
@@ -16471,12 +16661,12 @@ if (want("38b")) {
     const throwAc = new AbortController();
     const throwRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: throwAc.signal, writer: { out: () => {}, err: () => {} } });
     const throwInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
-    await sql`ALTER TABLE query_log RENAME TO query_log_away`;
+    await sql`ALTER TABLE thought_audit RENAME TO thought_audit_away`;
     const thrown = await Promise.race([throwRun.then((c) => `code ${c}`, (e: Error) => `threw ${e.message}`), Bun.sleep(15_000).then(() => "hung")])
-      .finally(() => sql`ALTER TABLE query_log_away RENAME TO query_log`);
+      .finally(() => sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`);
     await ended(throwRun, throwAc);
     const throwRow = await counts(handHeld);
-    assert(throwInHand && /^threw .*query_log/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
+    assert(throwInHand && /^threw .*thought_audit/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
       `the sleep throwing, the thought in hand: its stop of the passes counts a cut, the stops as they were (${thrown.slice(0, 80)}; ${JSON.stringify(throwRow)})`);
     // A pass that ends by itself — consolidation's start refused, its key
     // turned away — while extraction has a thought in hand: a cut. Read as the
@@ -16494,7 +16684,9 @@ if (want("38b")) {
     };
     const byItselfSay = (l: string) => { byItself.push(l); if (/extraction drained — consolidating beside it/.test(l)) consolidatingBeside = true; };
     const byItselfAc = new AbortController();
-    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
+    // The passes poll for new work every second, not every 15 s: the note comes after extraction's pass has drained,
+    // and waited out its poll, 15 s of this case's 16 (SMD-3196).
+    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, passFollowS: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
     let byItselfRow: { stops: number; stalled: number; cuts: number } | undefined;
     try {
       const besideSeen = await pollUntil(async () => consolidatingBeside, 30_000);
@@ -16557,7 +16749,8 @@ if (want("38b")) {
       const jl: { l: string; at: number }[] = [];
       let stopJ: PassStop | null = null;
       // Mid-pass, let-outs two seconds apart, so a wait still read once the judge answers would let the second note out (review pass 1).
-      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
+      // The passes poll for new work every second: mid-pass, consolidation waited out a 15 s poll after the judge answered (SMD-3196).
+      const runJ = runSleep({ url: URL_!, env: envJ, quiet: 1, poll: 1, passFollowS: 1, follow: true, minStampEveryS: 60, restartEveryMs: mid ? 2000 : undefined, workers: mid ? 1 : 2, onPass: (st) => { stopJ = st; }, writer: { out: (l) => jl.push({ l, at: Date.now() }), err: (l) => jl.push({ l, at: Date.now() }) } });
       const seen = (re: RegExp) => jl.find((x) => re.test(x.l))?.at ?? Infinity;
       // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
@@ -16620,8 +16813,17 @@ if (want("38b")) {
       assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
         `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
     };
-    await judgeCase(false);
-    await judgeCase(true);
+    // The judge's outage waited on a schedule of 1 s, then 2 s each, where the
+    // shipped 5 s and 10 s put the probe that finds it back at 15 s, the judge
+    // back at about 9 (SMD-3196). The waits aren't what either case asserts;
+    // test-worker-bootstrap.ts holds the shipped schedule.
+    const restoreJudgeOutage = shortenOutage(1000, 2000);
+    try {
+      await judgeCase(false);
+      await judgeCase(true);
+    } finally {
+      restoreJudgeOutage();
+    }
     judgeProbeDown = false;
     judgeMissing = false;
 

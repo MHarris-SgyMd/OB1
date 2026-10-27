@@ -172,6 +172,10 @@ x-otel-env: &otel-env
 #   dashboard  /dashboard and everything under it, the path kept, to the
 #           operator GUI, the `app` service, as app.ob1.internal (SMD-2280),
 #           which serves under that base and scopes its cookie to it;
+#   dashboard-breakglass  the same, on the `breakglass` entrypoint alone (the
+#           break-glass port, SMD-3307), with X-OB1-Listener: breakglass set
+#           (`breakglass-listener`), so the GUI offers key sign-in there; the
+#           entrypoint routes nothing else;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight, to the `mcp` service too.
 # Nothing else is routed, so the proxy answers every other path itself, with
@@ -203,7 +207,11 @@ x-otel-env: &otel-env
 #           body. The server's 500, 503 and 504 are its answers and are left
 #           alone (measured);
 #   api-off, not-served  noop@internal's 418 becomes the 404 a path nothing
-#           serves gets (measured on this pin).
+#           serves gets (measured on this pin);
+#   breakglass-listener, strip-listener  set X-OB1-Listener: breakglass on
+#           the break-glass router, and delete it on every request on `web`
+#           (its entrypoint middleware, the proxy's environment), so a client
+#           on the origin cannot claim the break-glass listener (SMD-3307).
 # Every backend is dialled by its mesh name, written rooted, never its service
 # name: compose gives each container its service name as an alias on every
 # network it joins, so a container of another project on this mesh (a tier
@@ -261,6 +269,12 @@ x-proxy-routes: &proxy-routes |
         priority: 30
         entryPoints: [web]
         service: app
+      dashboard-breakglass:
+        rule: "Path(`/dashboard`) || PathPrefix(`/dashboard/`)"
+        priority: 30
+        entryPoints: [breakglass]
+        middlewares: [breakglass-listener]
+        service: app
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
@@ -285,6 +299,14 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "418": 404
+      breakglass-listener:
+        headers:
+          customRequestHeaders:
+            X-OB1-Listener: "breakglass"
+      strip-listener:
+        headers:
+          customRequestHeaders:
+            X-OB1-Listener: ""
     services:
       mcp:
         loadBalancer:
@@ -313,13 +335,24 @@ x-forwarder: &forwarder |
   // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
   // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
   // this file, which compose would read as a variable: the script is inline in compose.yaml.
+  // `--port 8001` is the break-glass listener (SMD-3307), the `breakglass` service: the same forwarding,
+  // on the port the proxy's `breakglass` entrypoint listens on, which routes the operator GUI alone.
   import net from "node:net";
   import { lookup } from "node:dns/promises";
   import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
   import { readFileSync } from "node:fs";
 
   const PROXY = "proxy.ob1.internal.";
-  const PORT = 8000;
+  /** The proxy's entrypoints a forwarder may front: `web` (8000), the origin, and `breakglass` (8001). */
+  const ENTRYPOINTS = new Set([8000, 8001]);
+  /** The port to listen on and dial, from `--port N`: 8000 unless named, and only one of ENTRYPOINTS. */
+  export function portFrom(argv: string[]): number | null {
+    const i = argv.indexOf("--port");
+    if (i < 0) return 8000;
+    const n = Number(argv[i + 1]);
+    return ENTRYPOINTS.has(n) ? n : null;
+  }
+  const PORT = portFrom(process.argv) ?? 0;
   const DEADLINE_MS = 5000;
 
   const read = (path: string) => { try { return readFileSync(path, "utf8"); } catch { return ""; } };
@@ -533,12 +566,17 @@ x-forwarder: &forwarder |
       ["a v4 PROXY line, the mapped address plain", proxyLine({ remoteAddress: "::ffff:203.0.113.7", localAddress: "::ffff:10.89.9.2", remotePort: 51234, localPort: 8000 }) === "PROXY TCP4 203.0.113.7 10.89.9.2 51234 8000\r\n"],
       ["a v6 PROXY line", proxyLine({ remoteAddress: "2001:db8::7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY TCP6 2001:db8::7 fd00::1 1 8000\r\n"],
       ["mixed families are UNKNOWN", proxyLine({ remoteAddress: "203.0.113.7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY UNKNOWN\r\n"],
+      ["the port is 8000 unless named, 8001 when named, and none other", portFrom(["bun", "/forwarder.ts"]) === 8000 && portFrom(["bun", "/forwarder.ts", "--port", "8001"]) === 8001 && portFrom(["--port", "8002"]) === null && portFrom(["--port"]) === null && portFrom(["--port", "80"]) === null],
       ...(await joinCases()),
     ];
     for (const [name, ok] of cases) console.log((ok ? "ok   " : "FAIL ") + name);
     process.exit(cases.every(([, ok]) => ok) ? 0 : 1);
   }
 
+  if (PORT === 0) {
+    console.error("forwarder: --port takes one of " + [...ENTRYPOINTS].join(", ") + ", the proxy's entrypoints");
+    process.exit(2);
+  }
   net.createServer({ allowHalfOpen: true }, (client) => { void forward(client); })
     .listen(PORT, () => console.error("forwarder: listening on " + PORT + ", to " + PROXY + ":" + PORT + " on an internal network"));
 
@@ -998,11 +1036,15 @@ services:
   # `/dashboard` through the proxy, which reaches it as app.ob1.internal on
   # the mesh. The server's image run as `bun ../dashboard/serve.ts`, without
   # the image's preflight, as the MCP server is: it reads no store and holds
-  # no key. A visitor signs in with an access key, which the REST core's whoami
-  # checks, and every page is a read on the REST core at api.ob1.internal
-  # under that key, held in the service's memory and never in the browser; a
-  # restart signs everyone out. Key sign-in is off while COMPOSE_PROFILES
-  # names auth (ADR decision 16). OB1_PUBLIC_ORIGIN is the origin its forms
+  # no brain key of its own. A visitor signs in with an access key, which the
+  # REST core's whoami checks, or — while COMPOSE_PROFILES names auth, when key
+  # sign-in is off (ADR decision 16) — through the authorization server, as
+  # its confidential `gui` client with OB1_AUTH_SECRET_GUI (SMD-3307); every
+  # page is a read on the REST core at api.ob1.internal under that key or
+  # token, held in the service's memory and never in the browser; a restart
+  # signs everyone out. While the stack is configured, the break-glass port
+  # (the breakglass service) offers key sign-in on 127.0.0.1 alone, the proxy
+  # marking its requests (SMD-3307). OB1_PUBLIC_ORIGIN is the origin its forms
   # and cookie are judged by behind TLS (dashboard/serve.ts); unset, each
   # request's own, over plain HTTP. A stop drains within OB1_STOP_GRACE, as
   # the servers' does. On the mesh alone: nothing outward, no Postgres. Its
@@ -1016,6 +1058,11 @@ services:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+      OB1_AUTH_SECRET_GUI: ${OB1_AUTH_SECRET_GUI:-}
+      # The break-glass port on the host (SMD-3307): a form posted there comes
+      # from http://127.0.0.1:<it>, the one loopback origin the GUI takes, on
+      # that listener alone. 8001 unless set, as the breakglass service's.
+      BREAKGLASS_PORT: ${BREAKGLASS_PORT:-8001}
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # After the REST core, so `up app` brings it; not held for its health:
     # while it is down a page is the GUI's own 502.
@@ -1083,6 +1130,22 @@ services:
       # backends as the `-` header it aliases; deleted here, so a client
       # cannot supply one header twice under two spellings.
       TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: delete
+      # Every request on the origin loses any X-OB1-Listener it carries, on
+      # every router, an overlay's too: only the break-glass entrypoint below
+      # sets it, so the operator GUI may take it as the request's listener
+      # (SMD-3307).
+      TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES: strip-listener@file
+      # The break-glass entrypoint (SMD-3307; ADR decision 15): the
+      # `breakglass` service, under the auth profile, hands it the
+      # connections of its port published on 127.0.0.1 alone, as the
+      # forwarder hands `web` the origin's. Its one router takes /dashboard
+      # to the GUI with X-OB1-Listener: breakglass set, so the GUI offers key
+      # sign-in there while the stack is configured, whether or not the
+      # authorization server answers; anything else on it is the proxy's 404.
+      # The PROXY line and the alias headers are taken as on `web`.
+      TRAEFIK_ENTRYPOINTS_BREAKGLASS_ADDRESS: ":8001"
+      TRAEFIK_ENTRYPOINTS_BREAKGLASS_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+      TRAEFIK_ENTRYPOINTS_BREAKGLASS_HTTP_ALIASHEADERSSTRATEGY: delete
       # A directory, not one file: the route table below is routes.yaml in
       # it, and deploy/compose.api-public.yaml adds api.yaml beside it — the
       # operator's opt-in to the REST core's public path (SMD-2284).
@@ -1241,6 +1304,48 @@ services:
     # After the proxy, so `up forwarder` brings the brain, and the first `up`
     # after SMD-2583 recreates the proxy, which held the port, before this
     # binds it.
+    depends_on:
+      proxy:
+        condition: service_started
+    restart: unless-stopped
+    logging: *logging
+
+  # The break-glass listener (SMD-3307; ADR decision 15): while the stack is
+  # configured with the authorization server the origin offers no key
+  # sign-in, so knocking the authorization server over opens no weaker door;
+  # this port is the operator's own way in when it is down. The forwarder's
+  # script on `--port 8001`, to the proxy's `breakglass` entrypoint, which
+  # routes /dashboard alone and marks it, so the GUI offers key sign-in there.
+  # Published on 127.0.0.1 alone, a literal and no `_BIND` knob a deploy/.env
+  # could widen (check 13's named exception), and no documented tunnel points
+  # at it: every one dials the origin's port. Under the auth profile alone, so
+  # a stack that is not configured, which offers key sign-in on the origin,
+  # publishes no second port, and two stacks on one machine clash on it only
+  # when both run that profile (BREAKGLASS_PORT, 8001 unless set).
+  breakglass:
+    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373
+    profiles: ["auth"]
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["bun", "/forwarder.ts", "--port", "8001"]
+    init: true
+    configs:
+      - source: forwarder
+        target: /forwarder.ts
+    labels:
+      ob1.forwarder: *forwarder
+    ports:
+      - "127.0.0.1:${BREAKGLASS_PORT:-8001}:8001"
+    networks: [edge, front]
+    dns_search: ["."]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qE ':1F41 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+      start_interval: 1s
     depends_on:
       proxy:
         condition: service_started
@@ -1467,10 +1572,8 @@ services:
   # re-embed when the brain has vectors not at OB1_EMBEDDING_MODEL (SMD-2679),
   # then extraction, then consolidation beside it, only while the brain is quiet
   # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
-  # thought_audit and, when the server logs
-  # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
-  # the opt-in `sleep` grant group), no search — and hard-stops them within
-  # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
+  # thought_audit; a search does not count (SMD-3315) — and hard-stops them
+  # within OB1_SLEEP_POLL seconds (unset, 5) of the next live write, every lease
   # returned. A sleep runs at most OB1_SLEEP_BUDGET minutes (unset, 60; 0 for
   # no clock), then its passes stop after the thought in hand and the next
   # sleep waits for a live call; each pass's connections run under
@@ -1982,7 +2085,7 @@ services:
   # (x-proxy-routes, the auth router; SMD-1846). It joins two networks and
   # shares neither with Postgres, Ollama, Jev, n8n or the workers: `mesh`,
   # internal, where the proxy meets it, the MCP server probes it (SMD-2382)
-  # and the GUI will; and `auth-egress`, which nothing else joins, for the
+  # and the GUI signs in through it (SMD-3307); and `auth-egress`, which nothing else joins, for the
   # client metadata documents it fetches (each through its fetch guard, which
   # refuses private and *.ob1.internal targets). Not `egress`: the stack's
   # provider callers and model services meet there, and the one server here
@@ -2374,14 +2477,15 @@ networks:
   #          the stack's own Ollama and Jev, which fetch their weights there
   #          and are called there by name.
   #   auth-egress  outward, the authorization server's alone.
-  #   front  internal: the forwarder and the proxy alone, where the forwarder
-  #          reaches the proxy as proxy.ob1.internal.
+  #   front  internal: the forwarder, the break-glass listener and the proxy
+  #          alone, where each reaches the proxy as proxy.ob1.internal.
   #   telemetry  internal: the observability profile's collector and
   #          pg-exporter alone, where the collector scrapes it (SMD-1849
   #          PR 3b).
-  #   edge   outward, the forwarder's alone: where the stack's port is
-  #          published. The proxy is on internal networks alone, so a name it
-  #          looks up that nothing holds never reaches the host's resolvers.
+  #   edge   outward, the forwarder's and the break-glass listener's alone:
+  #          where their ports are published. The proxy is on internal
+  #          networks alone, so a name it looks up that nothing holds never
+  #          reaches the host's resolvers.
   # An internal network has no route out and does not forward a name it does
   # not hold to the host's resolvers (measured on podman 6); it also
   # publishes no port, so Postgres's, in compose.host-ports.yaml, and

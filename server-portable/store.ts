@@ -1818,6 +1818,22 @@ export interface ThoughtStore {
   existingIds(ids: string[]): Promise<Set<string>>;
 
   /**
+   * The thought each name names (SMD-3314, migration 112): the one with that
+   * id, else the one keeping it as metadata.client_key — a map from each
+   * lower-cased name that names one to its id, lower-cased. A name that is
+   * not a UUID, or names nothing, is not in the map.
+   */
+  thoughtsNamed(names: string[]): Promise<Map<string, string>>;
+
+  /**
+   * The thought already holding this text, by 003's fingerprint, and the
+   * client_key it keeps (null for none) — or null when no thought holds it.
+   * Read before a keyed capture, which lands on that row (080's merge): a
+   * row keeping another key keeps it (SMD-3314).
+   */
+  keyAtText(content: string): Promise<{ id: string; clientKey: string | null } | null>;
+
+  /**
    * Migration 025's read-back. traceProvenance walks UP the derived_from chain
    * (ancestors, depth 0 = the thought itself); findDerivatives looks DOWN it
    * (what was derived from this, one level). Both are SQL functions,
@@ -2010,7 +2026,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
+  resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

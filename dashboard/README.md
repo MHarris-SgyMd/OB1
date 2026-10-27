@@ -5,7 +5,9 @@ GUI: a SvelteKit server of its own that reads and writes the brain only through 
 REST core (`server-portable/api.ts`), the brain's contract. This directory is that GUI
 (SMD-2280). Every page is a call on the REST core through
 [`../rest-client`](../rest-client/README.md), the client the MCP server uses, under the
-signed-in visitor's own key. It holds no store, no key list and no key of its own.
+signed-in visitor's own key, or the authorization server's token for them (SMD-3307). It
+holds no store, no key list and no brain key of its own; its one secret is the AS's `gui`
+client's.
 
 It replaces the three dashboards under `dashboards/`, which retire as this one takes
 over what each did (SMD-2280's plan: read views first, then plugin pages, then
@@ -14,15 +16,21 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | File | What it is |
 |---|---|
 | `serve.ts` | The entry, `bun serve.ts`: the SvelteKit server `bun run build` writes to `build/`, on PORT (8000), with the origin set (below) |
-| `src/hooks.server.ts` | Every request: the session, the sign-in wall, and the headers that keep a page out of caches and frames |
-| `src/lib/server/session.ts` | The sessions, held in the server's memory |
+| `src/hooks.server.ts` | Every request: its origin, the session, the sign-in wall, and the headers that keep a page out of caches and frames |
+| `src/lib/server/session.ts` | The sessions, held in the server's memory (a key or the authorization server's tokens), and the sign-in answers already taken |
+| `src/lib/server/oauth.ts` | Sign-in through the authorization server as its `gui` client: the authorization request, the code's exchange, a refresh, a revocation, a session's renewal |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key (a core operation's or a plugin's) |
 | `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
-| `src/lib/server/signin.ts` | Whether key sign-in is offered, and whoami's answer |
-| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
+| `src/lib/server/signin.ts` | Whether key sign-in is offered, whoami's answer, and a refused sign-in's words |
+| `src/lib/server/listener.ts` | Which listener a request came in by (the origin, or the break-glass port), and the origin an unsafe request may come from |
+| `src/lib/server/grants.ts` | The page of grants' calls to the authorization server's admin listener: the live grants, and a revoke |
+| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, the grants, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
 | `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
 | `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
+| `smoke-oauth.ts` | The sign-in through the authorization server, driven the same way on a configured stack, and the page of grants |
+| `smoke-breakglass.ts` | The break-glass key sign-in on a configured stack with the authorization server down, and the origin refusing it |
+| `test-oauth.ts` | `oauth.ts`, the revoker, the session store's revocations, the break-glass listener's rules and the page of grants' calls offline |
 
 ## In the stack
 
@@ -35,9 +43,10 @@ nothing for it. A release's compose overlay runs the release's server image here
 
 Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
 `https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
-`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key. One or the
-other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
-cross-site ("The origin", below).
+`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key — or, on a stack
+configured with the authorization server, through it ("Signing in", below). One or the
+other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused, the
+page naming the address that takes it ("The origin", below).
 
 ## Signing in
 
@@ -55,29 +64,83 @@ cross-site ("The origin", below).
 - **While the stack is configured with the authorization server** (`COMPOSE_PROFILES`
   names `auth`, ADR decision 16), key sign-in is off on the public origin, whether or
   not the authorization server answers: knocking it over must not open a weaker door.
-  Sign-in by code and PKCE, and break-glass key sign-in on a loopback-only port, are
-  SMD-2280's fourth PR; until then a configured stack's GUI signs no one in.
+  The GUI signs the operator in through it instead (SMD-3307), as its confidential
+  `gui` client, with `OB1_AUTH_SECRET_GUI` from `deploy/.env` (recreate `app` after
+  turning the profile on, as `deploy/README.md`'s "Authorization server" does): the
+  sign-in page's button starts a code-and-PKCE request for the REST core
+  (`resource=<origin>/api`, `offline_access` with `prompt=login consent`, so the AS
+  asks for the password every time and a sign-out of the GUI is one); the AS sends the
+  browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
+  an access token (600 s) and a refresh token, held in the session like a key and never
+  sent to the browser. A URL can drop `prompt=login`, and the AS's own session (a day,
+  which the GUI's sign-out leaves) would then skip the password, so the AS asks the
+  `gui` client the password on every authorization whatever its request says, and the
+  callback takes the tokens only if the ID token's `auth_time` is no earlier than the
+  sign-in's start. Each sign-in is a grant of its own at the AS, so revoking one
+  session's refresh token, which ends its grant, ends no other. A
+  sign-in in flight holds nothing on the server: its state and PKCE verifier are
+  derived from a binding in its cookie that no URL carries, so a callback URL seen
+  elsewhere completes no sign-in this browser started (one the operator completed for
+  a sign-in someone else started is that person's, OAuth's own residual). Start and
+  sign-out refuse a post from another origin. Every page calls the REST core with the access
+  token, renewed with the refresh token a minute before it lapses, from the session as
+  it is now (one renewal per session at a time); a renewal the AS refuses ends the
+  session, and one it does not answer, or an AS its probe finds down, is the page's 503
+  — for up to 30 s after the AS is back, while the probe's answer is kept — (should the
+  AS have spent the token before its answer was lost, the next try is a reuse it
+  refuses, which ends the session). Sign-out revokes the refresh token at the AS, and a
+  session that ends any other way while the GUI runs — evicted, replaced, found
+  expired, refused by the REST core, a sign-in that failed after its exchange, a
+  renewal that landed after its session ended — has its revoked too; one the AS does
+  not answer is tried again every 30 s until it does (for the token's 14 days, a
+  thousand at most). A restart forgets its sessions, and what is still due, before it
+  could. The access token itself stays good at the REST core until it lapses (600 s at
+  most), as the core checks it without asking the AS; it never left the GUI. With the
+  AS not answering, the page says sign-in is unavailable and names the break-glass
+  port; with no secret or no sound origin, it says so too. Either way it signs no one
+  in on the origin.
+- **Break-glass** (SMD-3307; ADR decision 15). While the stack is configured, the
+  `breakglass` service publishes a second port on `127.0.0.1` alone
+  (`BREAKGLASS_PORT`, 8001 unless set; no `_BIND` knob, and no tunnel points at it):
+  the forwarder's script on the proxy's `breakglass` entrypoint, which routes
+  `/dashboard` alone and marks each request `X-OB1-Listener: breakglass`. The `web`
+  entrypoint deletes that header from every request on the origin, so only the proxy
+  sets it. On that port the page offers key sign-in whatever the AS's state — the
+  operator's way in on the brain's machine when the AS is down, misconfigured or
+  locked out — and starts no sign-in through the AS. A session made there opens pages
+  there alone, and one made on the origin opens none there; each rides a cookie of its
+  own name (`ob1_dashboard_breakglass_<port>` there), so where the two share a host
+  (an origin of `http://127.0.0.1:…`), or two brains' break-glass ports share
+  127.0.0.1, neither overwrites the other; it is never Secure, the port being plain
+  HTTP. What reaches the port is this machine: its browsers, and its containers too,
+  through the engine's name for the host (`host.docker.internal`,
+  `host.containers.internal`), as they reach any loopback port; the stack's own
+  servers reach the GUI on the mesh besides.
 - **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
   the server holds 1,000 in all. A sign-in over a live session ends the old one.
 - **The origin is shared.** The cookie rides `/dashboard` alone, but any page served
   elsewhere on the same origin (Grafana at `/grafana/` with
   `compose.grafana-public.yaml`, say) can send requests to `/dashboard` that carry it,
-  and SvelteKit's origin check passes them. A script running in such a page reaches
+  and the GUI's origin check passes them. A script running in such a page reaches
   what the signed-in visitor's key reaches (ADR, "Path-based public routes carry
   obligations").
 
 ## The origin
 
-SvelteKit refuses a form posted from another origin, and the cookie is Secure only on
-https. So the server must know the origin a browser sees:
+The GUI refuses any request that changes something (POST, PUT, PATCH, DELETE, with a
+body or without) posted from another origin — its own check, `hooks.server.ts`, in
+place of SvelteKit's, which would refuse the break-glass port's forms — and the cookie
+is Secure only on https. So the server must know the origin a browser sees:
 
 - **`OB1_PUBLIC_ORIGIN`**, when it is a sound public origin (the authorization
   server's rules: https, or http on a loopback host, and an origin alone). Set it when
   a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. It is
   then the only origin the GUI takes a form from, as it is the one the authorization
-  server and every redirect name: sign in there, not at `127.0.0.1`. (A loopback sign-in
-  beside a public origin is the break-glass listener of SMD-2280's fourth PR.) An
-  unsound one is warned of and passed over.
+  server and every redirect name: sign in there, not at `127.0.0.1`. The break-glass
+  port takes its own origin alone, `http://127.0.0.1:${BREAKGLASS_PORT}` — not
+  `localhost`, which another process may answer on `::1` (the port is published on
+  127.0.0.1 alone), nor the configured origin, from whose pages a key could otherwise
+  be posted there. An unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a
   LAN address signs in as it is reached through the stack's port. Reached without
@@ -90,9 +153,10 @@ https. So the server must know the origin a browser sees:
 |---|---|
 | `OB1_REST_URL` | The REST core; `http://api.ob1.internal.:8000` on the mesh unless set |
 | `OB1_PUBLIC_ORIGIN` | The origin behind TLS (above) |
-| `COMPOSE_PROFILES` | Key sign-in is off while it names `auth` |
+| `COMPOSE_PROFILES` | Key sign-in is off on the origin while it names `auth` |
+| `BREAKGLASS_PORT` | The break-glass port on the host, 8001 unless set: `http://127.0.0.1:<it>` is the one origin the GUI takes a form from on that listener, and its session cookie's name carries it. Changed, it needs `app` recreated as well as `breakglass` (a plain `compose up -d` does both) |
 | `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
-| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
+| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin, so not on the break-glass port, which routes the GUI alone. With neither, no link |
 | `PORT` | 8000 unless set |
 | `OB1_STOP_GRACE` | The stop's grace, as the servers read it: the GUI drains within it, less 2 s |
 
@@ -109,6 +173,7 @@ https. So the server must know the origin a browser sees:
 | `/dashboard/query-log` | `list_logged_searches`: the logged searches, most recent first, from a time — each query (one line), its arm, tier, the count it asked for (034's `match_count`, not how many it found) and arguments. Every key's searches, as the tool shows them to any key that can read; empty where `OB1_QUERY_LOG` is off |
 | `/dashboard/status` | `brain_info`, laid out as the core's own rows (`brainInfoRows` in `server-portable/brain-info.ts`, the brain_info tool's words): the server's version, commit and migrations, and the database's ledger, sizes, counts, vectors, proposals, findings and workers' heartbeats |
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212) |
+| `/dashboard/grants` | On a stack configured with the authorization server (`COMPOSE_PROFILES` naming `auth`), for a session that may write (the operator's, or a write key's on the break-glass port), and named in the nav for it alone (SMD-3307 PR 3): the clients signed in as the operator, each a grant at the AS — the MCP clients connected, and each sign-in to this GUI (one holding no live refresh token marked so: never finished, or idle past the refresh token's 14 days; recreating `app` forgets its sessions, whose grants stay listed until revoked here or lapsed) — newest first, 500 at most, each with its client (a registered one by its id and the name it gave itself, the characters that hide or reorder text taken out, though a look-alike name still looks alike; a metadata-document one by its host), its scopes and resources, when it was signed in, last renewed (its newest refresh token, when later than the sign-in's own) and lapses; and a revoke for each. Read and written through the AS's admin listener on the mesh (`auth.ob1.internal:3001`, no proxy route to it) under the GUI's own `gui` credentials, never the visitor's; so the visitor's own session is checked at the REST core on every load and revoke (`whoami`, which renews a token due and ends a refused one), and a session whose grant was revoked, or whose key was removed, loses the page with it. A revoke refuses the grant's refresh tokens at once; the access token the client holds is refused by the REST core once it lapses, within ten minutes (the maintainer's choice of 2026-10-26), and revoking one of this GUI's own grants ends that session at its next renewal. The AS down is said from the sign-in page's probe of `/healthz`, whose answer is kept 30 s either way: while it says down, without calling the listener (an AS just started again shows within 30 s); while it says up, the listener is called, and one that hangs costs a call's 10 s; its refusing the GUI's credentials is said too, and so is its turning the GUI's address away after 20 refusals in 15 minutes. Each revoke is logged: the AS's log names the grant and its client, the GUI's the session that revoked it. Without the auth profile the page is a 404; configured but without `OB1_AUTH_SECRET_GUI` or a sound origin, a 503 naming them; for a read session a 403 |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
 | `/dashboard/health` | Liveness: `ok`, asking the REST core nothing |
 | `/dashboard/plugins/example/notes` | The example plugin's Notes page, while `OB1_PLUGINS` names it: the newest thoughts (`example_recent`), a thought's notes (`example_list_notes`, each with the key that pinned it), and for a key that may, a form pinning one (`example_add_note`; a refusal said beside the form, the note kept) |
@@ -132,8 +197,8 @@ recreating `app`, as the example's README does, signs everyone out instead.
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.
 Pages are `no-store`, refuse framing, send `Referrer-Policy: same-origin` (not
-`no-referrer`, under which a browser posts a form with `Origin: null` and SvelteKit
-refuses it), and carry a Content-Security-Policy that admits no script but
+`no-referrer`, under which a browser posts a form with `Origin: null` and the GUI's
+origin check refuses it), and carry a Content-Security-Policy that admits no script but
 SvelteKit's own, by a nonce per response. Times are written in UTC.
 
 ## Develop

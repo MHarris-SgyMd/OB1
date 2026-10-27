@@ -38,9 +38,15 @@
  * `.or()`'s `cs`). A table that appears after the first read is seen on its
  * first use (an empty answer is not kept); a column that appears is seen when
  * a filter, an order, a payload or a select list names it (the map is re-read
- * once) or when a row comes back carrying it (the next call's map is fresh);
- * one dropped or retyped is not until the process restarts — PostgREST's own
- * cache reloads on a signal, not on its own.
+ * once), or on the call after one that returned rows of a spelled-out `*`
+ * (the shape read beside them moved — shapeSql; SMD-1602, every table since
+ * SMD-3329); one dropped is seen when the shim's own list names it (a 42703
+ * placed in that list reads the map again and runs the call once more,
+ * SMD-3329); one retyped when Postgres refuses the statement's cached plan
+ * or a star's rows carry the new shape (the statements are made new, a new
+ * generation, SMD-3329's passes 3 and 4). A foreign key
+ * is not seen until the process restarts — PostgREST's own cache reloads on a
+ * signal, not on its own.
  *
  * ── Resource embedding ───────────────────────────────────────────────────────
  * `.select("*, maintenance_tasks ( id, name )")`, `"*, recipes:recipe_id (name)"`
@@ -97,8 +103,20 @@
  * always returned; `.rpc()`'s shape is what `pg_proc.proretset` declares, not
  * how many cells came back. And an array column is read through `to_json` —
  * PostgREST's rendering — because Bun's binary decoder hands a `uuid[]` back as
- * literal text and refuses a `real[]` holding a NULL; a table with an array
- * column therefore has its `*` spelled out from the map (see columnSql).
+ * literal text and refuses a `real[]` holding a NULL (see columnSql).
+ *
+ * ── No `*` it can name (SMD-3329) ────────────────────────────────────────────
+ * Bun prepares each statement and keeps it. A `*` over a table a migration
+ * widens, or over a function it drops and makes again with one more OUT
+ * column, re-analyses to a different result type, and Postgres refuses the
+ * cached plan (0A000) on every call until the process restarts — a vendored
+ * server left up across a migration failed each such call. So a table's `*`
+ * is spelled out from the map (projection) and `.rpc()` names the function's
+ * declared columns; a named list re-analyses to the result type it had. What
+ * a named list cannot survive — a column retyped — is a refused plan that the
+ * call answers as a new statement (Catalog.generationOf). The brain's own code
+ * is held to the same rule by check 41, which cannot see SQL this module
+ * builds at run time.
  *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
@@ -130,6 +148,15 @@ function ident(name: string, what: string): string {
 }
 
 const refusal = (what: string) => new Error(`compat/supabase-sql: ${what}`);
+
+/**
+ * A name the catalog gave, quoted as Postgres quotes one: any name a column can
+ * have (`"my col"`, `"naïve"`, `"q""uote"`), where ident() refuses all but the
+ * plain ones a caller may write. Only for names read from the catalog, never a
+ * caller's — a `*` spelled out from the map names every column the table has
+ * (SMD-3329).
+ */
+const quoteName = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
 /**
  * A filter or ORDER BY column: a plain identifier, or PostgREST's JSON path —
@@ -257,7 +284,23 @@ type ColumnInfo = { type: string; category: string; elem?: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
 type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null; set: boolean } };
-type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; natts: Map<string, number>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>> };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; shapes: Map<string, string>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>>; encoding?: Promise<string>; generations: Map<string, number> };
+
+/** What each memo resolved to, so a caller holding an answer can tell whether it is still the current one (forgetIf). */
+const RESOLVED = new WeakMap<Promise<unknown>, unknown>();
+
+/**
+ * The table's shape as one string, read beside a spelled-out star's rows and
+ * with the catalog's map: its `pg_class` oid, its `relnatts`, and a digest of
+ * its live columns' types in order (SMD-1602's count; the oid and the types
+ * since SMD-3329's pass 3 and 4). A column added moves the count; a table
+ * rebuilt under its name is a new oid, though it may have the old count; a
+ * column retyped moves the types and nothing else. `rel` is a SQL expression
+ * for the table's oid.
+ */
+function shapeSql(rel: string): string {
+  return `(SELECT c.oid::text || ':' || c.relnatts || ':' || md5(coalesce((SELECT string_agg(a.atttypid::text || '.' || a.atttypmod, ',' ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), '')) FROM pg_class c WHERE c.oid = ${rel})`;
+}
 
 /** One store per connection URL: the extension servers create a client per request, and the schema does not change between them. */
 const STORES = new Map<string, CatalogStore>();
@@ -277,7 +320,7 @@ class Catalog {
 
   constructor(private sql: SQL, url: string) {
     let store = STORES.get(url);
-    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), natts: new Map(), fks: new Map(), fns: new Map(), pks: new Map() }));
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), shapes: new Map(), fks: new Map(), fns: new Map(), pks: new Map(), generations: new Map() }));
     this.store = store;
   }
 
@@ -292,11 +335,23 @@ class Catalog {
   private memo<T extends { size: number } | unknown[]>(map: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> {
     let p = map.get(key);
     if (!p) {
-      p = read();
-      map.set(key, p);
-      p.then((v) => { if ((Array.isArray(v) ? v.length : v.size) === 0) map.delete(key); }, () => map.delete(key));
+      const q = read();
+      p = q;
+      map.set(key, q);
+      q.then((v) => { RESOLVED.set(q, v); if ((Array.isArray(v) ? v.length : v.size) === 0) map.delete(key); }, () => map.delete(key));
     }
     return p;
+  }
+
+  /**
+   * Whether the memo under `key` is still the answer a caller read (`seen`):
+   * not already forgotten, not already replaced by a fresh read, not a fresh
+   * read still in flight. Twenty calls refused at once by one migration then
+   * forget, and re-read, once — not twenty times (SMD-3329's pass 4).
+   */
+  private stillCurrent(map: Map<string, Promise<unknown>>, key: string, seen: unknown): boolean {
+    const p = map.get(key);
+    return !!p && RESOLVED.get(p) === seen;
   }
 
   /**
@@ -343,36 +398,85 @@ class Catalog {
     return !!absent && [...names].some((n) => absent.has(n));
   }
 
+  /**
+   * Whether the server counts a statement's `position` in bytes: a SQL_ASCII
+   * server takes the client's bytes as they come, and counts them; any other
+   * converts them and counts characters. Asked only for a statement with a
+   * character outside ASCII, where the two differ, and once per URL.
+   */
+  async placesInBytes(text: string): Promise<boolean> {
+    if (!/[^\x00-\x7f]/.test(text)) return false;
+    const p = (this.store.encoding ??= (async () => String(((await this.sql.unsafe("SHOW server_encoding")) as unknown as { server_encoding: string }[])[0]?.server_encoding))());
+    try { return (await p) === "SQL_ASCII"; } catch { this.store.encoding = undefined; return false; }
+  }
+
+  /** Drop what is remembered about a function's overloads; the next call reads them again. */
+  forgetFunction(fn: string): void {
+    this.store.fns.delete(fn);
+  }
+
+  /** forgetFunction, only while the overloads remembered are the ones the caller read. */
+  forgetFunctionIf(fn: string, seen: Overload[]): void {
+    if (this.stillCurrent(this.store.fns, fn, seen)) this.forgetFunction(fn);
+  }
+
+  /** forget, only while the columns remembered are the ones the caller read. */
+  forgetIf(table: string, seen: Columns): void {
+    if (this.stillCurrent(this.store.columns, table, seen)) this.forget(table);
+  }
+
   /** Drop what is remembered about a table's columns; the next call reads them again. */
   forget(table: string): void {
     this.store.columns.delete(table);
     this.store.absent.delete(table);
-    this.store.natts.delete(table);
+    this.store.shapes.delete(table);
   }
 
   /**
-   * `pg_class.relnatts` as it stood when the table's columns were read: the
-   * count of attributes the table has ever had (a dropped one still counts),
-   * which a query on a spelled-out star carries back beside its rows, so a
-   * column added under a running client is seen on the next call as a
-   * changed count rather than as a key the map lacks (SMD-1602).
+   * The table's shape (shapeSql) as it stood when its columns were read, which
+   * a query on a spelled-out star carries back beside its rows, so a column
+   * added, a table rebuilt or a column retyped under a running client is seen
+   * on the next call as a changed shape rather than as a key the map lacks
+   * (SMD-1602, SMD-3329).
    */
-  nattsOf(table: string): number | undefined {
-    return this.store.natts.get(table);
+  shapeOf(table: string): string | undefined {
+    return this.store.shapes.get(table);
+  }
+
+  /**
+   * How many times the statements over this table or function have been made
+   * new because its shape changed under them (SMD-3329's pass 3 and 4): a
+   * refused plan, a 42703 in the shim's own list, a changed shape read beside
+   * the rows. Bun keeps a prepared statement under its text, with the
+   * parameter types it was first given, so the same text would meet the old
+   * plan, or the old types, again; a statement carrying a new generation, as
+   * a trailing comment, is prepared afresh. Kept per URL, like the catalog.
+   */
+  generation(key: string): number {
+    return this.store.generations.get(key) ?? 0;
+  }
+
+  static suffix(generation: number): string {
+    return generation ? ` /* generation ${generation} */` : "";
+  }
+
+  /** The next generation, from the one the caller's statement carried: calls refused at once by one change move it once. */
+  nextGeneration(key: string, from: number): void {
+    if (this.generation(key) === from) this.store.generations.set(key, from + 1);
   }
 
   private readColumns(table: string): Promise<Columns> {
     return (async () => {
       const rows = (await this.sql.unsafe(
-        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, c.relnatts::int AS natts,
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, ${shapeSql("to_regclass($1)")} AS shape,
                 (SELECT e.typname FROM pg_type b JOIN pg_type e ON e.oid = b.typelem
                   WHERE b.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END) AS elem
            FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class c ON c.oid = a.attrelid
           WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
           ORDER BY a.attnum`,
         [ident(table, "table")] as never[]
-      )) as unknown as { name: string; type: string; category: string; natts: number; elem: string | null }[];
-      if (rows.length) this.store.natts.set(table, Number(rows[0].natts));
+      )) as unknown as { name: string; type: string; category: string; shape: string; elem: string | null }[];
+      if (rows.length) this.store.shapes.set(table, String(rows[0].shape));
       return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category, ...(r.elem ? { elem: r.elem } : {}) }]));
     })();
   }
@@ -521,6 +625,58 @@ function toPostgrestError(e: unknown): PostgrestError {
 /** A caller bug — a bad identifier, a nested embed — thrown by the shim itself, not a database condition. */
 const isRefusal = (e: unknown) => e instanceof Error && e.message.startsWith("compat/supabase-sql:");
 
+/** A stretch of a statement's text, [start, end) in UTF-16 code units, that the shim filled with column names of its own. */
+type Span = [number, number];
+
+/**
+ * Whether a 42703 points into a span of the statement the shim filled with
+ * columns of its own — a `*` it spelled out from the catalog, a function's
+ * declared columns — rather than at a column the caller named: the catalog is
+ * then stale, and the call is run once more on a fresh read (SMD-3329).
+ * Postgres says where in the statement's text the column was written
+ * (`position`, 1-based), whatever language its messages are in — in
+ * characters, or in bytes on a SQL_ASCII server, which takes the client's
+ * bytes as they come (`bytes`; see placesInBytes).
+ * A payload key the table lacks is placed in the INSERT list or the SET, a
+ * filter's in the WHERE, an embed's inside the embed — never in the span. An
+ * error raised inside a function body or a trigger carries no `position` (its
+ * offset is into the body, `internalPosition`), so it is never the shim's,
+ * and the statement that raised it, which may have advanced a sequence, is not
+ * run again. Postgres refuses a column it cannot find before it executes the
+ * statement, so the call that is run again had done nothing.
+ */
+function inShimSpan(e: unknown, text: string, spans: readonly Span[], bytes = false): boolean {
+  const err = e as { errno?: unknown; position?: unknown } | null;
+  if (spans.length === 0 || String(err?.errno) !== "42703") return false;
+  const pos = Number(err?.position);
+  if (!Number.isInteger(pos) || pos < 1) return false;
+  // Characters (or bytes) to code units: a character outside the BMP is two units, one character and four bytes.
+  let at = 0;
+  for (let c = 1; c < pos && at < text.length;) {
+    const cp = text.codePointAt(at) ?? 0;
+    c += bytes ? (cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4) : 1;
+    at += cp > 0xffff ? 2 : 1;
+  }
+  return spans.some(([a, b]) => at >= a && at < b);
+}
+
+/**
+ * Whether an error is Postgres refusing a prepared statement's cached plan
+ * because what it reads changed its result type (0A000, "cached plan must not
+ * change result type"), raised by the plan cache before the statement runs —
+ * told by the routine that raised it, which no language changes. 0A000 is
+ * every "not supported", and one raised while a statement runs (an inlined SQL
+ * function's body, a C function) may follow a write outside the transaction.
+ */
+function planChanged(e: unknown): boolean {
+  const err = e as { errno?: unknown; routine?: unknown; where?: unknown } | null;
+  // No function's context either: a plan a function body caches is its own, and its refusal follows the body's work.
+  return String(err?.errno) === "0A000" && err?.routine === "RevalidateCachedQuery" && !err?.where;
+}
+
+/** A 42703 — asked first, so the server's encoding is asked only for an error whose place is read. */
+const undefinedColumn = (e: unknown) => String((e as { errno?: unknown } | null)?.errno) === "42703";
+
 // ── The select list ──────────────────────────────────────────────────────────
 
 type SelectItem =
@@ -634,8 +790,6 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   private rowMode: "many" | "single" | "maybeSingle" = "many";
   /** The columns the filters, the order and the payload name — what the catalog's map must know (see columnsOf). */
   private named = new Set<string>();
-  /** Whether the last compile spelled a `*` out from the map (an array-bearing table): a 42703 then means the map named a column since dropped. */
-  private spelledOut = false;
 
   constructor(private sql: SQL, private catalog: Catalog, private table: string) {}
 
@@ -1136,15 +1290,11 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * `date[]` bare dates), where Bun's binary decoder hands a `uuid[]` back as
    * the literal text `{…}` and refuses a `real[]` holding a NULL outright
    * (`ERR_POSTGRES_NULLS_IN_ARRAY_NOT_SUPPORTED_YET` — the query log's
-   * `result_scores`, SMD-1602). So on a table with an array column a `*` is
-   * spelled out from the map, arrays wrapped, with `relnatts` read beside the
-   * rows so a column added under a running client is still seen on the next
-   * call (execute compares it with the count the map was read at); on a table
-   * without one, `*` stays `*`, and a row carrying a key the map lacks is the
-   * signal, as before.
+   * `result_scores`, SMD-1602). See projection for where a `*` is spelled out.
    */
   private columnSql(name: string, info: ColumnInfo | undefined): string {
-    return info?.category === "A" ? `to_json(${ident(name, "column")}) AS ${ident(name, "column")}` : ident(name, "column");
+    // The name is the catalog's, or a caller's that parseSelect has passed through ident() already.
+    return info?.category === "A" ? `to_json(${quoteName(name)}) AS ${quoteName(name)}` : quoteName(name);
   }
 
   /**
@@ -1153,26 +1303,44 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * correlated subquery joins to it as it joins to a selected row
    * (`.insert(contact).select("*, companies (id, name)")`, job-hunt's;
    * refused until SMD-1798).
+   *
+   * A `*` is spelled out from the map, every table's (SMD-3329; an array-
+   * bearing table's alone since SMD-1602). Bun prepares each statement and
+   * keeps it, and a `*` over a table a migration has widened re-analyses to a
+   * different result type, which Postgres refuses on every call until the
+   * process restarts (0A000, "cached plan must not change result type"); a
+   * named list re-analyses to the one it had. The table's shape (shapeSql) is
+   * read beside the rows, so the call after a column is added, the table is
+   * rebuilt or a column is retyped has it (execute compares the shape with the
+   * one the map was read at); a column dropped is a 42703 placed in this list
+   * (inShimSpan), and execute reads the map again and runs the call once more.
+   * A table the catalog cannot see keeps `*`, and the query reports what is
+   * missing. An embed's `(*)` stays a star: its rows reach the caller
+   * as one json column, whose type a new column does not change.
    */
-  private async projection(cols: Columns): Promise<string> {
+  private async projection(cols: Columns): Promise<{ sql: string; spelled: Span[] }> {
     const parts: string[] = [];
-    const hasArray = [...cols.values()].some((c) => c.category === "A");
-    this.spelledOut = false;
+    // Where each spelled-out `*` sits in the list, relative to its start: a 42703 there is the map naming a column
+    // since dropped. Returned, not kept on the builder, so two awaits of one builder cannot mix their lists.
+    const spelled: Span[] = [];
+    let at = 0; // where the next part starts in the joined list
+    const push = (part: string) => { parts.push(part); at += part.length + 2; };
     const base = { table: this.table.trim(), alias: ident(this.table.trim(), "table") };
     for (const item of this.items) {
       if (item.kind === "star") {
-        if (!hasArray) { parts.push("*"); continue; }
-        for (const [name, info] of cols) parts.push(this.columnSql(name, info));
-        parts.push(`(SELECT c.relnatts FROM pg_class c WHERE c.oid = to_regclass('${base.alias}'))::int AS __natts`);
-        this.spelledOut = true;
+        if (cols.size === 0) { push("*"); continue; }
+        const from = at;
+        for (const [name, info] of cols) push(this.columnSql(name, info));
+        push(`${shapeSql(`to_regclass('${base.alias}')`)} AS __shape`);
+        spelled.push([from, at - 2]);
       }
-      else if (item.kind === "column") parts.push(this.columnSql(item.name, cols.get(item.name)));
+      else if (item.kind === "column") push(this.columnSql(item.name, cols.get(item.name)));
       // A table the catalog cannot see has no keys to embed through: the embed is left out so the query itself
       // reports the missing table (42P01, as `{ error }`) rather than a refusal naming a foreign key.
       else if (cols.size === 0) continue;
-      else parts.push(await this.embedSql(item, base, 1));
+      else push(await this.embedSql(item, base, 1));
     }
-    return parts.join(", ") || "*";
+    return { sql: parts.join(", ") || "*", spelled };
   }
 
   /**
@@ -1182,8 +1350,10 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * OFFSET; `countText` is run only when the page comes back empty (an offset
    * past the end), where the window has no row to ride on (SMD-1602).
    */
-  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string }> {
+  private async compile(): Promise<{ text: string; values: unknown[]; cols: Columns; countText?: string; spans: Span[]; gen: number }> {
     const table = this.table.trim();
+    const gen = this.catalog.generation(`table ${table}`);
+    const suffix = Catalog.suffix(gen);
     const t = ident(table, "table");
     for (const row of this.payload) for (const c of Object.keys(row)) this.names(c);
     const cols = await this.catalog.columnsOf(table, this.named);
@@ -1196,17 +1366,23 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const where = { text: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", values: filters.values };
       // head: no rows, whether or not a count was asked for — supabase-js answers `data: null` to both; PostgREST runs
       // the query for its headers alone. One count query serves both forms; the count is answered only when asked.
-      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols };
-      let projection = await this.projection(cols);
+      if (this.headOnly) return { text: `SELECT count(*)::int AS __count FROM ${t}${where.text}`, values: where.values, cols, spans: [], gen };
+      const listed = await this.projection(cols);
+      let projection = listed.sql;
       if (this.wantCount) projection += ", count(*) OVER () AS __count";
       let text = `SELECT ${projection} FROM ${t}${where.text}`;
       if (this.orderBy.length) text += ` ORDER BY ${this.orderBy.join(", ")}`;
       if (this.limitN !== null) text += ` LIMIT ${Number(this.limitN)}`;
       if (this.offsetN !== null) text += ` OFFSET ${Number(this.offsetN)}`;
-      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined };
+      // Last, so no place the spans hold moves.
+      text += suffix;
+      // The projection follows "SELECT ": its spelled-out spans sit seven characters in.
+      return { text, values: where.values, cols, countText: this.wantCount ? `SELECT count(*)::int AS __count FROM ${t}${where.text}` : undefined, spans: listed.spelled.map(([a, b]): Span => [a + 7, b + 7]), gen };
     }
 
-    const returning = await this.projection(cols);
+    const { sql: returning, spelled } = await this.projection(cols);
+    // A write's RETURNING list ends its text: its spelled-out spans are counted back from the end.
+    const spansIn = (text: string): Span[] => spelled.map(([a, b]): Span => [text.length - returning.length + a, text.length - returning.length + b]);
     // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
     const bind = (c: string, v: unknown, values: unknown[]): string => {
       const b = bound(cols.get(c), v);
@@ -1237,7 +1413,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         text += ` ON CONFLICT (${target}) DO ${this.ignoreDuplicates ? "NOTHING" : `UPDATE SET ${quoted.map((c) => `${c} = EXCLUDED.${c}`).join(", ")}`}`;
       }
       text += ` RETURNING ${returning}`;
-      return { text, values, cols };
+      return { text: text + suffix, values, cols, spans: spansIn(text), gen };
     }
 
     if (this.op === "update") {
@@ -1247,15 +1423,13 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const values: unknown[] = [];
       const sets = names.map((c) => `${ident(c, "column")} = ${bind(c, row[c], values)}`);
       const where = this.whereClause(cols, values.length);
-      return {
-        text: `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${returning}`,
-        values: [...values, ...where.values],
-        cols,
-      };
+      const text = `UPDATE ${t} SET ${sets.join(", ")}${where.text} RETURNING ${returning}`;
+      return { text: text + suffix, values: [...values, ...where.values], cols, spans: spansIn(text), gen };
     }
 
     const where = this.whereClause(cols, 0);
-    return { text: `DELETE FROM ${t}${where.text} RETURNING ${returning}`, values: where.values, cols };
+    const text = `DELETE FROM ${t}${where.text} RETURNING ${returning}`;
+    return { text: text + suffix, values: where.values, cols, spans: spansIn(text), gen };
   }
 
   /**
@@ -1275,30 +1449,36 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * the database unreachable, in the query or in the catalog read before it —
    * resolves as `{ error }` the way supabase-js does.
    */
-  private async execute(): Promise<Result<T>> {
-    let compiled = false;
+  private async execute(retried = false): Promise<Result<T>> {
+    let compiled: { text: string; spans: Span[]; cols: Columns; gen: number } | null = null;
     const table = this.table.trim();
     try {
-      const { text, values, cols, countText } = await this.compile();
-      compiled = true;
+      const { text, values, cols, countText, spans, gen } = await this.compile();
+      compiled = { text, spans, cols, gen };
       const raw = (await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[];
-      // The page's total (count(*) OVER (), the same on every row) and the map's attribute count ride on the rows and
+      // The page's total (count(*) OVER (), the same on every row) and the table's shape ride on the rows and
       // are lifted off them before the caller sees a row.
       let total: number | null = raw.length && "__count" in raw[0] ? Number(raw[0].__count) : null;
-      const natts = raw.length && "__natts" in raw[0] ? Number(raw[0].__natts) : undefined;
+      const shape = raw.length && "__shape" in raw[0] ? String(raw[0].__shape) : undefined;
       const rows = raw.map((r) => {
-        if (!("__count" in r) && !("__natts" in r)) return jsonShaped(r, cols);
-        const { __count: _c, __natts: _n, ...rest } = r;
+        if (!("__count" in r) && !("__shape" in r)) return jsonShaped(r, cols);
+        const { __count: _c, __shape: _s, ...rest } = r;
         return jsonShaped(rest, cols);
       });
       // The query named a column remembered as absent and RAN: the column exists, the map is stale (a `date` column
       // added after it was first named would shape as an instant for the process's life) — forget it for the next call.
       // So too when a row comes back with a column the map does not know (`select("*")` after an ADD COLUMN names
       // nothing, but the row does): this row is shaped by the old map, the next call's by a fresh one. On a table whose
-      // `*` is spelled out from the map, no such key can come back; the attribute count read beside the rows says it.
+      // `*` is spelled out from the map, no such key can come back; the shape read beside the rows says it (shapeSql) —
+      // and a changed shape makes the table's statements new as well (a new generation), since one prepared before a
+      // column was retyped still holds the parameter types it was first given (SMD-3329's pass 4).
       const known = (k: string) => cols.size === 0 || cols.has(k) || this.items.some((it) => it.kind === "embed" && it.key === k);
-      const grown = natts !== undefined && this.catalog.nattsOf(table) !== undefined && natts !== this.catalog.nattsOf(table);
-      if (this.catalog.skippedRefresh(table, this.named) || grown || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(table);
+      const reshaped = shape !== undefined && this.catalog.shapeOf(table) !== undefined && shape !== this.catalog.shapeOf(table);
+      if (reshaped) {
+        this.catalog.forgetIf(table, cols);
+        this.catalog.nextGeneration(`table ${table}`, gen);
+      }
+      if (this.catalog.skippedRefresh(table, this.named) || (rows[0] && Object.keys(rows[0]).some((k) => !known(k)))) this.catalog.forget(table);
 
       if (this.headOnly) {
         // head: no rows, as supabase-js answers; the count only when asked (`{ head: true }` alone streamed the table).
@@ -1315,6 +1495,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       // A counted page that came back empty (an offset past the end) has no row for the window to ride on: the count
       // query PostgREST would run for Content-Range, the same WHERE without the page.
       if (this.wantCount && total === null) {
+        // The count query names no column of the shim's: a 42703 from it is placed against its own text, in no span.
+        compiled = { text: countText ?? "", spans: [], cols, gen };
         if (countText) total = Number(((await this.sql.unsafe(countText, values as never[])) as unknown as { __count: number }[])[0]?.__count ?? 0);
         else total = rows.length;
       }
@@ -1324,9 +1506,21 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       const error = toPostgrestError(e);
       // The query ran on a map that skipped a refresh for a column remembered as absent, and failed with something
       // other than "that column does not exist": the column is there now and the map is stale — forget it, so the
-      // next call reads the table again (a 42703 confirms the absence and keeps the memo). A 42703 on a spelled-out
-      // `*` is the map's own naming of a column since dropped: forget it too, so the next call spells the fresh set.
-      if (compiled && ((error.code !== "42703" && this.catalog.skippedRefresh(table, this.named)) || (error.code === "42703" && this.spelledOut))) this.catalog.forget(table);
+      // next call reads the table again (a 42703 confirms the absence and keeps the memo).
+      if (compiled && error.code !== "42703" && this.catalog.skippedRefresh(table, this.named)) this.catalog.forget(table);
+      // The table's shape changed under the statement: a 42703 inside a spelled-out `*` (the map's own naming of a
+      // column since dropped; see inShimSpan), or Postgres refusing the statement's cached plan (a column it reads
+      // retyped, or dropped and added again with another type; see planChanged). Either comes before the statement
+      // runs. Forget the map — once, however many calls one migration refused (forgetIf) — and run the call once more
+      // as a new statement, a new generation, on a fresh read: the fresh read may spell the same text, which Bun keeps
+      // with its old plan, and a migration that dropped one column and retyped another would meet both in turn
+      // (SMD-3329; the caller saw a failed call on every one before, or on the first).
+      const reshaped = !!compiled && ((compiled.spans.length > 0 && undefinedColumn(e) && inShimSpan(e, compiled.text, compiled.spans, await this.catalog.placesInBytes(compiled.text))) || planChanged(e));
+      if (compiled && reshaped) {
+        this.catalog.forgetIf(table, compiled.cols);
+        this.catalog.nextGeneration(`table ${table}`, compiled.gen);
+        if (!retried) return this.execute(true);
+      }
       return { data: null, error, count: null };
     }
   }
@@ -1422,12 +1616,26 @@ export class SupabaseSqlClient {
    * which goes as JSON text, the rule this method had before it read the
    * catalog — and Postgres resolves the call as before.
    */
-  async rpc<T = unknown>(fn: string, args: Record<string, unknown> = {}): Promise<Result<T>> {
+  rpc<T = unknown>(fn: string, args: Record<string, unknown> = {}): Promise<Result<T>> {
+    return this.call<T>(fn, args, false);
+  }
+
+  /** rpc(), and the one call it runs again when the catalog it projected from is stale (`retried`). */
+  private async call<T>(fn: string, args: Record<string, unknown>, retried: boolean): Promise<Result<T>> {
+    /** The statement and where in it the function's declared columns are named, and the overloads read: a 42703 there is a stale catalog. */
+    let text = "";
+    let spans: Span[] = [];
+    let named = false;
+    let overloads: Overload[] = [];
+    let read: Overload[] = [];
+    const key = `function ${fn.trim()}`;
+    const gen = this.catalog.generation(key);
     try {
       const f = ident(fn, "function");
       const names = Object.keys(args);
       for (const n of names) ident(n, "argument");
-      let overloads = (await this.catalog.argTypesOf(fn)).filter((o) => names.every((n) => o.names.includes(n)));
+      read = await this.catalog.argTypesOf(fn);
+      overloads = read.filter((o) => names.every((n) => o.names.includes(n)));
       // Overloads that share an argument's name but not its type are told apart by the value, as PostgREST's JSON
       // body tells them apart: a JS array is for an array, json or vector parameter, not a text one. Without this,
       // `tagged(search_tags text[])` beside `tagged(search_tags text)` — in one schema or across two visible ones —
@@ -1464,20 +1672,41 @@ export class SupabaseSqlClient {
       // the function is — when every candidate overload declares the same; candidates that differ leave the rows as
       // they come (one with no OUT columns beside one with some is a difference, not an agreement).
       const shapes = await Promise.all(overloads.map(async (o) => {
-        if (o.outs.size) return o.outs;
-        if (o.returns.table) return this.catalog.columnsOf(o.returns.table);
-        return new Map([[fn.trim(), { type: o.returns.type, category: o.returns.category }]]) as Columns;
+        if (o.outs.size) return { cols: o.outs, columns: true };
+        if (o.returns.table) return { cols: await this.catalog.columnsOf(o.returns.table), columns: true };
+        return { cols: new Map([[fn.trim(), { type: o.returns.type, category: o.returns.category }]]) as Columns, columns: false };
       }));
       const key = (m: Columns) => JSON.stringify([...m].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, v.type]));
-      const outs = shapes.length && shapes.every((m) => key(m) === key(shapes[0])) ? shapes[0] : undefined;
-      // An array column of a declared shape is read through to_json, as a table's is (columnSql's reason: a `uuid[]`
-      // path column arrives as literal text otherwise); a shape the candidates disagree on is read as it comes.
-      // The call is aliased with the function's own name: a scalar function's one column takes the alias's name, and
-      // the shape map keys it by the function's.
-      const projection = outs && [...outs.values()].some((c) => c.category === "A")
-        ? [...outs].map(([name, info]) => (info.category === "A" ? `to_json(${f}.${ident(name, "column")}) AS ${ident(name, "column")}` : `${f}.${ident(name, "column")}`)).join(", ")
+      const outs = shapes.length && shapes.every((m) => key(m.cols) === key(shapes[0].cols)) ? shapes[0].cols : undefined;
+      // A declared shape of columns is projected by name, an array column through to_json, as a table's `*` is
+      // (columnSql's reason: a `uuid[]` path column arrives as literal text otherwise). By name because Bun prepares
+      // the statement and keeps it: a `*` over a function a migration drops and makes again with one more OUT column
+      // re-analyses to a different result type, which Postgres refuses on every call until the process restarts
+      // (0A000); a named list re-analyses to the one it had (SMD-3329). A column dropped or renamed since the catalog
+      // was read is a 42703 placed among these, and the call is run once more on a fresh read (inShimSpan). One added
+      // to a RETURNS TABLE is not seen until the process restarts (the code that reads a new column ships in a new
+      // process); one added to the table of a RETURNS SETOF is, once a read of that table has forgotten its map. A scalar, and a shape the candidates disagree on, are read as they come — a scalar's result type
+      // is the function's whichever way it is spelled. The call is aliased with the function's own name: a scalar
+      // function's one column takes the alias's name, and the shape map keys it by the function's.
+      // An unnamed OUT parameter (`OUT int`) has no name to project — Postgres calls its column `columnN` — so a
+      // shape holding one is read as it comes.
+      named = outs !== undefined && outs.size > 0 && shapes.every((m) => m.columns) && !outs.has("");
+      const projection = named && outs
+        ? [...outs].map(([name, info]) => (info.category === "A" ? `to_json(${f}.${quoteName(name)}) AS ${quoteName(name)}` : `${f}.${quoteName(name)}`)).join(", ")
         : "*";
-      const rows = ((await this.sql.unsafe(`SELECT ${projection} FROM ${call} AS ${f}`, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
+      text = `SELECT ${projection} FROM ${call} AS ${f}${Catalog.suffix(gen)}`;
+      if (named) spans = [[7, 7 + projection.length]];
+      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map((r) => jsonShaped(r, outs));
+      // A scalar's row whose columns are not its one: the function was made again since the catalog read it, on a
+      // connection that had not prepared the statement, so nothing failed (a scalar's catalog, a table's rows). These
+      // rows are shaped by the old read; the next call's by a fresh one. Not run again — this call ran the function.
+      // A composite the catalog could not see (a type off the search path, a domain over one, `OUT` parameters with no
+      // names) also reads as a scalar here, and its rows always carry its fields: not a sign of anything.
+      const scalarRead = shapes.every((m) => !m.columns) && overloads.every((o) => !/^[CP]$/.test(o.returns.category));
+      if (outs && scalarRead && rows[0] && Object.keys(rows[0]).join("\u0000") !== [...outs.keys()].join("\u0000")) {
+        this.catalog.forgetFunctionIf(fn, read);
+        for (const o of overloads) if (o.returns.table) this.catalog.forget(o.returns.table);
+      }
 
       // What the function declares decides the shape, as it does for PostgREST (SMD-1602): a set-returning function
       // yields rows — one row of one column included, `[{ col: v }]`, where the old rule collapsed it to `v` and the
@@ -1505,7 +1734,22 @@ export class SupabaseSqlClient {
       return { data: rows as T, error: null, count: null };
     } catch (e) {
       if (isRefusal(e)) throw e;
-      return { data: null, error: toPostgrestError(e), count: null };
+      const error = toPostgrestError(e);
+      // A 42703 among the declared columns: the function was dropped and made again since the catalog read it, or the
+      // table it returns rows of lost a column (see inShimSpan). A changed plan: the function was made again with
+      // another result type — columns where the catalog read a scalar, overloads that disagree, an OUT column
+      // retyped. Postgres refuses either before it runs the function. Read both again and call once more, as a new
+      // statement (a new generation): the fresh read may spell the same text, which Bun keeps with its old plan.
+      const stale = text && undefinedColumn(e) && inShimSpan(e, text, spans, await this.catalog.placesInBytes(text));
+      const changed = text && planChanged(e);
+      if (stale || changed) {
+        // Once, however many calls one change refused (forgetFunctionIf, nextGeneration from the call's own).
+        this.catalog.forgetFunctionIf(fn, read);
+        for (const o of overloads) if (o.returns.table) this.catalog.forget(o.returns.table);
+        this.catalog.nextGeneration(key, gen);
+        if (!retried) return this.call<T>(fn, args, true);
+      }
+      return { data: null, error, count: null };
     }
   }
 

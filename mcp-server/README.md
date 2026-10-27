@@ -23,7 +23,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
 | File | What it is |
 |---|---|
 | `app.ts` | `createMcpApp`: the MCP endpoint, `/health`, the keyed worker mirrors, the job routes, the method guard and discovery |
-| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
+| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_LISTEN_HOST (one IP address to listen on, as the REST core's: unset, every address; never forwarded by compose; a value that is no IP address, a link-local IPv6 one, or one this host does not have, exits 2), OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
 | `exchange.ts` | The token exchange at the hop (SMD-2286): an OAuth token traded for the REST core's, cached by its digest |
 | `stack.ts` | This server with the REST core behind it in one process, for server-portable's suites |
 | `test-mcp.ts` | The suite |
@@ -134,6 +134,16 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   nothing. The
   registry busy on this server's own key is busy, `-32003` with `Retry-After`, not a
   misconfiguration.
+- **CORS.** `/mcp` answers every origin, `Access-Control-Allow-Origin: *`
+  (`mcp-edge.ts`'s `corsHeaders`), and reads no allowlist, on purpose (SMD-2113). A
+  browser-hosted client, claude.ai or the Claude Desktop connector, calls from an origin
+  that is its own, not the operator's, so an allowlist could only refuse clients. CORS is
+  not what guards the brain: every MCP call still needs a key or a token, as from any
+  other client, and this server reads no cookie, so a page has no ambient credential to
+  borrow. The REST core sets no CORS at all (`docs/vendored-disposition.md`,
+  `OPTIONS *`): a page reaches it same-origin or through a server of its own, as the
+  operator GUI does. `server-portable/test-server.ts`'s `corsOk` and `test-mcp.ts`'s
+  preflight case hold the answer, so changing it is a decision, not a drift.
 
 **Known differences from `index.ts` (found by the parity runs SMD-2287 PR 6a retired):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as

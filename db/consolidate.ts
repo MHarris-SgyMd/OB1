@@ -885,10 +885,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // arguments beside 029's, four beside 070's, five beside 109's) is then
     // ambiguous (not unique) and fails; seven resolve (preflight's lineage
     // check names the leftover). --key selects one pass in the SQL, before the
-    // cap (SMD-3248); --after starts past the cursor's row (SMD-3249).
+    // cap (SMD-3248); --after starts past the cursor's row (SMD-3249). Each
+    // read here names its columns, never `*`, as the store's do (SMD-3302).
     const listed = async (st: string | null, lineage: boolean | null) =>
-      (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean, ${KEY ?? null}::text,
-                                                         ${AFTER?.confidence ?? null}::numeric, ${AFTER?.judgedAt ?? null}::timestamptz, ${AFTER?.id ?? null}::uuid)`) as Listed[];
+      (await sql`SELECT id, status, verdict, confidence, reason, similarity, judge_key, judged_at, reviewed_at, review_note, superseding_id,
+                        older_id, older_content, older_created_at, newer_id, newer_content, newer_created_at, older_edited, newer_edited,
+                        lineage, page_key, remaining
+                   FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean, ${KEY ?? null}::text,
+                                                    ${AFTER?.confidence ?? null}::numeric, ${AFTER?.judgedAt ?? null}::timestamptz, ${AFTER?.id ?? null}::uuid)`) as Listed[];
     // --list lineage: the unreviewed rows standing on a lineage pair — the
     // reviewer's alone (a pending row holds its pair, 066 never re-finds it;
     // a stale one waits for the pass's settle, 067) — pending first, then
@@ -904,7 +908,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     let read = false;
     if (listedRows.length) {
       try {
-        writers = (await sql`SELECT * FROM list_proposal_writers(${sql.array(listedRows.map((p) => p.id), "UUID")}::uuid[])`) as Record<string, unknown>[];
+        writers = (await sql`SELECT id, older_actor_name, older_actor_kind, older_trust, older_capture_only, older_superseded_by, older_lapses, older_takes,
+                                    newer_actor_name, newer_actor_kind, newer_trust, newer_capture_only, newer_superseded_by, newer_lapses, newer_takes,
+                                    same_capturer
+                               FROM list_proposal_writers(${sql.array(listedRows.map((p) => p.id), "UUID")}::uuid[])`) as Record<string, unknown>[];
         read = true;
       } catch (e) {
         if (!WRITERS_MISSING.test((e as Error).message)) throw e;
@@ -984,7 +991,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   async function printStale(days: number): Promise<void> {
-    const rows = (await sql`SELECT * FROM stale_entities(make_interval(days => ${days}), 50)`) as
+    const rows = (await sql`SELECT entity_id, entity_type, name, thoughts, newest_at FROM stale_entities(make_interval(days => ${days}), 50)`) as
       { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: Stamp }[];
     if (rows.length === 0) {
       out(`  stale: no entity has gone ${days} days without a mention`);

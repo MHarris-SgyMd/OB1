@@ -1,7 +1,8 @@
 // The one place the GUI calls the brain: the REST core, through the typed
 // client the MCP server uses (../rest-client, SMD-2287), with the signed-in
-// visitor's own key — never one of this server's — so what a page shows is
-// what that key may read. Server-only ($lib/server): SvelteKit refuses to
+// visitor's own credential — their key, or the authorization server's token for
+// them (SMD-3307) — never one of this server's, so what a page shows is what
+// that credential may read. Server-only ($lib/server): SvelteKit refuses to
 // bundle it into the browser.
 //
 // The GUI is a direct caller, so it sends no forwarder key: the audit row
@@ -11,7 +12,9 @@ import { env } from '$env/dynamic/private';
 import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
-import { closeSession, cookieOptions, SESSION_COOKIE, type Session } from './session';
+import { createRenewer, createRevoker, oauthSettings, refreshTokens, RenewalFailed, revokeRefresh } from './oauth';
+import { closeSession, cookieOptions, liveTokens, storeTokens, type Session } from './session';
+import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
 /** The longest one call may take: a page waits on it, so well under a minute. */
 export const REST_TIMEOUT_MS = 30_000;
@@ -40,7 +43,8 @@ export function codeOf(body: unknown): string | undefined {
  * whoever holds the cookie, and the words are the operator's, in the log.
  */
 export async function read<K extends CallableOperation>(event: RequestEvent, session: Session, name: K, input: InputOf<K>): Promise<unknown> {
-	return bodyOf(name, await answered(event, name, () => rest().call(name, input, { key: session.key, signal: event.request.signal })));
+	const credential = await credentialOf(event, session);
+	return bodyOf(name, await answered(event, name, () => rest().call(name, input, { ...credential, signal: event.request.signal })));
 }
 
 /**
@@ -53,8 +57,61 @@ export async function readPlugin(event: RequestEvent, session: Session, tool: st
 }
 
 /** A plugin operation under the visitor's key, its answer for the caller to read: a form action says a refusal beside the form, not as the page's error. */
-export function callPlugin(event: RequestEvent, session: Session, tool: string, method: Method, path: string, input: Record<string, unknown>): Promise<Answer> {
-	return answered(event, tool, () => rest().callPath(method, path, input, { key: session.key, signal: event.request.signal }));
+export async function callPlugin(event: RequestEvent, session: Session, tool: string, method: Method, path: string, input: Record<string, unknown>): Promise<Answer> {
+	const credential = await credentialOf(event, session);
+	return answered(event, tool, () => rest().callPath(method, path, input, { ...credential, signal: event.request.signal }));
+}
+
+/**
+ * The sessions' token renewals (oauth.ts createRenewer): refreshed on the mesh
+ * as the `gui` client, read from and written back to the session itself. An
+ * AS its health probe found down (cached 30 s, 2 s at most) is no answer at
+ * once, not a wait of the token call's 10 s on every page (review pass 1).
+ */
+const accessFor = createRenewer({
+	refresh: async (refreshToken) => {
+		const s = oauthSettings(env);
+		if (!s) return { ok: false, refused: 'not_configured' };
+		if (!(await authReachability().reachable())) return { ok: false, unreachable: true };
+		return refreshTokens(s, refreshToken);
+	},
+	current: liveTokens,
+	store: (id, tokens) => void storeTokens(id, tokens),
+	close: (id) => void closeSession(id),
+});
+
+/** The revocations of tokens no session holds (oauth.ts createRevoker), on the mesh as the `gui` client; hooks.server.ts hands its `add` to the session store. */
+export const revocations = createRevoker({
+	revoke: (refresh) => {
+		const s = oauthSettings(env);
+		return s ? revokeRefresh(s, refresh) : Promise.resolve('refused');
+	},
+});
+
+/**
+ * What a call carries for the session: its key, or a token good for the next
+ * minute at least — renewed with the refresh token first when it is not. A
+ * renewal the AS refuses (the grant revoked, the chain past its 30 days) ends
+ * the session, to /signin; one the AS does not answer is the page's 503.
+ */
+export async function credentialOf(event: RequestEvent, session: Session): Promise<{ key: string } | { token: string }> {
+	if ('key' in session.credential) return { key: session.credential.key };
+	try {
+		return { token: await accessFor(session.id) };
+	} catch (err) {
+		if (!(err instanceof RenewalFailed)) throw err;
+		console.error(`[dashboard] a session's renewal ${err.refused ? `was refused (${err.message}); it is ended` : 'got no answer from the authorization server'}`);
+		if (err.refused) signOutHere(event);
+		throw error(503, 'The authorization server did not answer, so this session could not be renewed. Try again in a moment.');
+	}
+}
+
+/** Ends this request's session and sends the visitor to /signin. */
+function signOutHere(event: RequestEvent): never {
+	// Its tokens are revoked as it ends (session.ts onTokensEnded): a 401 from the REST core leaves a refresh token no session holds (review pass 2).
+	closeSession(event.locals.session?.id);
+	event.cookies.delete(event.locals.sessionCookie, cookieOptions(event.url, event.locals.breakglass));
+	throw redirect(303, `${base}/signin`);
 }
 
 /** A call's answer: the page's 502 (or a slow search's 504) when the core did not answer, and /signin when it no longer takes the key. */
@@ -72,11 +129,7 @@ async function answered(event: RequestEvent, name: string, call: () => Promise<A
 			throw error(504, `The brain did not answer within ${REST_TIMEOUT_MS / 1000} s. A search by meaning waits on the embedding provider, which may be slow or not answering; search by exact text, which needs none.`);
 		throw error(502, 'The brain did not answer. The dashboard log has the reason.');
 	}
-	if (answer.status === 401) {
-		closeSession(event.cookies.get(SESSION_COOKIE));
-		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
-		throw redirect(303, `${base}/signin`);
-	}
+	if (answer.status === 401) signOutHere(event);
 	return answer;
 }
 

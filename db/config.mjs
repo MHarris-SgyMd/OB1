@@ -2507,15 +2507,6 @@ export const ROLE_GRANTS = Object.freeze({
   querylog: Object.freeze([
     Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
   ]),
-  // The sleep scheduler's read of the query log (db/sleep.ts, SMD-2678): a
-  // search logged there wakes the brain, as a live write in thought_audit
-  // does. Opt-in (OPT_IN_GRANT_GROUPS): the log holds every search's text, so
-  // a plain --grant leaves it out and only `--groups …,sleep` issues it. A
-  // role without it sleeps on writes alone, and the scheduler and preflight's
-  // `sleep` row say so.
-  sleep: Object.freeze([
-    Object.freeze({ table: "query_log", privileges: Object.freeze(["SELECT"]), since: "034" }),
-  ]),
   // The durable async job registry (069, SMD-2318): the server writes a row per
   // long-running job as the in-memory registry moves it along (INSERT on start,
   // UPDATE on each state change, SELECT for the poll's read-back), and the owner
@@ -2699,12 +2690,16 @@ export const ROLE_GRANTS = Object.freeze({
 
 /** The advisory lock (`pg_advisory_xact_lock(hashtext(GRANT_LOCK))`) every `migrate.ts --grant` and `db/login-role.ts` take, so two at once in one database queue rather than deadlock or collide on "tuple concurrently updated" over the same catalog rows (SMD-2289). */
 export const GRANT_LOCK = "ob1:grants";
-/** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "sleep", "jobs", "pages", "community", "extensions", "recipes"]);
-/** The groups a plain `migrate.ts --grant` leaves out: issued only when `--groups` names them (SMD-2678). */
-export const OPT_IN_GRANT_GROUPS = Object.freeze(["sleep"]);
-/** What a plain `migrate.ts --grant <role>` issues: every group but the opt-in ones. */
-export const DEFAULT_GRANT_GROUPS = Object.freeze(ROLE_GRANT_GROUPS.filter((g) => !OPT_IN_GRANT_GROUPS.includes(g)));
+/** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
+/**
+ * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
+ * name rather than as an unknown word. `sleep` was the sleep scheduler's read
+ * of query_log (SMD-2678), retired in 2.0.0 with the search's wake (SMD-3315).
+ */
+export const RETIRED_GRANT_GROUPS = Object.freeze({
+  sleep: "retired in 2.0.0: a search no longer wakes the sleep scheduler, which reads no query_log (SMD-3315)",
+});
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -2838,15 +2833,15 @@ export function grantPresenceSql(objects) {
 }
 /**
  * GRANT statements giving `role` exactly the privileges the given groups need
- * (default: DEFAULT_GRANT_GROUPS, what a plain `migrate.ts --grant` issues —
- * every group but the opt-in ones, SMD-2678). Pass `present` (a
+ * (default: ROLE_GRANT_GROUPS, what a plain `migrate.ts --grant` issues).
+ * Pass `present` (a
  * Set of object names that exist — tables, views, sequences and functions alike, the
  * names as the rows spell them) to skip what a partially-migrated database or an
  * unapplied community schema lacks; omit it to emit everything. The role is
  * quoted; the schema USAGE grant is the caller's to add (a schema, not a
  * table). One GRANT per object, its privileges combined, in group/list order.
  */
-export function grantStatements(role, { groups = DEFAULT_GRANT_GROUPS, present = null } = {}) {
+export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
   const ident = quoteIdent(role);
   const out = [];
   for (const { kind, name, privileges } of mergedGrants(groups, present)) {
@@ -2868,7 +2863,7 @@ export function grantStatements(role, { groups = DEFAULT_GRANT_GROUPS, present =
  * grantStatements and grantVerifySql so what is granted and what is checked
  * are one list (SMD-1796, third review pass).
  */
-export function mergedGrants(groups = DEFAULT_GRANT_GROUPS, present = null) {
+export function mergedGrants(groups = ROLE_GRANT_GROUPS, present = null) {
   const ORDER = ["USAGE", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE"];
   const byName = new Map();
   for (const g of groups) {

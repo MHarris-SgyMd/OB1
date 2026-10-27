@@ -171,6 +171,7 @@ main() {
   nodb .                 scripts/check-fork-consistency.ts
   nodb .                 recipes/session-capture-hook/test-session-capture.mjs
   nodb .                 dashboards/open-brain-dashboard/test-parsers.ts
+  nodb dashboard          test-oauth.ts
   nodb .                 deploy/forwarder.ts --self-check
   nodb .                 deploy/instance.ts --self-check
   nodb .                 deploy/edge/edge.ts --self-check
@@ -205,6 +206,7 @@ main() {
   nodb deploy/auth        provision.ts --self-check
   nodb deploy/auth        limits.ts --self-check
   nodb deploy/auth        target.ts --self-check
+  nodb deploy/auth        admin.ts --self-check
   nodb extensions         test-auth.ts
   nodb db                 sync-linear.ts --self-check
   nodb db                 ingest-linear.ts --self-check

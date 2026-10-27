@@ -49,6 +49,16 @@ tickets, migration numbers and existing change numbers; do not give the record
 its own number or heading — the release step does.
 ```
 
+**A removal names its side of the version contract** (SMD-2687). This applies to
+a fragment that removes or renames a URL, route, port or setting in a file a
+release ships, a flag or named value of a command a shipped image runs, or that
+deletes vendored code. One sentence of its FORK body says
+which side of the contract the change falls on (FORK.md, "Versioning"). Inside
+the contract it is a `major`. Maintainer tooling and vendored code are outside
+it, so there it is a `minor`, and its Changelog body carries an **Upgrading:**
+line. SMD-2878's record is the example: the three-brain stack's file was
+tooling.
+
 `CONTRIBUTING.md` says when a fragment is required. `check-fork-consistency`
 validates every fragment (the six types, a bump the migrations allow, both bodies
 present and in that order, the changelog line and the title naming the tickets,

@@ -38,7 +38,7 @@
  * - sign-in and consent pages. The operator signs in by password, checked
  *   against an argon2id hash from the environment (decision 15's fallback);
  *   passkeys wait for the public origin (SMD-2382), and the loopback
- *   break-glass is the GUI's (SMD-2280).
+ *   break-glass is the GUI's (SMD-3307).
  *   Consent is asked of every client, first-party ones included, and names
  *   what the server has checked, not what the client calls itself: the
  *   `client_id` (for a metadata document, its host); where the code goes (an
@@ -64,6 +64,9 @@
  *   that one: anthropics/claude-code#95270). All three serve the provider's
  *   OpenID document, whose `issuer` is `<origin>/auth`;
  * - `/healthz`, for compose.
+ * And on a port of its own, ADMIN_PORT (3001), which no proxy rule routes to,
+ * the admin listener the operator GUI's page of grants reads and revokes
+ * through (SMD-3307 PR 3; admin.ts says what it takes and answers).
  * Each is matched on the request target's path as the library reads it, never
  * decoded or resolved. A target that is not a path (absolute-form, which only
  * a caller on the mesh can send: the proxy rewrites it), or that holds a
@@ -97,7 +100,7 @@
  */
 // Types alone: the server is made by target.ts's serve, guarded.
 import type http from "node:http";
-import Provider, { errors, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
+import Provider, { errors, interactionPolicy, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
@@ -105,6 +108,7 @@ import { configFromEnv, type Config } from "./config.ts";
 import { ACCESS_TOKEN_TYPE, chainRotates, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
+import { ADMIN_PORT, adminRoute, basicCredentials, isGuiClient } from "./admin.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
 import { guard, say, serve, targetOf, whyOf } from "./target.ts";
 
@@ -146,10 +150,37 @@ const THIRD_PARTY_GRANTS = new Set(["authorization_code", "refresh_token"]);
 
 const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata => {
   const base = { client_id, client_secret: C.secrets[client_id], token_endpoint_auth_method: "client_secret_basic" as const };
-  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code"], response_types: ["code"], redirect_uris: [p.redirect] };
+  // The GUI renews its session with a refresh token (SMD-3307): it asks for
+  // offline_access with prompt=login consent, and holds the token server-side,
+  // rotating under the same policy as a third-party client's (refreshTtl,
+  // chainRotates). Its prompt=login puts auth_time in its ID token, when the
+  // password was typed (the login result's ts), which the GUI holds against
+  // its sign-in's start; a request that drops it gets none, and the GUI
+  // refuses that. Not require_auth_time: the library then refuses every gui
+  // request without openid, which the evals' POC sends.
+  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect] };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
 });
+
+/** The clients the operator GUI signs in as (layout.ts's `gui` kind). */
+const GUI_CLIENTS = new Set(Object.entries(L.clients).flatMap(([id, p]) => (p.kind === "gui" ? [id] : [])));
+
+/**
+ * The library's prompts, with one check more on its sign-in: a GUI client is
+ * asked the password on every authorization, whatever its request says.
+ * `prompt=login` rides a URL the browser can change, and the AS's own session
+ * (a day, which the GUI's sign-out leaves) would otherwise let a later visitor
+ * of that browser through with a click (SMD-3307 review pass 4). `result.login`
+ * is set only on this interaction's own resume after the password.
+ */
+const policy = interactionPolicy.base();
+policy.get("login")!.checks.add(
+  // Its error named, as the prompt's own checks have it: prompt=none is answered login_required (review pass 5).
+  new interactionPolicy.Check("gui_password_every_time", "a GUI client is asked the password every time", "login_required", (ctx) =>
+    GUI_CLIENTS.has(ctx.oidc.client?.clientId ?? "") && !ctx.oidc.result?.login ? interactionPolicy.Check.REQUEST_PROMPT : interactionPolicy.Check.NO_NEED_TO_PROMPT,
+  ),
+);
 
 /** POC ONLY (see the header): the library's internal reason for a refusal, which it never sends itself. */
 const POC_ERROR_DETAIL = C.pocErrorDetail;
@@ -186,7 +217,7 @@ const provider = new Provider(L.issuer, {
   // The brain's scopes are resource scopes, but a client's registered `scope` is checked against this list too.
   scopes: ["openid", "offline_access", ...SCOPES],
   // Access tokens take their resource's accessTokenTTL, which the library's default ttl functions read; a number here would override it.
-  // A refresh token (a third-party client's, with offline_access) lasts 14 days unused, within its grant's 30 (layout.ts refreshTtl, SMD-2286).
+  // A refresh token (a third-party client's or the GUI's, with offline_access) lasts 14 days unused, within its grant's 30 (layout.ts refreshTtl, SMD-2286).
   ttl: {
     Interaction: 600,
     Session: 86_400,
@@ -226,7 +257,7 @@ const provider = new Provider(L.issuer, {
     },
   },
   routes: { authorization: "/authorize" },
-  interactions: { url: (_ctx, interaction) => `/auth/interaction/${interaction.uid}` },
+  interactions: { policy, url: (_ctx, interaction) => `/auth/interaction/${interaction.uid}` },
   features: {
     devInteractions: { enabled: false },
     clientCredentials: { enabled: true },
@@ -441,16 +472,37 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     verifies.giveBack();
     flowTries.clear(uid);
     if (address !== undefined) signIns.succeeded(address);
-    return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"] } }, { mergeWithLastSubmission: false });
+    // ts: when the password was typed, which auth_time then says — not when the consent after it was pressed (review pass 5).
+    return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"], ts: Math.floor(Date.now() / 1000) } }, { mergeWithLastSubmission: false });
   }
   if (action === "confirm") {
     if (prompt.name !== "consent") return page(res, 400, "none", "not a consent step");
-    const grant = details.grantId ? await provider.Grant.find(details.grantId) : new provider.Grant({ accountId: session!.accountId, clientId: String(params.client_id) });
-    if (!grant) return page(res, 400, "none", "grant not found");
-    const d = prompt.details as { missingOIDCScope?: string[]; missingOIDCClaims?: string[]; missingResourceScopes?: Record<string, string[]> };
-    if (d.missingOIDCScope) grant.addOIDCScope(d.missingOIDCScope.join(" "));
-    if (d.missingOIDCClaims) grant.addOIDCClaims(d.missingOIDCClaims);
-    for (const [indicator, scopes] of Object.entries(d.missingResourceScopes ?? {})) grant.addResourceScope(indicator, scopes.join(" "));
+    const clientId = String(params.client_id);
+    let grant: InstanceType<typeof provider.Grant>;
+    if (GUI_CLIENTS.has(clientId)) {
+      // A GUI sign-in is a grant of its own, made from its request alone (the
+      // library validated its scope and resource before this page): a
+      // revocation of a session it replaced — which ends that session's whole
+      // grant — must not end this one, nor, landing while this page is open,
+      // leave it nothing to build on (SMD-3307 review passes 4 and 5).
+      // The brain's scopes count twice: among the provider's scopes (the
+      // `scopes` setting, which the library checks a grant's OIDC scope
+      // against) and as the REST core's resource scopes.
+      const asked = asking.scope.split(" ").filter(Boolean);
+      const brain = asked.filter((s) => (SCOPES as readonly string[]).includes(s));
+      grant = new provider.Grant({ accountId: session!.accountId, clientId });
+      grant.addOIDCScope(asked.filter((s) => s === "openid" || s === "offline_access" || brain.includes(s)).join(" "));
+      if (brain.length) for (const indicator of asking.resources) grant.addResourceScope(indicator, brain.join(" "));
+    } else {
+      // A third-party client's consent adds what it still lacks to the grant it has.
+      const held = details.grantId ? await provider.Grant.find(details.grantId) : undefined;
+      if (details.grantId && !held) return page(res, 400, "none", "grant not found");
+      grant = held ?? new provider.Grant({ accountId: session!.accountId, clientId });
+      const d = prompt.details as { missingOIDCScope?: string[]; missingOIDCClaims?: string[]; missingResourceScopes?: Record<string, string[]> };
+      if (d.missingOIDCScope) grant.addOIDCScope(d.missingOIDCScope.join(" "));
+      if (d.missingOIDCClaims) grant.addOIDCClaims(d.missingOIDCClaims);
+      for (const [indicator, scopes] of Object.entries(d.missingResourceScopes ?? {})) grant.addResourceScope(indicator, scopes.join(" "));
+    }
     const grantId = await grant.save();
     return provider.interactionFinished(req, res, { consent: { grantId } }, { mergeWithLastSubmission: true });
   }
@@ -617,7 +669,47 @@ const server = serve((req, res) => {
   purge();
 }));
 
-// A stop (compose's SIGTERM) closes the listener, lets the requests in flight
+// The admin listener (admin.ts; SMD-3307 PR 3): the operator GUI's page of
+// grants, on the mesh, routed by no proxy rule. The GUI client's credentials
+// are checked before the path is read. Every failure counts against the
+// socket's address (no proxy stands in front), on the token endpoint's
+// numbers, though that endpoint counts per address and client, and only
+// behind a trusted proxy; an address past them is refused for the rest of the
+// window, the GUI's own included, so a wrong secret ends in 429 there.
+const adminFailures = new WindowLimit(TOKEN_FAILURES.limit, TOKEN_FAILURES.windowMs);
+const GUI_SECRETS: Record<string, string | undefined> = Object.fromEntries([...GUI_CLIENTS].map((id) => [id, C.secrets[id]]));
+function answer(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
+  res.end(JSON.stringify(body));
+}
+const admin = serve((req, res) => {
+  const target = targetOf(req.url);
+  if (!target) return answer(res, 400, { error: "invalid_request", error_description: "bad request target: send the path alone" });
+  const address = req.socket.remoteAddress ?? "";
+  const wait = adminFailures.wait(address);
+  if (wait) return tooMany(res, wait, "too many failed authentications from this address");
+  if (!isGuiClient(basicCredentials(req.headers.authorization), GUI_SECRETS)) {
+    adminFailures.record(address);
+    return answer(res, 401, { error: "invalid_client", error_description: "the admin listener takes the operator GUI's client credentials, as HTTP Basic" }, { "www-authenticate": 'Basic realm="ob1-auth-admin"' });
+  }
+  const route = adminRoute(req.method ?? "", target.path);
+  if (route.kind === "list") return answer(res, 200, store.grants());
+  if (route.kind === "revoke") {
+    const client = store.dropGrant(route.id);
+    if (client === null) return answer(res, 404, { error: "not_found", error_description: "no live grant has that id" });
+    // The client it was for, by what the AS checked (its id); the GUI's log names the session (review pass 2). A
+    // metadata document's id is the client's own URL, which the library takes with a NEL, a C1 control or a
+    // bidirectional one in it: everything outside printable ASCII is written as an escape (review pass 3).
+    const said = JSON.stringify(client).replace(/[^\x20-\x7e]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+    console.log(`grant ${route.id} of client ${said} revoked on the operator's page of grants`);
+    res.writeHead(204, { "cache-control": "no-store" });
+    return res.end();
+  }
+  if (route.kind === "method") return answer(res, 405, { error: "method_not_allowed" }, { allow: route.allow });
+  answer(res, 404, { error: "not_found" });
+}).listen(ADMIN_PORT, "0.0.0.0", guard("the admin listener's start", () => console.log(`admin listener on ${ADMIN_PORT}: the operator GUI's page of grants, on the mesh`)));
+
+// A stop (compose's SIGTERM) closes the listeners, lets the requests in flight
 // finish for up to 5 s, closes the store and exits; without a handler Bun
 // ignored the signal and every stop waited out the grace period for SIGKILL
 // (server-portable/shutdown.ts measured the same). A second signal, or the
@@ -643,8 +735,15 @@ function stop(signal: string) {
   if (stopping) return done(1);
   stopping = true;
   try {
-    server.close(guard("the stop", () => done(0)));
+    // Done once both listeners have closed.
+    let open = 2;
+    const closed = guard("the stop", () => {
+      if (--open === 0) done(0);
+    });
+    server.close(closed);
+    admin.close(closed);
     server.closeIdleConnections();
+    admin.closeIdleConnections();
     setTimeout(guard("the stop's bound", () => done(1)), 5000).unref();
   } catch (e) {
     say(() => `the stop on ${signal} failed: ${whyOf(e)}`);

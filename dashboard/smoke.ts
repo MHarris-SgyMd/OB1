@@ -115,8 +115,8 @@ const attributesHold = (line: string) =>
 const redacted = (line: string) => line.replace(/=[^;]*/, "=…");
 
 // As a browser submits the form: HTML wanted (without `accept: text/html`,
-// SvelteKit answers an action as JSON for a fetch), same-origin (its CSRF
-// check reads `origin`).
+// SvelteKit answers an action as JSON for a fetch), same-origin (the GUI's
+// origin check reads `origin`, hooks.server.ts).
 const FORM = { "content-type": "application/x-www-form-urlencoded", accept: "text/html", origin: ORIGIN };
 const signIn = async (key: string) => {
   const r = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ key }).toString() });
@@ -257,6 +257,9 @@ async function notesArm() {
   const signedIn = await signIn(WRITE_KEY!);
   const home = await get("/");
   assert(signedIn.status === 303 && home.status === 200, `the write key signs in for the Notes arm (${signedIn.status}, ${home.status})`);
+  // The page of grants is a stack configured with the authorization server's (SMD-3307 PR 3; review pass 1): here, no nav names it and its page is a 404.
+  const grants = await get("/grants");
+  assert(!navOf(home.html).includes('href="/dashboard/grants"') && grants.status === 404, `with no authorization server, the write key's nav has no page of grants, and its address is a 404 (${grants.status})`);
   // The root layout reads the address, so SvelteKit runs it again at every navigation and the nav follows the registry (review pass 2; pass 4: only a browser run held it).
   const rootData = await get("/__data.json");
   let rereads = false;
@@ -383,7 +386,7 @@ if (NOTES_ONLY) {
   assert(signin.status === 200 && signin.html.includes('name="key"'), `/signin offers key sign-in (${signin.status})`);
   assert(/content-security-policy/i.test([...signin.headers.keys()].join(" ")) && signin.headers.get("x-frame-options") === "DENY", "…with a Content-Security-Policy, and no framing");
   // same-origin, never no-referrer: under no-referrer a browser posts a plain form with `Origin: null`, which
-  // SvelteKit refuses as cross-site, and sign-out — a form with no script — failed in every browser (review pass 1).
+  // the GUI's origin check refuses, and sign-out — a form with no script — failed in every browser (review pass 1).
   // This smoke sets Origin itself, so it holds the header that decides what a browser sends.
   assert(signin.headers.get("referrer-policy") === "same-origin", `…and Referrer-Policy same-origin, so a browser's form post carries its origin (${signin.headers.get("referrer-policy")})`);
   const nullOrigin = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: { ...FORM, origin: "null" }, body: new URLSearchParams({ key: WRITE_KEY }).toString() });

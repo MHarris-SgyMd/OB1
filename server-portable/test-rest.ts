@@ -11,7 +11,7 @@
  *   bun test-rest.ts
  */
 
-import { createAssert, RuntimeUrl, serveChild } from "../db/test-support.ts";
+import { createAssert, exitAndOutput, healthAt, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
@@ -31,13 +31,17 @@ const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
 const doc = openApiDocument() as { openapi: string; paths: Record<string, Record<string, Op>> };
 
+// Every stub server here listens on 127.0.0.1, where it is reached, as each child serveChild starts does: on every
+// address, macOS can give it a port another app (Tailscale, a VM's port forwarder) holds on 127.0.0.1, and that app
+// answers in its place (SMD-3323).
+
 // [16]'s measurement of what api.ts's idleTimeout is for, on this runtime: a
 // GET whose handler answers after 14 s, served at 255 and at Bun's default
 // (which cuts at its 10 s plus its sweep, about 12 s). Started here, so its
 // 14 s run beside every other section rather than after them all (SMD-3201);
 // [16] awaits it.
 const idleProbe = (idleTimeout?: number) => {
-  const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
+  const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), hostname: "127.0.0.1", fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
   return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 40)}`).finally(() => server.stop(true));
 };
 const idleProbes = Promise.all([idleProbe(255), idleProbe()]);
@@ -517,7 +521,7 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   let failing = false;
   const k2 = await generateKeyPair("ES256", { extractable: true });
   let serving: { keys: unknown[] } = jwks;
-  const jwksServer = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(serving)) : new Response("no", { status: 404 })) });
+  const jwksServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(serving)) : new Response("no", { status: 404 })) });
   const at = `http://127.0.0.1:${jwksServer.port}/auth/jwks`;
   let T = 0;
   const S = 1000;
@@ -653,7 +657,7 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
     let hits = 0;
     let body: unknown = jwks;
     let status = 200;
-    const srv = Bun.serve({ port: 0, fetch: () => (hits++, status === 200 ? Response.json(body) : new Response("down", { status })) });
+    const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => (hits++, status === 200 ? Response.json(body) : new Response("down", { status })) });
     const url = `http://127.0.0.1:${srv.port}/auth/jwks`;
     const k = remoteChecker(settings, url);
     assert((await k(await mint())).status === "ok" && hits === 1, `the deploy's checker reads once (${hits})`);
@@ -1237,7 +1241,7 @@ console.log("\n[11] `bun api.ts` stopped with a search in flight: the stop's bou
 {
   // A provider that answers no embedding for 5 s, so the search is in flight
   // when the stop's bound (OB1_STOP_GRACE=3: 1 s) cuts it.
-  const slow = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(5_000); return Response.json({ data: [{ embedding: [0] }] }); } });
+  const slow = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async () => { await Bun.sleep(5_000); return Response.json({ data: [{ embedding: [0] }] }); } });
   const api = await serveChild(import.meta.dir, "api.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub",
     OB1_LLM_BASE_URL: `http://127.0.0.1:${slow.port}/v1`, OB1_LLM_LOCAL: "1",
@@ -1258,6 +1262,45 @@ console.log("\n[11] `bun api.ts` stopped with a search in flight: the stop's bou
   const cut = out.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.outcome === "cut");
   assert(cut.length === 1 && cut[0]?.route === "/v1/search" && cut[0]?.tool === "search_thoughts" && cut[0]?.agent === "w" && cut[0]?.door === "api",
     `the search the stop cut has one line, \`cut\`, by its route, operation and key (${JSON.stringify(cut)}; ${out.slice(-400)})`);
+}
+
+console.log("\n[11b] `bun api.ts` listens where OB1_LISTEN_HOST says: serveChild's children on 127.0.0.1 alone, blank on every address; a value that is no IP address, or none this host has, stops it at start, never said (SMD-3323)");
+{
+  // Four at once: serveChild's own (127.0.0.1), one told "  " (blank, so every address, trimmed — passed to Bun as it
+  // came it would not bind), and two that exit before they serve: one told a planted value that is no address, one
+  // an address no host has (TEST-NET-1). A second loopback address tells the first two apart: a server on every
+  // address answers there, one on 127.0.0.1 alone does not. Probed, not assumed, so a host without IPv6 loopback
+  // (where [::1] refuses every server) asks 127.0.0.2, and one with neither fails here rather than holding nothing.
+  const PLANTED = "Zq9XwVk7Jp4RmT";
+  const refuse = (value: string) => Bun.spawn([process.execPath, "--no-env-file", "api.ts"], {
+    cwd: import.meta.dir, stdout: "pipe", stderr: "pipe",
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OPENROUTER_API_KEY: "stub", OB1_LISTEN_HOST: value },
+  });
+  const refusing = [refuse(` ${PLANTED} `), refuse("192.0.2.1")];
+  const [second, here, every] = await Promise.all([
+    secondLoopback(),
+    serveChild(import.meta.dir, "api.ts", { OPENROUTER_API_KEY: "stub" }),
+    serveChild(import.meta.dir, "api.ts", { OPENROUTER_API_KEY: "stub", OB1_LISTEN_HOST: "  " }),
+  ]);
+  // Its own body, not a status: another app holding the port on that address does not read as the child.
+  const at = (host: string | null, port: number) => healthAt(host, port, REST_HEALTH_BODY);
+  let seen: Record<string, string> = {};
+  try {
+    seen = { second: second ?? "none", here4: await at("127.0.0.1", here.port), here2: await at(second, here.port), every2: await at(second, every.port) };
+  } finally {
+    here.kill();
+    every.kill();
+  }
+  assert(second !== null, `a second loopback address reaches a server on every address ([::1] or 127.0.0.2), so the rows below can tell 127.0.0.1 alone apart (${JSON.stringify(seen)})`);
+  assert(here.up && seen.here4 === "the child" && seen.here2.startsWith("refused"), `serveChild's child listens on 127.0.0.1 alone: 127.0.0.1 answers, ${second} does not (${JSON.stringify(seen)})`);
+  // Asked at the second address alone: on every address, the child is the one this suite cannot keep from another app's
+  // 127.0.0.1 listener at its port (a stress run saw it once in 300), and its own body there is what shows every address.
+  assert(seen.every2 === "the child", `told a blank value, the child listens on every address, as unset: ${second} reaches it (${JSON.stringify(seen)})`);
+  const [notIp, notHere] = await Promise.all(refusing.map((child) => exitAndOutput(child)));
+  assert(notIp.code === 2 && notIp.said.includes("OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start") && !notIp.said.includes("Started") && !notIp.said.includes("Zq9X"),
+    `a value that is no IP address: exit 2 before it serves, said in words, the value never shown (exit ${notIp.code}; ${notIp.said.slice(0, 300)})`);
+  assert(notHere.code === 2 && notHere.said.includes("OB1_LISTEN_HOST (a value not shown) is not an address of this host, so the server did not start") && !notHere.said.includes("Started") && !notHere.said.includes("192.0.2"),
+    `an address this host does not have: exit 2 in words, not Bun's "Is port N in use?" (exit ${notHere.code}; ${notHere.said.slice(0, 300)})`);
 }
 
 console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named for its route, and the operation's under it; a fault an ERROR, a refusal its code; no key or query text in any; a real `bun api.ts` sends its spans to a collector at its stop");
@@ -1385,7 +1428,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // origin alone, and its stop sends what is batched (the batch's own delay is
   // 5 s), before it exits.
   const received: string[] = [];
-  const collector = Bun.serve({ port: 0, fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") received.push(await req.text()); return Response.json({}); } });
+  const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") received.push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const STUB = { OB1_STOP_GRACE: "3", MCP_ACCESS_KEYS: `w:write:${hashKey("write-raw")}`, OPENROUTER_API_KEY: "stub" };
   const api = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://otel-user:otel-secret@127.0.0.1:${collectorPort}` }, { waitForSdk: true });
@@ -1407,7 +1450,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // With a collector that fails: the stop says the telemetry was not all sent — not
   // that the pool did not close — and the failed export says so, by origin and
   // kind, neither the endpoint's credentials nor its headers in any line (review pass 1).
-  const gone = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 500 }) });
+  const gone = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("no", { status: 500 }) });
   const gonePort = gone.port;
   const lone = await serveChild(import.meta.dir, "api.ts", {
     ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://otel-user:otel-secret@127.0.0.1:${gonePort}`, OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer s3cr3t-header",
@@ -1439,9 +1482,10 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   assert(!killed.up && killedMs < 3_000, `a child killed by a signal: not up, seen in ${Math.round(killedMs)} ms`);
   // A child that binds but whose /health answers 503 is not up: serveChild reads the port from the child's start line
   // and up from its /health, never from the bind alone (SMD-3263 review pass 2). It exits in a second, which ends the
-  // wait.
+  // wait. It listens where serveChild's OB1_LISTEN_HOST says, as api.ts does: on every address, another app's
+  // 127.0.0.1 listener at its port could answer its /health 200 and read as it (SMD-3323).
   const busy = `${tmpdir()}/smd3263-busy-${process.pid}.ts`;
-  await Bun.write(busy, "export default { port: Number(process.env.PORT), fetch: () => new Response('busy', { status: 503 }) };\nsetTimeout(() => process.exit(0), 1_000);\n");
+  await Bun.write(busy, "export default { port: Number(process.env.PORT), hostname: process.env.OB1_LISTEN_HOST, fetch: () => new Response('busy', { status: 503 }) };\nsetTimeout(() => process.exit(0), 1_000);\n");
   const busyChild = await serveChild(tmpdir(), busy, {});
   busyChild.kill();
   await Bun.file(busy).delete();
@@ -1460,7 +1504,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     // The waits that ran out, named in a failing row's message (review pass 1).
     const missed: string[] = [];
     try {
-      collector = Bun.serve({ port: 0, idleTimeout: 0, fetch: answer });
+      collector = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 0, fetch: answer });
       // Read before the stop: a stopped server's port is not its port.
       port = collector.port!;
       const started = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${port}`, OTEL_BSP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4", ...env }, { waitForSdk: true });
@@ -1510,7 +1554,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // after the signal, and the drain would wait on nothing (SMD-3297 review pass 4).
   let searchArrived = () => {};
   const arrived = new Promise<void>((resolve) => { searchArrived = resolve; });
-  const heldProvider = Bun.serve({ port: 0, fetch: async (req) => {
+  const heldProvider = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
     if ((await req.text()).includes("a search the drain waits on")) searchArrived();
     await Bun.sleep(5_500);
     return Response.json({ data: [{ embedding: [0] }] });

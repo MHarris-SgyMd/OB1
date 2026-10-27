@@ -228,6 +228,16 @@ jobs:
         working-directory: dashboard
         run: bun run check
 
+      # SMD-3307: the GUI's sign-in through the authorization server, offline:
+      # dashboard/src/lib/server/oauth.ts against a fake token endpoint — the
+      # authorization request, the code's exchange, a refresh and a revocation
+      # as the `gui` client, and a session's renewal (once per session at a
+      # time; a refused one ends it, an unanswered one leaves it). The real AS
+      # is driven in deploy-stack-auth's GUI step.
+      - name: The operator GUI's sign-in through the authorization server, offline
+        working-directory: dashboard
+        run: bun test-oauth.ts
+
       - name: The MCP server over the REST core
         working-directory: mcp-server
         run: bun test-mcp.ts
@@ -480,7 +490,7 @@ jobs:
 
       - name: Authorization server rules
         working-directory: deploy/auth
-        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check
+        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
@@ -701,9 +711,9 @@ jobs:
       matrix:
         shard: [rest, sleep, long, extract]
 
-    # A service container, not with-postgres.sh — the runner provides the database
-    # and Actions handles readiness. The local script exists for developers, who
-    # mostly run podman.
+    # A service container, not with-postgres.sh — the runner provides the
+    # database, and "Wait for the service Postgres" below waits for it. The
+    # local script exists for developers, who mostly run podman.
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -712,11 +722,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -730,6 +735,30 @@ jobs:
       - name: Install
         working-directory: db
         run: bun install --frozen-lockfile
+
+      # The service carries no health check, so the runner starts these steps
+      # as soon as its container does — with the 5 s pg_isready check it
+      # carried before, it held them until the check first passed, about 6 s
+      # later — and the checkout and install overlap Postgres's start
+      # (SMD-3196). This waits for it before the first suite, as
+      # db/with-postgres.sh does: over TCP inside the container, since over the
+      # socket the entrypoint's initialising server, which listens on no TCP
+      # address, reads as ready for a moment before the real one is up; and a
+      # container that has exited ends the wait at once.
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
@@ -765,11 +794,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
       # The upgrade and preflight pair's own Postgres, which the start step's
       # two legs reach on 5433: its comment has why (SMD-3195).
       pair-postgres:
@@ -779,11 +803,6 @@ jobs:
           POSTGRES_DB: ob1upgrade
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -797,6 +816,24 @@ jobs:
       - name: Install
         working-directory: server-portable
         run: bun install --frozen-lockfile
+
+      # The services carry no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"; ready "$PAIR_PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
+          PAIR_PG: ${{ job.services.pair-postgres.id }}
 
       # Two suites side by side, each against its own database (SMD-2219), on
       # the second service, pair-postgres, which they have to themselves:
@@ -1334,6 +1371,10 @@ jobs:
             || { echo "compose.yaml's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+          # Under the auth profile, the break-glass listener (SMD-3307) publishes
+          # the one port more, on loopback too, its label the same script.
+          docker compose -f compose.yaml --profile auth config --format json \
+            | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.breakglass.ports | length == 1) and (.services.breakglass.ports[0].published == "8001") and (.services.breakglass.labels["ob1.forwarder"] == .configs.forwarder.content)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is; it dials the REST
           # core by its rooted mesh name (SMD-2294; the table is check 28's
@@ -1369,9 +1410,10 @@ jobs:
           # SMD-2285: the authorization server publishes nothing, joins only
           # the internal mesh and an outward network of its own (SMD-2583),
           # and is handed no Postgres credential, no plain password and not
-          # the POC's switch.
+          # the POC's switch. The profile's two ports are the forwarder's and
+          # the break-glass listener's (SMD-3307), held above.
           docker compose -f compose.yaml --profile auth config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
+            | jq -e '([.services[].ports[]?] | length == 2) and (.services.auth | has("ports") | not) and ((.services.auth.networks | keys) == ["auth-egress", "mesh"]) and .networks.mesh.internal == true and ((.services.auth.environment | keys) | all(test("POSTGRES|DATABASE|PASSWORD$|POC") | not))'
           # SMD-1849 PR 3a: the observability profile's collector publishes
           # nothing and joins the internal mesh, and since PR 3b the internal
           # telemetry network, where it scrapes pg-exporter, which publishes
@@ -1406,7 +1448,7 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["breakglass", "forwarder"]) and (on("front") == ["breakglass", "forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1593,8 +1635,8 @@ jobs:
               compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
-              # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
-              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
+              # The release's: an image and its pull policy, on any service but the proxy, its forwarder (SMD-2583) and the break-glass listener, the forwarder's image too (SMD-3307).
+              compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ] && [ "$s" != breakglass ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
             esac
           }
@@ -1882,7 +1924,10 @@ jobs:
       # its public origin offers no key sign-in, whether or not the
       # authorization server answers — no key field, and a post of the write
       # key from the origin it is configured for refused with no cookie, by
-      # the GUI's own words (not SvelteKit's cross-site refusal).
+      # the GUI's own words (SvelteKit's own origin check is off). With the
+      # authorization server not running, its page says sign-in is unavailable
+      # (SMD-3307: the GUI holds the `gui` client's secret from .env, so this
+      # is the AS's absence, not the GUI's settings).
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |
@@ -1890,6 +1935,7 @@ jobs:
           docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps api mcp app
           page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
           grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
+          grep -q 'data-testid="unavailable"' <<<"$page" || { echo "the configured GUI, its authorization server not running, does not say sign-in is unavailable" >&2; exit 1; }
           if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
           code=$(curl -s -o /tmp/gui-signin -D /tmp/gui-signin-headers -w '%{http_code}' --max-time 15 -X POST \
             -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' -H 'origin: https://brain.example.test' \
@@ -3639,6 +3685,100 @@ jobs:
           [ "$(cut -d' ' -f2 <<<"$got")" = 30 ] || { echo "the 503 for a token with no keys read says Retry-After \"$(cut -d' ' -f2 <<<"$got")\", not 30"; exit 1; }
           auth rm -sfv auth
 
+      # SMD-3307: the operator GUI signs the operator in through the
+      # authorization server. The AS's side first: the `gui` client signed in
+      # as the GUI does (restart-check.ts --gui-refresh) gets a refresh token,
+      # a refresh rotates it, and once revoked, as the GUI's sign-out revokes
+      # it, it is refused; a second sign-in in that browser without
+      # prompt=login is asked the password all the same, on a grant of its
+      # own that the first one's revocation leaves, and prompt=none is
+      # login_required. Then the GUI itself, recreated on the configured
+      # .env (its OB1_AUTH_SECRET_GUI, the origin) beside a REST core that
+      # takes the AS's tokens, driven through the proxy as a browser would
+      # (dashboard/smoke-oauth.ts): the start, the password and consent at
+      # the AS, the callback opening a session, the views under the token, no
+      # token in any page, header, navigation data, script or cookie (the
+      # Verify line), a replayed, forged, stolen or other browser's callback
+      # refused, a post from another origin refused, sign-out, the next
+      # visitor asked the password, and a denied consent. The page of grants
+      # (PR 3): the AS's admin listener (deploy/auth/admin.ts, port 3001)
+      # holds its rules from inside its container (restart-check.ts --admin:
+      # no credential, the MCP service's own and a wrong secret refused, the
+      # GUI's listing); the REST core reaches it on the mesh and is refused
+      # without the GUI's credentials, the forwarder, off the mesh, reaches
+      # nothing, and the proxy routes nothing to it. A third-party client is
+      # signed in with a refresh token, refreshed once so it is one the server
+      # took (--hold-grant); the smoke revokes its grant on the page, and its
+      # refresh token is refused at once (--refused; its access token lapses
+      # within 600 s, the maintainer's choice). Last, the listener's failure
+      # limit: 20 wrong secrets from the container's own address (one no
+      # other call uses), each 401, then the address turned away, the GUI's
+      # own credentials from it too (--admin-lockout, which leaves that
+      # address locked out for the window; nothing else dials it). Every sign-in the step makes ends revoked, so the AS's store
+      # holds no refresh token of the `gui` client after it: sign-out revoked
+      # the GUI's. The password goes by name, never on a command line, and the
+      # held refresh token sits in a file of the runner's own, removed after.
+      - name: The operator GUI signs in through the authorization server
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
+          # The REST core and the GUI after it, so their first calls look each name up afresh (as the step above does).
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api app
+          OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          export OB1_AUTH_OPERATOR_PASSWORD
+          auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
+          auth exec -T auth bun restart-check.ts --admin
+          [ "$(auth exec -T api bun -e 'const r = await fetch("http://auth.ob1.internal.:3001/grants"); console.log(r.status)')" = 401 ] || { echo "the admin listener did not answer the REST core on the mesh with 401 without the GUI's credentials" >&2; exit 1; }
+          [ "$(auth exec -T forwarder bun -e 'fetch("http://auth.ob1.internal.:3001/grants", { signal: AbortSignal.timeout(3000) }).then((r) => console.log(r.status), () => console.log("unreachable"))')" = unreachable ] || { echo "the forwarder, off the mesh, reached the admin listener" >&2; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:8010/grants)" = 404 ] || { echo "the proxy routes /grants somewhere" >&2; exit 1; }
+          held=$(mktemp)
+          ( umask 077; auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --hold-grant > "$held" )
+          (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test --revoke-client "$(jq -r .client_id "$held")")
+          auth exec -T auth bun restart-check.ts --refused < "$held"
+          rm -f "$held"
+          auth exec -T auth bun restart-check.ts --admin-lockout
+          left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
+          [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
+          # The step below removes the authorization server, after its break-glass check with it up.
+
+      # SMD-3307's break-glass port (ADR decision 15): the `breakglass` service,
+      # under the auth profile, publishes 127.0.0.1:BREAKGLASS_PORT to the
+      # proxy's `breakglass` entrypoint, which routes /dashboard alone and marks
+      # it. On 8002 here, not its default, so the GUI's reading of the knob is
+      # held too (a form there is taken from http://127.0.0.1:8002 alone); the
+      # GUI is recreated on it. dashboard/smoke-breakglass.ts first with the
+      # authorization server up (--as-up): a sign-in through it starts on the
+      # origin and not on the break-glass port, which offers the key all the
+      # same, and a read key's revoke on the page of grants is the action's
+      # own 403 (with the server down, the page's load would answer it).
+      # Then the server is removed, as the steps after expect, and the GUI
+      # recreated again, so its 30 s answer from the server's probe is not one
+      # from before the server went; the full run holds the Verify lines: on
+      # the origin no key is offered or taken — a forged X-OB1-Listener (the
+      # `web` entrypoint deletes it), `Host: 127.0.0.1` from that origin and
+      # from the configured one included — while on the break-glass port the
+      # key signs in with the server down, under a cookie of its own name, its
+      # session opening nothing on the origin; a post there from another
+      # loopback port, localhost, the configured origin or none is refused, and
+      # nothing but the GUI is routed; the page of grants says that the server
+      # is down, and a read key there has no such page (403, its revoke too);
+      # the smoke requires the read key, so these rows never skip. The keys go by name, never on a command line. `breakglass` is
+      # removed after.
+      - name: The break-glass port takes a key while the authorization server is down
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          export BREAKGLASS_PORT=8002
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps app
+          auth up -d --wait --wait-timeout 60 --no-deps breakglass
+          (cd ../dashboard && bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test --as-up)
+          # Gone again, as the steps above leave it: the next step meets no authorization server.
+          auth rm -sfv auth
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps app
+          (cd ../dashboard && bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test)
+          auth rm -sf breakglass
+
       # SMD-1846. What the proxy itself owes, beside the smoke:
       # - /.well-known, bare and under it, is answered by the proxy, not the
       #   server — Traefik's 404 body, where the server's would be "Not
@@ -4157,11 +4297,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -4179,6 +4314,23 @@ jobs:
       - name: Typecheck
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
+
+      # The service carries no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with

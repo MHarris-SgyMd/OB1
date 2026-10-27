@@ -19,8 +19,7 @@
  * worker's process is gone, and for extraction the last judged block's
  * malformed answers (SMD-2266's alarm, which a follower otherwise says only on
  * stderr), and for the sleep scheduler `slept`, its current or last sleep's
- * `from` and `to` (SleepMark), and `reads`, whether its role reads the query
- * log (LogReads, SMD-2678), and `held`, the thoughts its wakes hold back
+ * `from` and `to` (SleepMark), and `held`, the thoughts its wakes hold back
  * (SleepHeld, SMD-2694), and `budget`, its budget in force and the sleeps
  * stopped on it (SleepBudget, SMD-2679; `slept.budget` says which stopped); and `waitingMidPass`, the passes waiting mid-pass for a
  * provider that stopped answering — the sleep scheduler's by name, a
@@ -86,9 +85,6 @@ export type MalformedBlock = { answers: number; bad: number; alarm: boolean };
  */
 export type SleepMark = { from: string; to: string | null; budget?: BudgetStop; limit?: number };
 
-/** Whether the sleep scheduler's role reads query_log, as its start found: a search then wakes it; otherwise only writes do (SMD-2678). */
-export type LogReads = "yes" | "denied" | "missing";
-
 export interface PassStamper {
   /** The row's key. */
   key: string;
@@ -114,12 +110,6 @@ export interface PassStamper {
    * /health show it (SMD-2678). Only the scheduler sets it.
    */
   slept?(mark: SleepMark): void;
-  /**
-   * The sleep scheduler's word on whether its role reads query_log (`reads`
-   * in the value), so preflight's `sleep` row says what wakes the scheduler,
-   * not what preflight's own role may read (SMD-2678, review pass 1).
-   */
-  watching?(reads: LogReads): void;
   /**
    * The sleep scheduler's mark of the passes waiting at their start for a
    * provider that does not answer (`waiting` in the value, left out while
@@ -254,7 +244,6 @@ export function passStamper(opts: {
   let ended = false;
   let malformed: MalformedBlock | null = null;
   let slept: SleepMark | null = null;
-  let reads: LogReads | null = null;
   let waiting: readonly string[] = [];
   let waitingMidPass: readonly string[] = [];
   let refused: string | null = null;
@@ -267,7 +256,7 @@ export function passStamper(opts: {
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(aside ? { aside } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(aside ? { aside } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -330,9 +319,6 @@ export function passStamper(opts: {
     },
     slept(mark) {
       slept = mark;
-    },
-    watching(r) {
-      reads = r;
     },
     waiting(passes) {
       waiting = [...passes];

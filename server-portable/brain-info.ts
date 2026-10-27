@@ -197,8 +197,6 @@ export interface WorkerHeartbeat {
    * or not of the shape.
    */
   slept?: { from: string; to: string | null; budget?: BudgetStop; limit?: number };
-  /** Whether the sleep scheduler's role reads query_log, as its start found (SMD-2678); absent for the other workers and an older scheduler. */
-  reads?: "yes" | "denied" | "missing";
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
   waiting?: ("reembed" | "extract" | "consolidate")[];
   /**
@@ -417,7 +415,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const slept = s !== null && typeof s === "object" && typeof s.from === "string" && UTC_INSTANT.test(s.from) && (s.to === null || (typeof s.to === "string" && UTC_INSTANT.test(s.to)))
       ? { from: s.from, to: s.to as string | null, ...(stoppedOn ? { budget: stoppedOn } : {}), ...(limit !== undefined ? { limit } : {}) }
       : undefined;
-    const reads = worker === "sleep" && (v!.reads === "yes" || v!.reads === "denied" || v!.reads === "missing") ? v!.reads : undefined;
     // Its waiting passes and its refusal (SMD-2752), each left off when not
     // of the shape: the passes by name, each once; the refusal of the list.
     const w = worker === "sleep" ? v!.waiting : undefined;
@@ -457,7 +454,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ended: v!.ended === true || v!.outcome === "stopped",
       malformed,
       ...(slept ? { slept } : {}),
-      ...(reads ? { reads } : {}),
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),

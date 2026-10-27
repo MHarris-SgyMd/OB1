@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { base } from '$app/paths';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
@@ -11,7 +12,15 @@
 <div class="max-w-md mx-auto px-6 py-16">
 	<div class="bg-bg-card border border-white/10 rounded-2xl p-8">
 		<h1 class="text-2xl font-semibold mb-2">Sign in</h1>
-		{#if data.offered}
+		{#if data.refused}
+			<div class="text-sm text-red-400 mb-6" role="alert" data-testid="refused">{data.refused}</div>
+		{/if}
+		{#if data.mode === 'key' || data.mode === 'breakglass'}
+			{#if data.mode === 'breakglass'}
+				<p class="text-sm text-text-muted mb-4" data-testid="breakglass">
+					Break-glass sign-in: this is the brain's loopback-only port, for its operator on this machine while the authorization server is down or unusable. It takes an access key whatever the authorization server's state; the public address never does.
+				</p>
+			{/if}
 			<p class="text-sm text-text-muted mb-8">
 				Paste an access key for this brain. A read key or a write key opens the dashboard; a capture-only key may add thoughts and nothing else, so it is refused here.
 			</p>
@@ -57,9 +66,21 @@
 					{loading ? 'Signing in…' : 'Sign in'}
 				</button>
 			</form>
+		{:else if data.mode === 'oauth'}
+			<p class="text-sm text-text-muted mb-8">
+				This brain signs its operator in through its authorization server. Key sign-in is off here: a configured stack's public origin never offers a key.
+			</p>
+			<!-- A form, not a link: a hover's preload would start a sign-in, and so could a link planted elsewhere. -->
+			<form method="POST" action="{base}/auth/start" data-testid="oauth">
+				<button type="submit" class="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium">Sign in through the authorization server</button>
+			</form>
+		{:else if data.mode === 'unavailable'}
+			<p class="text-sm text-text-muted" role="alert" data-testid="unavailable">
+				Sign-in is unavailable: the authorization server is not answering. Key sign-in is off on this public address whatever the authorization server's state, so that stopping it opens no weaker door. Start it again on the brain's machine (<code>compose up -d --wait auth</code>, with the stack's other files). Meanwhile its operator signs in with an access key on that machine's break-glass port{#if data.breakglassPort}, <code>http://127.0.0.1:{data.breakglassPort}/dashboard/</code>{/if}, which no tunnel reaches.
+			</p>
 		{:else}
-			<p class="text-sm text-text-muted" role="alert">
-				Key sign-in is off: this stack is configured with the authorization server (COMPOSE_PROFILES names auth), and its public origin never offers a key. Sign-in through the authorization server, and a loopback-only key sign-in for when it is down, are still to come (SMD-2280).
+			<p class="text-sm text-text-muted" role="alert" data-testid="misconfigured">
+				Sign-in is unavailable: this stack is configured with the authorization server (COMPOSE_PROFILES names auth), but the dashboard has no <code>OB1_AUTH_SECRET_GUI</code> or no sound <code>OB1_PUBLIC_ORIGIN</code>. Key sign-in is off here. The operator sets both in <code>deploy/.env</code> and recreates <code>app</code>; meanwhile, on the brain's machine, the break-glass port{#if data.breakglassPort} (<code>http://127.0.0.1:{data.breakglassPort}/dashboard/</code>){/if} takes an access key.
 			</p>
 		{/if}
 	</div>

@@ -258,10 +258,10 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3048 assertions: 3048 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and eleven (111) migrations applied, and
-`\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
-the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
+`bun test-schema.ts` prints `3063 assertions: 3063 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and twelve (112) migrations applied, and
+`\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
+the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
 
 ## The migrations
@@ -300,11 +300,12 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
-migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
-baseline `0.0.0+upstream.9543c29`), and every release cut appends the migration
+migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
+it carried `+upstream.<sha>`, and 044 wrote the pre-first-release baseline
+`0.0.0+upstream.9543c29`), and every release cut appends the migration
 that writes its version as the last file of the range it freezes: 048 writes
 `1.0.0+upstream.9543c29`, the first release (`001..048`), and 051 writes
 `1.1.0+upstream.9543c29`, the second (`049..051`), and 057 writes
@@ -315,7 +316,7 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.6.0+upstream.9543c29`, the seventh (`077..081`), and 083 writes
 `1.7.0+upstream.9543c29`, the eighth (`082..083`), and 089 writes
 `1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
-`1.9.0+upstream.9543c29`, the tenth (`090..103`). `preflight` prints the
+`1.9.0+upstream.9543c29`, the tenth (`090..103`); from 2.0.0, the eleventh, a stamp is the plain version. `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -2053,12 +2054,16 @@ before that migration (070 from v1.9.0): upgrade the server, never run the
 `--reapply` the older preflight prints. A server left running across
 the migration fails each listing on a connection that had already listed
 ("cached plan must not change result type", the result type changed) until
-it restarts. DDL alone; no row moves; no grant is carried. Refuses by name
+it restarts: its reads asked for `*`. Since SMD-3302 the brain's own code
+names the columns it reads from a function, table or view (check 41), so a
+statement re-plans to the same result type when a later migration adds a
+column; compat/supabase-sql names the columns it can, at run time, since
+SMD-3329. DDL alone; no row moves; no grant is carried. Refuses by name
 without 016, 025 or 029; a re-apply is a no-op. test-schema [98] (230 rows
-walked in pages of 200 and of 7, ties across page edges, a stale row re-judged
-under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade
-[20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,
-the store, e2e and REST suites.
+walked in pages of 200 and of 7, ties across page edges, a stale row
+re-judged under the cursor, the partial cursor, 109 re-applied beside it),
+test-upgrade [20bb], test-live [16] (`--after` over 51 rows),
+`server-portable/test-preflight.ts`, the store, e2e and REST suites.
 
 Migration 111 records a thought's own subject (SMD-3306). The consolidation pass
 decides "evolves" pair by pair, and three rounds of asking its link step another
@@ -2093,6 +2098,32 @@ test-schema [99] (the key's shape, every refusal, each action of the door, the
 lineage and the delete), test-upgrade [20bc] (refused without each
 prerequisite; onto a populated brain at 110, nothing moved), test-live [10h]
 (the pass and the sweep), `server-portable/test-preflight.ts`.
+
+Migration 112 gives a thought a `client_key`: one thought per key (SMD-3314).
+The canary is a brain of its own (SMD-2872), and the operator's and agents'
+writes reach it by a client that repeats each write there. A thought captured on
+each brain gets two ids, while an edit, a delete or a `supersedes` names it by
+the id the first brain gave it. `capture_thought`'s `client_key` keeps that id
+on the copy as `metadata.client_key`, and the servers resolve a name to the
+thought with that id, else the one keeping it as its key: `update_thought`,
+`delete_thought`, and the `supersedes` and `derived_from` of either. A key that
+names a thought already returns it and writes nothing; a capture-only key is
+refused the key, and its names stay ids (SMD-1298's existence-oracle rule). The
+key lives in metadata, not a column: the event carries the row's metadata (055,
+060), so a replay keeps it. The servers refuse it in a caller's `metadata` or
+`metadata_patch`, and a re-capture onto a row keeping another key keeps that
+one. The file is one unique partial btree on `thoughts
+((metadata->>'client_key'))` where the value is not null, which the servers'
+read of a key walks. Rows that already share a value (a caller's metadata could
+set the key before 112) are refused by name before the build; a trigger
+(`ob1_client_key_set_once`) refuses a write that would give a keyed row another key,
+with its event, and the server captures it again without the key (`held`); an index of
+another shape, or an INVALID one, under its name is refused naming the statement
+that clears it, as 100's is. Needs nothing past 001; a re-apply is a no-op; no
+grant moves. test-schema [100] (the index's shape, one thought per key, the
+duplicate refusal, the re-apply), test-upgrade [20bd] (onto a populated brain at
+111, a duplicate refused by name), `server-portable/test-e2e-sql.ts` [24] (the
+tools).
 
 ## What changed relative to the guide
 
@@ -2139,18 +2170,17 @@ this.)
 `db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
 same one, grouped by what the role does. Preflight's `write privileges` check
 refuses a server role missing any of the **capture** group; `migrate.ts --grant`
-issues every group at once but the opt-in **sleep** group, or with `--groups
-capture,worker,…` those alone (SMD-2289) — the only way to issue **sleep**
-(SMD-2678). `--groups` revokes nothing; `--exact` adds the
+issues every group at once, or with `--groups
+capture,worker,…` those alone (SMD-2289). `--groups` revokes nothing; `--exact` adds the
 revoke, in the grant's own transaction: a member of another role or an owner
 of anything is refused, then what an ACL grants the role on a
 table or column, a sequence or a routine, and CREATE on a schema or the
 database, go (schema USAGE, CONNECT and TEMP stay); it is refused if it still
 holds anything else (named by catalog and database); then the groups are
-granted, so what it holds here is theirs — so an `--exact` without `--groups`
-also takes away a **sleep** grant made earlier: name it again
-(`--groups <its groups>,sleep --exact`) for a scheduler's role, and restart
-the scheduler after either, since it reads the privilege once at its start.
+granted, so what it holds here is theirs — which is how a role granted the
+**sleep** group before 2.0.0 loses its `SELECT` on `query_log`: the group is
+retired (SMD-3315), `--groups` refuses its name, and a plain `--grant … --exact`
+leaves the role every group's privileges and no read of the log.
 Every `--grant`, and `login-role.ts`,
 holds one advisory lock, so two at once in one database queue. `db/login-role.ts --role <name> --password-env <VAR>`
 creates or updates the LOGIN role itself (not a superuser, owning nothing,
@@ -2209,7 +2239,6 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
-| **sleep** — the sleep scheduler (`sleep.ts`, the compose `sleep` profile, SMD-2678): a search logged in the query log wakes the brain. **Opt-in:** a plain `--grant` leaves it out, since the log holds every search's text; only `--groups …,sleep` issues it. A role without it sleeps on writes alone, and the scheduler and preflight's `sleep` row say so | `query_log` (034) | `SELECT` |
 | **jobs** — the durable async job registry (069, SMD-2318): the server writes a row per long-running job as the in-memory registry moves it along (INSERT on start, UPDATE on each state change, SELECT for the poll's read-back after a restart or an eviction), and the owner or a scheduler prunes terminal rows with `prune_jobs` (DELETE). Soft like the query log — without it the async handles fall back to the in-memory registry (SMD-2273), so a role missing it is not refused, only less durable | `jobs` (069) | `SELECT, INSERT, UPDATE, DELETE` |
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
@@ -2273,7 +2302,7 @@ a superuser), after the migrations are applied:
 bun migrate.ts --url ... --grant your_role
 ```
 
-`--grant` issues exactly the list above, but for the opt-in **sleep** group,
+`--grant` issues exactly the list above,
 for the tables, views, sequences and
 functions that exist, in one transaction — and before committing it asks the
 catalog whether the role now holds each privilege, because a grantor that holds
@@ -2793,7 +2822,7 @@ OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorde
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
-bun extract-entities.ts --url … --subjects              # each thought's own subject where none stands at its text: the rules, then the judge model for the rest (SMD-3306)
+bun extract-entities.ts --url … --subjects              # each thought's own subject where none is current — none at its text, or one an older rule or question found: the rules, then the judge model for the rest (SMD-3306)
 bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
 #   with --limit N and --timeout SECONDS (300, per model call) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
@@ -3025,36 +3054,64 @@ will do before it claims anything.
 
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subject when a rule finds it: the ticket it is filed under
-(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else
-the first ticket on its first non-blank line. A ticket-shaped word there counts
-unless its prefix is on a fixed list of encodings, hashes, protocols,
-standards, licences, model names and dated periods, so `UTF-8`, `SHA-256` or
-`GPT-4` leaves the thought to the model, and a key is the same on every brain
-and every run. It goes through migration 111's
-`record_thought_subject` at the text the claim read, under the rules' key
-`subject:rules@r1`, and the pass asks no model for it. `--subjects` is the sweep
-for the rest (`db/subject-sweep.ts`): each thought with no standing subject at
-its current text, extracted before 111, keyed by no rule or edited since, gets
-the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`). The model is
-asked step 1 of the mediated-pair test about the thought alone, SMD-3299's
-round 4 own question word for word (`server-portable/subject.ts`), and its
-answer is read into a key: the first ticket id in it, else a PR's number, else a
-release's version, else the answer as a lower-case phrase. On SMD-3299's 275
-canary thoughts, blind raters agree on a ticket for 245; the rules named one for
-232 and were right on 230, and with the 27B asked about the other 13, 243 were
-right (99.2%), where the raters agree with each other on 98.1%. The sweep takes
-one thought at a time without a lease, the door's lock and fingerprint check
-making a sweep beside the pass safe. An answer naming nothing records nothing,
-so the next sweep asks again; one that is not JSON with a subject records
-nothing either, is said, and exits 1, as the pass fails a malformed answer.
+(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
+session summary's header ticket, when the capture hook's header lists that one
+alone and one of the session's listed prompts names it too, in any case (not its
+title, which may be the harness's own and name the branch's ticket). The
+hook's header lists the tickets a session's prompts named, and its branch's or
+directory's only when they named none: a session on a branch may have done other
+work, and a header listing several, or its full three, is the model's to choose
+among. A ticket-shaped word counts unless
+its prefix is on a fixed list of encodings, hashes, protocols, standards,
+licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
+no ticket, and a key is the same on every brain and every run. It goes through
+migration 111's `record_thought_subject` at the text the claim read, under its
+rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
+no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
+each thought with no current subject — none at its text (extracted before 111,
+keyed by no rule, or edited since), or one found under an older rule or question
+— gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`), the door
+replacing the old one. The model is asked the subject's own question about the
+thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
+answer is read into a key: the first ticket id in it, else the PR it is (an
+answer that is one PR: a PR among other numbers is none), else a release's
+version, else the answer as a lower-case phrase. A ticket or a release counts
+only when the thought itself names it, and a PR only when its number appears in
+it: one it does not name is the model's invention, or its copy of the question's
+example, and is dropped. The
+question asks for one subject: a ticket by its id alone. Version 1 read
+any note's first-line ticket and asked SMD-3299's round 4 question; on 160
+canary thoughts it agreed with fresh blind raters 0.910 of the time against
+their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
+for sessions that did other work, a note's first-line ticket that was only
+context, and vague model phrases among the misses. The sweep takes one thought
+at a time without a lease, the door's lock and fingerprint check making a sweep
+beside the pass safe. An answer naming nothing records nothing, so the next
+sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
+its thought is asked again at every sweep, and counted in the summary, until
+SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` counts
+each thought taken, in id order from the first, so such a thought is taken first
+again, as is one a `--subjects rules` run leaves to the model. A run's summary
+counts the subjects it recorded in place of a standing one, and how many of those
+took a new key. One that is not
+JSON with a subject records nothing either, is said, and exits 1, as the pass
+fails a malformed answer. A changed judge model leaves its predecessor's
+subjects standing, current at the same question: nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today). The egress gate
+been measured on the question (the stable brain's, today). On a brain upgraded
+from version 1 it finds every filed ticket again, unchanged, under the metadata
+rule's own key, and leaves every thought the model must answer under its old
+subject, out of date and counted, until a run with the model. There the
+extraction pass, too, finds an edited thought's subject only when a rule keys it:
+an edited note version 1 keyed by its first line keeps its old subject at its old
+text until a `--subjects` run. The egress gate
 reads each row before its question, and a policy that refuses every row
 refuses the sweep before any; the rules alone send nothing. On a brain before
 111, or under a role without the door's grants, the pass records no subject and
 says so once, its entities standing; the sweep refuses either by name before
 any question, exit 2. A dry run reads on through a signal, as the pass's does.
-Sleep does not run the sweep yet (SMD-3306).
+Sleep does not run the sweep yet: each run reads every thought, its count and its
+pages, whatever is left to do, which SMD-3306 PR 4 bounds first.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -3788,18 +3845,16 @@ refuses to start without the key (exit 2). Elsewhere it needs the same: the serv
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
 another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
-`capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084) —
-with the opt-in `sleep` group as well for a search to wake it (below). It
+`capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084). It
 has no `--job`.
 
-**What wakes it.** A write the audit recorded through a key not classified
-`ingested` — the servers' vector mender's writes, marked background on the
-audit row, do not (SMD-2889) — and — only under the server's `OB1_QUERY_LOG=on` (off by default),
-and only for a role that may read `query_log`: the owner, or one granted the
-opt-in `sleep` group, `migrate.ts --grant <role> --groups <its groups>,sleep`
-("Grants for a capturing role"; the log holds every search's text, so a
-plain `--grant` leaves it out) — a read the server logged. Otherwise only
-writes wake it; the start says which, and preflight's `sleep` row does too.
+**What wakes it.** A live write — one the audit recorded through a key not
+classified `ingested`; the servers' vector mender's writes, marked background
+on the audit row, are not live either (SMD-2889). That is what "a live call"
+means below and in its lines. A search is not one, whatever `OB1_QUERY_LOG`
+says: a running pass costs a search 24–33 ms (SMD-3024), so the passes go on
+through one, and the scheduler reads no `query_log` (SMD-3315; before 2.0.0 a
+logged search woke it, for a role granted the retired `sleep` group).
 board-sync's key is classified `ingested` on the stable brain; an unclassified
 key's writes wake it (a one-shot reembed run, ingest-records, a migration's
 backfill) until `SELECT set_agent_kind('<key name>', 'ingested')` says they
@@ -4246,9 +4301,8 @@ What the columns are not:
 - **The `workers` profile measures a pass that never yields.** Under the sleep
   scheduler, a pass runs beside a burst until the scheduler's next poll sees the
   burst's first recorded call: up to `--poll` (5 s) after that call ends. That is
-  a capture or two, or a few dozen searches. Reads wake it only with
-  `OB1_QUERY_LOG=on` and a sleep role that may read `query_log` (the owner, or a
-  role in the `sleep` grant group). That window was not measured here.
+  a capture or two; a search does not wake it at all (SMD-3315). That window
+  was not measured here.
 
 ### bench-querylog.ts
 
@@ -4835,6 +4889,17 @@ claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp \
   --header "x-brain-key: <key>"
 ```
 
+### One import per brain (SMD-3314)
+
+An import names one brain per run: `ingest-records.ts`, its `--items` seam and the
+import recipes behind it write to the database `--url` names, and nothing else. A
+canary is a brain of its own, fed from the sources themselves (docs/one-brain-per-stack.md,
+row 11), so to feed it an import runs again against the canary's database, with the
+canary's credentials. Each run is idempotent on its own brain and depends on no other
+brain's rows. Its ids are deterministic — the same record makes the same id on every
+brain — so a thought an import made has one id everywhere, as one a refresh copied
+does, and a copied edit or `supersedes` naming it needs no `client_key` to find it.
+
 ## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
 
 The **canary** is main's shadow and the **working** tier is a per-worktree
@@ -5033,8 +5098,8 @@ pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
 extraction, the last judged block's malformed answers and whether they passed
 SMD-2266's alarm, and, for the sleep scheduler, `slept`, its current or last
-sleep's start and end, and `reads`, whether its role read `query_log` at its
-start (SMD-2678). The time is the
+sleep's start and end (SMD-2678; a scheduler before 2.0.0 also wrote `reads`,
+whether its role read `query_log`, which is ignored since SMD-3315). The time is the
 row's `updated_at`, the database's `now()`.
 
 - **`ok`:** the pass ran, whatever its rows came to — a document the model
@@ -5481,12 +5546,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3048 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1725 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 3063 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1736 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 110 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 111 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 317 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 327 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

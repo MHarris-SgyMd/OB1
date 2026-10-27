@@ -303,9 +303,9 @@ export function queryOf(url: string): URLSearchParams {
   return new URLSearchParams(start === -1 ? "" : beforeHash.slice(start));
 }
 
-// routable and requestAt live here, not in root.ts, because this is the module
-// whose byte-identical copies sit in each vendored tree (`bun run sync-auth` in
-// extensions/) (SMD-2595).
+// routable, requestAt and listenHostFrom live here, not in root.ts, because
+// this is the module whose byte-identical copies sit in each vendored tree
+// (`bun run sync-auth` in extensions/) (SMD-2595, SMD-3323).
 
 /** Where a request whose URL will not parse is rebuilt: `.invalid` (RFC 6761) is no host a client dials or an origin names. */
 export const REBUILD_ORIGIN = "http://unparsable-host.invalid";
@@ -344,6 +344,59 @@ export function routable(req: Request): Request {
   const target = req.url.replace(/^[a-z][a-z\d+.-]*:\/\/[^/?#]*/i, "");
   // Joined, not resolved against the origin: a target of `//x` is a path, not another host.
   return requestAt(req, `${REBUILD_ORIGIN}${target.startsWith("/") ? "" : "/"}${target}`);
+}
+
+/** IPv4 in dotted decimal, each part 0 to 255 with no leading zero. */
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+/**
+ * An IP address in one form, or null for anything else: IPv4 as written, IPv6
+ * as the URL parser writes it (`::0001` is `::1`), and an IPv4-mapped one
+ * (`::ffff:127.0.0.1`) as its IPv4. Only hex digits, colons and dots are read,
+ * so no bracket, zone (`%lo0`), port or path reaches the parser.
+ */
+function canonicalIp(text: string): string | null {
+  if (IPV4.test(text)) return text;
+  if (!/^[0-9a-f:.]+$/i.test(text) || !text.includes(":") || !URL.canParse(`http://[${text}]/`)) return null;
+  const v6 = new URL(`http://[${text}]/`).hostname.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6);
+  if (!mapped) return v6;
+  const [hi, lo] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
+/**
+ * Where an entry listens (SMD-3323): every address, or the one IP address
+ * OB1_LISTEN_HOST names. `0.0.0.0` is every IPv4 address and `::` every
+ * address, as unset is. A suite starts its children on 127.0.0.1: Bun with no
+ * hostname listens on every address, and on macOS a port picked for it can be
+ * one another app (Tailscale, a VM's port forwarder) holds on 127.0.0.1 alone;
+ * that app then takes every connection to 127.0.0.1 at the port, so a suite's
+ * requests, or a child's exports to the suite's collector, reached it. A port
+ * picked on 127.0.0.1 is not one held there (0 of 18,000 measured binds).
+ *
+ * Unset or blank is every address. A value that is no IP address, a
+ * link-local IPv6 one (fe80::/10, which needs an interface, a zone, that this
+ * setting does not take; with its zone it is refused the same way), or, where
+ * the entry passes `hostAddresses` (its network interfaces' addresses, as the
+ * OS lists them: Linux's other 127/8 addresses are not listed, so not taken),
+ * one this host does not have, is a problem, which the entry says before it
+ * starts and exits 2 on: Bun's own word for an address it cannot listen on
+ * misleads ("Is port N in use?" on macOS, EADDRNOTAVAIL on Linux). The value
+ * is never said, so a secret pasted into it is not printed (SMD-3235).
+ */
+export function listenHostFrom(raw: string | undefined, hostAddresses?: readonly string[]): { hostname?: string; problem: string | null } {
+  const text = raw?.trim() ?? "";
+  if (!text) return { problem: null };
+  const ip = canonicalIp(text);
+  const fix = "so the server did not start: name one this host has, such as 127.0.0.1, or unset it to listen on every address (SMD-3323)";
+  const scoped = canonicalIp(text.split("%")[0]);
+  if (scoped !== null && /^fe[89ab][0-9a-f]:/.test(scoped)) return { problem: `OB1_LISTEN_HOST (a value not shown) is a link-local address, which needs an interface this setting does not take, ${fix}` };
+  if (ip === null) return { problem: `OB1_LISTEN_HOST (a value not shown) is not an IP address, ${fix}` };
+  if (ip !== "0.0.0.0" && ip !== "::" && hostAddresses && !hostAddresses.some((a) => canonicalIp(a) === ip)) {
+    return { problem: `OB1_LISTEN_HOST (a value not shown) is not an address of this host, ${fix}` };
+  }
+  return { hostname: ip, problem: null };
 }
 
 /**

@@ -70,7 +70,7 @@ import {
   EMBEDDING_MODEL,
   HNSW_SEEDS,
   ROLE_GRANT_GROUPS,
-  DEFAULT_GRANT_GROUPS,
+  RETIRED_GRANT_GROUPS,
   GRANT_LOCK,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
@@ -383,9 +383,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // role now holds each privilege and rolls back if not: a grantor that holds a
   // privilege without grant option "grants" it with a WARNING and no effect,
   // which the driver does not surface (SMD-1796, third review pass).
-  // A plain --grant issues DEFAULT_GRANT_GROUPS: every group but the opt-in
-  // ones, which only --groups issues (the sleep group's read of the query log,
-  // SMD-2678). --groups a,b grants those groups of ROLE_GRANTS alone (SMD-2289:
+  // A plain --grant issues every group of ROLE_GRANTS; a retired group's name
+  // (RETIRED_GRANT_GROUPS: `sleep`, SMD-3315) is refused as such. --groups a,b
+  // grants those groups of ROLE_GRANTS alone (SMD-2289:
   // the orchestration runner's role gets what its ingester and reembed run, not
   // the whole list). Alone it revokes nothing, so a role granted more
   // before keeps what it has. --exact makes the grant all the role holds in this
@@ -418,11 +418,12 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     }
     const groupsArg = opts.groups ?? undefined;
     const exact = opts.exact === true;
-    // A plain --grant issues every group but the opt-in ones (the sleep group's read of the query log, SMD-2678).
-    const grantGroups = groupsArg === undefined ? DEFAULT_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
+    const grantGroups = groupsArg === undefined ? ROLE_GRANT_GROUPS : [...new Set(groupsArg.split(",").map((g) => g.trim()).filter(Boolean))];
     const unknown = grantGroups.filter((g) => !(ROLE_GRANT_GROUPS as readonly string[]).includes(g));
     if (groupsArg !== undefined && (unknown.length || !grantGroups.length)) {
-      err(`--groups takes a comma-separated list of ${ROLE_GRANT_GROUPS.join(", ")}${unknown.length ? `; not a group: ${unknown.map((g) => JSON.stringify(g)).join(", ")}` : "; none was given"}.`);
+      const retired = unknown.filter((g) => Object.hasOwn(RETIRED_GRANT_GROUPS, g));
+      const strange = unknown.filter((g) => !retired.includes(g));
+      err(`--groups takes a comma-separated list of ${ROLE_GRANT_GROUPS.join(", ")}${strange.length ? `; not a group: ${strange.map((g) => JSON.stringify(g)).join(", ")}` : ""}${retired.map((g) => `; ${JSON.stringify(g)} was ${RETIRED_GRANT_GROUPS[g]} — drop it from --groups`).join("")}${unknown.length ? "" : "; none was given"}. Nothing was granted.`);
       return 2;
     }
     const flags = `${groupsArg === undefined ? "" : ` --groups ${grantGroups.join(",")}`}`;

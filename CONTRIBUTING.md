@@ -141,6 +141,7 @@ grant select, insert, update, delete on table public.your_table to your_role;
 - A README saying how to turn it on (`OB1_PLUGINS`) and what each operation answers
 - Tests over the REST core with the plugin enabled, as `server-portable/test-plugins.ts` and `test-plugins-sql.ts` drive the example
 - Check 31 of `scripts/check-fork-consistency.ts` passing (an accident guard, not a sandbox: review is the control): no core table, no other schema, no role, session or transaction change in its SQL; no import but the SDK and its own files; no global past `ctx` (`fetch`, `process`, `Bun` and their kin)
+- Check 41 passing: its SQL names the columns it reads from its own tables and functions, never `*` or `RETURNING *`, so a server left running across a migration that adds a column keeps working (SMD-3302)
 
 **Primitives** additionally require:
 - **"Extensions That Use This"** section listing which extensions reference this primitive
@@ -285,8 +286,9 @@ are ignored. The config is `scripts/commitlint.config.ts`.
 
 ## Changelog & versioning (fork changes)
 
-The fork is versioned `MAJOR.MINOR.PATCH+upstream.<sha>` — the rules are in
-[`FORK.md`](FORK.md)'s "Versioning" section. A change to the fork's own code, as
+The fork is versioned `MAJOR.MINOR.PATCH` — plain SemVer from 2.0.0; 1.0.0 to 1.9.0
+carried `+upstream.<sha>` — and the rules are in [`FORK.md`](FORK.md)'s "Versioning"
+section. A change to the fork's own code, as
 opposed to a vendored contribution, records itself as a **release fragment** rather
 than by editing a hand-numbered FORK.md section:
 
@@ -304,6 +306,14 @@ than by editing a hand-numbered FORK.md section:
   and Markdown aside, comes with no fragment added or modified; the refusal
   names the files that asked (SMD-1857). The one landing that passes without a fragment is a release
   cut, which records itself in `releases.json` instead (SMD-1860).
+- **A removal names its side of the version contract.** This applies to a
+  fragment that removes or renames a URL, route, port or setting in a file a
+  release ships, a flag or named value of a command a shipped image runs, or
+  that deletes vendored code. It says in one sentence which
+  side of the contract the change falls on (FORK.md, "Versioning", "What the
+  version contract covers"; SMD-2687). Inside the contract it is a `major`.
+  Maintainer tooling and vendored code are outside it, so there it is a `minor`,
+  with an **Upgrading:** line in the changelog entry.
 - The release step assembles the accumulated fragments into numbered change
   files (`changes/NNN-<slug>.md`), FORK.md's index and `CHANGELOG.md` in one
   commit, after the commit that bumps the version and adds its migration; the
