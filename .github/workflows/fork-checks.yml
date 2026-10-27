@@ -3971,8 +3971,9 @@ jobs:
       # every query is run where Grafana would run it, its variables at All
       # and its rate window 5 m. Each Prometheus query must return a series
       # with a number above 0 in it within three minutes (the exporter is
-      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the ten that answer 0 where
-      # their family has series and their filter matches nothing (`or 0 * …`:
+      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the ten
+      # that answer 0 where their family has series and their filter matches
+      # nothing (`or 0 * …`:
       # the failure share, the store's three, the collector's three and its
       # three totals), empty where it has none — but the NO_TRAFFIC panel,
       # whose events this traffic does not make; each Loki query must return
@@ -4172,9 +4173,10 @@ jobs:
           # — the stub's 404 for each capture's metadata call is a provider
           # failure, and about three in 10 m make it pending (firing 5 m on) —
           # and the other four normal and healthy, nothing here making their
-          # conditions. Rules are evaluated every 30 s; a read from before the
-          # exporter's first scrape may still hold the Postgres rule's NoData,
-          # so the wait is for all of it, 18 rounds (about two minutes).
+          # conditions. Rules are evaluated every 10 s here (30 s as shipped);
+          # a read from before the exporter's first scrape may still hold the
+          # Postgres rule's NoData, so the wait is for all of it, 18 rounds
+          # (about two minutes).
           judged() {
             local uid
             grep -qE '^(pending|firing) ok ob1-provider-failures$' <<<"$st" || return 1
