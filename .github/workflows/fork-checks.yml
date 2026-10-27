@@ -490,7 +490,7 @@ jobs:
 
       - name: Authorization server rules
         working-directory: deploy/auth
-        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check
+        run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
@@ -3385,7 +3385,7 @@ jobs:
           if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
           echo "$out"
           if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
-          docker run -d --name ob1-mcp-image --network none --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
+          OB1_FORWARDER_KEY=$(openssl rand -hex 32) docker run -d --name ob1-mcp-image --network none --entrypoint bun -e OB1_FORWARDER_KEY -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
           up=""
           for _ in $(seq 1 40); do [ "$(docker exec ob1-mcp-image wget -qO- http://127.0.0.1:8000/health 2> /dev/null)" = ok ] && { up=1; break; }; sleep 0.25; done
           docker exec ob1-mcp-image wget -qO- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' \
@@ -3553,9 +3553,11 @@ jobs:
           auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
           auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
           # The session cookie a sign-in sets is the issuer's path alone, so on
-          # the shared origin it never rides a request to /mcp or the rest.
-          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
-          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
+          # the shared origin it never rides a request to /mcp or the rest. The
+          # password goes by name, as in the steps below (check 43, SMD-3351).
+          OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          export OB1_AUTH_OPERATOR_PASSWORD
+          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
           [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
           [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
           bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
@@ -3700,10 +3702,24 @@ jobs:
       # token in any page, header, navigation data, script or cookie (the
       # Verify line), a replayed, forged, stolen or other browser's callback
       # refused, a post from another origin refused, sign-out, the next
-      # visitor asked the password, and a denied consent. Every sign-in the
-      # step makes ends revoked, so the AS's store holds no refresh token of
-      # the `gui` client after it: sign-out revoked the GUI's. The password
-      # goes by name, never on a command line.
+      # visitor asked the password, and a denied consent. The page of grants
+      # (PR 3): the AS's admin listener (deploy/auth/admin.ts, port 3001)
+      # holds its rules from inside its container (restart-check.ts --admin:
+      # no credential, the MCP service's own and a wrong secret refused, the
+      # GUI's listing); the REST core reaches it on the mesh and is refused
+      # without the GUI's credentials, the forwarder, off the mesh, reaches
+      # nothing, and the proxy routes nothing to it. A third-party client is
+      # signed in with a refresh token, refreshed once so it is one the server
+      # took (--hold-grant); the smoke revokes its grant on the page, and its
+      # refresh token is refused at once (--refused; its access token lapses
+      # within 600 s, the maintainer's choice). Last, the listener's failure
+      # limit: 20 wrong secrets from the container's own address (one no
+      # other call uses), each 401, then the address turned away, the GUI's
+      # own credentials from it too (--admin-lockout, which leaves that
+      # address locked out for the window; nothing else dials it). Every sign-in the step makes ends revoked, so the AS's store
+      # holds no refresh token of the `gui` client after it: sign-out revoked
+      # the GUI's. The password goes by name, never on a command line, and the
+      # held refresh token sits in a file of the runner's own, removed after.
       - name: The operator GUI signs in through the authorization server
         working-directory: deploy
         run: |
@@ -3714,7 +3730,16 @@ jobs:
           OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
           export OB1_AUTH_OPERATOR_PASSWORD
           auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
-          (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test)
+          auth exec -T auth bun restart-check.ts --admin
+          [ "$(auth exec -T api bun -e 'const r = await fetch("http://auth.ob1.internal.:3001/grants"); console.log(r.status)')" = 401 ] || { echo "the admin listener did not answer the REST core on the mesh with 401 without the GUI's credentials" >&2; exit 1; }
+          [ "$(auth exec -T forwarder bun -e 'fetch("http://auth.ob1.internal.:3001/grants", { signal: AbortSignal.timeout(3000) }).then((r) => console.log(r.status), () => console.log("unreachable"))')" = unreachable ] || { echo "the forwarder, off the mesh, reached the admin listener" >&2; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:8010/grants)" = 404 ] || { echo "the proxy routes /grants somewhere" >&2; exit 1; }
+          held=$(mktemp)
+          ( umask 077; auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --hold-grant > "$held" )
+          (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test --revoke-client "$(jq -r .client_id "$held")")
+          auth exec -T auth bun restart-check.ts --refused < "$held"
+          rm -f "$held"
+          auth exec -T auth bun restart-check.ts --admin-lockout
           left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
           [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
           # The step below removes the authorization server, after its break-glass check with it up.
@@ -3727,7 +3752,9 @@ jobs:
       # GUI is recreated on it. dashboard/smoke-breakglass.ts first with the
       # authorization server up (--as-up): a sign-in through it starts on the
       # origin and not on the break-glass port, which offers the key all the
-      # same. Then the server is removed, as the steps after expect, and the GUI
+      # same, and a read key's revoke on the page of grants is the action's
+      # own 403 (with the server down, the page's load would answer it).
+      # Then the server is removed, as the steps after expect, and the GUI
       # recreated again, so its 30 s answer from the server's probe is not one
       # from before the server went; the full run holds the Verify lines: on
       # the origin no key is offered or taken — a forged X-OB1-Listener (the
@@ -3736,8 +3763,10 @@ jobs:
       # key signs in with the server down, under a cookie of its own name, its
       # session opening nothing on the origin; a post there from another
       # loopback port, localhost, the configured origin or none is refused, and
-      # nothing but the GUI is routed. The key goes by name, never on a command
-      # line. `breakglass` is removed after.
+      # nothing but the GUI is routed; the page of grants says that the server
+      # is down, and a read key there has no such page (403, its revoke too);
+      # the smoke requires the read key, so these rows never skip. The keys go by name, never on a command line. `breakglass` is
+      # removed after.
       - name: The break-glass port takes a key while the authorization server is down
         working-directory: deploy
         run: |

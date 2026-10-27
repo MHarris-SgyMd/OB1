@@ -260,7 +260,7 @@ const entries = sources.filter((f) => {
   // The sweep's own flags pass --subjects' check and reach the sweep, which says what it will do before it dials
   // (review pass 1: without a URL the case stopped at databaseUrl, before the check it named).
   const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9");
-  ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:rules@r1), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
+  ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:metadata@r1, subject:first_line@r2), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
     `--subjects rules with --dry-run, --limit and --timeout passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
   for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {

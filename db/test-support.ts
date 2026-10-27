@@ -861,23 +861,32 @@ export function answersHealth(port: number, body: string, init: RequestInit = {}
  * there, and is refused (SMD-3323). Probed, not assumed: a host without IPv6
  * loopback refuses [::1] whatever the server listens on, so the row would hold
  * nothing; Linux answers 127.0.0.2 on its loopback, macOS answers neither
- * without IPv6. The probe's answer is its own token, so another app holding
- * the probe's port on that address does not read as it.
+ * without IPv6 — 127.0.0.2 times out there, a second's wait. The probe's
+ * answer is its own token, so another app holding the probe's port on that
+ * address does not read as it; one that accepts and never answers reads as
+ * nothing there.
  */
 export async function secondLoopback(): Promise<string | null> {
   const token = crypto.randomUUID();
-  const probe = Bun.serve({ port: 0, fetch: () => new Response(token) });
-  try {
-    // IPv6 loopback as connect.ts spells a URL's host: its LOOPBACK_HOSTS is the one spelling of the loopback names.
-    for (const host of [[...LOOPBACK_HOSTS].find((h) => h.startsWith("[")), "127.0.0.2"]) {
-      if (host === undefined) continue;
-      const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text(), () => "");
-      if (got === token) return host;
+  // Up to three probes, each on a port of its own, the next only after another listener answered in the probe's place:
+  // a port picked for every address can sit beside another process's listener on [::1] alone (PR 2a review passes 2–3).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const probe = Bun.serve({ port: 0, fetch: () => new Response(token) });
+    let foreign = false;
+    try {
+      // IPv6 loopback as connect.ts spells a URL's host: its LOOPBACK_HOSTS is the one spelling of the loopback names.
+      for (const host of [[...LOOPBACK_HOSTS].find((h) => h.startsWith("[")), "127.0.0.2"]) {
+        if (host === undefined) continue;
+        const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text(), () => null);
+        if (got === token) return host;
+        if (got !== null) foreign = true;
+      }
+    } finally {
+      probe.stop(true);
     }
-    return null;
-  } finally {
-    probe.stop(true);
+    if (!foreign) return null;
   }
+  return null;
 }
 
 /**

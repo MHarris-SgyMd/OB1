@@ -40,7 +40,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, type Extraction } from
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS } from "./consolidate.ts";
 import { DECIDE_PROMPT, DECIDE_VERSION } from "./consolidate-decide.ts";
 import { METADATA_PROMPT, METADATA_PROMPT_VERSION, TAG_KEYS } from "./metadata.ts";
-import { SUBJECT_PROMPT_VERSION, SUBJECT_RULES_VERSION, subjectPrompt } from "./subject.ts";
+import { SUBJECT_PROMPT_VERSION, SUBJECT_RULE_VERSIONS, subjectPrompt } from "./subject.ts";
 
 /** A recipe as `derivations.recipe` holds it: `deterministic` required, the rest the producer's. */
 export type Recipe = { deterministic: boolean } & Record<string, unknown>;
@@ -137,13 +137,14 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
 
 /**
  * A thought's own subject's recipe (111, SMD-3306): a rule's, deterministic,
- * naming the rule and the rules' version; or the judge model's, naming the
+ * naming the rule and its version; or the judge model's, naming the
  * model, the question's version and hash, the temperature and the subject it
- * answered, which the key was read from (subject.ts's subjectKey), so a
+ * answered, which the key was read from (subject.ts's subjectKey, its guard
+ * reading the thought's text at the fingerprint the lineage names), so a
  * changed reading can be checked against what the model said.
  */
 export function subjectRecipe(found: { by: "metadata" | "first_line" } | { by: "model"; model: string; temperature: number; answer: string }): Recipe {
-  if (found.by !== "model") return { deterministic: true, rule: found.by, rules_version: SUBJECT_RULES_VERSION };
+  if (found.by !== "model") return { deterministic: true, rule: found.by, rule_version: SUBJECT_RULE_VERSIONS[found.by] };
   return { deterministic: false, model: found.model, prompt_version: SUBJECT_PROMPT_VERSION, prompt_hash: promptHash(subjectPrompt()), temperature: found.temperature, answer: found.answer };
 }
 

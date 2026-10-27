@@ -23,13 +23,14 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
 | `src/lib/server/signin.ts` | Whether key sign-in is offered, whoami's answer, and a refused sign-in's words |
 | `src/lib/server/listener.ts` | Which listener a request came in by (the origin, or the break-glass port), and the origin an unsafe request may come from |
-| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
+| `src/lib/server/grants.ts` | The page of grants' calls to the authorization server's admin listener: the live grants, and a revoke |
+| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, the grants, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
 | `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
 | `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
-| `smoke-oauth.ts` | The sign-in through the authorization server, driven the same way on a configured stack |
+| `smoke-oauth.ts` | The sign-in through the authorization server, driven the same way on a configured stack, and the page of grants |
 | `smoke-breakglass.ts` | The break-glass key sign-in on a configured stack with the authorization server down, and the origin refusing it |
-| `test-oauth.ts` | `oauth.ts`, the revoker, the session store's revocations and the break-glass listener's rules offline |
+| `test-oauth.ts` | `oauth.ts`, the revoker, the session store's revocations, the break-glass listener's rules and the page of grants' calls offline |
 
 ## In the stack
 
@@ -172,6 +173,7 @@ is Secure only on https. So the server must know the origin a browser sees:
 | `/dashboard/query-log` | `list_logged_searches`: the logged searches, most recent first, from a time — each query (one line), its arm, tier, the count it asked for (034's `match_count`, not how many it found) and arguments. Every key's searches, as the tool shows them to any key that can read; empty where `OB1_QUERY_LOG` is off |
 | `/dashboard/status` | `brain_info`, laid out as the core's own rows (`brainInfoRows` in `server-portable/brain-info.ts`, the brain_info tool's words): the server's version, commit and migrations, and the database's ledger, sizes, counts, vectors, proposals, findings and workers' heartbeats |
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212) |
+| `/dashboard/grants` | On a stack configured with the authorization server (`COMPOSE_PROFILES` naming `auth`), for a session that may write (the operator's, or a write key's on the break-glass port), and named in the nav for it alone (SMD-3307 PR 3): the clients signed in as the operator, each a grant at the AS — the MCP clients connected, and each sign-in to this GUI (one holding no live refresh token marked so: never finished, or idle past the refresh token's 14 days; recreating `app` forgets its sessions, whose grants stay listed until revoked here or lapsed) — newest first, 500 at most, each with its client (a registered one by its id and the name it gave itself, the characters that hide or reorder text taken out, though a look-alike name still looks alike; a metadata-document one by its host), its scopes and resources, when it was signed in, last renewed (its newest refresh token, when later than the sign-in's own) and lapses; and a revoke for each. Read and written through the AS's admin listener on the mesh (`auth.ob1.internal:3001`, no proxy route to it) under the GUI's own `gui` credentials, never the visitor's; so the visitor's own session is checked at the REST core on every load and revoke (`whoami`, which renews a token due and ends a refused one), and a session whose grant was revoked, or whose key was removed, loses the page with it. A revoke refuses the grant's refresh tokens at once; the access token the client holds is refused by the REST core once it lapses, within ten minutes (the maintainer's choice of 2026-10-26), and revoking one of this GUI's own grants ends that session at its next renewal. The AS down is said from the sign-in page's probe of `/healthz`, whose answer is kept 30 s either way: while it says down, without calling the listener (an AS just started again shows within 30 s); while it says up, the listener is called, and one that hangs costs a call's 10 s; its refusing the GUI's credentials is said too, and so is its turning the GUI's address away after 20 refusals in 15 minutes. Each revoke is logged: the AS's log names the grant and its client, the GUI's the session that revoked it. Without the auth profile the page is a 404; configured but without `OB1_AUTH_SECRET_GUI` or a sound origin, a 503 naming them; for a read session a 403 |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
 | `/dashboard/health` | Liveness: `ok`, asking the REST core nothing |
 | `/dashboard/plugins/example/notes` | The example plugin's Notes page, while `OB1_PLUGINS` names it: the newest thoughts (`example_recent`), a thought's notes (`example_list_notes`, each with the key that pinned it), and for a key that may, a form pinning one (`example_add_note`; a refusal said beside the form, the note kept) |
@@ -195,8 +197,8 @@ recreating `app`, as the example's README does, signs everyone out instead.
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.
 Pages are `no-store`, refuse framing, send `Referrer-Policy: same-origin` (not
-`no-referrer`, under which a browser posts a form with `Origin: null` and SvelteKit
-refuses it), and carry a Content-Security-Policy that admits no script but
+`no-referrer`, under which a browser posts a form with `Origin: null` and the GUI's
+origin check refuses it), and carry a Content-Security-Policy that admits no script but
 SvelteKit's own, by a nonce per response. Times are written in UTC.
 
 ## Develop

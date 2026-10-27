@@ -51,6 +51,7 @@ let lastBody: Record<string, unknown> = {};
 let lastInput = "";
 const provider = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
     const body = (await req.json()) as Record<string, unknown>;
@@ -75,7 +76,7 @@ const provider = Bun.serve({
 
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
-process.env.OB1_LLM_BASE_URL = `http://localhost:${provider.port}/v1`;
+process.env.OB1_LLM_BASE_URL = `http://127.0.0.1:${provider.port}/v1`;
 // Declared local to the egress gate (SMD-1903): the stub is on this box, and
 // the gate reads the flag, never the address — without it the default, deny,
 // refuses every call to it. test-egress.ts holds that case.
@@ -90,8 +91,8 @@ delete process.env.SUPABASE_URL;
 
 const worker = await mcpUnderTest();
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 
 let id = 1;
 async function call(name: string, args: Record<string, unknown> = {}): Promise<string> {

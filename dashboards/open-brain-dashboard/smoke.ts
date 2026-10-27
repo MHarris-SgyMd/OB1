@@ -50,6 +50,7 @@ const assert = (cond: boolean, msg: string) => (cond ? ok(msg) : bad(msg));
 {
   const stub = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch: async (req) => {
       const { id } = (await req.json()) as { id: number };
       const body = [
@@ -70,8 +71,9 @@ const assert = (cond: boolean, msg: string) => (cond ? ok(msg) : bad(msg));
   stub.stop(true);
 }
 
-// A free port, then release it for the preview server.
-const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+// A free port, then release it for the preview server — picked on 127.0.0.1, where the preview binds: on macOS a port
+// picked for every address can be one another app holds on 127.0.0.1, which the strict bind would then refuse (SMD-3323).
+const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
 const port = probe.port!;
 probe.stop(true);
 
