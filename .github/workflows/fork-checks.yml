@@ -4022,12 +4022,13 @@ jobs:
           # substitution must have changed its value, and the overlay's render
           # must differ from the shipped one in those two values alone.
           ci=$RUNNER_TEMP/observability-ci.json
-          jq '{services: {lgtm: {environment: {OTELCOL_EXTRA_ARGS: (.services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\""))}}},
-               configs: {"grafana-alert-rules": {content: (.configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s"))}}}' /tmp/observability-render.json > "$ci"
+          # The two substitutions, once: the overlay is written with them and checked against them.
+          tens='def args: .services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\"");
+                def rules: .configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s");'
+          jq "$tens"' {services: {lgtm: {environment: {OTELCOL_EXTRA_ARGS: args}}}, configs: {"grafana-alert-rules": {content: rules}}}' /tmp/observability-render.json > "$ci"
           docker compose -f compose.yaml -f "$ci" --profile observability config --format json > /tmp/observability-render-ci.json
-          jq -e --slurpfile ci /tmp/observability-render-ci.json '
-              (.services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\"")) as $args
-            | (.configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s")) as $rules
+          jq -e --slurpfile ci /tmp/observability-render-ci.json "$tens"'
+              args as $args | rules as $rules
             | $args != .services.lgtm.environment.OTELCOL_EXTRA_ARGS and $rules != .configs["grafana-alert-rules"].content
             and $ci[0].services.lgtm.environment.OTELCOL_EXTRA_ARGS == $args and $ci[0].configs["grafana-alert-rules"].content == $rules
             and ($ci[0] | del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)) == del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)' \
