@@ -71,7 +71,7 @@ const stubOpts = {
     });
   },
 };
-let stub = Bun.serve({ port: 0, ...stubOpts });
+let stub = Bun.serve({ port: 0, ...stubOpts, hostname: "127.0.0.1" });
 const STUB = `http://127.0.0.1:${stub.port}/v1`;
 const HOST = `127.0.0.1:${stub.port}`;
 
@@ -287,8 +287,8 @@ for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EG
 
 const worker = await mcpUnderTest();
 assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
-const server = Bun.serve({ port: 0, fetch: worker.fetch });
-const BASE = `http://localhost:${server.port ?? 0}`;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+const BASE = `http://127.0.0.1:${server.port ?? 0}`;
 let rpcId = 1;
 async function call(key: string, name: string, args: Record<string, unknown> = {}): Promise<{ text: string; isError: boolean; sc?: Record<string, unknown> }> {
   const r = await fetch(BASE, {
@@ -453,7 +453,7 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
     `the audit row: the gate allowed the call, and vector_failed says why no vector came of it (${JSON.stringify(ctx)})`);
 
   // The stub back on its port: the same text sent again takes the vector on the same id.
-  stub = Bun.serve({ port, ...stubOpts });
+  stub = Bun.serve({ port, ...stubOpts, hostname: "127.0.0.1" });
   const again = await call(OPEN_KEY, "capture_thought", { content });
   const [after] = await sql`SELECT embedding IS NOT NULL AS has, embedding_model FROM thoughts WHERE id = ${id!}::uuid`;
   assert(!again.isError && again.text.includes(id!) && !/WITHOUT a vector|was unavailable/.test(again.text) && after.has === true && after.embedding_model === EMB_MODEL,
@@ -466,7 +466,7 @@ const FORWARD_KEY = "f0".repeat(32);
 const FORWARD_ENTRY = `mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`;
 const mcpEntry = (restPort: number) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
   cwd: `${import.meta.dir}/../mcp-server`,
-  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_REST_URL: `http://127.0.0.1:${restPort}`, OB1_FORWARDER_KEY: FORWARD_KEY, OB1_PLUGINS: "" },
+  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_REST_URL: `http://127.0.0.1:${restPort}`, OB1_FORWARDER_KEY: FORWARD_KEY, OB1_PLUGINS: "" },
   stdout: "pipe",
   stderr: "pipe",
 });
@@ -483,7 +483,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296).
   const providerPort = quietPort();
   const childEnv = () => ({
-    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
+    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_STORE: "sql", DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
     MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "1",
     // A pool of one: the leader lock holds a connection of its own, so the tick's reads and writes
@@ -527,7 +527,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const [still] = await sql`SELECT embedding IS NULL AS bare FROM thoughts WHERE id = ${id!}::uuid`;
     assert(still.bare === true, "the provider still down after the first ticks: the row waits");
     // The provider back on its port; no hand step.
-    provider = Bun.serve({ port: providerPort, ...stubOpts });
+    provider = Bun.serve({ port: providerPort, ...stubOpts, hostname: "127.0.0.1" });
     for (let deadline = Date.now() + 15_000; !mended && Date.now() < deadline; ) {
       mended = (await sql`SELECT embedding IS NOT NULL AS has FROM thoughts WHERE id = ${id!}::uuid`)[0].has === true;
       if (!mended) await Bun.sleep(200);
@@ -555,7 +555,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const made = await fetch(`${apiAt}/v1/thoughts`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ content: restContent }) });
     const madeBody = await made.json() as { id?: string; embeddingAttached?: boolean };
     assert(made.status === 201 && !!madeBody.id && madeBody.embeddingAttached === false, `through REST with the provider down: saved, no vector attached (${made.status} ${JSON.stringify(madeBody)})`);
-    provider = Bun.serve({ port: providerPort, ...stubOpts });
+    provider = Bun.serve({ port: providerPort, ...stubOpts, hostname: "127.0.0.1" });
     let restMended = false;
     for (let deadline = Date.now() + 15_000; !restMended && Date.now() < deadline; ) {
       restMended = (await sql`SELECT embedding IS NOT NULL AS has FROM thoughts WHERE id = ${madeBody.id!}::uuid`)[0].has === true;
@@ -595,7 +595,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
   const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: {
-      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_STORE: "sql", DATABASE_URL: URL_,
       OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
       MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",
     },
@@ -654,7 +654,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     assert(/^Provider:\s+unreachable since \S+ \(the connection was refused\) — serving degraded: .*; re-probed every 1 s by GET \/models$/m.test(info.text), `brain_info's Provider row says so (${info.text.split("\n").find((l) => l.startsWith("Provider:"))})`);
     // The provider comes up on its port: no call is made (the mender off, no
     // capture, no search), so only the re-probe can see it.
-    provider = Bun.serve({ port: providerPort, fetch: async (req) => {
+    provider = Bun.serve({ port: providerPort, hostname: "127.0.0.1", fetch: async (req) => {
       if (req.method === "GET") { models++; return Response.json({ object: "list", data: [] }); }
       if (new URL(req.url).pathname.endsWith("/embeddings")) {
         const b = (await req.clone().json()) as { input?: unknown };
