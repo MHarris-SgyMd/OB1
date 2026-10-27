@@ -519,21 +519,13 @@ the atomic capture path: the store writes content, metadata and vector in one
 `upsert_thought` call and has no two-step fallback (that was the retired
 PostgREST store's).
 
-Migration 014 matters here too. The guide's `match_thoughts` applies a metadata
-filter *after* choosing its candidates, so a selective filter silently returns
-fewer rows than match; preflight probes the RPC on every start and warns while
-that body is in place. To clear it, run the fork's migrator against the Supabase
-project's **direct** connection string (Project Settings → Database → connection
-string, not the pooler) — every migration is idempotent and 014 needs pgvector
-0.8.0, which Supabase ships. A schema the dashboard applied has no ledger yet,
-so it takes `--reapply`: every file runs again over what is there, in one
-transaction, and is recorded; a plain run there is refused (`db/README.md` §4,
-SMD-3425). After that, a plain run applies later migrations:
-
-```bash
-cd ../db && bun migrate.ts --reapply --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-cd ../db && bun migrate.ts --reapply --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-```
+The schema is the migrator's. In the compose stack its `migrate` service runs
+`db/migrate.ts` on every `up`, before the servers start (`db/README.md`).
+Preflight probes `match_thoughts` on every start and warns while a body from
+before 014 is in place, one that filters metadata *after* choosing its
+candidates and so returns fewer rows than match. A schema applied without the
+migrator takes `--reapply` once; a plain run there is refused (`db/README.md`
+§4, SMD-3425).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing
@@ -543,7 +535,7 @@ the same shape at 020 and 021 — and, for 032, its `reembed.ts` sending you to
 `--reapply` and that older `--reapply` re-creating the dropped form beside the
 current one, after which every shorter call is `function is not unique` until a
 current checkout re-applies. The compose stack is in lockstep by construction; a hand-run server
-or a Supabase brain served from another machine is not (FORK.md change 60;
+is not (FORK.md change 60;
 SMD-1451 is the migrator refusing it).
 
 ## What this brain is: `brain_info` and a keyed `/health`
