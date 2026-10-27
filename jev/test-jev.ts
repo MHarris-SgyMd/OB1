@@ -276,7 +276,7 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   const good = new TextEncoder().encode("the pinned bytes\n");
   const sha = new Bun.CryptoHasher("sha256").update(good).digest("hex");
   let served = good, hits = 0;
-  const hub = Bun.serve({ port: 0, fetch: (req) => { hits++; return new URL(req.url).pathname.endsWith("/m.bin") ? new Response(served) : new Response("no", { status: 404 }); } });
+  const hub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => { hits++; return new URL(req.url).pathname.endsWith("/m.bin") ? new Response(served) : new Response("no", { status: 404 }); } });
   const pins: ModelPins = { repo: "o/r", revision: "abc", files: { "m.bin": { bytes: good.length, sha256: sha } } };
   const dir = await mkdtemp(`${tmpdir()}/jev-test-`);
   const base = `http://127.0.0.1:${hub.port}`;
@@ -305,6 +305,7 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   // A download that fails midway removes its own part and names the file.
   const flaky = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     fetch: () => new Response(new ReadableStream({ start(c) { c.enqueue(good.subarray(0, 5)); setTimeout(() => c.error(new Error("connection reset")), 10); } })),
   });
   await rm(dir, { recursive: true, force: true });
@@ -397,6 +398,7 @@ type Stub = { requests: { path: string; body: any; bytes: number; auth: string |
 const stub: Stub = { requests: [], answer: () => new Response("unset", { status: 500 }) };
 const tier = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     const path = new URL(req.url).pathname;
     const raw = req.method === "POST" ? await req.text() : "";
@@ -541,7 +543,7 @@ section("[8] the client's batches and answers");
   assert(err && !(err instanceof ProviderError) && err.name === "TimeoutError", `a caller's own signal firing surfaces as the caller's error, not the config's timeout (${err?.name}: ${err?.message?.slice(0, 50)})`);
   stub.answer = honest;
   // /info is checked whole: the contract's name with its fields missing is a body error, not a crash in the reader.
-  const partialInfo = Bun.serve({ port: 0, fetch: () => Response.json({ contract: JEV_CONTRACT, model: { name: "x" } }) });
+  const partialInfo = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ contract: JEV_CONTRACT, model: { name: "x" } }) });
   err = undefined;
   try { await jevInfo(resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${partialInfo.port}`, OB1_JEV_LOCAL: "1" })!); } catch (e) { err = e; }
   partialInfo.stop(true);

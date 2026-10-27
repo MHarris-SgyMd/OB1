@@ -570,7 +570,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   // read too, the steps' value once, never the SDK's parse in their place (review pass 4: it was parsed again).
   const bomJson = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "probe_kit_shape", arguments: { n: 1, flag: "yes", word: "a" } } });
   assert(argumentsById(`\uFEFF\uFEFF${bomJson}`).get("1") !== undefined && argumentsById(`\uFEFF${bomJson}`).get("1") !== undefined, "argumentsById reads a body behind one or two byte-order marks");
-  const served = Bun.serve({ port: 0, fetch: (req) => withPlugins.fetch(req) });
+  const served = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withPlugins.fetch(req) });
   let bomText = "";
   try {
     const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf, ...new TextEncoder().encode(bomJson)]);
@@ -615,9 +615,9 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
     log: () => {},
     plugins: () => loadPlugins("example"),
   });
-  const restServer = Bun.serve({ port: 0, fetch: (req) => exampleRest.fetch(req) });
+  const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => exampleRest.fetch(req) });
   // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
-  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "pipe", stderr: "pipe" });
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "pipe", stderr: "pipe" });
   const { port: entryPort } = await childPort(entry, 20_000);
   let entryTools: string[] = [];
   try {
@@ -788,9 +788,9 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
     track: (run) => run(),
     log: () => {},
   });
-  const restServer = Bun.serve({ port: 0, fetch: (req) => hangingRest.fetch(req) });
+  const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => hangingRest.fetch(req) });
   // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
-  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
   const { port, stdout: entryOut } = await childPort(entry, 20_000);
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
@@ -822,7 +822,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
   for (const [k] of otelSaved) delete process.env[k];
   // The entry in a process of its own and the REST core in this one, each sending its spans to one collector here.
   const received: Record<string, string[]> = {};
-  const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
+  const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const tracing = setUpTelemetry("open-brain-api-test", { report: { warn: () => {} }, urls: { traces: `http://127.0.0.1:${collector.port}/v1/traces` } });
   const tracedRest = createRestApp({
     core,
@@ -833,11 +833,11 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     log: () => {},
     plugins: () => loadPlugins("example"),
   });
-  const restServer = Bun.serve({ port: 0, fetch: (req) => tracedRest.fetch(req) });
+  const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => tracedRest.fetch(req) });
   // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
   const entry = Bun.spawn(["bun", "index.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
+    env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
     stdout: "pipe",
     stderr: "pipe",
   });
