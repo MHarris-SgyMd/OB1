@@ -260,6 +260,8 @@ export const ACCEPTED_CLAIM_SQL: string;
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 /** The migrator's re-run, as every remedy that names it prints it. */
 export const REAPPLY_COMMAND: string;
+/** SQL: whether public holds the fork's `thoughts` (a table or a partitioned one), by pg_class — read as a column, `SELECT ${PUBLIC_THOUGHTS_EXISTS} AS present`. */
+export const PUBLIC_THOUGHTS_EXISTS: string;
 /** The lock timeout, in seconds, migrate.ts sets for its session and quotes in its messages; test-upgrade derives its expectations from it. */
 export const LOCK_TIMEOUT_S: number;
 /** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */
@@ -307,8 +309,8 @@ export function quoteIdent(name: unknown): string;
 export function searchPathSchemas(setting: string, serverVersionNum: number, keepEmpty?: boolean): string[];
 /** Set the transaction's search_path to itself without the temp schema (dropped by parsed name, each name quoted), LOCAL; returns the path it read. */
 export function setPathWithoutTemp(tx: import("bun").SQL): Promise<string>;
-/** Put public first on the session's search_path (session scope, this run alone), or say why not: this migrator's ledger in another schema on the path and no brain (that ledger with thoughts; thoughts alone when `adopting`) in public, or public missing or without USAGE. `was` is the replaced path, null where public was first; `viaUser`, the other schema is the role's own, reached through "$user". */
-export function pinPublicFirst(sql: import("bun").SQL, adopting?: boolean): Promise<
+/** Put public first on the session's search_path (session scope, this run alone), or say why not: this migrator's ledger in another schema on the path and no brain (that ledger with thoughts) in public, or public missing or without USAGE. `was` is the replaced path, null where public was first; `viaUser`, the other schema is the role's own, reached through "$user". */
+export function pinPublicFirst(sql: import("bun").SQL): Promise<
   | { refused: null; was: string | null }
   | { refused: "ledger"; schema: string; viaUser: boolean }
   | { refused: "public"; missing: boolean; role: string; owner: string }

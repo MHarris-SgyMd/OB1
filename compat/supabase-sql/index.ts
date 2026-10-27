@@ -1768,13 +1768,33 @@ export class SupabaseSqlClient {
  * Drop-in for supabase-js `createClient`. The second argument is accepted and
  * ignored so the call site does not have to change: with SQL the credentials live
  * in the connection URL, and there is no separate service key.
+ *
+ * A value that is not a postgres:// URL is refused by its shape alone, never a
+ * slice of it: the hand ports pass the connection string here, so a mistyped
+ * scheme quoted back would print the role's password (SMD-2263). The value is
+ * trimmed first, so a quoting slip's space or newline is no refusal.
  */
 export function createClient(databaseUrl: string, _serviceKey?: string, opts?: { max?: number }): SupabaseSqlClient {
-  if (!databaseUrl || !/^postgres(ql)?:\/\//.test(databaseUrl)) {
+  const url = typeof databaseUrl === "string" ? databaseUrl.trim() : "";
+  if (!/^postgres(ql)?:\/\//.test(url)) {
     throw new Error(
-      `compat/supabase-sql: expected a postgres:// connection URL, got "${String(databaseUrl).slice(0, 40)}". ` +
+      `compat/supabase-sql: expected a postgres:// connection URL, got ${urlShape(url)} (the value is not repeated: it may hold a password). ` +
         `This shim replaces PostgREST — pass DATABASE_URL where the original passed SUPABASE_URL.`
     );
   }
-  return new SupabaseSqlClient(databaseUrl, opts ?? {});
+  return new SupabaseSqlClient(url, opts ?? {});
+}
+
+/**
+ * What a refused connection value is, in words that hold none of it: a scheme
+ * is named only when "://" follows it, as a URL's does (a bare "user:password@"
+ * would otherwise read as one), and a postgres scheme with too few slashes, or
+ * in capitals, is said as such (SMD-2263).
+ */
+function urlShape(url: string): string {
+  if (url === "") return "nothing (the value is unset or empty)";
+  const pg = /^(postgres(?:ql)?):(\/\/)?/i.exec(url);
+  if (pg) return pg[2] ? `a "${pg[1]}:" URL whose scheme is not lower case` : `a "${pg[1].toLowerCase()}:" value without "//" after its scheme`;
+  const scheme = /^([a-z][a-z0-9+.-]{0,19}):\/\//i.exec(url)?.[1];
+  return scheme ? `a "${scheme.toLowerCase()}:" URL` : "a value with no URL scheme";
 }

@@ -56,28 +56,43 @@ bun migrate.ts --url postgres://user:pass@host:5432/dbname
 Each migration runs in its own transaction and is recorded in `schema_migrations`,
 so re-running is a no-op and a failure part-way resumes rather than restarting.
 
-### 4. Adopting an existing database
+### 4. A schema with no ledger
 
-If your `thoughts` table was created by hand from the guide, you have two options.
-Every migration is individually idempotent, so you can simply run them — nothing
-will be duplicated. Or record them as applied without executing:
+A schema applied without the migrator has no `schema_migrations` yet. Every
+migration is individually idempotent, so `--reapply` (§5) brings it under the
+ledger: every file runs again over what is there, in one transaction, and is
+recorded. Stop the server and every worker first. It checks first that this
+shell agrees with the brain: the embedding width, and the model 006 would
+otherwise re-record in `ob1_config`. A plain run there, and its `--dry-run`, is
+refused (exit 2, nothing written, `--reapply` named; SMD-3425): it would give
+each file its own transaction, leaving older definitions in place if it
+stopped part-way, and would check nothing. An empty database (no `thoughts`)
+is a first build and goes on. In the compose stack, with its servers and
+workers stopped: `docker compose run --rm migrate bun migrate.ts --reapply`. Preflight's `migration ledger` row names `--reapply` where it
+finds `thoughts` and no ledger, or one recording nothing. A live `--reapply`
+over no ledger makes the table inside its transaction, so a refusal or a
+failure leaves none behind. `--reapply` leaves plugins' migrations to a plain
+run after it.
 
-```bash
-bun migrate.ts --url ... --baseline
-```
+Recording the ledger without running the files, `--baseline`, was retired with
+its override `--force` (SMD-3325). The compose stack builds every brain by
+running the files, and no hand-built database was left to adopt. Each flag is
+refused by name, exit 2, before the run reads anything.
 
-`--baseline` is all-or-nothing: it marks **every** migration not already in the
-ledger as applied, without running any of them. That is what adoption wants, and
-it is the wrong tool for recording a single migration you applied by hand — on a
-database sitting at 009 it would mark 010 applied too, and the agent registry
-would never be created. For one migration, insert the one `schema_migrations`
-row; `--dry-run` prints the `sha256` to use beside each name.
+To record a single migration you applied by hand, insert its one
+`schema_migrations` row; `--dry-run` prints the `sha256` to use beside each name.
+
+Fifty-two migrations between 030 and 111 open with a guard that refuses, naming what the file needs
+and `--reapply`, where the ledger records a file the schema lacks. That was the
+state `--baseline` left; their hint still asks "adopted with --baseline?", the
+files being hashed. A new migration does not paste the guard.
 
 ### 5. Re-applying what the ledger already records
 
-A database adopted with `--baseline` can say 030 in its ledger while its
-functions are the guide's: a plain run skips every recorded file, and
-`reembed.ts` and preflight refuse or warn on the body they find and name this:
+A ledger can record a file whose objects the schema lacks: a body removed or
+replaced from outside the migrations. Or there is no ledger at all (§4). A plain run skips every recorded file,
+and `reembed.ts` and preflight refuse or warn on the body they find and name
+this:
 
 ```bash
 bun migrate.ts --url ... --reapply
@@ -108,15 +123,15 @@ from what `ob1_config` records (006 would re-record it — run from a shell
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
 own definition is the update). The checks read the catalog and `ob1_config`
-under a 10 s lock timeout of their own. A plain run on the baselined brain,
-where 030 is pending, fails at 030 with what is missing and this command,
+under a 10 s lock timeout of their own. A plain run on a brain whose ledger
+is ahead of its schema, where 030 is pending, fails at 030 with what is missing and this command,
 rather than a bare "does not exist"; preflight's `edit signature`, `delete
 signature`, `vector models` and `atomic capture` remedies name it where the
 ledger records the migration they find absent.
 
 **021's evidence backfill runs with the operator's acceptances out of its
-sight** — on the re-run, and on a plain run where 021 is pending (a brain built
-by hand through 021 and adopted by "just run them", or a ledger hole). 021
+sight** — on the re-run, and on a plain run where 021 is pending (a ledger
+hole; a brain built by hand with no ledger takes the re-run, SMD-3425). 021
 labels an unlabelled thought from its latest succeeded claim row under a key
 naming a model, and the file is hashed and applied as written, from before a
 succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
@@ -149,8 +164,7 @@ Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
-030's own header still describes, that file being hashed. `--baseline` runs no
-SQL and shadows nothing.
+030's own header still describes, that file being hashed.
 
 **Stop the server and any re-embed or extraction worker first, and connect
 directly, not through a transaction-mode pooler:** the migrator sets session
@@ -224,8 +238,8 @@ only when the core's are clean:
   as they are.
 
 `--dry-run` lists each plugin's pending files under its own heading: the sha,
-and the role and schema each would run as. It makes nothing. `--baseline` and
-`--reapply` leave plugins to a plain run, and say so. A name that is no plugin,
+and the role and schema each would run as. It makes nothing. `--reapply`
+leaves plugins to a plain run, and says so. A name that is no plugin,
 or one given twice, is refused before anything runs (exit 2).
 
 ```bash
@@ -1716,7 +1730,7 @@ schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
 page's LIMIT). Preflight's `thought indexes` row warns while the index is
 INVALID or of another shape, and — once the ledger records 100 — missing: the
-file is not re-run, so a drop, a `--baseline` adoption or an unfinished
+file is not re-run, so a drop or an unfinished
 `CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
 that mends it (`--reapply` for an index whose migration's other objects are
 absent too), or — for an INVALID one — the pid of the index operation it
@@ -2662,7 +2676,7 @@ a load that inserted the text around `upsert_thought` still can, which lands
 as a failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
-adopted with `--baseline` — ledger says 021, body says 013 — is told to
+whose ledger is ahead of its schema — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
 above; the migrator runs 021's backfill with the operator's acceptances out of
 its sight, so it labels from real passes alone).
@@ -3811,19 +3825,19 @@ one a raw `BEGIN` opened); a transaction's handle is refused for one.
 
 ## Sleep: the passes while the brain is quiet (SMD-1794)
 
-`sleep.ts` runs extraction and consolidation while the brain is quiet, and
-stops them within `--poll` seconds of the first live call being recorded —
+`sleep.ts` runs re-embed, extraction and consolidation while the brain is
+quiet, and stops them within `--poll` seconds of the first live call being recorded —
 "dolphin sleep": one half works while the other keeps answering. The header
 of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain, a call wakes it or its budget stops it
+bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain, a call wakes it or its budget stops it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
+#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as its own service: `--profile sleep`
@@ -3856,9 +3870,11 @@ says: a running pass costs a search 24–33 ms (SMD-3024), so the passes go on
 through one, and the scheduler reads no `query_log` (SMD-3315; before 2.0.0 a
 logged search woke it, for a role granted the retired `sleep` group).
 board-sync's key is classified `ingested` on the stable brain; an unclassified
-key's writes wake it (reembed, ingest-records, a migration's backfill) until
-`SELECT set_agent_kind('<key name>', 'ingested')` says they are background
-work. The passes it runs write no audit row, so they never wake it.
+key's writes wake it (a one-shot reembed run, ingest-records, a migration's
+backfill) until `SELECT set_agent_kind('<key name>', 'ingested')` says they
+are background work. The passes it runs write no audit row but re-embed's,
+for a row it gives its first vector, which is marked background as the
+mender's are (SMD-2679), so they never wake it.
 
 **What it does asleep.** First the re-derive pass (SMD-1794's order,
 SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
@@ -3880,9 +3896,34 @@ replay's refusal stops it said once, and a brain without 063 or a role
 without `EXECUTE` on the function is told once at the start and sweeps
 nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
 role short of one of those grants meets 42501 at the first call, said with
-the grant, and the sweeps end for the process. Then extraction alone until its pool drains, then
-consolidation beside it — the order "Start `extract` alone on a backlog" asks
-of an operator. A wake hard-stops both: every lease returned, the model call in
+the grant, and the sweeps end for the process. Then re-embed (SMD-2679),
+alone, so the vectors consolidation judges neighbours by are current — only
+when its backlog has work (rows pending or in flight under the configured
+model's own key — another process's live lease not counted — thoughts not at
+the model or with no vector, finished rows whose thought has moved;
+`--dry-run` prints it, counting every lease, a hand run's too), so
+a brain with nothing to re-embed starts no pass and calls no embedding
+endpoint at all: re-embed's start is not among those the scheduler checks.
+Until its pool drains; anything else that ends it sets it down for that
+sleep — refused (a key, credit, the model not served, the egress policy, a
+refusal mid-pass), a statement past its timeout, its provider not answering —
+said, on the row (`aside`, its kind; a thrown error's reason in the log), and
+extraction and consolidation run on; the next sleep with work tries it again.
+A model switch it will not make —
+the brain recording an embedding model other than the stack's
+`OB1_EMBEDDING_MODEL` — sets it aside, said and on the row (briefly at each
+later sleep), extraction and consolidation running on; the record is read
+again at each sleep's start and each poll while it is aside, so running
+`reembed.ts --switch-model` clears it — re-embed runs in that sleep if read
+at its start, else in the next sleep with work. Putting the variable back instead means
+recreating `sleep` (and `api`): the scheduler reads its environment once.
+**Unlabelled vectors:** a brain from before migration 021 carries vectors
+with no model, and its first sleeps re-embed and label them, one embedding
+call a row, before they extract, across as many sleeps as the clock needs;
+the start line and `--dry-run` count them, and `reembed.ts --dry-run` before
+upgrading says how many. Then extraction alone until its
+pool drains, then consolidation beside it — the order "Start `extract` alone
+on a backlog" asks of an operator. A wake hard-stops the passes: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (093, [Long thoughts
 resume](#extract-entitiests)), so one longer than every sleep advances by the
@@ -4051,7 +4092,16 @@ ended … stopped on its budget — its clock spent (60 min); the next begins
 after a live call and the quiet" while it waits for one (`resting`), no
 warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
 that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
-above).
+above). Since SMD-2679's PR 4b its `waiting` and `waitingMidPass` name
+`reembed` too, and `aside` carries re-embed set aside on a model switch —
+`{ reembed: { kind: "model-switch", recorded, configured } }`, the model the
+brain records and the stack's — until a sleep finds the record put right, or
+set down for the sleep — `{ reembed: { kind } }`, one of `provider`, `model`,
+`egress`, `tables`, `usage`, `statement`, `outage`, `failed` — until the next
+sleep begins. The row's outcome reads failed while re-embed is set aside, or
+down for a cause the operator mends (all but `outage`, its provider's state),
+so preflight's `sleep` row flags it as "its last pass failed"; that row names
+the aside itself from SMD-2679's next PR.
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
@@ -5511,9 +5561,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1714 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1736 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 89 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 111 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 327 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
@@ -5578,8 +5628,9 @@ that no script outside the suites reads `DATABASE_URL`, builds a client or
 exits inside the door.
 
 `migrate.ts` is also an engine (SMD-2304): `import { run } from "./migrate.ts"`
-defines it and does nothing else, and `run({ url, dryRun, baseline, reapply,
-force, grant, sql, writer })` is the CLI's run, returning the exit code — its
+defines it and does nothing else, and `run({ url, dryRun, reapply, grant, sql,
+writer })` is the CLI's run, returning the exit code (`baseline` and `force`
+are refused as retired, as the CLI refuses the flags, SMD-3325) — its
 lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
 the migration files are read per call, and a client passed in is used in
 place of the URL and never closed. It must be one connection (the `max: 1`
@@ -5849,7 +5900,7 @@ first assumed. See FORK.md's SMD-1632 section.
 ### What only the live suite can catch
 
 - **The migration runner.** `migrate.ts` talks to a server over TCP with `Bun.sql`.
-  PGlite is not a server, so the ledger, `--dry-run`, `--baseline` and drift
+  PGlite is not a server, so the ledger, `--dry-run` and drift
   detection were untested until `test-live.ts` existed.
 - **Driver-level parameter binding.** The double-encoding bug below is invisible to
   a test that writes SQL literals. It only appears when a client binds a JS value

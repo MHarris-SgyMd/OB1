@@ -13033,7 +13033,7 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
   const RUN = "Run these in psql against the brain's database, as the tables' owner (the role the migrator connects as), one statement at a time (CONCURRENTLY refuses a transaction block). ";
   const SIZE = "Before each CREATE INDEX, size the memory in that session: about 2.5 KB a vector in the table (`SELECT count(embedding) FROM <table>`), as `SET maintenance_work_mem = '<size>';`. ";
   const SMALLER = (it: string) => `; on a smaller table the migrator builds ${it} inside its transaction, holding writers, in the migrating role's maintenance_work_mem (\`ALTER ROLE <role> SET maintenance_work_mem = '<size>'\`, RESET after). `;
-  const FREE = (t: string) => `${t}_embedding_idx is missing, and a re-apply or a run with no ledger would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`;
+  const FREE = (t: string) => `${t}_embedding_idx is missing, and a re-apply would build a vector index there first (001's or 007's CREATE INDEX), then 039 its own`;
   const WAIT = "once that build has finished without error (an interrupted one leaves the index INVALID), ";
   const PENDING = "Apply the pending migrations, 039 among them: `cd db && bun migrate.ts --url …`.";
   const LOCKED = "The ledger is locked (schema_migrations could not be read: canceling statement due to lock timeout): a migration or a long transaction holds it, perhaps 039 itself. Run preflight again once it is released; it will then say how to apply 039.";
@@ -13160,8 +13160,8 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
   const freeOnly = plan039({ pairs: [pairOf(T, null)], dim: W }).steps;
   const renameOnly = plan039({ pairs: [pairOf(T, null, stageIx(T))], dim: W }).steps;
   assert(freeOnly === `${RUN}${SIZE}On any brain, first — on thoughts (${FREE(T)}): 1) \`${CREATE(N, T)}\`. ` && renameOnly === `${RUN}On any brain, first — on thoughts (${N} is missing and ${S}, of 039's shape, is built): 1) \`ALTER INDEX ${S} RENAME TO ${N};\`. `
-         && apply039({ state: "none" }) === "Apply the migrations: `cd db && bun migrate.ts --url …` — with no ledger it runs every file, 039 among them, and records each (not --baseline, which would record 039 without running it).",
-    "the memory goes ahead of any CREATE INDEX, an any-brain one alone included, and not ahead of a rename alone; with no ledger, the plain run that records every file, not the --baseline the ledger row offers");
+         && apply039({ state: "none" }) === `The ledger records nothing, or there is none, so re-apply the migrations: stop the server and every worker, run \`cd db && bun migrate.ts --url … --reapply\` (it re-runs every migration in one transaction, so 074, the last definer of match_thoughts, runs again after 039), then start them again; with nothing recorded it applies every file, 039 among them, and records each.`,
+    "the memory goes ahead of any CREATE INDEX, an any-brain one alone included, and not ahead of a rename alone; with no ledger, the re-apply that records every file");
   assert([walkPlain, walkRecorded, walkUnread, walkHole, walkLocked, leadRecorded].every((t) => !/file alone|direct connection|074_min_trust|\{\{/.test(t))
          && leadRecorded.includes(apply039({ state: "recorded" })) && walkRecorded.includes(apply039({ state: "recorded" })) && apply039({ state: "unread" }).includes("(this role cannot read schema_migrations)") && apply039() === PENDING,
     "no branch has a file applied by hand, 074 after it or a placeholder left in; both rows say 039's apply in apply039's words, an unread reason defaulting to the refusal's and no ledger state to the pending run");

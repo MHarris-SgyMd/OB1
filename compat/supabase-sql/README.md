@@ -276,6 +276,13 @@ column as one parameter holding the array literal, its elements quoted and
 escaped, cast to the declared type. A test asserts that a value containing
 `'; DROP TABLE …` is stored as data and the table survives.
 
+`createClient` refuses a value that is not a `postgres://` URL by its shape
+alone — its scheme (`got a "mysql:" URL`), or that it has none — and never
+repeats any of the value: the hand-ported recipes pass the connection string
+here, so a mistyped scheme quoted back would print the role's password
+(SMD-2263). It trims the value first, so a stray space or newline from an env
+file is no refusal.
+
 ## The catalog
 
 PostgREST knows the schema; a supabase-js caller leans on that without knowing

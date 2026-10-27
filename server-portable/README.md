@@ -519,21 +519,13 @@ the atomic capture path: the store writes content, metadata and vector in one
 `upsert_thought` call and has no two-step fallback (that was the retired
 PostgREST store's).
 
-Migration 014 matters here too. The guide's `match_thoughts` applies a metadata
-filter *after* choosing its candidates, so a selective filter silently returns
-fewer rows than match; preflight probes the RPC on every start and warns while
-that body is in place. To clear it, run the fork's migrator against the Supabase
-project's **direct** connection string (Project Settings → Database → connection
-string, not the pooler) — every migration is idempotent and 014 needs pgvector
-0.8.0, which Supabase ships:
-
-```bash
-cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
-```
-
-Or record the ones the dashboard already applied with `--baseline` and apply the
-rest; `db/README.md` §4 covers both routes.
+The schema is the migrator's. In the compose stack its `migrate` service runs
+`db/migrate.ts` on every `up`, before the servers start (`db/README.md`).
+Preflight probes `match_thoughts` on every start and warns while a body from
+before 014 is in place, one that filters metadata *after* choosing its
+candidates and so returns fewer rows than match. A schema applied without the
+migrator takes `--reapply` once; a plain run there is refused (`db/README.md`
+§4, SMD-3425).
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing
@@ -543,7 +535,7 @@ the same shape at 020 and 021 — and, for 032, its `reembed.ts` sending you to
 `--reapply` and that older `--reapply` re-creating the dropped form beside the
 current one, after which every shorter call is `function is not unique` until a
 current checkout re-applies. The compose stack is in lockstep by construction; a hand-run server
-or a Supabase brain served from another machine is not (FORK.md change 60;
+is not (FORK.md change 60;
 SMD-1451 is the migrator refusing it).
 
 ## What this brain is: `brain_info` and a keyed `/health`
@@ -1124,7 +1116,7 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1215 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1217 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-rest.ts          # 490 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)

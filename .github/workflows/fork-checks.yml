@@ -1942,7 +1942,7 @@ jobs:
             --data-urlencode "key=$OB1_SMOKE_KEY" http://127.0.0.1:8010/dashboard/signin)
           echo "a key posted to the configured GUI: $code"
           if [ "$code" != 403 ] || ! grep -q 'Key sign-in is off' /tmp/gui-signin; then echo "the configured GUI did not refuse key sign-in itself" >&2; exit 1; fi
-          if grep -qi '^set-cookie: ob1_dashboard_session=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
+          if grep -qiE '^set-cookie: ob1_dashboard_session(_[0-9]+)?=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
@@ -2807,6 +2807,8 @@ jobs:
           kill "$SQUAT"
           q "INSERT INTO ob1_config (key, value) VALUES ('tier', 'working')"
           refused "is stamped tier 'working'" up --port 8011
+          # SMD-3155: with no canary volume, a plain up stands one up from stable, said.
+          grep -F '(open-brain-canary_pgdata does not exist): it is stood up from stable' /tmp/canary-refused.out
           q "DELETE FROM ob1_config WHERE key = 'tier'"
           q "ALTER DATABASE openbrain SET ob1.refresh_target = 'canary'"
           refused "carries the refresh mark 'canary'" up --port 8011
@@ -2842,7 +2844,8 @@ jobs:
       #   profiles, and no other profile's secret, and sets the old canary's
       #   database to that password. Neither password then opens the other
       #   stack's database, and the canary's server holds none of stable's.
-      # - The second `up` names no port, so takes its env file's, under
+      # - The second `up`, `--refresh` (a plain `up` keeps the canary's database
+      #   since SMD-3155), names no port, so takes its env file's, under
       #   SERVER_BIND=0.0.0.0: its forwarder stays on loopback, and stable's
       #   /canary/mcp is the proxy's 404. The stub serves another model: the
       #   thought put on stable just before it reaches the canary, and the
@@ -2852,8 +2855,10 @@ jobs:
       # - A third `up`, with a connector at the port's root: named as one the
       #   canary no longer answers, and the root is the proxy's own 404 with
       #   no Deprecation header, retired at v2.0.0 (SMD-2532).
-      # - A fourth `up`, on --port 8012, then one after 8013 is edited into the
-      #   file by hand, which names the connector left at 8012.
+      # - A fourth `up`, on --port 8012, a plain one, which keeps the database
+      #   (a canary-only row survives, no tier half runs), then refusals of a
+      #   database stamped stable, running and stopped, then one after 8013 is
+      #   edited into the file by hand, which names the connector left at 8012.
       #   On --port 8012: the port is written to the canary's
       #   env file, 8011 is free, and a connector left at 8011 is named.
       # - Then teardown:
@@ -2965,6 +2970,10 @@ jobs:
           if [ -s /tmp/tier-sample/both ]; then echo "a container was on both brains' data networks: $(sort -u /tmp/tier-sample/both | tr '\n' ' ')" >&2; exit 1; fi
           if ! compgen -G '/tmp/tier-sample/stable.*' > /dev/null || ! compgen -G '/tmp/tier-sample/canary.*' > /dev/null; then ls -la /tmp/tier-sample >&2; echo "the sampler saw no tier half on one side of the refresh" >&2; exit 1; fi
           grep -F 'stamped open-brain-postgres-1 tier=stable' /tmp/canary-up.out
+          # SMD-3155: a plain up keeps a canary's database, but this one (the
+          # pre-SMD-2583 Postgres made above) holds no relations, so it is
+          # stood up from stable, said.
+          grep -F 'no canary database to keep (open-brain-canary_pgdata holds no relations): it is stood up from stable' /tmp/canary-up.out
           # SMD-2583: the canary's own env file, made from stable's: mode 600,
           # every setting of stable's but its database password, which is a
           # new one, and the secrets of the profiles the canary never runs (the
@@ -3097,7 +3106,9 @@ jobs:
           # holds it: migrate.ts never changes it, so the up must (code review).
           cq "CREATE ROLE ob1_plugins LOGIN PASSWORD 'ci-dummy-plugin-password-0123456789'" > /dev/null
           touch /tmp/provider-stub-wrong
-          rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
+          # SMD-3155: --refresh, since a plain up now keeps the canary's database
+          # and this one is to bring stable's new thought.
+          rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up --refresh > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
           plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
@@ -3112,7 +3123,8 @@ jobs:
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own forwarder is not on loopback only" >&2; exit 1; }
           if grep -F "to the canary's env file" /tmp/canary-wrong.out; then echo "an up with no --port wrote to the canary's env file" >&2; exit 1; fi
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "stable's /canary/mcp answers with the canary on a port of its own" >&2; exit 1; }
-          [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
+          [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the up --refresh did not bring stable's new thought" >&2; exit 1; }
+          if grep -F "the canary's database is kept" /tmp/canary-wrong.out; then echo "up --refresh said it kept the canary's database" >&2; exit 1; fi
           # A connector at the root of the canary's own port is one it no
           # longer answers: the legacy route that handed a POST there to the
           # canary went with v2.0.0, and the root is the proxy's own 404
@@ -3133,7 +3145,7 @@ jobs:
           grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
           board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
-          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run up --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             http://127.0.0.1:8011/) || root_code="no answer (curl exit $?)"
@@ -3141,11 +3153,20 @@ jobs:
           # Another port (SMD-2874): written to the canary's env file, where
           # compose reads it from then on, its old port freed, and a connector
           # left there named.
+          # SMD-3155: a plain up, which keeps the canary's database: a row only
+          # the canary holds (a refresh's restore would replace it) survives,
+          # no tier half runs, and its writers stop for the migration.
+          cq "INSERT INTO ob1_config (key, value) VALUES ('ci_canary_plain_up', 'kept') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
           FAKE_URL='http://127.0.0.1:8011/mcp?key=x' ./canary.sh --port 8012 up --no-smoke | tee /tmp/canary-moved.out
+          grep -F "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)" /tmp/canary-moved.out
+          grep -F 'migrated in place (its own rows kept)' /tmp/canary-moved.out
+          if grep -F 'refresh open-brain-postgres-1' /tmp/canary-moved.out; then echo "a plain up ran the refresh" >&2; exit 1; fi
+          [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_plain_up'")" = kept ] || { echo "a plain up lost the canary's own row" >&2; exit 1; }
+          cq "DELETE FROM ob1_config WHERE key = 'ci_canary_plain_up'"
           grep -F "wrote to the canary's env file, $PWD/.env.canary.local: SERVER_PORT=\"8012\" (it said 8011)" /tmp/canary-moved.out
           # SMD-3312 review pass 2: an upgrade's own path, board-sync running
-          # since the root up, stopped for the refresh and recreated after it.
-          grep -F 'canary board-sync stopped for the refresh' /tmp/canary-moved.out
+          # since the root up, stopped for the migration and recreated after it.
+          grep -F 'canary board-sync stopped for the migration' /tmp/canary-moved.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-moved.out
           [ "$(grep -c '^SERVER_PORT=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one SERVER_PORT line after the move" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, a port this canary no longer answers on: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-moved.out
@@ -3158,6 +3179,28 @@ jobs:
           # a cold key registry answers plain `ok` (smoke.sh warms it the same way).
           for _ in 1 2 3 4 5; do jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null 2>&1 && break; sleep 2; done
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "127.0.0.1:8012/mcp does not answer as the canary: $(health 8012/mcp | head -c 120)" >&2; exit 1; }
+          # SMD-3155: a canary database stamped other than canary, as a refresh
+          # that died before its last step leaves stable's copy, is refused by a
+          # plain up, naming --refresh, before anything changes: the canary
+          # still answers. The two refresh flags together are refused, and
+          # either beside down.
+          cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
+          refused "is stamped 'stable', not canary" up --no-smoke
+          grep -F 'Run up --refresh to finish one. Nothing changed.' /tmp/canary-refused.out
+          refused "is stamped 'stable', not canary" up --no-refresh --no-smoke
+          cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
+          jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "the refused up stopped the canary" >&2; exit 1; }
+          refused 'one or the other' up --refresh --no-refresh
+          # …and where the canary's Postgres is stopped when the run begins, the
+          # guard is asked once it is started, after the writers stop: exit 1,
+          # saying what is stopped, and the next up brings them back.
+          cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
+          docker compose -p open-brain-canary -f compose.yaml stop postgres
+          rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
+            && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
+          cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
+          refused 'go with up' down --refresh
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published
           # when the run began is still named (code review).
@@ -3440,12 +3483,14 @@ jobs:
           docker rm -f ob1-runner-egress
 
       # SMD-2285: the authorization server as compose runs it. Its secrets are
-      # --init's, into this job's deploy/.env. First, with one setting blanked
-      # and the origin given a path, it refuses to start, exit 2, naming both
-      # at once. Then it comes up healthy, and a client registered by DCR is
-      # read back with its registration token after a restart (the log shows
-      # the second start) and again after a recreate, as an upgrade does: the
-      # SQLite store is in its volume, and the memory adapter forgot both.
+      # --init's, into this job's deploy/.env. With one setting blanked, the
+      # origin given a path and the profiles without auth, it refuses to start,
+      # exit 2, naming all three at once — a run beside the rest of the step,
+      # since it waits 30 s before its exit (SMD-3200). Meanwhile it comes up
+      # healthy, and a client registered by DCR is read back with its
+      # registration token after a restart (the log shows the second start)
+      # and again after a recreate, as an upgrade does: the SQLite store is in
+      # its volume, and the memory adapter forgot both.
       # The store's directory is the server's user's alone; an interaction
       # with no session is the library's 400, and a write to a store another
       # connection holds locked answers 500 and is logged; with the cap set to
@@ -3499,18 +3544,24 @@ jobs:
           # (the failure log, and the teardown's `down -v`, which removes
           # auth-data too).
           # The refusal below waits 30 s before its exit 2 (no hot restart
-          # loop), so this step takes that much longer.
+          # loop), so it runs in the background through the rest of the step
+          # (SMD-3200). The image and the volume are made first, so its run and
+          # the server's up race to build or create neither; the up recreates
+          # the container made beside them, which the one-off never touches. A
+          # one-off `run` takes no network alias, so it never answers for the
+          # server, and compose's up, restart, logs and plain ps pass it over.
+          # Exec does not: it sorts by container number, where the one-off reads
+          # 0 before the server's 1, so every `auth exec` here takes --index 1.
+          # The refusal is waited for and asserted before the server's stop, its
+          # 30 s long past by then. A failure before that removes its container
+          # by name (killing the background job would reach only a subshell), so
+          # the teardown meets no one-off holding the volume.
           ../.github/ci/auth-settings.sh
-          set +e
-          out=$(auth run --rm --no-deps -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth 2>&1)
-          code=$?
-          set -e
-          echo "$out" | tail -5
-          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
-          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
-            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
-          done
-          auth up -d --build --wait --wait-timeout 120 --no-deps auth
+          auth up --no-start --build --no-deps auth
+          auth run --rm --no-deps --name ob1-auth-refusal -e OB1_AUTH_COOKIE_KEYS= -e OB1_PUBLIC_ORIGIN=https://brain.example.test/auth -e COMPOSE_PROFILES=local-models auth > /tmp/auth-refusal.out 2>&1 < /dev/null &
+          refusal=$!
+          trap 'docker rm -f ob1-auth-refusal > /dev/null 2>&1 || true' EXIT
+          auth up -d --wait --wait-timeout 120 --no-deps auth
           for path in /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/auth; do
             got=$(via_proxy "http://127.0.0.1:8010$path")
             [ "$got" = "200 https://brain.example.test/auth" ] || { echo "GET $path through the proxy answered \"$got\", not the server's document"; exit 1; }
@@ -3543,24 +3594,24 @@ jobs:
             c=$(curl -s --max-time 10 -o /tmp/off-body -w '%{http_code}' "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path" || true)
             { [ "$c" = 404 ] && [ ! -s /tmp/off-body ]; } || { echo "POST $path at the origin root answered $c '$(head -c 80 /tmp/off-body)', not oauth-fallback-off's bodiless 404"; exit 1; }
           done
-          auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
+          auth exec --index 1 -T auth bun restart-check.ts --register > /tmp/auth-client.json
           auth restart auth
           auth up -d --wait --wait-timeout 60 --no-deps auth
-          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          auth exec --index 1 -T auth bun restart-check.ts --read < /tmp/auth-client.json
           log=$(auth logs --no-color auth)
           starts=$(grep -cF "issuer https://brain.example.test/auth" <<<"$log" || true)
           [ "$starts" = 2 ] || { echo "the log shows $starts starts, not 2: the restart did not restart the server"; exit 1; }
           auth up -d --force-recreate --wait --wait-timeout 60 --no-deps auth
-          auth exec -T auth bun restart-check.ts --read < /tmp/auth-client.json
+          auth exec --index 1 -T auth bun restart-check.ts --read < /tmp/auth-client.json
           # The session cookie a sign-in sets is the issuer's path alone, so on
           # the shared origin it never rides a request to /mcp or the rest. The
           # password goes by name, as in the steps below (check 43, SMD-3351).
           OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
           export OB1_AUTH_OPERATOR_PASSWORD
-          cookie_path=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
+          cookie_path=$(auth exec --index 1 -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --session-cookie < /tmp/auth-client.json)
           [ "$cookie_path" = /auth ] || { echo "the session cookie's Path is \"$cookie_path\", not /auth"; exit 1; }
-          [ "$(auth exec -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
-          bogus=$(auth exec -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
+          [ "$(auth exec --index 1 -T auth stat -c '%U %a' /data)" = "bun 700" ] || { echo "/data is not the server's alone"; exit 1; }
+          bogus=$(auth exec --index 1 -T auth bun -e 'const r = await fetch("http://127.0.0.1:3000/auth/interaction/not-a-uid"); console.log(r.status, (await r.text()).includes("cookie not found"))')
           [ "$bogus" = "400 true" ] || { echo "an interaction with no session answered \"$bogus\", not 400 naming the missing cookie"; exit 1; }
           # SMD-2615: absolute-form targets, each with an authority the URL parser
           # refuses, are 400 and `//x/healthz` is not /healthz; the process is
@@ -3568,20 +3619,20 @@ jobs:
           # A connection the server holds open is cut after 3 s and reads "timeout",
           # whatever it sent first, so it fails the row rather than hanging the job.
           # shellcheck disable=SC2016 # JavaScript, run in the container
-          odd=$(auth exec -T auth bun -e 'const { connect } = require("node:net"); const ask = (t) => new Promise((ok) => { let out = ""; const s = connect(3000, "127.0.0.1", () => s.write(`GET ${t} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)); s.on("data", (d) => (out += d)); let held = false; const timer = setTimeout(() => { held = true; s.destroy(); }, 3000); s.on("close", () => { clearTimeout(timer); ok(held ? "timeout" : out.split(" ")[1] || "none"); }); s.on("error", () => ok("refused")); }); const out = []; for (const t of ["http://x:99999/healthz", "http://[::1/auth/token", "//x/healthz"]) out.push(await ask(t)); await Bun.sleep(500); out.push(await fetch("http://127.0.0.1:3000/healthz").then((r) => r.status, () => "refused")); console.log(out.join(" "))')
+          odd=$(auth exec --index 1 -T auth bun -e 'const { connect } = require("node:net"); const ask = (t) => new Promise((ok) => { let out = ""; const s = connect(3000, "127.0.0.1", () => s.write(`GET ${t} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)); s.on("data", (d) => (out += d)); let held = false; const timer = setTimeout(() => { held = true; s.destroy(); }, 3000); s.on("close", () => { clearTimeout(timer); ok(held ? "timeout" : out.split(" ")[1] || "none"); }); s.on("error", () => ok("refused")); }); const out = []; for (const t of ["http://x:99999/healthz", "http://[::1/auth/token", "//x/healthz"]) out.push(await ask(t)); await Bun.sleep(500); out.push(await fetch("http://127.0.0.1:3000/healthz").then((r) => r.status, () => "refused")); console.log(out.join(" "))')
           [ "$odd" = "400 400 404 200" ] || { echo "absolute-form targets, //x/healthz, then /healthz answered \"$odd\", not \"400 400 404 200\""; exit 1; }
           [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$(auth ps -q auth)")" = "true 0" ] || { echo "the authorization server restarted after the odd targets"; exit 1; }
           # One process holds the store's write lock across the whole request and
           # lets go only after the answer, so nothing depends on two start-ups'
           # timing: the server's write waits out its 5 s and answers 500.
           # shellcheck disable=SC2016 # JavaScript, run in the container
-          locked=$(auth exec -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
+          locked=$(auth exec --index 1 -T auth bun -e 'const { Database } = require("bun:sqlite"); const d = new Database("/data/auth.sqlite"); d.exec("BEGIN IMMEDIATE"); try { const r = await fetch("http://127.0.0.1:3000/auth/reg", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); console.log(r.status, (await r.json()).error); } finally { d.exec("ROLLBACK"); }')
           [ "$locked" = "500 server_error" ] || { echo "a write to a locked store answered \"$locked\", not 500 server_error"; exit 1; }
           # The cap (3 here): the client registered above and two more fill it, and the next is refused for now.
-          for _ in 1 2; do auth exec -T auth bun restart-check.ts --register > /dev/null; done
+          for _ in 1 2; do auth exec --index 1 -T auth bun restart-check.ts --register > /dev/null; done
           # Every spelling the library routes to registration (any case, a trailing slash, a query: SMD-2615) is held to it.
           # shellcheck disable=SC2016 # JavaScript, run in the container
-          full=$(auth exec -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/", "/auth/reg?ob1=1"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
+          full=$(auth exec --index 1 -T auth bun -e 'const out = []; for (const p of ["/auth/reg", "/auth/REG", "/auth/reg/", "/auth/reg?ob1=1"]) { const r = await fetch("http://127.0.0.1:3000" + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.example/callback"], token_endpoint_auth_method: "none" }) }); out.push(`${r.status} ${(await r.json()).error} ${r.headers.get("retry-after")}`); } console.log(out.join(" | "))')
           want="503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600 | 503 temporarily_unavailable 3600"
           [ "$full" = "$want" ] || { echo "registrations past the cap answered \"$full\", not \"$want\""; exit 1; }
           got=$(via_proxy -X POST -H 'content-type: application/json' -d '{"redirect_uris":["https://client.example/callback"],"token_endpoint_auth_method":"none"}' http://127.0.0.1:8010/auth/reg)
@@ -3591,10 +3642,26 @@ jobs:
           # a client that does not exist, or the public one registered above (no secret to guess), is never counted.
           # Every other one carries a query, the 21st among them: the gate reads past it as the library does (SMD-2615).
           pub=$(bun -e 'console.log(JSON.parse(await Bun.stdin.text()).client_id)' < /tmp/auth-client.json)
-          bad=$(auth exec -T -e PUB="$pub" auth bun -e 'const tok = async (client, from, path = "/auth/token") => (await fetch("http://127.0.0.1:3000" + path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9", i % 2 ? "/auth/token" : "/auth/token?ob1=1")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
+          bad=$(auth exec --index 1 -T -e PUB="$pub" auth bun -e 'const tok = async (client, from, path = "/auth/token") => (await fetch("http://127.0.0.1:3000" + path, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Basic " + btoa(client + ":not-the-secret"), "x-forwarded-for": from }, body: "grant_type=client_credentials" })).status; const out = []; for (let i = 0; i < 21; i++) out.push(await tok("gui", "203.0.113.9", i % 2 ? "/auth/token" : "/auth/token?ob1=1")); const none = []; const open = []; for (let i = 0; i < 21; i++) { none.push(await tok("no-such-client", "203.0.113.11")); open.push(await tok(process.env.PUB, "203.0.113.12")); } console.log(out.filter((s) => s === 401).length, out.at(-1), await tok("gui", "203.0.113.10"), await tok("mcp", "203.0.113.9"), none.filter((s) => s === 401).length, open.filter((s) => s === 401).length)')
           want="20 429 401 401 21 21"
           [ "$bad" = "$want" ] || { echo "21 bad client secrets, then another address, another client, and 21 each for no client and the public one, answered \"$bad\", not \"$want\""; exit 1; }
           grep -qF "server error: SQLiteError: database is locked" <<<"$(auth logs --no-color auth)" || { echo "the locked store's server_error is not in the log"; exit 1; }
+          # The refusal, started before the server came up: exit 2, naming every bad setting at once. Then compose, which
+          # lists a one-off with -a alone, lists the server's container alone: the refusal's is gone with it (SMD-3200).
+          # Bounded: a refusal that never exits fails here, not at the job's six hours.
+          for _ in $(seq 60); do kill -0 "$refusal" 2> /dev/null || break; sleep 1; done
+          kill -0 "$refusal" 2> /dev/null && { echo "the refusal had not exited a minute after the rest of the step"; exit 1; }
+          code=0
+          wait "$refusal" || code=$?
+          trap - EXIT
+          out=$(< /tmp/auth-refusal.out)
+          echo "$out" | tail -5
+          [ "$code" = 2 ] || { echo "a bad setting exited $code, not 2"; exit 1; }
+          for said in "OB1_AUTH_COOKIE_KEYS is not set" "OB1_PUBLIC_ORIGIN must be an origin alone" 'COMPOSE_PROFILES does not name auth ("local-models")'; do
+            grep -qF "$said" <<<"$out" || { echo "the refusal did not say: $said"; exit 1; }
+          done
+          n=$(auth ps -aq auth | wc -l)
+          [ "$n" = 1 ] || { echo "compose lists $n auth containers after the refusal, not the server's alone"; exit 1; }
           id=$(auth ps -q auth)
           SECONDS=0
           auth stop auth
@@ -3916,6 +3983,24 @@ jobs:
         with:
           bun-version: "1.4.3"
 
+      # lgtm's image (2.6 GB) and pg-exporter's, pulled while the stack comes up
+      # rather than inside the observability step, where the pull took 21–28 s
+      # (SMD-3199). Both are pinned by digest in compose.yaml, so they are read
+      # from the file with no deploy/.env yet, and a ref not pinned is refused.
+      # The pull writes its log, then its exit code by a rename, which the
+      # observability step waits for before it reads the disk.
+      - name: Pull the observability profile's images, in the background
+        working-directory: deploy
+        run: |
+          # shellcheck disable=SC2016 # Bun's template literal
+          refs=$(bun -e 'const c = Bun.YAML.parse(await Bun.file("compose.yaml").text()); const r = ["lgtm", "pg-exporter"].map((s) => c.services[s]?.image ?? ""); if (r.some((x) => !/@sha256:[0-9a-f]{64}$/.test(x))) { console.error(`an observability image is not pinned by digest in compose.yaml: ${r.join(" ")}`); process.exit(1); } console.log(r.join(" "));')
+          echo "pulling $refs"
+          (
+            rc=0
+            for ref in $refs; do docker pull -q "$ref" || rc=$?; done
+            echo "$rc" > "$RUNNER_TEMP/observability-pull.rc.part" && mv "$RUNNER_TEMP/observability-pull.rc.part" "$RUNNER_TEMP/observability-pull.rc"
+          ) < /dev/null > "$RUNNER_TEMP/observability-pull.log" 2>&1 &
+
       # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
@@ -3955,8 +4040,9 @@ jobs:
       # every query is run where Grafana would run it, its variables at All
       # and its rate window 5 m. Each Prometheus query must return a series
       # with a number above 0 in it within three minutes (the exporter is
-      # scraped every 30 s) — or 0 itself for the ten that answer 0 where
-      # their family has series and their filter matches nothing (`or 0 * …`:
+      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the ten
+      # that answer 0 where their family has series and their filter matches
+      # nothing (`or 0 * …`:
       # the failure share, the store's three, the collector's three and its
       # three totals), empty where it has none — but the NO_TRAFFIC panel,
       # whose events this traffic does not make; each Loki query must return
@@ -3965,13 +4051,17 @@ jobs:
       # holds every name, and every label a matcher requires, on the pinned
       # images; check 37 holds the names and labels without a running profile. Loki refuses every record with its
       # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
-      # image is pulled, before Loki starts, and room made where it is tight. The
-      # step puts the stack's containers and deploy/.env back as it found
-      # them (the thought, the job, the query log's rows, pg-monitor-role's
-      # ob1_monitor role, lgtm-data and the telemetry network stay), so a step
-      # added after it meets the stack it found: a collector would lengthen
-      # the servers' stop line, which deploy-stack's last steps read where
-      # this ran until SMD-3170. A capture citing a thought that is not there
+      # image is pulled (in the background since the job's start, SMD-3199),
+      # before Loki starts, and room made where it is tight. The step is the
+      # job's last before the teardown, so it leaves the stack as it ends it:
+      # it put deploy/.env and the servers back as it found them until
+      # SMD-3199, for a step after it that no longer exists — a step added
+      # after it brings that back. CI's clocks are 10 s, not the shipped 30 s:
+      # the collector's scrape of pg-exporter and the alert rules' evaluation,
+      # from an overlay derived from compose's own render, so the rest of the
+      # collector's config is the shipped one, and the step holds that the
+      # overlay changes the interval alone (SMD-3199; checks 37 and 38 hold the
+      # files' text). A capture citing a thought that is not there
       # makes the store's refusals line read above 0, and one tool called
       # once proves Prometheus's zero at a series' start.
       # SMD-3050: compose's render of the alert rules is
@@ -3986,7 +4076,6 @@ jobs:
       - name: The observability profile's dashboard reads every series it names
         working-directory: deploy
         run: |
-          cp .env /tmp/env-before-observability
           printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
           # compose's render prints each `$` doubled again, as compose.yaml has it,
           # so it reads back as the file once undoubled (Grafana's mount has one).
@@ -3995,12 +4084,33 @@ jobs:
             || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
           jq -j '.configs["grafana-alert-rules"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/alert-rules.yaml \
             || { echo "compose renders the grafana-alert-rules config otherwise than deploy/observability/alert-rules.yaml" >&2; exit 1; }
+          # CI's clocks, 10 s where the files say 30 s (SMD-3199): the collector's
+          # scrape of pg-exporter and the rule group's evaluation, written from
+          # the render above into an overlay, so the collector's whole pipeline
+          # and the rules are the shipped ones but for the interval. Each
+          # substitution must have changed its value, and the overlay's render
+          # must differ from the shipped one in those two values alone.
+          ci=$RUNNER_TEMP/observability-ci.json
+          # The two substitutions, once: the overlay is written with them and checked against them.
+          tens='def args: .services.lgtm.environment.OTELCOL_EXTRA_ARGS | sub("\"scrape_interval\":\"30s\""; "\"scrape_interval\":\"10s\"");
+                def rules: .configs["grafana-alert-rules"].content | sub("(?m)^    interval: 30s$"; "    interval: 10s");'
+          jq "$tens"' {services: {lgtm: {environment: {OTELCOL_EXTRA_ARGS: args}}}, configs: {"grafana-alert-rules": {content: rules}}}' /tmp/observability-render.json > "$ci"
+          docker compose -f compose.yaml -f "$ci" --profile observability config --format json > /tmp/observability-render-ci.json
+          jq -e --slurpfile ci /tmp/observability-render-ci.json "$tens"'
+              args as $args | rules as $rules
+            | $args != .services.lgtm.environment.OTELCOL_EXTRA_ARGS and $rules != .configs["grafana-alert-rules"].content
+            and $ci[0].services.lgtm.environment.OTELCOL_EXTRA_ARGS == $args and $ci[0].configs["grafana-alert-rules"].content == $rules
+            and ($ci[0] | del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)) == del(.services.lgtm.environment.OTELCOL_EXTRA_ARGS, .configs["grafana-alert-rules"].content)' \
+            /tmp/observability-render.json > /dev/null \
+            || { echo "CI's overlay does not change the collector's scrape interval and the alert rules' interval from 30 s to 10 s, and those alone" >&2; exit 1; }
           # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
           # starts on it: Loki refuses every record with the disk under lgtm-data
           # past 90% (PR 3c, measured), and the log query below would fail with
           # no reason given. Where it is tight, the runner image's SDKs this job
-          # never uses (several GB) make room.
-          docker compose -f compose.yaml --profile observability pull lgtm pg-exporter
+          # never uses (several GB) make room. The pull began at the job's start.
+          for _ in $(seq 600); do [ -f "$RUNNER_TEMP/observability-pull.rc" ] && break; sleep 1; done
+          [ "$(cat "$RUNNER_TEMP/observability-pull.rc" 2> /dev/null)" = 0 ] \
+            || { echo "the observability images' pull did not end with 0 within 10 minutes ($(cat "$RUNNER_TEMP/observability-pull.rc" 2> /dev/null || echo "no exit code")):" >&2; cat "$RUNNER_TEMP/observability-pull.log" >&2; exit 1; }
           root=$(docker info -f '{{.DockerRootDir}}')
           used=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
           if [ "$used" -ge 85 ]; then
@@ -4009,7 +4119,7 @@ jobs:
           fi
           df -h "$root"
           [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
-          docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
+          docker compose -f compose.yaml -f "$ci" --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
           ./smoke.sh http://127.0.0.1:8010/mcp "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
           # Each call's tool, status and, where the tool refused, isError;
@@ -4133,9 +4243,10 @@ jobs:
           # — the stub's 404 for each capture's metadata call is a provider
           # failure, and about three in 10 m make it pending (firing 5 m on) —
           # and the other four normal and healthy, nothing here making their
-          # conditions. Rules are evaluated every 30 s; a read from before the
-          # exporter's first scrape may still hold the Postgres rule's NoData,
-          # so the wait is for all of it, 18 rounds (about two minutes).
+          # conditions. Rules are evaluated every 10 s here (30 s as shipped);
+          # a read from before the exporter's first scrape may still hold the
+          # Postgres rule's NoData, so the wait is for all of it, 18 rounds
+          # (about two minutes).
           judged() {
             local uid
             grep -qE '^(pending|firing) ok ob1-provider-failures$' <<<"$st" || return 1
@@ -4186,9 +4297,9 @@ jobs:
           [ "$signins" = 0 ] || said "Postgres logged $signins failed sign-ins as ob1_monitor: a /probe reached the exporter"
           echo "pg-exporter answers /cgi-bin/metrics alone, on telemetry alone"
           # The ticket's forced condition: the exporter stopped, the collector's
-          # next scrape reads up 0 (within its 30 s), and the Postgres rule is
+          # next scrape reads up 0 (within its 10 s here), and the Postgres rule is
           # pending at an evaluation after it (22–61 s from the stop over three
-          # fresh runs, measured), firing a minute on.
+          # fresh runs on the shipped 30 s, measured), firing a minute on.
           docker compose -f compose.yaml --profile observability stop pg-exporter
           for _ in $(seq 36); do
             st=$(states) || st=""
@@ -4197,13 +4308,6 @@ jobs:
           done
           grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" || said "the Postgres rule did not go pending within 3 minutes of pg-exporter's stop: $(tr '\n' ';' <<<"$st"); Prometheus's up and pg_up for the exporter: $(prom 'up{job="postgres"}') $(prom 'pg_up{job="postgres"}')"
           echo "the Postgres rule pending after pg-exporter's stop"
-          cp /tmp/env-before-observability .env
-          docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
-          for s in api mcp; do
-            endpoint=$(docker compose -f compose.yaml exec -T "$s" printenv OTEL_EXPORTER_OTLP_ENDPOINT) || { echo "could not read $s's OTEL_EXPORTER_OTLP_ENDPOINT after the step" >&2; exit 1; }
-            [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
-          done
 
       - name: Logs on failure
         if: failure()

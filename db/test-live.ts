@@ -7,7 +7,7 @@
  * reach, and all three have already hidden a defect:
  *
  *   1. The migration runner. migrate.ts speaks to a server over TCP with Bun.sql.
- *      PGlite is not a server, so the ledger, --dry-run, --baseline and drift
+ *      PGlite is not a server, so the ledger, --dry-run and drift
  *      detection were entirely untested until this file existed.
  *
  *   2. Driver-level parameter binding. The double-encoding bug that migration 005
@@ -3115,10 +3115,11 @@ if (want("9")) {
   assert(keyRows.length === 1 && keyRows[0].actor_name === "reembed" && keyRows[0].author_session_id === REEMBED_JOB && Object.keys(keyRows[0].diff).join(",") === "content_fingerprint" && keyRows[0].diff.content_fingerprint.before === null && typeof keyRows[0].diff.content_fingerprint.after === "string",
     `…one of them the twin that took the key: the move alone — before NULL, after 003's key — attributed to the pass (${JSON.stringify(keyRows.map((r: { diff: unknown }) => r.diff))})`);
   const [auditRow] = await sql`
-    SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
+    SELECT a.actor_name, a.author_session_id, a.diff, a.actor_context->>'background' AS background FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;
-  assert(auditRow?.actor_name === "reembed" && auditRow?.author_session_id === REEMBED_JOB && auditRow?.diff?.embedding_present === true,
-    `…for the row that gained a vector, attributed to the tool and the job (${JSON.stringify(auditRow)})`);
+  // A one-shot run's write is an operator's, not background work: only a follower's is marked (SMD-2679 PR 4b, review pass 1).
+  assert(auditRow?.actor_name === "reembed" && auditRow?.author_session_id === REEMBED_JOB && auditRow?.diff?.embedding_present === true && auditRow?.background === null,
+    `…for the row that gained a vector, attributed to the tool and the job, and not marked background (${JSON.stringify(auditRow)})`);
 
   const status = await reembed("--status");
   assert(status.code === 0 && /35 succeeded \(1 with a caveat\), 3 failed/.test(status.out), "--status reports the pass, caveat included");
@@ -11727,8 +11728,8 @@ if (want("26")) {
     // Refused before any query, the message intact on stderr.
     const noUrl = await lint({}, "--tier=1");
     const httpsUrl = await lint({ SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "unused" }, "--tier=1");
-    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL/.test(httpsUrl.out) && !/\[tier 1\] done/.test(httpsUrl.out),
-      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
+    assert(noUrl.code === 1 && /ERROR: SUPABASE_URL must be set/.test(noUrl.out) && httpsUrl.code === 1 && /expected a postgres:\/\/ connection URL, got a "https:" URL/.test(httpsUrl.out) && !httpsUrl.out.includes("example.supabase.co") && !/\[tier 1\] done/.test(httpsUrl.out),
+      `…no URL exits 1 naming the variable; a Supabase URL exits 1 with the shim's refusal naming its scheme alone, before any query (${noUrl.code}: ${firstLine(noUrl.out)}; ${httpsUrl.code}: ${firstLine(httpsUrl.out).slice(0, 120)})`);
     }
 
     // A graph table the role may not read is a refusal, not an absence: with SELECT on `thoughts` alone, Tier 2 exits 1
@@ -11775,9 +11776,10 @@ if (want("26")) {
     assert(thoughtsOut?.length === N && thoughtsOut.every((r) => ids.has(String(r.id))) && new Set(thoughtsOut.map((r) => r.id)).size === N && ascending(thoughtsOut, (r) => String(r.id)) && ascending(entitiesOut ?? [], (r) => Number(r.id)) && thoughtsOut.every((r) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(String(r.created_at)) && typeof r.metadata === "object") && entitiesOut?.length === 3 && edgesOut?.length === 1 && linksOut?.length === 1,
       `…the thoughts file holds exactly the table's ${N} ids once each and in id order (a page query without its ORDER BY survived every other assertion on a fresh heap — review pass 3, mutant), timestamps as ISO strings and metadata as objects; entities 3, edges 1, thought_entities 1 (${thoughtsOut?.length ?? "no file"}/${entitiesOut?.length ?? "-"}/${edgesOut?.length ?? "-"}/${linksOut?.length ?? "-"})`);
     const bkNoUrl = await backup({});
-    const bkHttps = await backup({ SUPABASE_URL: "https://example.supabase.co" });
-    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL/.test(bkHttps.out) && !/Open Brain Backup --/.test(bkHttps.out),
-      `…no URL exits 1 with both lines of its message; a Supabase URL exits 1 with the shim's refusal, before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
+    // A mistyped scheme on a connection string: the refusal names the scheme and repeats none of the value (SMD-2263).
+    const bkHttps = await backup({ SUPABASE_URL: "mysql://u:pw-not-real@127.0.0.1:5432/x" });
+    assert(bkNoUrl.code === 1 && /ERROR: SUPABASE_URL not found\.\nEither export it/.test(bkNoUrl.out) && bkHttps.code === 1 && /expected a postgres:\/\/ connection URL, got a "mysql:" URL/.test(bkHttps.out) && !bkHttps.out.includes("pw-not-real") && !/Open Brain Backup --/.test(bkHttps.out),
+      `…no URL exits 1 with both lines of its message; a mistyped scheme exits 1 with the shim's refusal, which names the scheme and repeats none of the value (its password included), before any query (${bkNoUrl.code}: ${firstLine(bkNoUrl.out)}; ${bkHttps.code}: ${firstLine(bkHttps.out).slice(0, 120)})`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
     await sql`DELETE FROM thoughts`;
@@ -14240,12 +14242,33 @@ if (want("38")) {
   let probes = 0;
   /** Every request naming this model, probes too: not served (a 404 naming it) — the judge's own, say (SMD-2752). */
   let missingModel: string | null = null;
+  /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first); and its switches: down, the key refused, each held. */
+  const embedCalls: { input: string; at: number }[] = [];
+  /** The embedding probes the stub answered: re-embed's start check, and any pass it starts. */
+  let embedProbes = 0;
+  let embedDown = false;
+  let embedKeyRefused = false;
+  let embedSlowMs = 0;
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
-      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; input?: string };
+      // Embeddings, apart from the chat switches below (SMD-2679 PR 4b: the scheduler runs re-embed): a vector on the
+      // input's axis, unless a case says the embedding provider is down (503) or refuses the key (401).
+      if (typeof body.input === "string") {
+        if (body.input !== "reembed.ts provider probe") embedCalls.push({ input: body.input, at: Date.now() });
+        else embedProbes++;
+        if (embedDown) return Response.json({ error: { message: "stub: embeddings overloaded" } }, { status: 503 });
+        if (embedKeyRefused) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
+        if (embedSlowMs && body.input !== "reembed.ts provider probe") await Promise.race([Bun.sleep(embedSlowMs), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        const v = new Array(EMBEDDING_DIM).fill(0);
+        let h = 0;
+        for (const ch of body.input) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+        v[1 + (h % (EMBEDDING_DIM - 1))] = 1;
+        return Response.json({ data: [{ embedding: v }] });
+      }
       if (missing || (missingModel !== null && body.model === missingModel)) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
@@ -14281,12 +14304,17 @@ if (want("38")) {
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
-  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL };
-  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL"]) delete env[k];
+  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: String(EMBEDDING_DIM) };
+  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT", "OB1_LLM_API_KEY"]) delete env[k];
+  // The brain records the embedding model the scheduler's re-embed pass is configured for, and the captures are at it,
+  // so a sleep has nothing to re-embed but what a case puts there (SMD-2679 PR 4b).
+  const EMBED_JOB = `reembed:stub-embed@${EMBEDDING_DIM}`;
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  await sql`DELETE FROM thought_work_claims WHERE work_type = ${EMBED_JOB}`;
   await sql`SELECT set_agent_kind('sync-sleep', 'ingested')`;
   await sql`SELECT set_agent_kind('op-sleep', 'operator')`;
   const capture = async (content: string, key: string | null, daysAgo = 0, axis = 0) => {
-    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, ...(key ? { actor: { name: key, via: "test-live" } } : {}) }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", ...(key ? { actor: { name: key, via: "test-live" } } : {}) }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
     if (daysAgo) await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
     return id;
   };
@@ -14491,7 +14519,7 @@ if (want("38")) {
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one sleep extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
-    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /both pools drained — the sleep ends/.test(onceText),
+    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("asleep:") && /the pools drained — the sleep ends/.test(onceText),
       `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
@@ -14568,7 +14596,7 @@ if (want("38")) {
     const bare = ((await sql`SELECT upsert_thought(${mendText}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
     const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${bare}::uuid`;
     const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
-      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-model'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
+      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
     const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
@@ -14614,7 +14642,7 @@ if (want("38")) {
     try {
       await tx`BEGIN`;
       [{ t: txBegan }] = await tx`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`;
-      await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
+      await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
       // The line comes before the row's write: polled for this sleep's mark, open (review pass 1).
       await pollUntil(async () => {
@@ -15331,9 +15359,12 @@ if (want("38")) {
     await capture("A note the CLI is asleep over.", "sync-sleep", 0, 7);
     slow = 8000;
     const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
+    const cliAt = Date.now();
     const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
     try {
-      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1, 30_000);
+      // The call in hand at the stub, not the claim alone: a signal between the claim and the call let the soft stop
+      // end within the 300 ms, exit 0 (seen once, SMD-2679 PR 4b's merge of main).
+      await pollUntil(async () => (await beat())?.running === true && (await claims(EX)).claimed === 1 && modelCalls.some((c) => c.kind === "extract" && c.at >= cliAt), 30_000);
       cli.kill("SIGINT");
       await Bun.sleep(300);
       cli.kill("SIGINT");
@@ -15782,6 +15813,444 @@ if (want("38")) {
       slowExtract = 0;
       await setKey(EX);
     }
+
+    // ── Re-embed first (SMD-2679 PR 4b): the scheduler runs re-embed before
+    // the claim passes, only when its backlog has work, and sets it aside on a
+    // model switch it will not make, the others running on.
+    {
+      /** A thought at another embedding model (or with no vector), written by the sync key, which wakes nothing. */
+      const reCapture = async (content: string, axis: number, model: string | null = "old-embed") =>
+        ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, ...(model ? { embedding_model: model } : {}), actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, ${model ? sql`${unit(axis)}::vector` : sql`NULL::vector`}) AS r`)[0].r as { id: string }).id;
+      const atEmbed = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+      const exStatus = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+      const reClaimed = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EMBED_JOB} AND status = 'claimed'`)[0].c);
+      const sleepBeat = async () => (await beat()) as unknown as { running?: boolean; outcome?: string | null; waitingMidPass?: string[]; aside?: unknown; slept?: { budget?: string }; budget?: { stops: number } } | null;
+      const follow = (o: Partial<Parameters<typeof runSleep>[0]> = {}) => {
+        lines.length = 0;
+        const ac = new AbortController();
+        const run = sleepRun({ follow: true, minStampEveryS: 1, ...o, signal: ac.signal });
+        return { stop: () => { ac.abort(); return bounded(run, ac); }, settle: () => bounded(run, ac) };
+      };
+      const oneSleep = async () => {
+        lines.length = 0;
+        const ac = new AbortController();
+        return await bounded(sleepRun({ signal: ac.signal }), ac);
+      };
+      try {
+        // Its backlog — two thoughts at another model and one with no vector —
+        // re-embedded before extraction's first call; the vectorless one's
+        // audited write marked background, so it wakes nothing.
+        modelCalls.length = 0;
+        embedCalls.length = 0;
+        const olds = [await reCapture("An old-model note, number one.", 11), await reCapture("An old-model note, number two.", 12)];
+        const vectorless = await reCapture("A note saved without a vector.", 0, null);
+        const t0 = Date.now();
+        const firstCode = await oneSleep();
+        const reembedded = (await Promise.all([...olds, vectorless].map(atEmbed))).every(Boolean);
+        const lastEmbed = Math.max(...embedCalls.map((c) => c.at));
+        const extractsAfter = modelCalls.filter((c) => c.kind === "extract" && c.at >= t0).map((c) => c.at);
+        const firstExtract = extractsAfter.length ? Math.min(...extractsAfter) : 0;
+        assert(firstCode === 0 && reembedded && embedCalls.length >= 3 && firstExtract > lastEmbed
+          && lines.some((l) => /re-embedding 3 thought\(s\) to stub-embed first — extraction starts once that pool drains/.test(l)) && lines.some((l) => /re-embed drained — extracting/.test(l)) && !lines.some((l) => /awake:/.test(l)),
+          `a sleep re-embeds its backlog first — three thoughts, before extraction's first call — then extracts; nothing wakes it (exit ${firstCode}; re-embedded ${reembedded}; ${embedCalls.length} embedding call(s), the last ${firstExtract - lastEmbed} ms before extraction's first)`);
+        const [bg] = await sql`SELECT actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${vectorless}::uuid AND actor_name = 'reembed' ORDER BY created_at DESC LIMIT 1`;
+        assert(bg?.background === "reembed", `…the vectorless thought's audited write is marked background, as the vector mender's is (${JSON.stringify(bg)})`);
+
+        // Nothing to re-embed: no pass starts and no start check runs for it, so no embedding call and no probe at all.
+        embedCalls.length = 0;
+        embedProbes = 0;
+        await capture("A note after the re-embed.", "sync-sleep", 0, 13);
+        const emptyCode = await oneSleep();
+        assert(emptyCode === 0 && embedCalls.length === 0 && embedProbes === 0 && !lines.some((l) => /re-embedding \d+ thought/.test(l)),
+          `a sleep with nothing to re-embed starts no pass: no embedding call, no probe at all (exit ${emptyCode}; ${embedCalls.length} call(s), ${embedProbes} probe(s))`);
+
+        // A wake mid re-embed: the pass stops at once, its lease returned, the thought in hand to the back of the queue.
+        const slowOld = [await reCapture("A slow old note, one.", 14), await reCapture("A slow old note, two.", 15)];
+        embedSlowMs = 6000;
+        const woken = follow();
+        let wakeMs = -1, inHand = false, heldBack = false, afterWake = {} as Record<string, number>;
+        try {
+          inHand = await pollUntil(async () => (await reClaimed()) > 0, 15_000);
+          const [{ before }] = await sql`SELECT now() AS before`;
+          const wakeAt = Date.now();
+          await liveWrite(sql, 'a live write while re-embedding');
+          if (await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000)) wakeMs = Date.now() - wakeAt;
+          afterWake = await claims(EMBED_JOB);
+          heldBack = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EMBED_JOB} AND status = 'pending' AND enqueued_at >= ${before}::timestamptz`)[0].c) > 0;
+        } finally {
+          embedSlowMs = 0;
+        }
+        const wokenCode = await woken.stop();
+        assert(inHand && wakeMs >= 0 && wakeMs < 4000 && !afterWake.claimed && heldBack && wokenCode === 0,
+          `a wake mid re-embed stops it at once, no lease left, the thought in hand moved to the back of the queue (in hand ${inHand}; woke in ${wakeMs} ms; ${JSON.stringify(afterWake)}; moved back ${heldBack}; exit ${wokenCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(slowOld, "TEXT")}::uuid[])`;
+
+        // The clock spent with re-embed work left: the stop is counted.
+        const clockOld = [await reCapture("A clocked old note, one.", 16), await reCapture("A clocked old note, two.", 17)];
+        // Re-embed's the only work left: the claim passes have these done, so the stop counts for re-embed's pool alone.
+        for (const job of [EX, CO]) {
+          await sql`SELECT enqueue_thoughts(${job}, ${sql.array(clockOld, "TEXT")}::uuid[])`;
+          await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${job} AND thought_id = ANY(${sql.array(clockOld, "TEXT")}::uuid[])`;
+        }
+        const clockLeft = { ex: await claims(EX), co: await claims(CO) };
+        embedSlowMs = 5000;
+        const clocked = follow({ budgetMs: 2000 });
+        let clockBeat = null as Awaited<ReturnType<typeof sleepBeat>>;
+        try {
+          await pollUntil(async () => (clockBeat = await sleepBeat())?.slept?.budget === "clock" && clockBeat?.running === false, 20_000);
+        } finally {
+          embedSlowMs = 0;
+        }
+        const clockedCode = await clocked.stop();
+        assert(clockBeat?.slept?.budget === "clock" && (clockBeat.budget?.stops ?? 0) >= 1 && clockedCode === 0,
+          `a clock spent with re-embed's work left, the claim passes' drained, is a counted budget stop (${JSON.stringify({ slept: clockBeat?.slept, budget: clockBeat?.budget })}; claim pools ${JSON.stringify(clockLeft)}; exit ${clockedCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(clockOld, "TEXT")}::uuid[])`;
+
+        // The embedding provider gone mid-pass: the row says re-embed waits mid-pass, and extraction goes on meanwhile.
+        const waitOld = [await reCapture("An old note before the embedding outage.", 18), await reCapture("An old note the embedding outage holds.", 19)];
+        const meanwhile = await capture("A note extraction takes while re-embed waits.", "sync-sleep", 0, 20);
+        embedSlowMs = 1500;
+        // Every write of the row, kept: the word lasts only until the scheduler's next poll, which a sampled read could miss.
+        await sql.unsafe(`CREATE TABLE zz_sleep_beats (value text);
+          CREATE FUNCTION zz_sleep_beats() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+            IF NEW.key = 'heartbeat:sleep' THEN INSERT INTO zz_sleep_beats VALUES (NEW.value); END IF; RETURN NEW; END $$;
+          CREATE TRIGGER zz_sleep_beats AFTER INSERT OR UPDATE ON ob1_config FOR EACH ROW EXECUTE FUNCTION zz_sleep_beats()`);
+        const waiting = follow({ poll: 3 });
+        let sawWait = false, wentOn = false, heldPending = false, downWord: unknown, outageOutcome: string | null | undefined, waitingCode = -9;
+        try {
+          await pollUntil(async () => (await reClaimed()) > 0, 15_000);
+          embedDown = true;
+          embedSlowMs = 0;
+          wentOn = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — its provider is not answering/.test(l)) && (await exStatus(meanwhile)) === "succeeded", 20_000);
+          sawWait = Number((await sql`SELECT count(*)::int AS c FROM zz_sleep_beats WHERE value::jsonb->'waitingMidPass' = '["reembed"]'::jsonb`)[0].c) > 0;
+          const outageBeat = await sleepBeat();
+          downWord = outageBeat?.aside;
+          outageOutcome = outageBeat?.outcome;
+          heldPending = (await claims(EMBED_JOB)).failed === undefined;
+        } finally {
+          embedDown = false;
+          embedSlowMs = 0;
+          waitingCode = await waiting.stop();
+          await sql.unsafe(`DROP TRIGGER IF EXISTS zz_sleep_beats ON ob1_config; DROP FUNCTION IF EXISTS zz_sleep_beats(); DROP TABLE IF EXISTS zz_sleep_beats`);
+        }
+        assert(sawWait && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0,
+          `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, then set down for the sleep, extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; exit ${waitingCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(waitOld, "TEXT")}::uuid[])`;
+
+        // A model switch at the check: re-embed set aside, said by the dry run, the log and the row; extraction runs on.
+        // Put right, the next sleep takes it up again.
+        await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
+        let asideRow: unknown, dryAside = false, extracted = false, takenUp = false, takenUpAsleep = false, rowAfter: unknown = "unread", asideCode = -9, recordAfter = "unread", asideOutcome: string | null | undefined;
+        let late = "";
+        try {
+          lines.length = 0;
+          await sleepRun({ quiet: 300, dryRun: true });
+          dryAside = lines.some((l) => /re-embed set aside: the brain records other-embed, this stack is configured for stub-embed/.test(l));
+          const asideNote = await capture("A note extracted while re-embed is set aside.", "sync-sleep", 0, 21);
+          const aside = follow();
+          try {
+            extracted = await pollUntil(async () => (await exStatus(asideNote)) === "succeeded", 15_000);
+            const asideBeat = await sleepBeat();
+            asideRow = asideBeat?.aside;
+            asideOutcome = asideBeat?.outcome;
+            // Put right by deleting the record: none recorded is no switch, read within the sleep it is aside in — no
+            // wake, as a --switch-model run by hand wakes nothing (review pass 2) — and re-embed's first pool, at the
+            // next sleep, records this stack's model.
+            await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+            takenUpAsleep = await pollUntil(async () => lines.some((l) => /re-embed's set-aside cleared: the brain records no embedding model now — the next sleep with work re-embeds, and records stub-embed/.test(l)), 10_000)
+              && !lines.some((l) => /awake:/.test(l));
+            late = await reCapture("An old note re-embed takes up again.", 22);
+            await liveWrite(sql, 'a live write to end the set-aside sleep');
+            takenUp = await pollUntil(() => atEmbed(late), 20_000);
+            recordAfter = ((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0]?.value as string | undefined) ?? "";
+            rowAfter = (await sleepBeat())?.aside;
+          } finally {
+            asideCode = await aside.stop();
+          }
+        } finally {
+          await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+        }
+        assert(dryAside && extracted && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)) && JSON.stringify(asideRow) === JSON.stringify({ reembed: { kind: "model-switch", recorded: "other-embed", configured: "stub-embed" } }) && asideOutcome === "failed" && asideCode === 0,
+          `a model switch at a sleep's start sets re-embed aside — the dry run and the log say it, the row carries it and reads failed, a switch the operator mends — and the scheduler runs on, extracting (dry run ${dryAside}; extracted ${extracted}; row ${JSON.stringify(asideRow)}, outcome ${asideOutcome}; exit ${asideCode})`);
+        assert(takenUpAsleep && takenUp && rowAfter === undefined && recordAfter === "stub-embed", `…the record put right — deleted here — is read within the sleep, with no wake, and the next sleep re-embeds, its first pool recording this stack's model, the row's word gone (asleep ${takenUpAsleep}; re-embedded ${takenUp}; row ${JSON.stringify(rowAfter)}; record ${recordAfter})`);
+
+        // Put right while the brain is awake, the record is read at the next sleep's start: re-embed runs in that sleep,
+        // and the line says so, not "the next sleep" (review pass 4).
+        await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
+        const awakeOld = await reCapture("An old note re-embedded once the record is put right while awake.", 26);
+        let startCleared = false, awakeReembedded = false, awakeCode = -9;
+        const awakeRun = follow({ quiet: 3 });
+        try {
+          await pollUntil(async () => lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)), 15_000);
+          await liveWrite(sql, 'a live write to wake the set-aside sleep');
+          await pollUntil(async () => lines.some((l) => /awake:/.test(l)), 10_000);
+          await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+          startCleared = await pollUntil(async () => lines.some((l) => /re-embed's set-aside cleared: the brain records stub-embed, this stack's — re-embed runs in this sleep when it has work/.test(l)), 15_000);
+          awakeReembedded = await pollUntil(() => atEmbed(awakeOld), 15_000);
+        } finally {
+          awakeCode = await awakeRun.stop();
+        }
+        await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+        await sql`DELETE FROM thoughts WHERE id = ${awakeOld}::uuid`;
+        assert(startCleared && awakeReembedded && awakeCode === 0,
+          `a record put right while the brain is awake is read at the next sleep's start: the set-aside cleared, said as this sleep's, and re-embed runs in it (said ${startCleared}; re-embedded ${awakeReembedded}; exit ${awakeCode})`);
+
+        // The record moving under a running re-embed: the follower exits 2, and the scheduler sets the pass aside and
+        // goes on, where it read a refusal and ended. A slow scheduler poll, so the follower's own poll meets the switch first.
+        const mids = [await reCapture("A mid-switch old note, one.", 23), await reCapture("A mid-switch old note, two.", 24)];
+        const afterSwitch = await capture("A note extracted after the switch.", "sync-sleep", 0, 25);
+        embedSlowMs = 1500;
+        const switching = follow({ poll: 15 });
+        let asideMid = false, extractedAfter = false, switchCode = -9, midOutcome: string | null | undefined;
+        try {
+          await pollUntil(async () => (await reClaimed()) > 0, 15_000);
+          await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
+          embedSlowMs = 0;
+          asideMid = await pollUntil(async () => lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)), 25_000);
+          extractedAfter = await pollUntil(async () => (await exStatus(afterSwitch)) === "succeeded", 25_000);
+          midOutcome = (await sleepBeat())?.outcome;
+        } finally {
+          embedSlowMs = 0;
+          switchCode = await switching.stop();
+          await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+        }
+        assert(asideMid && extractedAfter && midOutcome === "failed" && switchCode === 0 && !lines.some((l) => /ended by itself/.test(l)),
+          `the record moving under a running re-embed sets the pass aside, and the scheduler goes on to extract rather than end (aside ${asideMid}; extracted ${extractedAfter}; exit ${switchCode}; ${lines.filter((l) => /reembed|re-embed/.test(l)).slice(-3).join(" | ").slice(0, 300)})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(mids, "TEXT")}::uuid[])`;
+
+        // The record moving under a backlog longer than the batches in hand: the follower reads it before each batch, so
+        // the rows not yet claimed stay at the old model, not written at this stack's after the switch (review pass 4: a
+        // hand --switch-model beside a sleep's re-embed had the whole backlog written at the old model, every call billed).
+        const longOld: string[] = [];
+        for (let i = 0; i < 20; i++) longOld.push(await reCapture(`A long-backlog old note, number ${i}.`, 40 + i));
+        embedCalls.length = 0;
+        embedSlowMs = 300;
+        const longRun = follow();
+        let longStarted = false, longAside = false, longCode = -9, longAtStub = -1;
+        try {
+          longStarted = await pollUntil(async () => embedCalls.length > 0, 20_000);
+          await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
+          longAside = await pollUntil(async () => lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)), 25_000);
+          longAtStub = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ANY(${sql.array(longOld, "TEXT")}::uuid[]) AND embedding_model = 'stub-embed'`)[0].c);
+        } finally {
+          embedSlowMs = 0;
+          longCode = await longRun.stop();
+          await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+          await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(longOld, "TEXT")}::uuid[])`;
+        }
+        assert(longStarted && longAside && longAtStub >= 0 && longAtStub < 20 && longCode === 0,
+          `the record moving under a long re-embed backlog: the follower reads it before each batch, the rows not yet claimed left at the old model and the pass set aside (started ${longStarted}; aside ${longAside}; ${longAtStub} of 20 written at this stack's model; exit ${longCode})`);
+
+        // Re-embed refused at a sleep's start — the embedding key — sets it down for that sleep: extraction runs on, and the
+        // next sleep with work tries again (review pass 1, the maintainer's choice: it stalled every sleep).
+        const keyOld = await reCapture("An old note the refused key holds back.", 26);
+        const keyNote = await capture("A note extracted while the embedding key is refused.", "sync-sleep", 0, 27);
+        embedKeyRefused = true;
+        const keyed = follow();
+        let keyDown = false, keyExtracted = false, keyWord: unknown, keyRetaken = false, keyedCode = -9, keyOutcome: string | null | undefined, keyCleared = false;
+        try {
+          keyDown = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — the embedding provider refused it/.test(l)), 20_000);
+          keyExtracted = await pollUntil(async () => (await exStatus(keyNote)) === "succeeded", 20_000);
+          const keyBeat = await sleepBeat();
+          keyWord = keyBeat?.aside;
+          keyOutcome = keyBeat?.outcome;
+          embedKeyRefused = false;
+          await liveWrite(sql, 'a live write once the key is right');
+          keyRetaken = await pollUntil(() => atEmbed(keyOld), 20_000);
+          // The next sleep's word: set down no longer, so gone (review pass 2: no case held it).
+          keyCleared = await pollUntil(async () => (await sleepBeat())?.aside === undefined, 10_000);
+        } finally {
+          embedKeyRefused = false;
+          keyedCode = await keyed.stop();
+        }
+        assert(keyDown && keyExtracted && JSON.stringify(keyWord) === JSON.stringify({ reembed: { kind: "provider" } }) && keyOutcome === "failed" && keyRetaken && keyCleared && keyedCode === 0 && !lines.some((l) => /reembed ended by itself|reembed refused at its start/.test(l)),
+          `re-embed refused at a sleep's start sets it down for the sleep — said, on the row, which reads failed, a cause the operator mends — extraction running on, and the next sleep re-embeds once the key is right, the word gone (down ${keyDown}; extracted ${keyExtracted}; row ${JSON.stringify(keyWord)}, outcome ${keyOutcome}; re-embedded ${keyRetaken}; cleared ${keyCleared}; exit ${keyedCode})`);
+
+        // Refused mid-pass — the provider refusing the request itself — sets it down too, where it ended the scheduler.
+        const midKey = [await reCapture("A mid-pass refused note, one.", 28), await reCapture("A mid-pass refused note, two.", 29)];
+        const midKeyNote = await capture("A note extracted after a mid-pass refusal.", "sync-sleep", 0, 30);
+        embedSlowMs = 1500;
+        const midKeyed = follow();
+        let midDown = false, midExtracted = false, midKeyedCode = -9;
+        try {
+          await pollUntil(async () => (await reClaimed()) > 0, 15_000);
+          embedKeyRefused = true;
+          embedSlowMs = 0;
+          midDown = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — the embedding provider refused it/.test(l)), 20_000);
+          midExtracted = await pollUntil(async () => (await exStatus(midKeyNote)) === "succeeded", 20_000);
+        } finally {
+          embedKeyRefused = false;
+          embedSlowMs = 0;
+          midKeyedCode = await midKeyed.stop();
+        }
+        assert(midDown && midExtracted && midKeyedCode === 0,
+          `re-embed refused mid-pass sets it down for the sleep, and the scheduler extracts on rather than end (down ${midDown}; extracted ${midExtracted}; exit ${midKeyedCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([keyOld, ...midKey], "TEXT")}::uuid[])`;
+
+        // A statement past re-embed's statement_timeout sets it down for the sleep, where it stopped the sleep on its budget.
+        const slowPoolOld = await reCapture("An old note a slow pool holds back.", 31);
+        const slowPoolNote = await capture("A note extracted after re-embed's statement timed out.", "sync-sleep", 0, 32);
+        await sql.unsafe(`CREATE FUNCTION zz_reembed_pool_sleep() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+            IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN PERFORM pg_sleep(6); END IF; RETURN NULL; END $$;
+          CREATE TRIGGER zz_reembed_pool_sleep AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_pool_sleep()`);
+        const timedOut = follow({ statementTimeout: 2 });
+        let stmtDown = false, stmtExtracted = false, stmtCode = -9;
+        try {
+          stmtDown = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — a statement passed its statement_timeout/.test(l)), 20_000);
+          stmtExtracted = await pollUntil(async () => (await exStatus(slowPoolNote)) === "succeeded", 20_000);
+        } finally {
+          await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_pool_sleep ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_pool_sleep()`);
+          stmtCode = await timedOut.stop();
+        }
+        assert(stmtDown && stmtExtracted && stmtCode === 0 && !lines.some((l) => /the sleep stops on its budget/.test(l)),
+          `a statement past re-embed's statement_timeout sets it down for the sleep, and extraction runs on rather than the sleep stop (down ${stmtDown}; extracted ${stmtExtracted}; exit ${stmtCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ${slowPoolOld}::uuid`;
+
+        // Re-embed throwing — a privilege refused at its claim — is set down with its reason said, which the pass itself
+        // does not say (review pass 2: it read only "it ended by itself", the row ok).
+        const deniedOld = await reCapture("An old note a refused grant holds back.", 38);
+        const deniedNote = await capture("A note extracted while re-embed's grant is refused.", "sync-sleep", 0, 39);
+        await sql.unsafe(`CREATE FUNCTION zz_reembed_claim_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+            IF NEW.status = 'claimed' AND OLD.status IS DISTINCT FROM 'claimed' AND NEW.work_type LIKE 'reembed:%' THEN RAISE EXCEPTION 'zz: permission denied to claim' USING ERRCODE = '42501'; END IF;
+            RETURN NEW; END $$;
+          CREATE TRIGGER zz_reembed_claim_denied BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_reembed_claim_denied()`);
+        const denied = follow();
+        let deniedSaid = false, deniedExtracted = false, deniedOutcome: string | null | undefined, deniedCode = -9;
+        try {
+          deniedSaid = await pollUntil(async () => lines.some((l) => /reembed: zz: permission denied to claim/.test(l)) && lines.some((l) => /re-embed set down for this sleep — it ended by itself/.test(l)), 20_000);
+          deniedExtracted = await pollUntil(async () => (await exStatus(deniedNote)) === "succeeded", 20_000);
+          deniedOutcome = (await sleepBeat())?.outcome;
+        } finally {
+          await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_claim_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_claim_denied()`);
+          deniedCode = await denied.stop();
+        }
+        assert(deniedSaid && deniedExtracted && deniedOutcome === "failed" && deniedCode === 0,
+          `re-embed throwing — a grant refused at its claim — is set down with its reason said, the row failed, extraction running on (said ${deniedSaid}; extracted ${deniedExtracted}; outcome ${deniedOutcome}; exit ${deniedCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ${deniedOld}::uuid`;
+
+        // The clock spent while re-embed's pool statement blocks: its timeout after the clock starts no claim pass
+        // (review pass 2: one started past the clock, to be cut at the grace).
+        const lateOld = await reCapture("An old note the clock outlasts.", 40);
+        const lateNote = await capture("A note no pass starts for after the clock.", "sync-sleep", 0, 41);
+        await sql.unsafe(`CREATE FUNCTION zz_reembed_pool_sleep() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+            IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN PERFORM pg_sleep(6); END IF; RETURN NULL; END $$;
+          CREATE TRIGGER zz_reembed_pool_sleep AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_pool_sleep()`);
+        const clockFirst = follow({ statementTimeout: 3, budgetMs: 1000 });
+        let clockEnded = false, lateStatus: string | undefined, lateCode = -9;
+        try {
+          clockEnded = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — a statement passed its statement_timeout/.test(l)) && (await sleepBeat())?.running === false, 20_000);
+          await Bun.sleep(1500);
+          lateStatus = await exStatus(lateNote);
+        } finally {
+          await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_pool_sleep ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_pool_sleep()`);
+          lateCode = await clockFirst.stop();
+        }
+        assert(clockEnded && lateStatus !== "succeeded" && lateStatus !== "claimed" && lateCode === 0,
+          `re-embed's statement timing out after the sleep's clock was spent starts no claim pass: the sleep ends on its clock (ended ${clockEnded}; the note ${lateStatus ?? "unclaimed"}; exit ${lateCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([lateOld, lateNote], "TEXT")}::uuid[])`;
+
+        // Another process's live re-embed lease is not this sleep's to wait for: no re-embed phase, extraction at once
+        // (review pass 1: it waited out the lease, 900 s after a crashed run).
+        const leased = await reCapture("An old note another process holds.", 33);
+        await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ARRAY[${leased}::uuid])`;
+        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'reembed-elsewhere-1-0-x', claimed_at = now(), ttl_expires_at = now() + interval '1 hour' WHERE work_type = ${EMBED_JOB} AND thought_id = ${leased}::uuid`;
+        const leaseNote = await capture("A note extracted beside another process's lease.", "sync-sleep", 0, 34);
+        let leaseCode = -9;
+        const leaseAt = Date.now();
+        try {
+          leaseCode = await oneSleep();
+        } finally {
+          await sql`DELETE FROM thoughts WHERE id = ${leased}::uuid`;
+        }
+        const leaseMs = Date.now() - leaseAt;
+        assert(leaseCode === 0 && (await exStatus(leaseNote)) === "succeeded" && !lines.some((l) => /re-embedding \d+ thought/.test(l)) && leaseMs < 15_000,
+          `another process's live re-embed lease starts no re-embed phase here: the sleep extracts at once and ends (exit ${leaseCode}; ${leaseMs} ms)`);
+
+        // A one-shot sleep whose re-embed was set down left its pool: exit 1, not done (review pass 1).
+        const oneOld = await reCapture("An old note a one-shot sleep cannot re-embed.", 35);
+        await capture("A note a one-shot sleep extracts.", "sync-sleep", 0, 36);
+        embedDown = true;
+        let oneCode = -9;
+        try {
+          oneCode = await oneSleep();
+        } finally {
+          embedDown = false;
+        }
+        assert(oneCode === 1 && lines.some((l) => /re-embed set down for this sleep — its provider is not answering/.test(l)),
+          `a one-shot sleep whose re-embed was set down — its provider not answering — exits 1, its pool left (exit ${oneCode})`);
+        await sql`DELETE FROM thoughts WHERE id = ${oneOld}::uuid`;
+
+        // A one-shot sleep whose re-embed was aside at its start, the record put right within it: re-embed did not run in
+        // it, so not done — exit 1 (review pass 4: no case held the exit's rule where the rule before it said 0).
+        const clearedOld = await reCapture("An old note a one-shot sleep sets aside.", 38);
+        const clearedNote = await capture("A note a one-shot sleep extracts while re-embed is aside.", "sync-sleep", 0, 39);
+        await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
+        onExtract = async () => {
+          await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+        };
+        slowExtract = 1500;
+        let clearedCode = -9;
+        try {
+          clearedCode = await oneSleep();
+        } finally {
+          onExtract = null;
+          slowExtract = 0;
+          await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+        }
+        const clearedLeft = !(await atEmbed(clearedOld));
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([clearedOld, clearedNote], "TEXT")}::uuid[])`;
+        assert(clearedCode === 1 && clearedLeft && lines.some((l) => /re-embed's set-aside cleared: .* — the next sleep with work re-embeds/.test(l)),
+          `a one-shot sleep whose re-embed was aside at its start exits 1 though the record was put right within it — re-embed did not run in it (exit ${clearedCode}; left ${clearedLeft})`);
+
+        // Vectors from before migration 021 carry no model: the dry run counts them among re-embed's backlog (review pass 1).
+        const unlabelledNote = ((await sql`SELECT upsert_thought(${"A note from before the labels."}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, ${unit(37)}::vector) AS r`)[0].r as { id: string }).id;
+        let dryUnlabelled = false;
+        try {
+          lines.length = 0;
+          await sleepRun({ quiet: 300, dryRun: true });
+          dryUnlabelled = lines.some((l) => /reembed: 1 of those not yet in the pool are unlabelled — vectors from before migration 021/.test(l));
+        } finally {
+          await sql`DELETE FROM thoughts WHERE id = ${unlabelledNote}::uuid`;
+        }
+        assert(dryUnlabelled, `the dry run counts re-embed's unlabelled vectors, which the first sleeps re-embed and label (${lines.filter((l) => /reembed/.test(l)).join(" | ").slice(0, 300)})`);
+
+        // A finished row whose thought moved since is in the backlog — the data rule's — as the follower's first pool
+        // returns it (review pass 3: the count's sub-select moved to a WHERE of its own, for its cost at scale).
+        const movedNote = await capture("A note re-embedded, then moved by another server.", "sync-sleep", 0, 42);
+        await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ARRAY[${movedNote}::uuid])`;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EMBED_JOB} AND thought_id = ${movedNote}::uuid`;
+        await sql`UPDATE thoughts SET embedding_model = 'old-embed' WHERE id = ${movedNote}::uuid`;
+        let dryMoved = "";
+        try {
+          lines.length = 0;
+          await sleepRun({ quiet: 300, dryRun: true });
+          dryMoved = lines.find((l) => /^\s*reembed \(/.test(l)) ?? "";
+        } finally {
+          await sql`DELETE FROM thoughts WHERE id = ${movedNote}::uuid`;
+        }
+        assert(/ 1 not yet in the pool/.test(dryMoved), `a finished row whose thought moved since is in re-embed's backlog, as its first pool returns it (${dryMoved.trim()})`);
+
+        // A re-embed follower running outside sleep does not yield to a live call: the scheduler refuses (2), as for the others.
+        const outsideKey = `heartbeat:${EMBED_JOB}`;
+        await sql`INSERT INTO ob1_config (key, value) VALUES (${outsideKey}, ${JSON.stringify({ v: 1, job: EMBED_JOB, every_s: 60, running: false, outcome: "ok" })})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+        let outsideCode = -9;
+        try {
+          lines.length = 0;
+          const ac = new AbortController();
+          outsideCode = await bounded(sleepRun({ follow: true, signal: ac.signal }), ac);
+        } finally {
+          await sql`DELETE FROM ob1_config WHERE key = ${outsideKey}`;
+        }
+        assert(outsideCode === 2 && lines.some((l) => /refused: a re-embed follower is running outside sleep[^:]*: heartbeat:reembed:stub-embed@\S+ — a reembed\.ts --follow run by hand: stop it/.test(l)) && !lines.some((l) => /--profile workers stop/.test(l)),
+          `a re-embed follower running outside sleep refuses the scheduler, as the claim followers do, its words saying it is a hand run to stop (exit ${outsideCode})`);
+      } finally {
+        embedDown = false;
+        embedKeyRefused = false;
+        embedSlowMs = 0;
+        await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      }
+    }
   } finally {
     restoreOutage();
     stub.stop(true);
@@ -15849,7 +16318,15 @@ if (want("38b")) {
     hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
-      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[]; input?: string };
+      // Embeddings (SMD-2679 PR 4b: the scheduler runs re-embed, whose start probes them): a vector on the input's axis.
+      if (typeof body.input === "string") {
+        const v = new Array(EMBEDDING_DIM).fill(0);
+        let h = 0;
+        for (const ch of body.input) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+        v[1 + (h % (EMBEDDING_DIM - 1))] = 1;
+        return Response.json({ data: [{ embedding: v }] });
+      }
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
         if (body.model === JUDGE && judgeProbeHook) { const r = await judgeProbeHook(); if (r) return r; }
         if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
@@ -15883,11 +16360,13 @@ if (want("38b")) {
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
-  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL, OB1_EXTRACT_CHUNK_TOKENS: "300" };
-  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL"]) delete env[k];
+  const env: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: MODEL, OB1_EXTRACT_CHUNK_TOKENS: "300", OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: String(EMBEDDING_DIM) };
+  for (const k of ["OB1_WORKER_KEY", "OB1_JUDGE_MODEL", "OB1_CHAT_BASE_URL", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT", "OB1_LLM_API_KEY"]) delete env[k];
+  // The record and the captures at the re-embed pass's model: nothing to re-embed (SMD-2679 PR 4b).
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
   await sql`SELECT set_agent_kind('op-long', 'operator')`;
   const capture = async (content: string, daysAgo = 0, axis = 0) => {
-    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "op-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", actor: { name: "op-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
     if (daysAgo) await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
     return id;
   };
@@ -16014,7 +16493,7 @@ if (want("38b")) {
     let parkedNote = "";
     const parkedCapture = (async () => {
       if (!(await pollUntil(async () => lineAt.some((x) => /consolidating first/.test(x.l)), 120_000))) return;
-      parkedNote = ((await sql`SELECT upsert_thought(${"The parkednote, written by a sync while extraction is set aside."}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(13)}::vector) AS r`)[0].r as { id: string }).id;
+      parkedNote = ((await sql`SELECT upsert_thought(${"The parkednote, written by a sync while extraction is set aside."}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(13)}::vector) AS r`)[0].r as { id: string }).id;
     })();
     const b = await wokenEvery(joinedPast, 7, finishes).finally(() => { judgeHold38b = 300; });
     await parkedCapture;
@@ -16107,7 +16586,7 @@ if (want("38b")) {
     await capture("We bill monthly, decided in March.", 3, 0);
     await capture("We bill annually now.", 0, 0);
     const syncNote = async (text: string, axis: number) =>
-      ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+      ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "live" }, embedding_model: "stub-embed", actor: { name: "sync-long", via: "test-live" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
     // Both notes as the pair's first call begins. The second stands for one
     // that lands between the stalled thought's claim and the next poll, held
     // there: dated just behind it — as a thought reclaimed from a lapsed lease
@@ -16414,7 +16893,8 @@ if (want("38b")) {
     const between = new Proxy(sql, {
       apply(t, self, args) {
         const q = Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args);
-        if (raced || !Array.isArray(args[0]) || !(args[0] as string[]).join("$").includes("FROM thought_work_claims WHERE work_type =")) return q;
+        // Extraction's pool read (its `mine` count), not re-embed's backlog read, which comes first since sleep runs it (SMD-2679 PR 4b).
+        if (raced || !Array.isArray(args[0]) || !(args[0] as string[]).join("$").includes("FROM thought_work_claims WHERE work_type =") || !(args[0] as string[]).join("$").includes("AS mine")) return q;
         raced = true;
         return (async () => {
           const r = await (q as Promise<unknown>);
