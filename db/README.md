@@ -1,12 +1,12 @@
 # db — the core schema, as migrations
 
-Phase 1 of the Supabase migration. The Open Brain core schema currently exists as
-**prose inside a markdown guide** (`docs/01-getting-started.md`, steps 2.2–2.6),
-where nothing can apply it, version it, or check it. This directory is that DDL
-made executable.
+The brain's schema, as ordered migrations that `migrate.ts` applies once each
+and records in a ledger. Upstream kept its schema as prose in a setup guide,
+where nothing could apply, version or check it; this directory is that DDL made
+executable.
 
-Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector 0.8.0 or
-later — migration 014 declares HNSW settings that older pgvector rejects.
+It targets any Postgres 15+ with pgvector 0.8.0 or later — migration 014
+declares HNSW settings that older pgvector rejects.
 
 ## Prerequisites
 
@@ -14,7 +14,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To apply against a real database: Postgres 15+ with the `vector` extension at 0.8.0+
   available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted). If the
   provider pre-installs pgvector into a schema off the connection's `search_path`
-  (Supabase uses `extensions`), the runner adds it to its own session so the
+  (some use `extensions`), the runner adds it to its own session so the
   migrations apply, and preflight names the persistent fix for the server — see
   the `test-search-path.ts` note under Testing. The runner also puts `public`
   first on its own session's path, the rest after it, so the brain is built in
@@ -5807,7 +5807,7 @@ how SMD-1806's ingester met the step when it imported two `scripts/*.mjs`
 (TypeScript since SMD-1870, so their declaration files went).
 
 `test-search-path.ts` relocates pgvector into a schema off the connection's
-`search_path` — how Supabase and several managed providers ship it, where
+`search_path` — how several managed providers ship it, where
 `CREATE EXTENSION IF NOT EXISTS vector` no-ops and the bare `vector` type does
 not resolve — and asserts the runner heals its own session while preflight names
 the persistent fix. The test container installs pgvector into `public`, on the
