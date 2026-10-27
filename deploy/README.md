@@ -1958,7 +1958,7 @@ polls for new work.
 
 **Two profiles, pick one.** `--profile workers` runs both followers always,
 at low concurrency, beside live traffic. `--profile sleep` runs the same two
-passes only while the brain is quiet, at most an hour a sleep by default, and
+passes, and re-embed when the brain has vectors to re-embed, only while the brain is quiet, at most an hour a sleep by default, and
 stops them within seconds of the next live call ("The `sleep` profile
 instead", below) — so a backlog, and a sync write's capture made after a
 sleep's clock, waits for the next live call and the quiet. They are alternatives,
@@ -2181,10 +2181,24 @@ unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 `--profile sleep` runs one service, `sleep`: `db/sleep.ts --follow`, the
 sleep scheduler (SMD-1794; this service, SMD-2678). It runs this profile's two
-passes only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
-with no live call — the re-derive sweep, then extraction, and consolidation
-beside it once extraction's pool is drained, so the backlog order above is
-built in. On the next live call it stops both within `OB1_SLEEP_POLL` seconds
+passes, and re-embed, only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
+with no live call — the re-derive sweep, then re-embed when the brain has
+vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
+on a brain the server embeds at its own model, so no embedding call), then
+extraction, and
+consolidation beside it once extraction's pool is drained, so the backlog
+order above is built in. Anything that refuses re-embed — the embedding
+key, credit, the model not served — or its endpoint down sets it down for
+that sleep, said in its log and on `heartbeat:sleep`, and extraction and
+consolidation run on; the next sleep with work tries again. **Upgrading a
+brain from before migration 021:** its unlabelled vectors are re-embedded and
+labelled by the first sleeps, one embedding call a row, before extraction;
+`bun db/reembed.ts --dry-run` says how many first. A brain recording another
+embedding model than the stack's sets re-embed aside, said in its log and on
+`heartbeat:sleep` (preflight's `sleep` row says it from SMD-2679's next PR),
+and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
+re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
+back and recreate `api` and `sleep`, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds
 (unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
 model call in hand is aborted and every lease returned, and the brain is
 quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
@@ -2287,11 +2301,17 @@ in place of the two followers: stop `sleep` before the change reaches it, run
 the switch, then bring back `api sleep`. The switch extracts the backlog
 itself, in the foreground and beside any live traffic, as it does under
 `workers`; only consolidation's new pool — the thoughts re-pooled under the
-new key — waits for the brain to go quiet.
+new key — waits for the brain to go quiet. An embedding model change
+(`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
+until it records the new model, `sleep` sets its re-embed pass aside and says
+so, and once it has, a sleep re-embeds whatever the switch left unfinished
+(SMD-2679).
 
-Since SMD-2752 it checks each pass's start
-once, before its first quiet: a bad `OB1_WORKER_KEY`, a model not served (the
-judge's too) or an extraction key recorded under another model ends each
+Since SMD-2752 it checks each claim pass's start
+once, before its first quiet — not re-embed's, which each sleep with work
+starts and whatever refuses it sets down for that sleep (SMD-2679): a bad
+`OB1_WORKER_KEY`, a model not served (the judge's too) or an extraction key
+recorded under another model ends each
 start at once (exit 2, `heartbeat:sleep` ended failed), and its supervisor
 tries again after 1, 2, 4, 8, then every 15 minutes, each try refused the same
 way until the cause is mended (SMD-3214), so `podman logs` on `sleep` names

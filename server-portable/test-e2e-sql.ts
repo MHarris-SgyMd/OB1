@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { answersHealth, applyMigrations, childPort, createAssert, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
+import { answersHealth, applyMigrations, childPort, createAssert, migrationFiles, plantLedger, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -2501,10 +2501,10 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   assert(bare.database?.ledger?.present === false && bare.database?.highestMigration === null && bare.ledgerStatus === null,
     `a brain with no schema_migrations of its own — another tool's in another schema — reports no ledger and no judgement (${JSON.stringify(bare.database?.ledger)}, ${bare.ledgerStatus})`);
 
-  // Adopted the way an operator adopts a hand-built schema: the ledger now
-  // records every file, so its highest is the tree's last — a fresh brain is current.
-  const adopt = await runScript(["bun", join(here, "..", "db", "migrate.ts"), "--url", URL_, "--baseline"], { cwd: join(here, "..", "db") });
-  assert(adopt.code === 0, `migrate.ts --baseline adopts the schema (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+  // A ledger planted over the schema: it records every file, so its highest is
+  // the tree's last — a fresh brain is current.
+  const planted = await plantLedger(URL_);
+  assert(planted === migrationFiles().length, `the planted ledger records every file (${planted} rows)`);
   const info = await health("e2e-key") as Record<string, any>;
   const db = info.database ?? {};
   const [truth] = await sql`
@@ -2837,7 +2837,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 
     // A role whose search path does not reach public: every table exists and
     // none resolves. The ledger is present and invisible — never "no table",
-    // the shape preflight answers with --baseline — and nothing is queried.
+    // the shape preflight answers with --reapply — and nothing is queried.
     await sql.unsafe(`ALTER ROLE brain_reader SET search_path = nowhere`);
     const lost = new SQL({ url: roleUrl, max: 1 });
     try {
