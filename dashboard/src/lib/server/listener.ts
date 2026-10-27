@@ -71,11 +71,29 @@ export function originRefusal(request: Request, url: URL, port: number | null): 
 }
 
 /**
- * The session cookie's name on a listener: the origin's `ob1_dashboard_session`, and on the break-glass listener
- * one of its own with the port in it, so the two never overwrite each other where they share a host (an origin of
- * http://127.0.0.1:…), nor two brains' break-glass ports on one machine, whose cookies 127.0.0.1 shares across
- * ports (review pass 1).
+ * The session cookie's name on a listener: on the origin `ob1_dashboard_session`, with the origin's port in it when
+ * the origin names one (`ob1_dashboard_session_8010`), and on the break-glass listener one of its own with that
+ * port in it. A browser keeps one cookie per host and name whatever the port (RFC 6265 §8.5), so a name without
+ * the port is one cookie for every brain on the host: two unconfigured stacks reached at http://127.0.0.1:8010 and
+ * :8011 overwrote each other's, and each visit to one signed the browser out of the other (SMD-3352). So the
+ * origin's and the break-glass port's never overwrite each other where they share a host (an origin of
+ * http://127.0.0.1:…), nor two brains' origins or break-glass ports on one machine (review pass 1). An origin on
+ * its scheme's default port (a configured https one) keeps the bare name: the URL names no port, and no other
+ * brain normally shares its host.
  */
-export function sessionCookieName(breakglass: boolean, port: number | null): string {
-	return breakglass ? `ob1_dashboard_breakglass_${port ?? 'unset'}` : 'ob1_dashboard_session';
+export function sessionCookieName(breakglass: boolean, port: number | null, url: URL): string {
+	if (breakglass) return `ob1_dashboard_breakglass_${port ?? 'unset'}`;
+	return withOriginPort('ob1_dashboard_session', url);
+}
+
+/**
+ * A cookie's name with the origin's port in it when the origin names one (`<name>_8010`), else the name alone:
+ * the session cookie's rule above, and the sign-in binding's (session.ts signInCookieName), which two configured
+ * brains with loopback origins (`OB1_PUBLIC_ORIGIN=http://127.0.0.1:<port>`, which serve.ts takes) shared, each
+ * start overwriting the other's sign-in in flight (SMD-3352 review pass 1). `url` is the request's as SvelteKit
+ * reads it — OB1_PUBLIC_ORIGIN's when sound, else the Host it was reached at (serve.ts) — whose port is digits or
+ * none.
+ */
+export function withOriginPort(name: string, url: URL): string {
+	return url.port ? `${name}_${url.port}` : name;
 }

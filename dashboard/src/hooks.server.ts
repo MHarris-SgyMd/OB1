@@ -20,7 +20,8 @@ const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/call
 // the origin, and an origin's nothing on the break-glass port. Each listener's
 // cookie has a name of its own (listener.ts sessionCookieName), so where the
 // two share a host (an origin of http://127.0.0.1:…) neither overwrites the
-// other's (review pass 1). A cookie that names none (ended, expired, or from
+// other's (review pass 1), and the origin's carries its port, so neither do two
+// brains' on one machine (SMD-3352). A cookie that names none (ended, expired, or from
 // before a restart) is dropped, and an expired session's tokens revoked at the
 // AS (SMD-3307). Signed out, every path but OPEN redirects to /signin — here,
 // not in a layout's load, so a form action or an endpoint is behind it too.
@@ -29,7 +30,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 	if (!originAllowed(event.request, event.url, port)) return guarded(originRefusal(event.request, event.url, port));
 	const breakglass = onBreakGlass(event.request);
 	event.locals.breakglass = breakglass;
-	event.locals.sessionCookie = sessionCookieName(breakglass, port);
+	event.locals.sessionCookie = sessionCookieName(breakglass, port, event.url);
 	const id = event.cookies.get(event.locals.sessionCookie);
 	const held = readSession(id);
 	const session = held && held.breakglass === breakglass ? held : null;
