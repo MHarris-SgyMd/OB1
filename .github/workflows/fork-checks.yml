@@ -1160,7 +1160,7 @@ jobs:
           ) > "$out/runner.log" 2>&1 < /dev/null &
           echo "$!" > "$out/pid"
 
-      # The stack's own exit test, literally: bring up Postgres, apply the schema and
+      # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
       # provider stub on the runner, deploy/.env and the up are
@@ -2428,7 +2428,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      # The stack's own exit test, literally: bring up Postgres, apply the schema and
+      # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
       # provider stub on the runner, deploy/.env and the up are
@@ -3402,7 +3402,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      # The stack's own exit test, literally: bring up Postgres, apply the schema and
+      # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
       # provider stub on the runner, deploy/.env and the up are
@@ -4001,7 +4001,7 @@ jobs:
             echo "$rc" > "$RUNNER_TEMP/observability-pull.rc.part" && mv "$RUNNER_TEMP/observability-pull.rc.part" "$RUNNER_TEMP/observability-pull.rc"
           ) < /dev/null > "$RUNNER_TEMP/observability-pull.log" 2>&1 &
 
-      # The stack's own exit test, literally: bring up Postgres, apply the schema and
+      # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
       # The keys (their raw values in $GITHUB_ENV for the steps below), the
       # provider stub on the runner, deploy/.env and the up are

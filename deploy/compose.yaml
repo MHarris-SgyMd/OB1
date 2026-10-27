@@ -677,7 +677,9 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # The migrator: applies db/migrations, once each, recorded in the ledger.
+  # The migrator: applies db/migrations in order, each recorded in the ledger,
+  # then the enabled plugins' own (db/README.md has --reapply, which re-runs
+  # the core's).
   # Runs to completion, then exits. The server waits for it.
   #
   # Built from db/Dockerfile — the ob1-migrate image the release job publishes

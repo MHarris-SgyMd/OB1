@@ -1,7 +1,8 @@
 # deploy — the compose stack
 
-The brain is `compose.yaml`: the proxy, the REST core, the MCP server at `/mcp`,
-Postgres and the profiles beside them, each an ordinary piece of infrastructure
+The brain is `compose.yaml`: the forwarder and proxy in front, the REST core,
+the MCP server at `/mcp`, the operator GUI, Postgres and the migrator, and the
+profiles beside them, each an ordinary piece of infrastructure
 you run, with its settings in an env file. This directory is the smallest
 working arrangement of them. It is a reference, not a production topology: no
 TLS, no backups, no resource limits.
@@ -3880,11 +3881,15 @@ so the profile builds from a checkout.
   in its log, rather than exiting or failing the thoughts it holds
   (SMD-2599); a model the provider does not serve at start is refused with
   exit 2. Reviewing what consolidation proposes stays a person's job.
-- **Auth.** Each client holds a static key of its own, named and scoped in
-  `MCP_ACCESS_KEYS` and sent in a header or `?key=`. A key that leaks works
-  until it is taken out of the list. (Upstream's one shared key,
+- **Auth.** Without the `auth` profile, each client holds a static key of its
+  own, named and scoped in `MCP_ACCESS_KEYS` and sent in a header or `?key=`.
+  A key that leaks works until it is revoked: `revoke_agent_key` takes effect
+  within a minute, with no restart (`SETUP.md`), or it can be taken out of the
+  list. With the profile, MCP clients sign in through the authorization server
+  and hold tokens that last 600 s, and a client's grant is revoked on the
+  operator GUI's page of grants. (Upstream's one shared key,
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216), is what
-  these keys replaced.)
+  the named keys replaced.)
   The `auth` profile's authorization server runs behind the proxy's `/auth`;
   the MCP server at `/mcp` is its client (SMD-2287), and only the operator
   signs in there, with no passkey yet ("Authorization server", above).

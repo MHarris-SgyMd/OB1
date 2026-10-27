@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test a running Open Brain server over MCP.
 #
-# Point it at anything that speaks the protocol — the compose stack, a container on
-# EKS. It only needs the URL and the access key, so the same check works for every
-# deployment target.
+# Point it at the compose stack, on its own machine or behind the TLS proxy or
+# tunnel in front of it. It only needs the URL and the access key.
 #
 #   ./smoke.sh                                    # reads deploy/.env
 #   ./smoke.sh https://ob1.example.com/mcp "$KEY"
@@ -16,7 +15,7 @@
 # captures a thought, so it is safe against production.
 #
 # Checks 2, 3, 4 and 10 are the ones upstream's Edge Function deployment cannot
-# pass (the fork retired that build in SMD-1800): 2 because the platform's API
+# pass (the fork retired that build in SMD-1800): 2 because Supabase's API
 # gateway answers the OAuth discovery path with 401 before the function sees
 # it, 3, 4 and 10 because of the build. FORK.md changes 42 and 75 say why, and
 # why those failures are real (10: upstream's server has no keyed health body,

@@ -29,8 +29,8 @@ Three changes.
 3. **The data layer is an interface.** Every database call goes through the
    `ThoughtStore` interface in `store.ts`; the SQL store is its implementation.
 
-The second change is what makes the file testable; the third is Phase 2 of the
-migration.
+The second change is what makes the file testable; the third is what let the
+SQL store replace the PostgREST one.
 
 ## Choosing a model provider
 
