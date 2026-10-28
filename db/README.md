@@ -80,8 +80,8 @@ once it takes it, as another run may have made that write and let the lock go
 meanwhile. A `--dry-run` on an empty database still makes the empty ledger
 table, as it always has, and takes no lock: it applies nothing. Where 096 cannot
 take PUBLIC's grant on `pg_stat_statements` back (this role does not own the
-views), each run tries again, and so takes the lock, warning each time until
-the owner applies the file.
+views), each run tries again, and so takes the lock, warning or noting each time
+until the owner applies the file.
 
 ### 4. A schema with no ledger
 

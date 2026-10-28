@@ -65,8 +65,8 @@
  * exit 2, naming the holding backend; before, the two raced on the ledger's
  * rows and the catalog's, and one failed at once on a duplicate key.
  * --dry-run, --grant and a run with nothing to write take no lock: the sleep
- * scheduler reads it to stop its passes, and a no-op run on every
- * `compose up` must not stop them.
+ * scheduler is to read it to stop its passes (SMD-3379 PR 1c), and a no-op run
+ * on every `compose up` must not stop them.
  */
 
 import type { SQL } from "bun";
