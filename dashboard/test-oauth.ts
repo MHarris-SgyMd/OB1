@@ -192,7 +192,7 @@ console.log('▸ the session store: every ending of a token session revokes');
 {
 	const ended: string[] = [];
 	session.onTokensEnded((t) => void ended.push(t.refresh));
-	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, breakglass: false });
+	const tokenSession = (refresh: string, name = 'oauth:operator+gui') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, breakglass: false });
 	function tok(refresh: string): Tokens {
 		return { access: 'a', refresh, expiresAt: NOW };
 	}
@@ -328,7 +328,7 @@ console.log('▸ the page of grants (SMD-3307 PR 3)');
 	let asked = 0;
 	const who = (operations: string[] | null) => async () => {
 		asked++;
-		return operations ? { name: 'oauth:operator', scope: 'write', operations } : null;
+		return operations ? { name: 'oauth:operator+gui', scope: 'write', operations } : null;
 	};
 	const gate = await grantsGate({ ...env, COMPOSE_PROFILES: '' }, { canCapture: true }, who(['capture_thought']));
 	assert(!gate.ok && gate.status === 404 && asked === 0, 'the page\'s gate: no auth profile, a 404, the REST core never asked');

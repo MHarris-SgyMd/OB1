@@ -3581,13 +3581,16 @@ jobs:
       # SMD-2286 step 1: the REST core accepts the authorization server's
       # tokens, and only its own. A real sign-in and consent (restart-check.ts
       # --tokens) gives an /mcp token, exchanged as the MCP service for a REST
-      # core one, as the MCP server does at the hop. The REST core, recreated
-      # to read the configured .env and asked on its own port inside its
-      # container (it is published only by an overlay), names the caller
-      # oauth:operator with the MCP service as act, refuses the /mcp token
-      # (Verify: the MCP-audience token sent straight to it) and a read token's
-      # capture (Verify), and a write token's capture writes an audit row
-      # naming both. The authorization server stopped, the keys it read are
+      # core one, as the MCP server does at the hop. Each sign-in registers a
+      # client of its own, a connector. The REST core, recreated to read the
+      # configured .env and asked on its own port inside its container (it is
+      # published only by an overlay), names the caller by the operator and
+      # its connector, oauth:operator+<client> (SMD-3064: the exchange nests
+      # the connector in act), with the MCP service as act, refuses the /mcp
+      # token (Verify: the MCP-audience token sent straight to it) and a read
+      # token's capture (Verify), and two connectors' write tokens each write
+      # an audit row naming its own connector and the MCP service (SMD-3064's
+      # Verify 1). The authorization server stopped, the keys it read are
       # still used; read none (the REST core recreated), a token is a 503 with
       # Retry-After 30, never let through. And through the proxy's /mcp at the
       # origin's Host, where the MCP server built on the REST core trades each
@@ -3599,7 +3602,7 @@ jobs:
         run: |
           auth() { docker compose -f compose.yaml --profile auth "$@"; }
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          # The step above filled the store's cap of 3 (its volume stays); the two
+          # The step above filled the store's cap of 3 (its volume stays); the three
           # sign-ins here register a client each, so this start's cap is higher
           # (the shell's value is compose's over .env's).
           OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
@@ -3613,18 +3616,26 @@ jobs:
           export OB1_AUTH_OPERATOR_PASSWORD
           read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:read)
           write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
+          write2_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
           # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer, cut at 15 s.
           at_api() { T="$2" auth exec -T -e P="$1" -e T -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined, signal: AbortSignal.timeout(15000) }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
           check() { local got="$1" want="$2" filter="$3" what="$4"; if ! { [ "${got%% *}" = "$want" ] && jq -e "$filter" <<<"$(cut -d' ' -f3- <<<"$got")" > /dev/null; }; then echo "$what answered \"${got:0:300}\""; exit 1; fi; }
           api_w=$(jq -r .api <<<"$write_t")
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator" and .scope == "write" and .act == {"name": "oauth:mcp"}' "whoami with an exchanged write token"
+          who_w="oauth:operator+$(jq -r .client <<<"$write_t")"
+          who_w2="oauth:operator+$(jq -r .client <<<"$write2_t")"
+          [ "$who_w" != "$who_w2" ] || { echo "two sign-ins registered one client, $who_w"; exit 1; }
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\" and .scope == \"write\" and .act == {\"name\": \"oauth:mcp\"}" "whoami with an exchanged write token"
           check "$(at_api /v1/whoami "$(jq -r .mcp <<<"$read_t")")" 401 '.code == "UNAUTHORIZED" and .credential == "token"' "whoami with the /mcp token"
           check "$(at_api /v1/thoughts "$(jq -r .api <<<"$read_t")" POST '{"content":"SMD-2286: a read token may not capture"}')" 403 '.code == "FORBIDDEN" and .needs == "capture"' "a capture with an exchanged read token"
-          got=$(at_api /v1/thoughts "$api_w" POST '{"content":"SMD-2286: captured with an exchanged token"}')
-          check "$got" 201 '.id | type == "string"' "a capture with an exchanged write token"
-          id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
-          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
-          [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
+          for t in "$write_t" "$write2_t"; do
+            who="oauth:operator+$(jq -r .client <<<"$t")"
+            # Each connector's own text: a capture of text the brain holds answers with the thought it has, and its audit row.
+            got=$(at_api /v1/thoughts "$(jq -r .api <<<"$t")" POST "{\"content\":\"SMD-2286: captured with $who's exchanged token\"}")
+            check "$got" 201 '.id | type == "string"' "a capture with $who's exchanged write token"
+            id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
+            row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
+            [ "$row" = "$who oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not \"$who\" and the MCP service as act"; exit 1; }
+          done
           # The JSON-RPC answer to a POST to the proxy's /mcp at the origin's Host with this /mcp token, its bearer
           # read from a file (curl -H @file), never a command line; an event stream's data line, or the JSON body.
           # Read to its end (tail, not head): a tools/list line is some 22 KB, and a reader that leaves early
@@ -3641,7 +3652,7 @@ jobs:
           jq -e '(.result.isError // false) == false and (.result.content[0].text | contains("Total thoughts: "))' <<<"$stats" > /dev/null || { echo "a read token's thought_stats through /mcp answered \"${stats:0:300}\""; exit 1; }
           rm -f "$bearer_file"
           auth stop auth
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator"' "whoami, the authorization server stopped and its keys already read,"
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\"" "whoami, the authorization server stopped and its keys already read,"
           auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
           got=$(at_api /v1/whoami "$api_w")
           check "$got" 503 '.code == "BUSY" and .credential == "token"' "whoami, the authorization server stopped and no keys read,"
