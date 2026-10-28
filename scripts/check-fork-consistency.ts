@@ -245,8 +245,7 @@
  * 22b. the retired Cloudflare Workers target stays retired (SMD-3152): no
  *      server-portable/wrangler.toml or store-postgrest.ts, no wrangler or
  *      supabase-js in server-portable/package.json, and no file outside the
- *      history (changes/, CHANGELOG.md, FORK.md) and dashboards/ (whose Next
- *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
+ *      history (changes/, CHANGELOG.md, FORK.md) that names `wrangler`, or
  *      — outside code, where the refusal is spelled — sets OB1_STORE to
  *      postgrest; probes for both patterns
  * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
@@ -5544,9 +5543,9 @@ checkSupabaseJsImports();
 // supabase-js, and no live file names `wrangler` or sets OB1_STORE to
 // postgrest. A code file is exempt from the second pattern alone: the refusal
 // and its tests spell the selection they refuse. The history (changes/,
-// CHANGELOG.md, FORK.md) records what was; dashboards/ is exempt from both,
-// since open-brain-dashboard-next deploys to Cloudflare with wrangler of its
-// own, which is not the brain server.
+// CHANGELOG.md, FORK.md) records what was. dashboards/ was exempt from both
+// while the Next dashboard deployed to Cloudflare with wrangler of its own;
+// it retired with SMD-3309, and the exemption with it.
 /** `wrangler` as a word, any case. */
 const WRANGLER_WORD = /\bwrangler\b/i;
 /**
@@ -5587,7 +5586,7 @@ function checkRetiredTarget() {
   for (const dep of ["wrangler", "@supabase/supabase-js"]) {
     if (pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]) fail("server-portable/package.json", `names ${dep}, which only the retired Workers target and PostgREST store needed (SMD-3152)`);
   }
-  const files = citationFiles().filter((rel) => !isHistory(rel) && !rel.startsWith("dashboards/"));
+  const files = citationFiles().filter((rel) => !isHistory(rel));
   if (!files.includes("SETUP.md")) fail(SELF, "check 22b's listing does not reach SETUP.md — the listing is broken, not the tree clean");
   for (const rel of files) {
     const text = readFileSync(join(ROOT, rel), "utf8");
@@ -5758,7 +5757,7 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   ["cd mcp-server && npm install", false],
   ["cd server-portable && npm run dev:docs", false],
   ["cd server-portable && bun test && npm run lint", false],
-  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard-next && npm run dev", false],
+  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard && npm run dev", false],
   ["cd server-portable && bun keygen.ts && cd ../integrations/slack-capture && bun index.ts", false],
   ["npm --prefix server-portable install", false],
   ["docker run --name ob1-server-test postgres:17", false],

@@ -4,7 +4,7 @@
 
 ## What It Does
 
-Extends the `thoughts` table with two columns that track workflow state. This enables the [Workflow board](../../dashboards/open-brain-dashboard-next/#workflow-board) in the Next.js dashboard and the `progress_task` MCP tool for AI-assisted task management.
+Extends the `thoughts` table with two columns that track workflow state. Nothing in this tree reads them today: the Next.js dashboard's Workflow board retired with SMD-3309, and the `progress_task` MCP tool they were written for is not served (SMD-3260 drops it).
 
 **Valid statuses:** `new`, `planning`, `active`, `review`, `done`, `archived`
 

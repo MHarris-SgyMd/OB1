@@ -194,7 +194,7 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
 - **A plugin that needs an inbound webhook** (a capture source) is exposed at `/hooks/<name>`, off by default and turned on per plugin.
 - **Plugins are curated.** They run in the brain's own processes (the REST core's and the MCP server's) with the brain's privileges, so every plugin is maintainer-reviewed. `integrations/` stops being an open category for anything that touches the brain. Contributions that never touch the brain are out of this repo's surface.
 - **The six curated extensions port to plugins** (SMD-2311). Each tool becomes an operation. Each `schema.sql` becomes plugin migrations that adopt existing tables. professional-crm's direct `thoughts` read (`extensions/professional-crm/index.ts:480-485`) becomes a core-operation call. Upstream's multi-user `user_id` columns get a decision for each plugin (SMD-1716 stays deferred).
-- **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280).
+- **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280). All three were retired with the Next dashboard (SMD-3309).
 - **Identity** is the REST core's (decision 12). No plugin mints or checks its own keys.
 
 **As built (SMD-2310, 2026-10-08).** The mechanism settles what the decisions left open:
@@ -259,7 +259,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 
 | Surface | Retires when |
 |---|---|
-| `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. |
+| `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. **Met and retired** (SMD-3309). |
 | `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931). **Met and retired** (SMD-1931 PR 3). |
 | server-portable's MCP registration | The MCP server passes parity and the stable tier's `/mcp` routes to it (SMD-2287) |
 | The Cloudflare Workers target and the PostgREST store it selects | **Retired** ahead of SMD-2287's cutover, since no brain ran them (SMD-3152, SMD-2288's step 1) |
