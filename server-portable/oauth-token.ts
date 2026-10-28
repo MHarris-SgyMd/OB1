@@ -126,10 +126,11 @@ const SUBJECT = /^[A-Za-z0-9._~-]{1,128}$/;
 /**
  * Whether a client a subject signs in through can be named (SMD-3064): an id
  * the authorization server gave (a static client's, a registered one's), held
- * as a subject is, or a client metadata document's https URL (CIMD) of host
- * and path alone. A URL is held to those: no comma (an egress term list
- * splits on commas), no `+` (the name's separator), no credentials, and no
- * query or fragment, which the CIMD draft says a client id should not hold.
+ * as a subject is, or a client metadata document's https URL (CIMD) of a
+ * host, an optional port and a path alone. A URL is held to those: no comma
+ * (an egress term list splits on commas), no `+` (the name's separator), no
+ * credentials, and no query or fragment, which the CIMD draft says a client id
+ * should not hold.
  * At most 180 characters, so `oauth:operator+<client>` fits the search tools'
  * 200-character `actor` filter. deploy/auth/layout.ts holds the same rule, so
  * the authorization server issues no token for a client this one refuses; the

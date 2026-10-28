@@ -67,11 +67,12 @@ export const OPERATOR = "operator";
  * (SMD-3064). It names the caller `oauth:operator+<client>` and refuses a
  * token whose client it cannot carry on a log line, in an egress term or in
  * the search tools' 200-character `actor` filter: an id of a subject's
- * characters, or a metadata document's https URL of host and path alone, at
- * most 180 characters. server-portable/oauth-token.ts holds the same rule
- * (`clientNameable`), and the REST suite holds the two equal. This server
- * refuses such a client before its sign-in and at the exchange, so it never
- * issues a token the REST core would refuse.
+ * characters, or a metadata document's https URL of a host, an optional port
+ * and a path alone, at most 180 characters. server-portable/oauth-token.ts
+ * holds the same rule (`clientNameable`), and the REST suite holds the two
+ * equal. This server's client metadata validator refuses such a client
+ * wherever the library loads it, and the exchange refuses a token issued to
+ * one before that, so it issues no token the REST core would refuse.
  */
 export function clientNameable(id: string): boolean {
   return id.length <= 180 && /^(?:[A-Za-z0-9._~-]{1,128}|https:\/\/[A-Za-z0-9.-]{1,100}(?::[0-9]{1,5})?\/[A-Za-z0-9._~\/%-]{0,170})$/.test(id);

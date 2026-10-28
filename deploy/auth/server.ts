@@ -380,8 +380,10 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   if (claims.sub !== OPERATOR) throw new errors.InvalidGrant("subject_token names no known account");
   // The library writes client_id into every access token it signs (RFC 9068 §2.2); one without it was not signed here.
   if (typeof claims.client_id !== "string" || !claims.client_id) throw new errors.InvalidGrant("subject_token names no client");
-  // The client validator refuses such a client before it holds a token
-  // (extraClientMetadata, above); this holds if the two ever drift (SMD-3064).
+  // The client validator refuses such a client wherever it is loaded
+  // (extraClientMetadata, above), but never sees the subject token's client
+  // here: an /mcp token issued to one before this rule, still within its ten
+  // minutes, is refused at this line (SMD-3064).
   if (!clientNameable(claims.client_id)) throw new errors.InvalidGrant("subject_token's client has an id the REST core cannot name");
 
   const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));

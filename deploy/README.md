@@ -3670,7 +3670,10 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   `OB1_EGRESS_ALLOW` term stops admitting, so text the GUI and connectors
   send no longer leaves for a provider that the allow list gated.
   A classification of it, and a search's `actor` filter, match only the
-  rows written before.
+  rows written before. A connector named by a metadata document URL the
+  brain cannot name (a query, `HTTPS://`, `+` or `:` in its path, no path,
+  over 180 characters) is refused from now on, at its sign-in and its
+  refresh.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
