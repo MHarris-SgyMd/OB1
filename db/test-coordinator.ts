@@ -239,7 +239,14 @@ if (!root) {
   const planted = "/tmp/ob1-board-sync";
   mkdirSync(planted, { recursive: true });
   chmodSync(planted, 0o777);
+  // A HOME an earlier start left — the child's, 0700, holding a file of its own — removed at the next start.
+  const old = "/tmp/ob1-board-sync-oldhom";
+  mkdirSync(join(old, "inner"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(old, "inner", "cache"), "x");
+  // Made 0700 by mkdir; root, with no capability to chmod what is not its own, hands it over last.
+  for (const at of [join(old, "inner", "cache"), join(old, "inner"), old]) lchownSync(at, CHILDREN["board-sync"].uid, CHILDREN["board-sync"].uid);
   const own = await plant(true);
+  ok(!existsSync(old), `a HOME an earlier start left is removed at the next, though its uid's and 0700 (${old} ${existsSync(old) ? "still there" : "gone"})`);
   ok(own.h?.uid === CHILDREN["board-sync"].uid && own.status === String(CHILDREN["board-sync"].uid) && own.r?.uid === CHILDREN.sleep.uid,
     `each child runs as its own user (holder ${own.h?.uid}, the kernel's ${own.status}; reader ${own.r?.uid})`);
   const homeAt = own.h?.home ? statSync(own.h.home) : null;
@@ -259,6 +266,21 @@ if (!root) {
   chmodSync(probe, 0o644);
   const onceCode = await runOnce({ ...CHILDREN.extract, script: probe }, ["--status"], { env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_WORKER_KEY: "given-for-this-run" } });
   const seen = existsSync(join(probeDir, "seen.json")) ? JSON.parse(readFileSync(join(probeDir, "seen.json"), "utf8")) : null;
+  ok(typeof seen?.home === "string" && !existsSync(seen.home), `a one-off's HOME goes when it ends (${seen?.home})`);
+  // A sleep one-off: --dump-dir=DIR handed over when DIR is directly in /var/lib/ob1, a nested one never (its parent could be a child's link).
+  const direct = `/var/lib/ob1/test-once-${process.pid}`;
+  const nested = join(direct, "nested");
+  mkdirSync(nested, { recursive: true });
+  const noop = join(tmpdir(), `ob1-coordinator-noop-${process.pid}.ts`);
+  writeFileSync(noop, "process.exit(0);\n");
+  chmodSync(noop, 0o644);
+  await runOnce({ ...CHILDREN.sleep, script: noop }, [`--dump-dir=${direct}`], { env: { PATH: process.env.PATH ?? "" } });
+  await runOnce({ ...CHILDREN.sleep, script: noop }, [`--dump-dir=${nested}`], { env: { PATH: process.env.PATH ?? "" } });
+  rmSync(noop, { force: true });
+  ok(statSync(direct).uid === CHILDREN.sleep.uid && statSync(nested).uid === 0,
+    `a sleep one-off's --dump-dir=DIR is handed over directly in /var/lib/ob1, a nested one never (direct ${statSync(direct).uid}, nested ${statSync(nested).uid})`);
+  lchownSync(direct, 0, 0);
+  rmSync(direct, { recursive: true, force: true });
   rmSync(probeDir, { recursive: true, force: true });
   ok(onceCode === 3 && seen?.uid === CHILDREN.extract.uid && JSON.stringify(seen?.args) === JSON.stringify(["--status"]) && seen?.linear === false && seen?.worker === "given-for-this-run" && /^\/tmp\/ob1-extract-\w{6}$/.test(seen?.home ?? ""),
     `a one-off runs as the pass's user, with its args and its settings alone — the worker key given it, no Linear key — and exits with its code (${onceCode}, ${JSON.stringify(seen)})`);

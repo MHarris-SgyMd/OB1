@@ -1416,7 +1416,8 @@ services:
   coordinator:
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never
-    entrypoint: ["bun", "--no-install"]
+    # No .env read: the environment below is the whole of what it hands on.
+    entrypoint: ["bun", "--no-install", "--no-env-file"]
     command: ["db/coordinator.ts"]
     working_dir: /app
     # As root (the image's user is bun), so it can run each child as its own

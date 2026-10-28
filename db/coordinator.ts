@@ -59,8 +59,8 @@
  */
 
 import type { SQL } from "bun";
-import { lchownSync, lstatSync, mkdtempSync, readdirSync, type Stats } from "node:fs";
-import { join, resolve } from "node:path";
+import { lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type { StampingWorker } from "./pass-stamp.ts";
 import { supervise, type Supervisor } from "./supervise.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
@@ -183,13 +183,16 @@ export function childEnv(child: Child, env: Record<string, string | undefined>, 
   return { ...out, ...extra };
 }
 
-/** The prefix of a child's HOME: each start makes a fresh one beneath it (makeHome), when the coordinator runs as root. */
+/** The prefix of a child's HOME: each coordinator start, and each one-off, makes a fresh one beneath it (makeHome), when it runs as root. */
 export function childHome(child: Child): string {
   return `/tmp/ob1-${child.name}-`;
 }
 
-/** The dump volume's root: OB1_SLEEP_DUMP_DIR is handed to sleep's user only beneath it. */
-const DUMP_ROOT = "/var/lib/ob1/";
+/** A child's HOME when its own cannot be made: a path nothing makes, so no config is read from a directory another child can write (the shared /tmp). */
+export const NO_HOME = "/nonexistent/ob1-home";
+
+/** The dump volume's mount point: OB1_SLEEP_DUMP_DIR is handed to sleep's user only as a directory directly in it. */
+const DUMP_ROOT = "/var/lib/ob1";
 
 /** What is at `path`, its own kind and not a link's target's; null when nothing is. */
 function kindAt(path: string): Stats | null {
@@ -198,15 +201,15 @@ function kindAt(path: string): Stats | null {
 
 /**
  * Hand a directory, and the regular files in it, to `uid`: OB1_SLEEP_DUMP_DIR,
- * beneath DUMP_ROOT only. Never through a link: root following one a child
- * planted there would hand that child any file in the container. Said, never
- * thrown.
+ * only a directory directly in DUMP_ROOT — every directory above it root's,
+ * so no child can put a link on the path — and never through a link itself,
+ * the files by lchown, links among them skipped: root following one a child
+ * planted would hand it any file in the container. Said, never thrown.
  */
 function handDumpDir(dir: string | undefined, uid: number, err: (line: string) => void): void {
   if (!dir) return;
   const path = resolve(dir);
-  const at = kindAt(path);
-  if (!path.startsWith(DUMP_ROOT) || at === null || !at.isDirectory()) return;
+  if (dirname(path) !== DUMP_ROOT || !kindAt(path)?.isDirectory()) return;
   try {
     lchownSync(path, uid, uid);
     for (const entry of readdirSync(path)) {
@@ -218,12 +221,21 @@ function handDumpDir(dir: string | undefined, uid: number, err: (line: string) =
   }
 }
 
+/** The directory a sleep command line's --dump-dir names, in either form (`--dump-dir DIR`, `--dump-dir=DIR`). */
+function dumpDirArg(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--dump-dir") return args[i + 1];
+    if (args[i].startsWith("--dump-dir=")) return args[i].slice("--dump-dir=".length);
+  }
+  return undefined;
+}
+
 /**
- * A HOME of the child's own: a directory made afresh at each start beneath
- * childHome's prefix — by root, mode 0700, then handed to its uid — so
- * nothing another child set up in the shared /tmp (a directory at a path it
- * guessed, a .bunfig.toml in it) is ever a pass's HOME. "/tmp", said, when it
- * cannot be made.
+ * A HOME of the child's own: a directory made afresh beneath childHome's
+ * prefix — by root, mode 0700, then handed to its uid — so nothing another
+ * child set up in the shared /tmp (a directory at a path it guessed, a
+ * .bunfig.toml in it) is ever a pass's HOME. NO_HOME, said, when it cannot be
+ * made: never /tmp itself.
  */
 function makeHome(child: Child, err: (line: string) => void): string {
   try {
@@ -231,9 +243,57 @@ function makeHome(child: Child, err: (line: string) => void): string {
     lchownSync(home, child.uid, child.uid);
     return home;
   } catch (e) {
-    err(`coordinator: could not make a HOME of uid ${child.uid}'s own (${(e as Error).message}) — the pass runs with HOME=/tmp`);
-    return "/tmp";
+    err(`coordinator: could not make a HOME of uid ${child.uid}'s own (${(e as Error).message}) — the pass runs with HOME=${NO_HOME}, which does not exist`);
+    return NO_HOME;
   }
+}
+
+/** Remove a HOME a child owned: root takes back each directory in it first (no capability to write past a mode), links never followed. Said, never thrown. */
+function removeHome(home: string, err: (line: string) => void): void {
+  const takeBack = (dir: string): void => {
+    lchownSync(dir, 0, 0);
+    for (const entry of readdirSync(dir)) {
+      const at = join(dir, entry);
+      if (kindAt(at)?.isDirectory()) takeBack(at);
+    }
+  };
+  try {
+    if (!kindAt(home)?.isDirectory()) return;
+    takeBack(home);
+    rmSync(home, { recursive: true, force: true });
+  } catch (e) {
+    err(`coordinator: could not remove ${home} (${(e as Error).message})`);
+  }
+}
+
+/** The HOMEs earlier starts left for `child` in this container's /tmp, which outlives a restart: removed before a new one is made. */
+function removeOldHomes(child: Child, err: (line: string) => void): void {
+  const base = childHome(child).slice("/tmp/".length);
+  let names: string[];
+  try { names = readdirSync("/tmp"); } catch { return; }
+  for (const name of names) if (name.startsWith(base) && /^\w{6}$/.test(name.slice(base.length))) removeHome(join("/tmp", name), err);
+}
+
+/** How a child is started: its argv, its environment, its user, the HOME made for it. */
+type Launch = { cmd: string[]; env: Record<string, string>; uid?: number; gid?: number; home?: string };
+
+/**
+ * What coordinate() and runOnce() both start a child with: as root, a HOME of
+ * its own and (sleep) its dump directory handed over, from its command line's
+ * --dump-dir or OB1_SLEEP_DUMP_DIR; its settings alone; `args`, or the pass's
+ * own from those settings; no .env read, no install.
+ */
+function launch(child: Child, env: Record<string, string | undefined>, args: readonly string[] | null, own: boolean, say: (line: string) => void): Launch {
+  const home = own ? makeHome(child, say) : undefined;
+  const cenv = childEnv(child, env, home === undefined ? {} : { HOME: home });
+  const argv = args ?? child.args(cenv);
+  if (own && child.name === "sleep") for (const dir of new Set([dumpDirArg(argv), env.OB1_SLEEP_DUMP_DIR])) handDumpDir(dir, child.uid, say);
+  return {
+    cmd: [process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...argv],
+    env: cenv,
+    ...(own ? { uid: child.uid, gid: child.uid } : {}),
+    ...(home !== undefined && home !== NO_HOME ? { home } : {}),
+  };
 }
 
 export type CoordinatorOptions = {
@@ -258,20 +318,16 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     writer.err(`coordinator: runs ${who.length === 1 ? who[0] : `${who.slice(0, -1).join(", ")} and ${who[who.length - 1]}`}${own ? "" : " — not root, so each as this process's user, not its own"}`);
   }
   const children = plan.children.map((child) => {
-    const extra: Record<string, string> = {};
-    if (own) {
-      extra.HOME = makeHome(child, writer.err);
-      if (child.name === "sleep") handDumpDir(env.OB1_SLEEP_DUMP_DIR, child.uid, writer.err);
-    }
-    const cenv = childEnv(child, env, extra);
+    if (own) removeOldHomes(child, writer.err);
+    const l = launch(child, env, null, own, writer.err);
     return supervise({
       worker: child.worker,
-      cmd: [process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...child.args(cenv)],
-      ...(own ? { uid: child.uid, gid: child.uid } : {}),
+      cmd: l.cmd,
+      ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.gid }),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,
-      env: cenv,
+      env: l.env,
       sql: opts.sql,
       writer,
     });
@@ -293,35 +349,32 @@ const USAGE = `coordinator.ts takes no arguments — OB1_PASSES names the passes
 
 /**
  * One run of a pass's script, `args` in place of its own, as its user with its
- * settings; settles with its exit code, 127 when it cannot be started (said).
- * Sleep's dump directory — OB1_SLEEP_DUMP_DIR, or the run's own --dump-dir — is
- * handed to its user first, as the coordinator does.
+ * settings — launch()'s, as the coordinator starts it; settles with its exit
+ * code, 127 when it cannot be started (said). Its HOME goes when it ends.
  */
 export async function runOnce(child: Child, args: string[], opts: { env?: Record<string, string | undefined>; onSignal?: (stop: (signal: "SIGTERM" | "SIGINT") => void) => void } = {}): Promise<number> {
-  const env = opts.env ?? process.env;
-  const own = process.getuid?.() === 0;
   const say = (l: string) => console.error(l);
-  const extra: Record<string, string> = own ? { HOME: makeHome(child, say) } : {};
-  if (own && child.name === "sleep") {
-    handDumpDir(env.OB1_SLEEP_DUMP_DIR, child.uid, say);
-    const flag = args.indexOf("--dump-dir");
-    if (flag >= 0) handDumpDir(args[flag + 1], child.uid, say);
-  }
-  let p: ReturnType<typeof Bun.spawn>;
+  const own = process.getuid?.() === 0;
+  const l = launch(child, opts.env ?? process.env, args, own, say);
   try {
-    p = Bun.spawn([process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...args], {
-      env: childEnv(child, env, extra),
-      ...(own ? { uid: child.uid, gid: child.uid } : {}),
-      stdio: ["inherit", "inherit", "inherit"],
-      // Its own process group, as a coordinator's child: a terminal's Ctrl-C is the one signal passed on.
-      detached: true,
-    });
-  } catch (e) {
-    say(`coordinator: ${child.name} could not be started${own ? ` as uid ${child.uid}` : ""} (${(e as Error).message})`);
-    return 127;
+    let p: ReturnType<typeof Bun.spawn>;
+    try {
+      p = Bun.spawn(l.cmd, {
+        env: l.env,
+        ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.gid }),
+        stdio: ["inherit", "inherit", "inherit"],
+        // Its own process group, as a coordinator's child: a terminal's Ctrl-C is the one signal passed on.
+        detached: true,
+      });
+    } catch (e) {
+      say(`coordinator: ${child.name} could not be started${own ? ` as uid ${child.uid}` : ""} (${(e as Error).message})`);
+      return 127;
+    }
+    opts.onSignal?.((signal) => { if (p.exitCode === null && p.signalCode === null) p.kill(signal); });
+    return (await p.exited) ?? 1;
+  } finally {
+    if (l.home) removeHome(l.home, say);
   }
-  opts.onSignal?.((signal) => { if (p.exitCode === null && p.signalCode === null) p.kill(signal); });
-  return (await p.exited) ?? 1;
 }
 
 if (import.meta.main) {
