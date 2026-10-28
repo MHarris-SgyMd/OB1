@@ -125,12 +125,14 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
 After a change to a route, an input schema or a description in `server-portable/`:
 
 ```bash
+(cd server-portable && bun install)
 cd rest-client && bun install && bun generate.ts
 ```
 
 `bun test-client.ts` fails while a generated file is stale. CI runs it in the
 portable-server job, after server-portable's install, since the generator and the suite
-import `../server-portable`. The document's version is the release's, which every cut
+import `../server-portable`; without that install they fail at import, naming the
+package, since this directory's `bunfig.toml` turns Bun's auto-install off (SMD-2978). The document's version is the release's, which every cut
 bumps, so the generated files carry `snapshot` in its place.
 
 ## Test

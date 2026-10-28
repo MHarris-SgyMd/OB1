@@ -29,8 +29,8 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   `test-search-path.ts`, runs `server-portable/preflight.ts` from that
   directory, whose `bunfig.toml` turns Bun's auto-install off, so preflight's
   `zod` must come from that install (SMD-2978)
-- To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
-  for the benchmarks a few minutes — they build tables up to 100,000 rows;
+- To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: podman or
+  docker (no `server-portable` install), and for the benchmarks a few minutes — they build tables up to 100,000 rows;
   `test-bench-reuse.ts` the same and about three minutes (nine bench runs at
   150,000 rows).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
