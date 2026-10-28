@@ -4998,7 +4998,7 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
+console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not unless it files the thought under a ticket, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
 {
   const the113 = MIGRATIONS.find((f) => f.endsWith("_subject_pool.sql"))!;  // by name: renumbered when main takes its number
   // Each prerequisite in turn, the first missing named.
@@ -5046,6 +5046,8 @@ console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; on
   await sql`UPDATE thoughts SET metadata = metadata || '{"note": "a metadata edit"}'::jsonb WHERE id = ${third}::uuid`;
   assert((await inPool(t[1])) === "pending" && (await inPool(third)) === "none" && (await inPool(fourth)) === "succeeded",
     "after it, with a pool named, an edited thought joins it; a metadata edit does not");
+  await sql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-113"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(third)) === "pending", "…but filing it under a ticket does: the metadata rule reads it");
   await sql`SELECT update_thought(${fourth}::uuid, 'upgrade 113: thought 3, edited after it was asked')`;
   assert((await inPool(fourth)) === "pending", "…and a thought finished in the pool is put back in it once its text changes");
   const closed = (await sql`SELECT close_thought_subject(${t[0]}::uuid, ${subject.id}::uuid, ${await fpOf(t[0])}::text) AS c`)[0].c as { action: string; id: string };

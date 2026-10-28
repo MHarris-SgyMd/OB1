@@ -15957,7 +15957,7 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
-console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, nothing while none is named or for a metadata edit; close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one filed under another ticket, nothing while none (or a blank one) is named or for any other metadata edit; close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
 {
   const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
   const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
@@ -15971,7 +15971,12 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
   const before = await add("[101] captured before a pool is named");
   assert((await status(before)) === "none", "no pool named: a new thought joins none");
-  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', $1)`, [POOL]);
+  // A blank key names no pool, as 016's trigger reads a blank extraction key (review pass 1: no case held it).
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', '')`);
+  const blank = await add("[101] captured under a blank key");
+  assert((await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM thought_work_claims WHERE thought_id = $1 AND work_type = ''`, [blank])).rows[0].n === 0,
+    "a blank key names no pool: a new thought joins none, and the capture is not refused");
+  await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'subject_pool_key'`, [POOL]);
   const after = await add("[101] captured after");
   assert((await status(after)) === "pending", "a pool named: a new thought joins it, pending");
   await db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
@@ -15979,6 +15984,16 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   assert((await status(after)) === "succeeded", "a metadata edit does not put it back");
   await db.query(`UPDATE thoughts SET content = content WHERE id = $1`, [after]);
   assert((await status(after)) === "succeeded", "nor does a write of the same text");
+  // Filed under a ticket after it was asked: the metadata rule reads metadata.ticket, else metadata.issue, so either
+  // moving puts it back (review pass 1: a ticket filed later was never read).
+  const finish = () => db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"ticket": "SMD-101"}'::jsonb WHERE id = $1`, [after]);
+  const byTicket = await status(after);
+  await finish();
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-102"}'::jsonb WHERE id = $1`, [after]);
+  const byIssue = await status(after);
+  await finish();
+  assert(byTicket === "pending" && byIssue === "pending", `filing it under a ticket, or under an issue, puts a finished thought back (${byTicket}, ${byIssue})`);
   await db.query(`UPDATE thoughts SET content = '[101] captured after, edited' WHERE id = $1`, [after]);
   assert((await status(after)) === "pending", "an edit of its text puts a finished thought back in the pool");
   await db.query(`UPDATE thoughts SET content = '[101] captured before, edited' WHERE id = $1`, [before]);

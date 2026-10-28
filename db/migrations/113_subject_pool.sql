@@ -23,13 +23,17 @@
 --
 -- WHAT
 --   * thoughts_enqueue_subject() and its trigger, thoughts_subject_pool:
---     AFTER INSERT OR UPDATE OF content ON thoughts, as 016's
---     thoughts_entity_extraction, it puts the thought (back) in the pool
---     ob1_config.subject_pool_key names, through 016's requeue_thought_work.
---     The sweep writes that key on its first run (the pool's key names the
---     rules' versions and, when the model is asked, the question's and its
---     reasoning: server-portable/subject.ts's subjectPoolKey); absent, the
---     trigger does nothing. A metadata-only edit does not requeue.
+--     AFTER INSERT OR UPDATE OF content, metadata ON thoughts, it puts the
+--     thought (back) in the pool ob1_config.subject_pool_key names, through
+--     016's requeue_thought_work, as 016's thoughts_entity_extraction does for
+--     the extraction pass. The sweep writes that key on its first run (the
+--     pool's key names the rules' versions and, when the model is asked, the
+--     question's and its reasoning: server-portable/subject.ts's
+--     subjectPoolKey); absent or blank, the trigger does nothing. An update
+--     pools the thought again only when what its subject is read from moved:
+--     its text, or the ticket it is filed under (metadata.ticket, else
+--     metadata.issue, the metadata rule's fields), so a ticket filed after
+--     the thought was asked is read; any other metadata edit pools nothing.
 --   * close_thought_subject(thought, facet, fingerprint) — closes the
 --     thought's standing subject only when it is still that facet and the
 --     thought's text is still the one read; otherwise it answers what it found
@@ -88,7 +92,8 @@ $qc$;
 -- this trigger puts each new or edited thought (back) in it, as 016's does
 -- for the extraction pass's key. requeue_thought_work sets an existing claim
 -- back to pending whatever its state: a thought finished under the key, the
--- model having named nothing for it, is asked again once its text changes.
+-- model having named nothing for it, is asked again once its text, or the
+-- ticket it is filed under, changes.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thoughts_enqueue_subject()
 RETURNS trigger
@@ -101,7 +106,12 @@ BEGIN
   IF v_key IS NULL OR v_key = '' THEN
     RETURN NULL;
   END IF;
-  IF TG_OP = 'UPDATE' AND NEW.content IS NOT DISTINCT FROM OLD.content THEN
+  -- What the subject is read from: the text, and the ticket it is filed under
+  -- (metadata.ticket, else metadata.issue: the metadata rule's fields).
+  IF TG_OP = 'UPDATE'
+     AND NEW.content IS NOT DISTINCT FROM OLD.content
+     AND (NEW.metadata->>'ticket') IS NOT DISTINCT FROM (OLD.metadata->>'ticket')
+     AND (NEW.metadata->>'issue') IS NOT DISTINCT FROM (OLD.metadata->>'issue') THEN
     RETURN NULL;
   END IF;
   PERFORM requeue_thought_work(v_key, NEW.id);
@@ -110,11 +120,11 @@ END;
 $$;
 
 COMMENT ON FUNCTION thoughts_enqueue_subject() IS
-  'AFTER INSERT OR UPDATE OF content on thoughts (thoughts_subject_pool, 113): puts the thought (back) in the subject pool ob1_config.subject_pool_key names, through requeue_thought_work, as 016''s trigger does for the extraction pass''s key; nothing when no pool is named or the content did not change (ob1:subject-pool). Migration 113 / SMD-3306.';
+  'AFTER INSERT OR UPDATE OF content, metadata on thoughts (thoughts_subject_pool, 113): puts the thought (back) in the subject pool ob1_config.subject_pool_key names, through requeue_thought_work, as 016''s trigger does for the extraction pass''s key; nothing when no pool is named, or when an update left the text and the ticket it is filed under (metadata.ticket, metadata.issue) as they were (ob1:subject-pool). Migration 113 / SMD-3306.';
 
 DROP TRIGGER IF EXISTS thoughts_subject_pool ON thoughts;
 CREATE TRIGGER thoughts_subject_pool
-  AFTER INSERT OR UPDATE OF content ON thoughts
+  AFTER INSERT OR UPDATE OF content, metadata ON thoughts
   FOR EACH ROW EXECUTE FUNCTION thoughts_enqueue_subject();
 
 -- ---------------------------------------------------------------------------
