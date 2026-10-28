@@ -2,17 +2,17 @@
 /**
  * preflight.ts — fail a bad deployment before it serves traffic.
  *
- * Phase 4 of the migration. Without this the server starts happily when
- * misconfigured: `initialize` succeeds, `tools/list` returns every tool, and the
- * first real tool call returns "Error: OB1_STORE is unset, which selects the SQL
- * store, and DATABASE_URL is not set. …" inside a tool response. Every liveness
- * probe reports green, including the container healthcheck, because the HTTP layer genuinely is fine — the data layer is built
- * lazily on first use.
+ * Without this the REST core starts happily when misconfigured: it listens,
+ * every liveness probe reports green, including the container healthcheck,
+ * because the HTTP layer genuinely is fine, and the first real operation fails
+ * ("Error: OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is
+ * not set. …") — the data layer is built lazily on first use.
  *
- * On Supabase that mattered less: the platform injected SUPABASE_URL and
- * SUPABASE_SERVICE_ROLE_KEY, so they could not be wrong. Off Supabase every one of
- * them is a hand-written environment variable, and the failure is silent until a
- * user tries to capture a thought.
+ * The settings it reads are environment values someone wrote (in the compose
+ * stack the env file: the database password, from which compose builds
+ * DATABASE_URL, the access keys, the model provider's endpoint and key; in a
+ * pipeline or a checkout, whatever exports them), so any of them can be wrong,
+ * and the failure is silent until a user tries to capture a thought.
  *
  * Run it as a deploy gate, an init container, or a readiness probe:
  *
@@ -186,6 +186,7 @@ const {
   isLocalHostname,
   LOCAL_PROVIDER_SERVICES,
   REAPPLY_COMMAND,
+  PUBLIC_THOUGHTS_EXISTS,
   plan039,
   walkRemedy,
 } = await import("../db/config.mjs");
@@ -4591,14 +4592,11 @@ if (configFailed) {
         // which no longer adopts a schema by recording the ledger unrun
         // (SMD-3325): --reapply brings it under the ledger, every file
         // idempotent, in one transaction after its checks that the shell agrees
-        // with the brain — a plain run gives each file its own and checks
-        // nothing. An empty ledger beside it is a dry run's, or a by-hand
+        // with the brain; a plain run there is refused (SMD-3425). An empty ledger beside it is a dry run's, or a by-hand
         // CREATE's, and says no more (review pass 3). Without, nothing has been
         // migrated, as the schema row above says too (SMD-2237).
         const schemaThere = async () =>
-          ((await sql`
-            SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                            WHERE n.nspname = 'public' AND c.relname = 'thoughts' AND c.relkind IN ('r', 'p')) AS present`) as { present: boolean }[])[0].present;
+          ((await sql.unsafe(`SELECT ${PUBLIC_THOUGHTS_EXISTS} AS present`)) as { present: boolean }[])[0].present;
         const reapplyOver = `Re-apply the migrations over it with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped: with nothing recorded it runs every file again over what is there, each idempotent, in one transaction after checking this shell agrees with the brain, and records each.` +
           (pluginNames(env.OB1_PLUGINS).length > 0 && pluginProblem(env.OB1_PLUGINS) === null ? " --reapply leaves the plugins' migrations (OB1_PLUGINS) to a plain run after it." : "");
         if (!ledgerPresent) {

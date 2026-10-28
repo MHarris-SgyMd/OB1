@@ -109,6 +109,7 @@ From a checkout of this repository, create `integrations/telegram-capture/index.
 
 ```typescript
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
+import { listenOn } from "../_shared/auth.ts"; // OB1_LISTEN_HOST: one IP address to listen on, every address unset
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -313,8 +314,8 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-// Bun serves the default export on PORT (8000 unset).
-export default { port: Number(process.env.PORT || 8000), fetch: handler };
+// Bun serves the default export on PORT (8000 unset), on OB1_LISTEN_HOST's address (every address unset).
+export default { port: Number(process.env.PORT || 8000), ...listenOn(process.env.OB1_LISTEN_HOST), fetch: handler };
 ```
 
 ✅ **Done when:** The file exists at `integrations/telegram-capture/index.ts` and saves without TypeScript errors in your editor.
@@ -376,7 +377,7 @@ OPENROUTER_API_KEY='sk-or-v1-your-openrouter-key' \
 bun integrations/telegram-capture/index.ts
 ```
 
-Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
+Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
 
 Your capture URL will look like:
 

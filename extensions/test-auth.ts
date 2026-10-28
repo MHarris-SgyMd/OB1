@@ -53,8 +53,8 @@
  * `bun` — is what `bun <file>` serves, Bun starting the default export it
  * finds in the entry module (SMD-1480 gave these files a polyfill for the two
  * Deno members they used, change 74; SMD-1799 gave them Bun's own shape). The
- * last section starts each such file as a child process on a port this test
- * chose, with the environment its README documents, asks it over HTTP for the
+ * last section starts each such file as a child process on 127.0.0.1 at a port
+ * Bun picks, with the environment its README documents, asks it over HTTP for the
  * one thing that proves it is that server authenticating, and stops it. Every
  * file in the tree that imports the shim and exports the entry shape is
  * started, or this fails.
@@ -65,9 +65,9 @@
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hashKey } from "./_shared/auth.ts";
+import { hashKey, listenOn } from "./_shared/auth.ts";
 import { abandonedRequestLine, mcpReply, SSE_KEEPALIVE_MS, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, secondLoopback, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -684,17 +684,17 @@ console.log(`\n[${WEBHOOK.file}]`);
 // PORT (SMD-1799; until then compat/deno-on-bun.ts stood in for Deno's `serve`,
 // SMD-1480, FORK.md change 74). Each server on the SQL shim (which imports
 // `bun`) is started here as a child process: `bun <file>` with the
-// environment its README documents — PORT a port this test bound for a
-// moment and released, then polled until the child answers on it; with
+// environment its README documents, and PORT 0 and OB1_LISTEN_HOST 127.0.0.1 beside it,
+// the port read from Bun's start line and polled until the child answers on it; with
 // `--no-install` and no NODE_PATH, so a recipe or integration finds its packages
 // through the committed link above or fails to start, rather than having Bun
 // fetch them from npm (SMD-1991) — then asked over the port for the one thing that proves it is
 // that server, authenticating: an MCP server's tools/list under a write key
 // is its full tool list, an API's read probe passes under a read key, a
 // worker dry-runs under one, the receiver admits its secret; each refuses a
-// wrong key; each is still running afterwards; then stopped. The API on its
+// wrong key; each is still running afterwards and not reached at a second loopback address; then stopped. The API on its
 // own constant-time compare of a single key (smart-ingest; its key is not
-// _shared/auth.ts's — it takes only routable from it — and check 8 passes
+// _shared/auth.ts's — it takes only routable and listenOn from it — and check 8 passes
 // it) is started too, with a probe of its own. Every file
 // in the tree that imports the shim and exports the entry shape is in the
 // list, or the guard below fails.
@@ -743,19 +743,45 @@ const LIVE: Live[] = [
     },
   })),
 ];
-/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts had until SMD-2287 PR 6b — held to the letter (SMD-1799). */
-const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
+/**
+ * Bun's entry shape as the servers spell it, held to the letter (SMD-1799), found with the listen line or without it,
+ * so a server written from an older tail is still listed here and failed for the line, not passed over (SMD-3323 PR 2b).
+ */
+const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n(  \.\.\.listenOn\(process\.env\.OB1_LISTEN_HOST\),\n)?  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
-  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules") && onShim(f) && ENTRY_SHAPE.test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  const tails = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules") && onShim(f)).sort()
+    .flatMap((f) => { const m = ENTRY_SHAPE.exec(readFileSync(join(ROOT, f), "utf8")); return m ? [{ f, held: m[1] !== undefined }] : []; });
+  const inTree = tails.map((t) => t.f);
   assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here (${inTree.length}: ${inTree.join(", ")})`);
+  const unheld = tails.filter((t) => !t.held).map((t) => t.f);
+  assert(unheld.length === 0, `…and each spreads listenOn(process.env.OB1_LISTEN_HOST) between port and fetch (${unheld.join(", ") || "all do"})`);
 }
+// The vendored servers' listen options (SMD-3323 PR 2b): unset or blank every address, an IP address the one, anything
+// else thrown in words, the value never said.
+{
+  const planted = "Zq9XwVk7Jp4RmT";
+  const thrown = (raw: string) => { try { listenOn(raw); return ""; } catch (e) { return (e as Error).message; } };
+  const said = thrown(planted);
+  assert(JSON.stringify([listenOn(undefined), listenOn("  "), listenOn(" 127.0.0.1 "), listenOn("::1")]) === JSON.stringify([{}, {}, { hostname: "127.0.0.1" }, { hostname: "::1" }])
+    && said.startsWith("OB1_LISTEN_HOST (a value not shown) is not an IP address") && !said.includes("Zq9X") && thrown("fe80::1").includes("link-local"),
+    `listenOn: blank every address, an IP address the one, a name or a link-local address thrown in words (${said})`);
+}
+// Each server started here is off the dual-stack wildcard, the bind macOS can put on a port another app holds on
+// 127.0.0.1: a second loopback address, probed, does not reach it (SMD-3323 PR 2b). An IPv4 wildcard escapes the row
+// where that address is [::1], and is no hazard: a bind there skips a port held on 127.0.0.1.
+const second = await secondLoopback();
+const answeredElsewhere: string[] = [];
+let askedElsewhere = 0;
+let metElsewhere = 0;
 const DEADLINE_MS = 30_000;
 for (const live of LIVE) {
   // PORT 0: the child binds a port no one holds and says which in Bun's start line. A port bound here for a moment
   // and freed for it could be taken in between (a container publishing a port on the same host did, once, while the
   // suite ran), and a stranger would answer the poll (SMD-3296).
-  const env: Record<string, string | undefined> = { ...process.env, PORT: "0", ...live.env };
+  // On 127.0.0.1, where it is dialled: on every address, macOS can give it a port another app holds on 127.0.0.1, which
+  // then answers the poll (SMD-3323 PR 2b).
+  const env: Record<string, string | undefined> = { ...process.env, PORT: "0", ...live.env, OB1_LISTEN_HOST: "127.0.0.1" };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
   // A NODE_PATH from the shell goes too: a recipe's or integration's packages resolve through the committed links or not at all (SMD-1991).
@@ -772,6 +798,8 @@ for (const live of LIVE) {
   // loop that polled it spun for the whole deadline; change 74's pass 1), or the deadline passed.
   const base = `http://127.0.0.1:${port}`;
   const exited = proc.exited.then(() => "exited" as const);
+  const askSecond = () => fetch(`http://${second}:${port}/`, { signal: AbortSignal.timeout(2_000) }).then(() => "answered", (e: Error) => (e.name === "TimeoutError" ? "timed out" : "refused"));
+  let at2 = "refused";
   let up = false;
   while (port > 0 && !up && Date.now() < deadline) {
     const r = await Promise.race([exited, fetch(base, { signal: AbortSignal.timeout(2000) }).then(() => "up" as const, () => "down" as const)]);
@@ -784,6 +812,7 @@ for (const live of LIVE) {
     try { await live.probe(base); }
     catch (e) { assert(false, `${live.file}: answers over the port it was given (${e instanceof Error ? e.message : String(e)})`); }
     assert(proc.exitCode === null, "…and is still running after the probes");
+    if (second !== null) { at2 = await askSecond(); askedElsewhere++; }
   }
   // Stop the child BEFORE reading its stderr: a server alive without a port would
   // otherwise hold stderr open and the read below would hang the test (pass 1).
@@ -793,6 +822,13 @@ for (const live of LIVE) {
   const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;
+  // An answer there is the child's only if it stops with the child: a bind on 127.0.0.1 skips no port another app
+  // holds on [::1] alone, and that app's listener still answers, as PR 2a's rows accept (healthAt). A holder that
+  // exits between the two asks would be blamed on the child: rare, and a failure, never a pass.
+  if (at2 !== "refused") {
+    if ((await askSecond()) === "refused") answeredElsewhere.push(`${live.file}: ${at2}`);
+    else { metElsewhere++; console.log(`  ·  ${live.file}: another app's listener holds ${second} at port ${port} (${at2}), not the child`); }
+  }
   if (!up) {
     // The error line — `error: …`, `TypeError: …` — not the code frame Bun prints above it (`throw new Error(` is a frame line).
     const lines = (await new Response(proc.stderr).text()).trim().split("\n");
@@ -802,6 +838,8 @@ for (const live of LIVE) {
     assert(true, `${live.file}: \`bun ${live.file}\` starts and listens on PORT`);
   }
 }
+
+assert(second !== null && askedElsewhere > 0 && answeredElsewhere.length === 0, `every vendored server started here is off the dual-stack wildcard: ${second === null ? "no second loopback address answered a probe, so none was asked" : askedElsewhere === 0 ? "no child came up to be asked" : `${second} reaches none (${askedElsewhere} asked, ${metElsewhere} met another app's listener there; ${answeredElsewhere.join("; ") || "no child answered"})`}`);
 
 // ── Where the key may travel ─────────────────────────────────────────────────
 

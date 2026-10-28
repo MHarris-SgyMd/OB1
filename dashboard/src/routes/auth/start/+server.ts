@@ -3,7 +3,7 @@ import { env } from '$env/dynamic/private';
 import { base } from '$app/paths';
 import type { RequestHandler } from './$types';
 import { authorizeUrl, newSignIn, oauthSettings } from '$lib/server/oauth';
-import { SIGNIN_COOKIE, SIGNIN_MAX_AGE, signInCookieOptions } from '$lib/server/session';
+import { SIGNIN_MAX_AGE, signInCookieName, signInCookieOptions } from '$lib/server/session';
 import { authReachability } from '../../../../../server-portable/oauth-edge.ts';
 
 // A sign-in through the authorization server starts here (SMD-3307): a binding
@@ -21,6 +21,6 @@ export const POST: RequestHandler = async ({ cookies, url, locals }) => {
 	const s = oauthSettings(env);
 	if (!s || locals.session || locals.breakglass || !(await authReachability().reachable())) throw redirect(303, `${base}/signin`);
 	const { binding, state, challenge } = newSignIn();
-	cookies.set(SIGNIN_COOKIE, binding, { ...signInCookieOptions(url), maxAge: SIGNIN_MAX_AGE });
+	cookies.set(signInCookieName(url), binding, { ...signInCookieOptions(url), maxAge: SIGNIN_MAX_AGE });
 	throw redirect(303, authorizeUrl(s, state, challenge));
 };

@@ -151,7 +151,25 @@ console.log("[1] createClient keeps the supabase-js signature");
   assert(typeof db.from === "function" && typeof db.rpc === "function", "exposes .from() and .rpc()");
   let threw = "";
   try { createClient("https://project.supabase.co", "key"); } catch (e) { threw = (e as Error).message; }
-  assert(/expected a postgres:\/\/ connection URL/.test(threw), "a project URL is rejected with an explanatory message");
+  assert(/expected a postgres:\/\/ connection URL, got a "https:" URL/.test(threw) && !threw.includes("project.supabase.co"), `a project URL is rejected with an explanatory message naming its scheme alone (${threw.slice(0, 120)})`);
+  // The refusal never repeats the value: the hand ports pass the connection string here, password and all (SMD-2263).
+  const refusal = (v: unknown) => { try { createClient(v as string, "key"); return ""; } catch (e) { return (e as Error).message; } };
+  const shapes: [unknown, RegExp][] = [
+    ["mysql://u:pw-not-real@127.0.0.1:5432/x", /got a "mysql:" URL/],
+    ["postgres:/u:pw-not-real@127.0.0.1:5432/x", /got a "postgres:" value without "\/\/" after its scheme/],
+    ["POSTGRES://u:pw-not-real@127.0.0.1:5432/x", /got a "POSTGRES:" URL whose scheme is not lower case/],
+    ["u:pw-not-real@127.0.0.1:5432/x", /got a value with no URL scheme/],
+    ["   ", /got nothing \(the value is unset or empty\)/],
+    [undefined, /got nothing \(the value is unset or empty\)/],
+  ];
+  for (const [v, shape] of shapes) {
+    const m = refusal(v);
+    assert(shape.test(m) && !m.includes("pw-not-real") && !m.includes("127.0.0.1") && !/\bu:/.test(m), `…${JSON.stringify(v ?? null)} is refused by its shape, and no part of the value is in the message (${m.slice(0, 140)})`);
+  }
+  // A quoting slip's space or newline is trimmed, not refused, and the trimmed URL shares the pool.
+  const spaced = createClient(` ${URL_}\n`, "key");
+  assert(spaced.sql === db.sql, "a URL with a leading space and a trailing newline is trimmed, and shares the pool of the same URL");
+  await spaced.close();
   // The vendored servers build a client per request and close none; under Bun that was a pool per request (SMD-1588).
   const twin = createClient(URL_, "ignored-service-key");
   assert(twin.sql === db.sql, "two clients on one URL share one pool");

@@ -13,6 +13,7 @@
 // serves the GUI, so one map is the whole store.
 
 import { base } from '$app/paths';
+import { withOriginPort } from './listener';
 import type { Tokens } from './oauth';
 
 // The cookie's name is its listener's: listener.ts sessionCookieName (SMD-3307).
@@ -150,8 +151,12 @@ export function closeSession(id: string | undefined): Credential | null {
 
 // --- sign-ins through the authorization server, between the redirect and the callback ---
 
-/** The cookie binding a sign-in in flight to the browser that started it: the callback takes the AS's answer only with it (no login CSRF). */
-export const SIGNIN_COOKIE = 'ob1_dashboard_signin';
+/**
+ * The cookie binding a sign-in in flight to the browser that started it: the callback takes the AS's answer only
+ * with it (no login CSRF). Its name carries the origin's port when the origin names one, as the session cookie's
+ * does (listener.ts withOriginPort, SMD-3352).
+ */
+export const signInCookieName = (url: URL) => withOriginPort('ob1_dashboard_signin', url);
 /** As long as the AS keeps a sign-in open (deploy/auth/server.ts, ttl.Interaction; oauth.ts SIGNIN_MS). */
 export const SIGNIN_MAX_AGE = 600;
 /** Answers taken, remembered so each is taken once: the oldest forgotten past it. Only a callback that carries its own browser's state adds one. */

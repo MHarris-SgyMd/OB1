@@ -4024,7 +4024,9 @@ const KAC_HEADINGS = new Set(["Added", "Changed", "Deprecated", "Removed", "Fixe
  * the FORK body (`### N.` / `# N.`) is the mistake the fragment format exists to
  * prevent — the number is assigned at release, so a fragment cannot know its own.
  * A citation of an existing change number is fine; check 15 holds every citation
- * to a file (SMD-1917).
+ * to a file (SMD-1917). A path to another fragment is not: the cut numbers every
+ * fragment and rewrites no mention, so a fragment names a change by its ticket, or
+ * pins the path to a commit (SMD-2047).
  */
 
 function checkFragments() {
@@ -4061,10 +4063,12 @@ function checkFragments() {
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## FORK\ny (SMD-1)\n", "a missing Changelog body"],
     ["no front matter here\n", "no front matter"],
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\nmigrations: 045\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\ny (SMD-1)\n", "a scalar `migrations:` (read as none, it passed while the cut refused \"migration 000\" — SMD-1870)"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nIts sibling `changes/smd-2.md` says why.\n", "a path to another fragment, which points at nothing once the cut numbers it (SMD-2047)"],
   ]) if (fragmentProblems(probe, name).length === 0) fail(SELF, `check 16 no longer catches ${why} (its own probe)`);
   for (const [probe, why] of [
     ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\n```bash\n# 1. install\n```\n\n#1. not a heading\n\n1. a list item\n\n## Measured after\n\nA second-level heading inside the record is kept, as changes 19 and 79 keep theirs.\n", "a numbered comment in a fenced block, a `#1.`, a list item and a `## ` sub-heading inside the record"],
     ["---\ntype: added        # one of the six\nbump: minor        # the rules\ntickets: [SMD-1804]        # one or more\nmigrations: [044]          # or [] for none\n---\n\n## Changelog\n\nx (SMD-1804, migration 044).\n\n## FORK\n\nA title (SMD-1804)\n\nbody\n", "the README's template copied with its inline comments"],
+    ["---\ntype: added\nbump: minor\ntickets: [SMD-1]\n---\n\n## Changelog\nx (SMD-1)\n\n## FORK\nA title (SMD-1)\n\nThe mutant lists are at `fbedb39c:changes/smd-1.md`, and SMD-2's record says why; `changes/smd-NNNN.md` is the pattern.\n", "a fragment path pinned to a commit, a ticket named instead of a path, and the pattern written with letters"],
   ]) if (fragmentProblems(probe).length) fail(SELF, `check 16 refuses ${why}: ${fragmentProblems(probe).join("; ")} (its own non-probe)`);
 
   // Numbered files and stray names are check 15's; one definition of a fragment's name (fork-index.ts).
@@ -7299,8 +7303,8 @@ checkStarReads();
  * address, by its file and a fragment that names it and no other, with why; a fragment that names none, several, or
  * one already held is reported, as is an entry whose file the walk no longer reads (walkProblems, with the walk's
  * own floor). Its probe pins each of these. PR 1 held test-rest.ts, test-server.ts and db/test-support.ts; PR 2a
- * every suite and smoke script. Without git the walk cannot list them, and the check is skipped with a word, as
- * check 41 is.
+ * every suite and smoke script; PR 2b the vendored servers extensions/test-auth.ts starts, so its exception went.
+ * Without git the walk cannot list them, and the check is skipped with a word, as check 41 is.
  */
 /**
  * The files check 42 reads: every `test-*` or `smoke*` JavaScript or TypeScript file git tracks or would track,
@@ -7326,7 +7330,6 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
   ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
-  ["extensions/test-auth.ts", 'PORT: "0", ...live.env', "the vendored servers, which read no OB1_LISTEN_HOST until the ticket's PR 2b"],
 ];
 
 /**

@@ -67,7 +67,10 @@ if (!BASE || !ORIGIN || !PASSWORD) {
 const LOCAL = new URL(BASE).origin;
 const RENEWAL = args.includes("--renewal");
 const REVOKE_CLIENT = flag("revoke-client");
-const COOKIE = "ob1_dashboard_session";
+/** The session cookie, named for the configured origin's port when it names one (listener.ts sessionCookieName, SMD-3352). */
+const COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_session_${new URL(ORIGIN).port}` : "ob1_dashboard_session";
+/** The sign-in binding's cookie, named by the same rule (session.ts signInCookieName). */
+const SIGNIN_COOKIE = new URL(ORIGIN).port ? `ob1_dashboard_signin_${new URL(ORIGIN).port}` : "ob1_dashboard_signin";
 
 let pass = 0;
 let fail = 0;
@@ -154,13 +157,13 @@ const authz = start.location ? new URL(start.location, ORIGIN) : null;
 const q = authz?.searchParams;
 assert(start.status === 303 && authz !== null && `${authz.origin}${authz.pathname}` === `${ORIGIN}/auth/authorize`, `the start answers 303 to the AS's authorize endpoint (${start.status} → ${authz ? authz.origin + authz.pathname : "-"})`);
 assert(q?.get("client_id") === "gui" && q.get("code_challenge_method") === "S256" && Boolean(q.get("code_challenge")) && !q.has("code_verifier") && q.get("prompt") === "login consent" && q.get("resource") === `${ORIGIN}/api` && (q.get("scope") ?? "").split(" ").includes("offline_access") && q.get("redirect_uri") === `${ORIGIN}/dashboard/auth/callback`, "…as gui, an S256 challenge and no verifier, prompt=login consent, offline_access, for the REST core, back to the registered callback");
-const signinCookie = jar.get("ob1_dashboard_signin");
+const signinCookie = jar.get(SIGNIN_COOKIE);
 /** The sign-in cookie as the start set it, kept to put back for the replay below. */
 const keptSignin = signinCookie ? { ...signinCookie } : undefined;
 assert(signinCookie !== undefined && signinCookie.path === "/dashboard/auth" && /HttpOnly/i.test(signinCookie.line) && /;\s*Secure/i.test(signinCookie.line) === ORIGIN.startsWith("https:"), `…and a sign-in cookie on the GUI's auth paths alone, HttpOnly, Secure on an https origin (${signinCookie ? signinCookie.line.replace(/=[^;]*/, "=…") : "none"})`);
 // A stray callback mid-sign-in (an old link, another tab's answer) is refused and leaves this sign-in's cookie alone.
 const stray = await go(jar, `${BASE}/auth/callback?state=stray&code=x`);
-assert(stray.status === 303 && stray.location === "/dashboard/signin?refused=stale" && jar.get("ob1_dashboard_signin")?.value === signinCookie?.value, `a stray callback mid-sign-in is refused and leaves the sign-in's cookie in place (${stray.status} → ${stray.location})`);
+assert(stray.status === 303 && stray.location === "/dashboard/signin?refused=stale" && jar.get(SIGNIN_COOKIE)?.value === signinCookie?.value, `a stray callback mid-sign-in is refused and leaves the sign-in's cookie in place (${stray.status} → ${stray.location})`);
 const getStart = await go(jar, `${BASE}/auth/start`);
 assert(getStart.status === 405 || getStart.status === 404, `a GET of the start starts nothing (${getStart.status})`);
 
@@ -170,11 +173,11 @@ assert(callback.startsWith(`${ORIGIN}/dashboard/auth/callback?`) && new URL(call
 const landed = callback.startsWith(ORIGIN) ? await go(jar, callback) : { status: 0, location: "", html: "", headers: new Headers() };
 const session = jar.get(COOKIE);
 assert(landed.status === 303 && landed.location === "/dashboard/" && session !== undefined && session.path === "/dashboard" && /HttpOnly/i.test(session.line) && /SameSite=Lax/i.test(session.line), `the callback opens a session — a cookie on /dashboard, HttpOnly, Lax — and sends the browser home (${landed.status} → ${landed.location})`);
-assert(!jar.has("ob1_dashboard_signin"), "…and drops the sign-in cookie");
+assert(!jar.has(SIGNIN_COOKIE), "…and drops the sign-in cookie");
 
 // Signed in, a start starts nothing; and neither a start nor a sign-out is taken from another origin, even with no body (SvelteKit checks a form's).
 const startSignedIn = await go(jar, `${BASE}/auth/start`, { form: {} });
-assert(startSignedIn.status === 303 && startSignedIn.location === "/dashboard/signin" && !jar.has("ob1_dashboard_signin"), `signed in, the start starts nothing (${startSignedIn.status} → ${startSignedIn.location})`);
+assert(startSignedIn.status === 303 && startSignedIn.location === "/dashboard/signin" && !jar.has(SIGNIN_COOKIE), `signed in, the start starts nothing (${startSignedIn.status} → ${startSignedIn.location})`);
 const fromElsewhere = await Promise.all(["auth/start", "signout"].map((p) => fetch(`${BASE}/${p}`, { method: "POST", redirect: "manual", headers: { origin: "https://elsewhere.example", cookie: cookieFor(jar, `/dashboard/${p}`) } }).then((r) => r.status)));
 assert(fromElsewhere.every((c) => c === 403) && jar.has(COOKIE), `a start or a sign-out posted with no body from another origin is refused, the session kept (${fromElsewhere.join(", ")})`);
 
@@ -239,7 +242,7 @@ const replay = await go(jar, callback);
 assert(replay.status === 303 && replay.location === "/dashboard/signin?refused=stale", `the callback replayed signs no one in: back to /signin as stale (${replay.status} → ${replay.location})`);
 // Even with the sign-in cookie put back, the answer is taken once: its verifier was spent (the cookie alone does not hold it).
 const withCookie = newJar();
-if (keptSignin) withCookie.set("ob1_dashboard_signin", keptSignin);
+if (keptSignin) withCookie.set(SIGNIN_COOKIE, keptSignin);
 const replayedWithCookie = await go(withCookie, callback);
 assert(replayedWithCookie.status === 303 && replayedWithCookie.location === "/dashboard/signin?refused=stale" && !withCookie.has(COOKIE), `…even with its sign-in cookie put back: the verifier was spent, stale before the AS is asked (${replayedWithCookie.status} → ${replayedWithCookie.location})`);
 const forged = await go(newJar(), `${BASE}/auth/callback?code=x&state=never-given`);
@@ -251,7 +254,7 @@ const elsewhere = newJar();
 const openedElsewhere = answerC.startsWith(ORIGIN) ? await go(elsewhere, answerC) : { status: 0, location: answerC, html: "", headers: new Headers() };
 const thief = newJar();
 const stolenState = answerC.startsWith(ORIGIN) ? new URL(answerC).searchParams.get("state") ?? "" : "";
-thief.set("ob1_dashboard_signin", { value: stolenState, path: "/dashboard/auth", line: "" });
+thief.set(SIGNIN_COOKIE, { value: stolenState, path: "/dashboard/auth", line: "" });
 const openedByThief = answerC.startsWith(ORIGIN) ? await go(thief, answerC) : { status: 0, location: answerC, html: "", headers: new Headers() };
 assert(openedByThief.status === 303 && openedByThief.location === "/dashboard/signin?refused=stale" && !thief.has(COOKIE), `…nor that answer opened with a cookie set to its state, as a thief of the URL could: the verifier comes from the real cookie's binding alone (${openedByThief.status} → ${openedByThief.location})`);
 assert(new URL(answerC.startsWith(ORIGIN) ? answerC : `${ORIGIN}/x`).searchParams.has("code") && openedElsewhere.status === 303 && openedElsewhere.location === "/dashboard/signin?refused=stale" && !elsewhere.has(COOKIE), `…nor a real answer opened in another browser, one without the sign-in cookie (${openedElsewhere.status} → ${openedElsewhere.location})`);

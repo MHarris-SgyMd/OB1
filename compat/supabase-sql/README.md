@@ -55,18 +55,21 @@ environment, `Deno.serve` at the end — and the shim imports `bun`, so until
 SMD-1799 such a file also took `compat/deno-on-bun.ts`, a polyfill for those two
 members, as its first import (SMD-1480, FORK.md change 74). The servers are
 Bun-native now: `process.env` for the environment and, at the tail, the shape the
-core server has (`||`: an empty `PORT` is unset, not port 0) —
+core server had (`||`: an empty `PORT` is unset, not port 0), with the listen address
+`OB1_LISTEN_HOST` names, every address unset (`listenOn` from `_shared/auth.ts`, SMD-3323) —
 
 ```ts
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: app.fetch,
 };
 ```
 
 — which Bun serves when the file is the entry module (`PORT` 8000 unset, Deno's
 old default — a port podman's `gvproxy` also holds on macOS, so the examples say
-`PORT=8787`), and which a test imports as `default.fetch` without listening. A
+`PORT=8787`), and which a test imports as `default.fetch` without listening (the
+import reads `OB1_LISTEN_HOST`, so a value that is no IP address throws there too). A
 file that still reaches `Deno.*` fails at the call under Bun, is refused by the
 codemod's triage, and fails check 11 of `scripts/check-fork-consistency.ts`.
 Then, from a checkout:
@@ -272,6 +275,13 @@ text where a plain text column would refuse the integer; an array for an array
 column as one parameter holding the array literal, its elements quoted and
 escaped, cast to the declared type. A test asserts that a value containing
 `'; DROP TABLE …` is stored as data and the table survives.
+
+`createClient` refuses a value that is not a `postgres://` URL by its shape
+alone — its scheme (`got a "mysql:" URL`), or that it has none — and never
+repeats any of the value: the hand-ported recipes pass the connection string
+here, so a mistyped scheme quoted back would print the role's password
+(SMD-2263). It trims the value first, so a stray space or newline from an env
+file is no refusal.
 
 ## The catalog
 

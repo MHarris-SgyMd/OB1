@@ -37,7 +37,7 @@
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 67; extensions/test-auth.ts exercises it.
 import { createClient } from "../../../compat/supabase-sql/index.ts";
-import { authenticateRequest, canWrite } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, listenOn } from "../_shared/auth.ts";
 
 // ── Env ──────────────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -642,5 +642,6 @@ const handler = async (req: Request): Promise<Response> => {
 
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: handler,
 };

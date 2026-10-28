@@ -59,10 +59,17 @@ it, so there it is a `minor`, and its Changelog body carries an **Upgrading:**
 line. SMD-2878's record is the example: the three-brain stack's file was
 tooling.
 
+**Name another change by its ticket, not its fragment's path** (SMD-2047). The
+cut numbers every fragment and rewrites no mention of one, so a
+`changes/smd-NNNN.md` path in a fragment points at nothing after it. Write
+"SMD-NNNN's record" instead; a path pinned to a commit
+(`<sha>:changes/smd-NNNN.md`) still resolves.
+
 `CONTRIBUTING.md` says when a fragment is required. `check-fork-consistency`
 validates every fragment (the six types, a bump the migrations allow, both bodies
 present and in that order, the changelog line and the title naming the tickets,
-no numbered heading in the FORK body, the line cap below) — the same function
+no numbered heading in the FORK body, no path to a fragment, the line cap
+below) — the same function
 the release step runs before it writes.
 
 ## The shape of the record

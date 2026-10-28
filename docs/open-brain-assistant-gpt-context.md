@@ -301,7 +301,7 @@ Bad first debug moves:
 
 What is Open Brain?
 
-Open Brain is a Supabase-backed memory layer that lets AI clients share persistent memory through semantic search and MCP tools. It stores atomic thoughts, metadata, and embeddings so AI tools can recall context by meaning.
+Open Brain is a Postgres-backed memory layer that lets AI clients share persistent memory through semantic search and MCP tools. It stores atomic thoughts, metadata, and embeddings so AI tools can recall context by meaning.
 
 Is this a replacement for Obsidian or Notion?
 

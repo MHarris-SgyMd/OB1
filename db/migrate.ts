@@ -16,9 +16,10 @@
  * Every migration is also individually idempotent, so a schema applied without
  * the migrator, which has no ledger yet, is brought under it by --reapply:
  * every file runs again over what is there, in one transaction, after the
- * checks that this shell agrees with the brain, and is recorded. (A plain run
- * would give each file its own transaction and check nothing first.)
- * Recording the ledger without running the files was retired (SMD-3325).
+ * checks that this shell agrees with the brain, and is recorded. A plain run
+ * there is refused, --dry-run too, naming --reapply: it would give each file
+ * its own transaction and check nothing first (SMD-3425). Recording the
+ * ledger without running the files was retired (SMD-3325).
  *
  * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
  * transaction with a lock timeout (LOCK_TIMEOUT_S); recorded rows stay as they are, pending
@@ -61,6 +62,8 @@ import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
+  REAPPLY_COMMAND,
+  PUBLIC_THOUGHTS_EXISTS,
   PLUGIN_LOGIN_ROLE,
   PLUGIN_NAME_RE,
   alignVectorSearchPath,
@@ -653,21 +656,6 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
   if (plugins === null) return 2;
-  // A plain run that would apply a plugin's file, or make the login role, needs
-  // the login role's password and the URL its connection is built from:
-  // refused before anything runs, so a run never applies the core and stops
-  // at the plugins. One with nothing of the plugins' to do asks neither (PR 3
-  // review pass 2: it blocked a by-hand core-only run).
-  if (!dryRun && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
-    if (!opts.pluginPassword?.trim()) {
-      err(`OB1_PLUGINS names a plugin with migrations, and OB1_PLUGIN_DB_PASSWORD is not set: a plugin's SQL runs as ${PLUGIN_LOGIN_ROLE}, a login role the migrator makes with that password. Set it in deploy/.env (openssl rand -hex 32) and run again.`);
-      return 2;
-    }
-    if (!opts.url) {
-      err(`the plugin phase opens its own connection as ${PLUGIN_LOGIN_ROLE}, built from the database URL: pass url beside sql.`);
-      return 2;
-    }
-  }
   if (migrations.length === 0) {
     err(`No .sql files in ${MIGRATIONS_DIR}`);
     return 2;
@@ -721,6 +709,56 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // the ledger, so its CREATE neither fails with 3F000 on a path that names no
   // schema nor lands in another. See pinPublicFirst (config.mjs).
   if (!(await publicFirst(sql, out, err))) return 2;
+
+  // A schema applied without the migrator — public.thoughts there, and a ledger
+  // missing or recording no migration — is brought under it by --reapply alone
+  // (SMD-3425): one transaction, after the checks that this shell agrees with
+  // the brain. A plain run would give each file its own, check nothing, and
+  // from a shell of another model have 006 re-record ob1_config's. Refused,
+  // its dry run too, once public is put first (whose own refusals, a role
+  // without USAGE on public or another brain on the path, are the more exact
+  // and come first), and before the plugins' checks and the ledger's CREATE:
+  // nothing is written, and the plugins' password is not asked for by a run
+  // that cannot apply them (review pass 1). Judged in public by name, as
+  // preflight's ledger row reads it (PUBLIC_THOUGHTS_EXISTS); a migration is
+  // a row whose name starts with three digits, as brain_info counts the
+  // highest. An empty database (no thoughts) is a first build and goes on.
+  if (!reapply) {
+    const [state] = (await sql.unsafe(
+      `SELECT ${PUBLIC_THOUGHTS_EXISTS} AS thoughts, to_regclass('public.schema_migrations') IS NOT NULL AS ledger`
+    )) as { thoughts: boolean; ledger: boolean }[];
+    const recorded = state.thoughts && state.ledger
+      ? Number(((await sql`SELECT count(*)::int AS c FROM public.schema_migrations WHERE substr(name, 1, 3) ~ '^[0-9]{3}$'`) as { c: number }[])[0].c)
+      : 0;
+    if (state.thoughts && recorded === 0) {
+      err(
+        `${dryRun ? "--dry-run" : "A plain run"} refused: public.thoughts is here and the migration ledger records no migration (${state.ledger ? "schema_migrations holds none" : "no schema_migrations table"}) — a schema applied without the migrator,\n` +
+          "  or another application's table named thoughts, in which case point the migrator at a database of its own.\n" +
+          "  A plain run would re-run every file in a transaction of its own, checking nothing first: from a shell of another\n" +
+          "  OB1_EMBEDDING_MODEL, 006 would re-record the brain's model, and a run stopped part-way would leave older definitions committed.\n" +
+          "  Re-apply the migrations instead, with the server and every worker stopped — every file in one transaction, after checking\n" +
+          `  this shell agrees with the brain, each recorded (SMD-3425): ${REAPPLY_COMMAND}, or in the compose stack:\n` +
+          "  docker compose run --rm migrate bun migrate.ts --reapply. Nothing was changed."
+      );
+      return 2;
+    }
+  }
+
+  // A plain run that would apply a plugin's file, or make the login role, needs
+  // the login role's password and the URL its connection is built from:
+  // refused before anything runs, so a run never applies the core and stops
+  // at the plugins. One with nothing of the plugins' to do asks neither (PR 3
+  // review pass 2: it blocked a by-hand core-only run).
+  if (!dryRun && !reapply && plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins))) {
+    if (!opts.pluginPassword?.trim()) {
+      err(`OB1_PLUGINS names a plugin with migrations, and OB1_PLUGIN_DB_PASSWORD is not set: a plugin's SQL runs as ${PLUGIN_LOGIN_ROLE}, a login role the migrator makes with that password. Set it in deploy/.env (openssl rand -hex 32) and run again.`);
+      return 2;
+    }
+    if (!opts.url) {
+      err(`the plugin phase opens its own connection as ${PLUGIN_LOGIN_ROLE}, built from the database URL: pass url beside sql.`);
+      return 2;
+    }
+  }
 
   const LEDGER_DDL = `
     CREATE TABLE IF NOT EXISTS schema_migrations (

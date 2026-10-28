@@ -206,10 +206,10 @@ the tag, and `.github/workflows/release.yml` publishes the images and the releas
 from it (`scripts/release-artifacts.ts`).
 
 **The soak.** Before a cut is tagged, the canary runs it as the canary is: an
-in-place writer fed stable's inputs (`deploy/canary.sh up --no-refresh`), not a
-refreshed copy of stable's data (decided 2026-10-25; SMD-2541, SMD-1806). The
-cutover release, which changes how clients reach the brain, soaks at least 24
-hours.
+in-place writer fed stable's inputs (`deploy/canary.sh up`, which keeps its
+database since SMD-3155), not a refreshed copy of stable's data (decided
+2026-10-25; SMD-2541, SMD-1806). The cutover release, which changes how
+clients reach the brain, soaks at least 24 hours.
 
 ### Deploying
 

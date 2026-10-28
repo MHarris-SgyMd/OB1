@@ -2,8 +2,7 @@
  * store-sql.ts — direct SQL, the brain's one store (SMD-3152 retired the
  * PostgREST store it replaced).
  *
- * Phase 2 of the migration: the layer the plan calls "the real cost". Uses Bun's
- * built-in Postgres client, so it adds no driver dependency.
+ * Uses Bun's built-in Postgres client, so it adds no driver dependency.
  *
  * ── Behaviour must not change ────────────────────────────────────────────────
  * Every query here reproduced what the PostgREST store asked for, including two
