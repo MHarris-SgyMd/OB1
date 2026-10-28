@@ -3001,9 +3001,9 @@ else {
       const noConfig = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(noConfig.code === 1 &&
              /SELECT on ob1_config/.test(writeLine(noConfig.out)) &&
-             /016's enqueue trigger/.test(writeLine(noConfig.out)) &&
+             /016's and 113's enqueue triggers/.test(writeLine(noConfig.out)) &&
              /GRANT SELECT ON ob1_config TO ob1_pf_capture;/.test(noConfig.out),
-             `with 016's trigger present, a role lacking SELECT on ob1_config is refused, the trigger named (exit ${noConfig.code})`);
+             `with 016's and 113's triggers present, a role lacking SELECT on ob1_config is refused, the triggers named (exit ${noConfig.code})`);
       await claims.unsafe("GRANT SELECT ON ob1_config TO ob1_pf_capture");
 
       // 046's audit trigger reads the key's kind from ob1_agents as the caller
@@ -3102,6 +3102,16 @@ else {
              `with only the snapshot writes missing, the check names 060's trigger (exit ${noSnapshot.code})`);
       await claims.unsafe("GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture");
 
+      // Name a subject pool with extraction off: 113's trigger upserts a work
+      // claim as the caller on every capture, as 016's does, so the capture path
+      // needs thought_work_claims INSERT/UPDATE (SMD-3306 PR 5).
+      await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
+      const poolOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(poolOn.code === 1 && /INSERT, UPDATE on thought_work_claims/.test(writeLine(poolOn.out)) && /016's and 113's enqueue triggers/.test(writeLine(poolOn.out))
+               && /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolOn.out),
+             `with a subject pool named and extraction off, a role lacking the work-claim writes is refused, the triggers named (exit ${poolOn.code})`);
+      await claims.unsafe("DELETE FROM ob1_config WHERE key = 'subject_pool_key'");
+
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims
       // INSERT/UPDATE — which this role (SELECT-everywhere, no worker DML) lacks.
@@ -3110,7 +3120,7 @@ else {
       const extractOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(extractOn.code === 1 &&
              /INSERT, UPDATE on thought_work_claims/.test(writeLine(extractOn.out)) &&
-             /016's enqueue trigger/.test(writeLine(extractOn.out)) &&
+             /016's and 113's enqueue triggers/.test(writeLine(extractOn.out)) &&
              /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(extractOn.out),
              `with entity extraction enabled, a role lacking the work-claim writes is refused, the trigger named (exit ${extractOn.code})`);
 
@@ -3138,9 +3148,13 @@ else {
       assert(sleepGrant.code === 2 && /"sleep" was retired in 2\.0\.0: a search no longer wakes the sleep scheduler, which reads no query_log \(SMD-3315\) — drop it from --groups\. Nothing was granted\./.test(sleepGrant.out)
                && !/not a group/.test(sleepGrant.out) && !/^GRANT /m.test(sleepGrant.out),
              `…and --groups naming the retired sleep group is refused by name, nothing granted (exit ${sleepGrant.code}: ${sleepGrant.out.trim().split("\n").slice(-1)[0]})`);
+      // A subject pool named beside extraction (113): the ok names both, and the
+      // capture below runs 113's trigger as the role too.
+      await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
-             `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out)
+               && /entity extraction is enabled and a subject pool is named, so the enqueue triggers' work-claim writes are included/.test(writeLine(okRun.out)),
+             `…and granted, the role starts, the ok noting extraction is on and a subject pool named (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
       // The query log check (034, SMD-1295): present after the migrations, and
       // off by default with OB1_QUERY_LOG unset — reported, never a refusal.
       assert(/query log\s+present; off by default/.test(okRun.out),
@@ -3169,6 +3183,8 @@ else {
         // conditional check just proved it needs.
         const [{ queued }] = (await asRole`SELECT count(*)::int AS queued FROM thought_work_claims WHERE thought_id = ${r.id} AND work_type = 'extract:test'`) as { queued: number }[];
         assert(queued === 1, "…and 016's enqueue trigger upserts a work claim as the role, extraction being on");
+        const [{ pooled }] = (await asRole`SELECT count(*)::int AS pooled FROM thought_work_claims WHERE thought_id = ${r.id} AND work_type = 'subjects:r1.2:p2r'`) as { pooled: number }[];
+        assert(pooled === 1, "…and 113's trigger pools it as the role, a subject pool being named");
         const edit = (await asRole`SELECT update_thought(${r.id}::uuid, 'the capture, edited with content'::text, NULL::jsonb, ${vecOf(4)}::vector, ${windows}::jsonb, NULL::timestamptz, NULL::jsonb, ${EMBEDDING_MODEL}::text) AS r`) as { r: { ok?: boolean } }[];
         assert(edit.length === 1 && edit[0].r?.ok !== false, "an edit with content through the role succeeds — chunks replaced as the role");
       } finally {
@@ -3177,7 +3193,7 @@ else {
     } finally {
       // Clear the shared state that later sub-blocks see first, so it runs even
       // if dropping the role throws; then drop the role.
-      await claims.unsafe("DELETE FROM ob1_config WHERE key = 'entity_extraction_key'").catch(() => {});
+      await claims.unsafe("DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key')").catch(() => {});
       await dropCaptureRole();
     }
   }

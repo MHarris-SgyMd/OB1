@@ -8703,8 +8703,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `sixteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
+    `seventeen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15955,6 +15955,67 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   assert(/migration 112: thoughts_client_key_unique exists but is INVALID — a CONCURRENTLY build or drop that did not finish/.test(invalid), `an INVALID index in the shape: refused, naming it (${invalid.slice(0, 120)})`);
   await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
+}
+
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, nothing while none is named or for a metadata edit; close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+{
+  const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
+  const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
+  const trigger = async () => (await db.query<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('thoughts_enqueue_subject()'::regprocedure, 'pg_proc')) AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_subject_pool'`)).rows[0];
+  const trig = await trigger();
+  assert(trig.n === 1 && /Migration 113 \/ SMD-3306/.test(trig.c ?? "") && /ob1:subject-pool/.test(src), `one pool trigger on thoughts, its function's comment and the file's sentinel naming it (${trig.n})`);
+
+  const POOL = "subjects:r1.2:p2r";
+  const add = async (content: string) => (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}') RETURNING id`, [content])).rows[0].id;
+  const status = async (id: string) => (await db.query<{ s: string }>(`SELECT status AS s FROM thought_work_claims WHERE thought_id = $1 AND work_type = $2`, [id, POOL])).rows[0]?.s ?? "none";
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  const before = await add("[101] captured before a pool is named");
+  assert((await status(before)) === "none", "no pool named: a new thought joins none");
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', $1)`, [POOL]);
+  const after = await add("[101] captured after");
+  assert((await status(after)) === "pending", "a pool named: a new thought joins it, pending");
+  await db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  await db.query(`UPDATE thoughts SET metadata = '{"note": "a metadata edit"}' WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "a metadata edit does not put it back");
+  await db.query(`UPDATE thoughts SET content = content WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "nor does a write of the same text");
+  await db.query(`UPDATE thoughts SET content = '[101] captured after, edited' WHERE id = $1`, [after]);
+  assert((await status(after)) === "pending", "an edit of its text puts a finished thought back in the pool");
+  await db.query(`UPDATE thoughts SET content = '[101] captured before, edited' WHERE id = $1`, [before]);
+  assert((await status(before)) === "pending", "…and an edit pools a thought captured before the pool was named");
+
+  // The close: the subject read, and no other.
+  const fp = async (id: string) => (await db.query<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1`, [id])).rows[0].f;
+  const write = async (id: string, key: string) => (await db.query<{ r: { id: string } }>(`SELECT record_thought_subject($1, $2, 'model', 'subject:x@p2', NULL, $3, NULL) AS r`, [id, key, await fp(id)])).rows[0].r.id;
+  const close = async (id: string, facet: string, f: string) => (await db.query<{ c: Record<string, unknown> }>(`SELECT close_thought_subject($1, $2, $3) AS c`, [id, facet, f])).rows[0].c;
+  const standing = async (id: string) => (await db.query<{ id: string | null }>(`SELECT max(id::text) AS id FROM thought_facets WHERE thought_id = $1 AND kind = 'subject' AND valid_until IS NULL`, [id])).rows[0].id;
+  const read = await write(after, "phrase:the one read");
+  const since = await write(after, "phrase:written since");
+  const moved = await close(after, read, await fp(after));
+  assert(moved.action === "none" && moved.moved === true && moved.id === since && (await standing(after)) === since,
+    `another subject written since the read: not closed, the one standing named (${JSON.stringify(moved)})`);
+  const stale = await close(after, since, "0".repeat(64));
+  assert(stale.action === "none" && stale.stale === true && (await standing(after)) === since, `a text moved since the read: not closed (${JSON.stringify(stale)})`);
+  const closed = await close(after, since, await fp(after));
+  assert(closed.action === "closed" && closed.id === since && (await standing(after)) === null, `the subject read, at the text read: closed (${JSON.stringify(closed)})`);
+  const none = await close(after, since, await fp(after));
+  assert(none.action === "none" && none.moved === undefined && none.stale === undefined, `none standing: none (${JSON.stringify(none)})`);
+  const gone = await close("00000000-0000-0000-0000-000000000113", since, await fp(after));
+  assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
+  const refused: string[] = [];
+  for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {
+    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) { refused.push((e as { code?: string }).code ?? (e as Error).message); }
+  }
+  assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
+  const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
+  assert(/Migration 113 \/ SMD-3306/.test(comment), `close_thought_subject's comment names the migration (${comment.slice(0, 60)})`);
+
+  // Re-applied, nothing moves.
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  assert(again.endsWith("_subject_pool.sql") && (await trigger()).n === 1 && (await status(after)) === "pending", `113 applied again changes nothing: one trigger, the pool as it was (${again.slice(0, 80)})`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

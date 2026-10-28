@@ -2755,7 +2755,10 @@ export const CAPTURE_WRITES = Object.freeze(
  * capture and content-edit needs INSERT and UPDATE there, even for a role that
  * never runs a worker. Preflight folds these into the `write privileges` check
  * exactly when the key is set; a brain that never enabled extraction never needs
- * them. `thought_work_claims` is 015's; the requirement is 016's trigger.
+ * them. `thought_work_claims` is 015's; the requirement is 016's trigger, and
+ * 113's subject-pool trigger (SMD-3306) adds the same pairs while
+ * `ob1_config.subject_pool_key` names a pool, so preflight folds them in while
+ * either key is set.
  */
 export const EXTRACTION_TRIGGER_WRITES = Object.freeze([
   Object.freeze({ table: "thought_work_claims", privilege: "INSERT", since: "016" }),

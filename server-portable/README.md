@@ -734,8 +734,8 @@ discovers through `tools/list` (a capture-only key sees none of them):
   `thought_work_claims`, one row per `work_type`: pending / claimed (in flight,
   INCLUDING stale) / succeeded / failed, how many thoughts are unpooled, the corpus
   total, the stale-lease count with its oldest lease's time and holder, and whether the
-  pool is the active one (`ob1_config.entity_extraction_key` or `reembed:<model>@<dim>`;
-  `null` for consolidate). Read-only.
+  pool is the active one (`ob1_config.entity_extraction_key`, the subject pool's
+  `subject_pool_key` (113), or `reembed:<model>@<dim>`; `null` for consolidate). Read-only.
 
 `worker_status` also has a keyed **`GET /worker-status`** — the same authentication as
 `/health` (a read or write key gets the JSON array, a capture/wrong/no/revoked key or a

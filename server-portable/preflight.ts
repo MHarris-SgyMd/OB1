@@ -1833,13 +1833,18 @@ if (configFailed) {
           // thoughts matches nothing rather than raising); the key inside CASE
           // guards, so has_table_privilege — which raises for a relation it cannot
           // see — is reached only when the trigger, hence 006's ob1_config, exists.
-          const [{ triggerPresent, canReadConfig }] = (await sql`
+          // 113's subject-pool trigger (SMD-3306) has 016's shape: its own ob1_config read on every capture, and a
+          // work-claim upsert while ob1_config.subject_pool_key names a pool.
+          const [{ triggerPresent, poolTriggerPresent, canReadConfig }] = (await sql`
             SELECT EXISTS (SELECT 1 FROM pg_trigger
                             WHERE tgrelid = to_regclass('public.thoughts')
                               AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS "triggerPresent",
+                   EXISTS (SELECT 1 FROM pg_trigger
+                            WHERE tgrelid = to_regclass('public.thoughts')
+                              AND tgname = 'thoughts_subject_pool' AND NOT tgisinternal) AS "poolTriggerPresent",
                    CASE WHEN to_regclass('public.ob1_config') IS NOT NULL
                         THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"`) as
-            { triggerPresent: boolean; canReadConfig: boolean }[];
+            { triggerPresent: boolean; poolTriggerPresent: boolean; canReadConfig: boolean }[];
           // Read the key in its own statement, run only when the role can SELECT
           // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
           // above would become an InitPlan Postgres evaluates regardless of any
@@ -1852,15 +1857,19 @@ if (configFailed) {
           // through the role's search_path, and a role that may read the table
           // without public on its path read "relation does not exist" (SMD-2062).
           let ek: string | null = null;
+          let sk: string | null = null;
           if (canReadConfig) {
-            const [row] = (await sql`SELECT value FROM public.ob1_config WHERE key = 'entity_extraction_key'`) as { value: string | null }[];
-            ek = row?.value ?? null;
+            const rows = (await sql`SELECT key, value FROM public.ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key')`) as { key: string; value: string | null }[];
+            ek = rows.find((r) => r.key === "entity_extraction_key")?.value ?? null;
+            sk = rows.find((r) => r.key === "subject_pool_key")?.value ?? null;
           }
           const extracting = triggerPresent && canReadConfig && typeof ek === "string" && ek !== "";
-          // What the 016 trigger adds to the capture path when it is present: its
-          // own ob1_config read always, the work-claim upsert while extraction is on.
-          const conditional = triggerPresent
-            ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting ? EXTRACTION_TRIGGER_WRITES : [])]
+          const pooling = poolTriggerPresent && canReadConfig && typeof sk === "string" && sk !== "";
+          // What the 016 and 113 triggers add to the capture path when present:
+          // their ob1_config read always, the work-claim upsert while extraction is
+          // on or a subject pool is named.
+          const conditional = triggerPresent || poolTriggerPresent
+            ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting || pooling ? EXTRACTION_TRIGGER_WRITES : [])]
             : [];
           // 046's audit trigger reads ob1_agents as the caller; 025's does not. The
           // capture set lists the SELECT (db/README.md's table, --grant), and the
@@ -1914,7 +1923,7 @@ if (configFailed) {
               target.set(w.table, into);
             }
             const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
-            const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
+            const triggerMiss = (triggerPresent || poolTriggerPresent) && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
             // What would fail, by what is missing: the capture path's writers
             // for any capture-path table, and — 042's guard reads and writes
             // thought_facets as the caller on every delete — every delete of a
@@ -1940,7 +1949,9 @@ if (configFailed) {
             const lineageMiss = missingByTable.has("derivations");
             const fails: string[] = [];
             if (captureMiss) fails.push((triggerMiss
-              ? "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —"
+              ? (poolTriggerPresent
+                ? "a windowed capture, an edit with content, 008's audit trigger, or 016's and 113's enqueue triggers — which as the caller read ob1_config on every capture, and upsert a work claim while entity extraction is enabled or a subject pool is named —"
+                : "a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled —")
               : "a windowed capture, an edit with content, or 008's audit trigger")
               + (agentsMiss ? " (046's audit trigger reads ob1_agents as the caller on every capture, edit and delete that carries an actor)" : "")
               + (auditReadMiss ? " (055's ob1_append_thought_event reads the audit row it inserts — INSERT … RETURNING — and since 060 the audit trigger's check and the projector read the event, as the caller on every capture, edit and delete through the functions)" : "")
@@ -1981,7 +1992,9 @@ if (configFailed) {
                   grants);
             } else {
               const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
-              const note = extracting ? " — entity extraction is enabled, so the enqueue trigger's work-claim writes are included" : "";
+              const note = extracting || pooling
+                ? ` — ${[extracting ? "entity extraction is enabled" : "", pooling ? "a subject pool is named" : ""].filter(Boolean).join(" and ")}, so the enqueue ${extracting && pooling ? "triggers'" : "trigger's"} work-claim writes are included`
+                : "";
               add("write privileges", "ok",
                   `${role} holds the capture path's privileges — ${held}${note}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
             }

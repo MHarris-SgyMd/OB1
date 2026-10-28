@@ -551,8 +551,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // rebuild of 071's mirror for a status-set change, SMD-3160), 109
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
   // listing pages, SMD-3249), 111 (a thought's own subject
-  // recorded, SMD-3306) and 112 (a thought's client_key, one thought
-  // per key, SMD-3314)
+  // recorded, SMD-3306), 112 (a thought's client_key, one thought
+  // per key, SMD-3314) and 113 (the subject pool, SMD-3306)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -699,13 +699,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]) — all
+  // refusing by name rows that share one ([20bd]); 113 adds the subject
+  // pool's trigger on thoughts and a close of the subject read, refusing by
+  // name without 015, 016 or 111 ([20be]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 83, `030 is among the last eighty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 84, `030 is among the last eighty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4993,6 +4995,64 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   assert(/^client_key is set once: thought /.test(moved), `…and the caller's key, kept from before, is set once: a write moving it refused (${moved.slice(0, 80)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
   assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
+  await sql.close();
+}
+
+console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
+{
+  const the113 = MIGRATIONS.find((f) => f.endsWith("_subject_pool.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["015", "migration 113 needs 015 (claim_thoughts); this schema lacks it"],
+    ["016", "migration 113 needs 016 (requeue_thought_work); this schema lacks it"],
+    ["111", "migration 113 needs 111 (record_thought_subject); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const POOL = "subjects:r1.2:p2r";
+  // A brain before 113: the extraction pool named, so its trigger enqueues; a subject the sweep wrote.
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:x@p2')`;
+  const t: string[] = [];
+  for (let i = 0; i < 2; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const subject = (await sql`SELECT record_thought_subject(${t[0]}::uuid, 'phrase:upgrade', 'model', 'subject:x@p2', NULL::uuid, ${await fpOf(t[0])}::text, NULL::jsonb) AS r`)[0].r as { id: string };
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const claims = async () => JSON.stringify(await sql`SELECT thought_id, work_type, status FROM thought_work_claims ORDER BY thought_id, work_type`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), facetsBefore = await facets(), claimsBefore = await claims(), auditBefore = await audits();
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+
+  assert((await rows()) === before && (await facets()) === facetsBefore && (await claims()) === claimsBefore && (await audits()) === auditBefore,
+    "the file moves nothing it finds: every thought, facet, claim and audit row stands as it was");
+  const inPool = async (id: string) => String((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`)[0]?.status ?? "none");
+  const third = ((await sql`SELECT upsert_thought('upgrade 113: thought 2, before a pool is named'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string }).id;
+  assert((await inPool(third)) === "none", "no pool named: a new thought joins none");
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL})`;
+  const fourth = ((await sql`SELECT upsert_thought('upgrade 113: thought 3, after'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string }).id;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = ${fourth}::uuid AND work_type = ${POOL}`;
+  await sql`SELECT update_thought(${t[1]}::uuid, 'upgrade 113: thought 1, edited')`;
+  await sql`UPDATE thoughts SET metadata = metadata || '{"note": "a metadata edit"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(t[1])) === "pending" && (await inPool(third)) === "none" && (await inPool(fourth)) === "succeeded",
+    "after it, with a pool named, an edited thought joins it; a metadata edit does not");
+  await sql`SELECT update_thought(${fourth}::uuid, 'upgrade 113: thought 3, edited after it was asked')`;
+  assert((await inPool(fourth)) === "pending", "…and a thought finished in the pool is put back in it once its text changes");
+  const closed = (await sql`SELECT close_thought_subject(${t[0]}::uuid, ${subject.id}::uuid, ${await fpOf(t[0])}::text) AS c`)[0].c as { action: string; id: string };
+  assert(closed.action === "closed" && closed.id === subject.id, `close_thought_subject closes the subject read (${JSON.stringify(closed)})`);
+  const after = await rows(), facetsAfter = await facets(), claimsAfter = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  assert((await rows()) === after && (await facets()) === facetsAfter && (await claims()) === claimsAfter, "a re-apply is a no-op: every thought, facet and claim as it was");
   await sql.close();
 }
 

@@ -216,9 +216,9 @@ const FLAGS = {
   status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
   subjects: "optional",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>", subjects: "[rules] (the subject sweep: with --url, --limit, --timeout, --dry-run)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>", subjects: "[rules] (the subject sweep: with --url, --limit, --timeout, --retry-failed, --dry-run)" };
 /** The flags the subject sweep reads (db/subject-sweep.ts): any other beside --subjects is the pass's, refused rather than dropped. */
-const SUBJECT_FLAGS: ReadonlySet<string> = new Set(["subjects", "url", "limit", "timeout", "dry-run"]);
+const SUBJECT_FLAGS: ReadonlySet<string> = new Set(["subjects", "url", "limit", "timeout", "retry-failed", "dry-run"]);
 
 /**
  * What one extraction run is asked to do — the CLI's flags, typed (SMD-2304).
@@ -2035,7 +2035,7 @@ if (import.meta.main) {
     const value = cli.value("subjects");
     const others = Object.keys(FLAGS).filter((f) => !SUBJECT_FLAGS.has(f) && cli.has(f as keyof typeof FLAGS));
     if ((value !== undefined && value !== "rules") || others.length > 0) {
-      console.error(`extract-entities.ts: --subjects takes "rules" or no value, and goes with --url, --limit, --timeout and --dry-run alone${others.length ? `, not ${others.map((f) => `--${f}`).join(", ")}` : ""}.\n${flagList(FLAGS, HINTS)}`);
+      console.error(`extract-entities.ts: --subjects takes "rules" or no value, and goes with --url, --limit, --timeout, --retry-failed and --dry-run alone${others.length ? `, not ${others.map((f) => `--${f}`).join(", ")}` : ""}.\n${flagList(FLAGS, HINTS)}`);
       process.exit(2);
     }
     const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
@@ -2044,7 +2044,7 @@ if (import.meta.main) {
     const sql = openSql(url, { max: 2 });
     let uninstall = () => {};
     await closeThenExit(sql, async () => {
-      return sweepSubjects({ sql, url, model: value !== "rules", limit, timeout, dryRun: cli.has("dry-run"), onPass: (stop) => { uninstall = stopOnSignals(stop); } }).finally(() => uninstall());
+      return sweepSubjects({ sql, url, model: value !== "rules", limit, timeout, retryFailed: cli.has("retry-failed"), dryRun: cli.has("dry-run"), onPass: (stop) => { uninstall = stopOnSignals(stop); } }).finally(() => uninstall());
     });
   }
   // The numbers by the scanner's rules, in run()'s order — the lease pair

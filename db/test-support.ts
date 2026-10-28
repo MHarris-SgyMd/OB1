@@ -361,6 +361,9 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
+  // 113 (SMD-3306): the subject pool — the trigger function (the trigger goes with thoughts) and the safe close.
+  "thoughts_enqueue_subject()",
+  "close_thought_subject(uuid, uuid, text)",
 ];
 
 /**
