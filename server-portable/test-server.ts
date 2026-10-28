@@ -3272,12 +3272,15 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // timed out a request after 10 seconds` after the suite's report: expected.
   const bare = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => silentSse() });
   const kept = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
-  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
-  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
+  // The ceiling, at a small scale: a stream silent for 1250 ms with a 50 ms
+  // frame and a 500 ms ceiling stops pinging at the ceiling and says so once.
   // Nominally nine frames, about twenty-four uncapped; the band below leaves a
-  // loaded runner's timer drift room on both sides.
+  // loaded runner's timer drift room on both sides. A first tick late past the
+  // ceiling sends none, so the scale is what a stall of the event loop has to
+  // outlast: at 20 ms and 200 ms, a stall of ~120 ms at the start failed it,
+  // which the job's other suites beside this one did once (SMD-3470).
   let stalls = 0;
-  const capped = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+  const capped = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(1250), { intervalMs: 50, maxMs: 500, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -3322,7 +3325,7 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
   assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
   assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
-    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
+    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 1250 ms at 50 ms with a 500 ms ceiling)`);
   assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
@@ -3339,7 +3342,11 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
   assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
-  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  // The server times the request from its arrival and the client's 1.5 s from
+  // its send, in one process, so a stall between the two reads short: the
+  // floor tells the abort's moment from an at-once line, not to the 100 ms
+  // (a 200 ms stall read 1.3 s, SMD-3470).
+  assert(m !== null && Number(m[1]) >= 1 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(
     requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
