@@ -22,8 +22,8 @@ export const SESSION_MAX_AGE = 60 * 60 * 24;
 /** The most sessions held at once: the oldest goes when a sign-in would pass it, so a flood of sign-ins holds at most this many keys in memory. */
 export const MAX_SESSIONS = 1000;
 /**
- * The most one key holds — or one subject the authorization server signed in,
- * `oauth:<sub>` — a sign-in past it ends that holder's oldest session, not
+ * The most one key holds — or one principal the authorization server signed in,
+ * `oauth:<sub>+<client>` — a sign-in past it ends that holder's oldest session, not
  * another's, so one key signed in over and over cannot push every other
  * visitor out of MAX_SESSIONS (review pass 1). Only sessions under fifty or more
  * keys reach the global cap. Two sign-ins posted at once over one cookie each
@@ -39,7 +39,7 @@ export type Session = {
 	/** The session's id, the cookie's value: what a renewal writes the new tokens back under. */
 	id: string;
 	credential: Credential;
-	/** The holder's name and scope, as the REST core's whoami said at sign-in (`oauth:<sub>` for a token). */
+	/** The holder's name and scope, as the REST core's whoami said at sign-in (`oauth:operator+gui` for a token, SMD-3064). */
 	name: string;
 	scope: string;
 	/** Whether whoami named capture_thought among the holder's operations — false for a read key. */

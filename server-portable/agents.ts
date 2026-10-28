@@ -179,9 +179,10 @@ function cacheKey(keyHash: string, label: string): string {
  * scope it last had — mint a forwarder fresh, as keygen.ts does.
  */
 export function recordedScope(principal: Principal): string | undefined {
-  // An authorization server's subject (`oauth:<sub>`, SMD-2286) is one row whatever scope each of its tokens holds, so
-  // recording each token's would rewrite the row on every change of scope, a write per request between two clients of
-  // one subject, and the column would show churn, not a privilege change. Recorded NULL, as a forwarder's is.
+  // An authorization server's principal (`oauth:<sub>+<client>`, SMD-2286, SMD-3064) is one row whatever scope each of
+  // its tokens holds, so recording each token's would rewrite the row on every change of scope, a write per request
+  // between two sign-ins of one client, and the column would show churn, not a privilege change. Recorded NULL, as a
+  // forwarder's is.
   return principal.scope === "forward" || principal.name.startsWith("oauth:") ? undefined : principal.scope;
 }
 
@@ -192,8 +193,10 @@ export class AgentResolver {
    * create an entry. The key space is the configured key set, not anything a
    * caller controls, and an expired entry is overwritten rather than added to.
    * A token the REST core accepts (oauth-token.ts, SMD-2286) adds one entry
-   * per subject the authorization server signs for — its one account and its
-   * configured service clients — so that space is the configuration's too.
+   * per principal the authorization server signs for: its configured service
+   * clients, and its one account once per client the operator signed in
+   * through (SMD-3064). Each of those took the operator's password and
+   * consent, so that space is the operator's to grow, not a caller's.
    */
   private cache = new Map<string, Entry>();
 

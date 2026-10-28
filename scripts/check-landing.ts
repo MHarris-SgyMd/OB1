@@ -103,7 +103,6 @@ export const LANDING_PROBES: [why: string, changes: Change[], says: string | nul
   ["the REST client the MCP server calls the brain through (SMD-2287)", [["M", "rest-client/index.ts"], ["M", "rest-client/test-client.ts"]], "touches rest-client/index.ts"],
   ["the MCP server as a client of the REST core (SMD-2287)", [["M", "mcp-server/app.ts"], ["M", "mcp-server/test-mcp.ts"]], "touches mcp-server/app.ts"],
   ["the operator GUI, which the server image carries (SMD-2280)", [["M", "dashboard/src/routes/+page.svelte"]], "touches dashboard/src/routes/+page.svelte"],
-  ["the dashboards that retire, not the operator GUI", [["M", "dashboards/open-brain-dashboard/src/lib/api.ts"]], null],
   ["a fixture — data an eval reads is not a test file", [["M", "evals/fixtures/replay.json"]], "touches evals/fixtures/replay.json"],
   ["a directory-shaped name that only starts like one", [["M", "evals-old/x.ts"], ["M", "server-portable-docs/x.ts"]], null],
   ["a release cut — the version migration added, the fragments it numbered deleted, the manifest written", [["A", "db/migrations/048_schema_version.sql"], ["M", "db/version.mjs"], ["D", "changes/smd-1804.md"], ["A", "changes/018-long-captures-stay-searchable.md"], ["M", "CHANGELOG.md"], ["M", "releases.json"]], null],

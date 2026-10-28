@@ -689,40 +689,58 @@ console.log("\n[6b] Forwarded through REST: the client's key is the subject, the
   assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c) === before, "…and neither refused request wrote a thought");
 }
 
-console.log("\n[6c] The authorization server's token through REST (SMD-2286): the subject oauth:<sub>, an exchanged token's act on the audit row, the registry's row with no scope, a read token refused a capture, a revoked subject refused");
+console.log("\n[6c] The authorization server's token through REST (SMD-2286, SMD-3064): a principal per client, oauth:<sub>+<client>, an exchanged token's act on the audit row, the registry's row with no scope, a trust per client, a read token refused a capture, one client revoked alone");
 {
   // The REST core of api.ts over this store, given a token check over a key set this suite signs with (a deploy reads the authorization server's on the mesh).
   const settings = tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://brain.example.test" })!;
   const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });
   const jwks = { keys: [{ ...(await exportJWK(publicKey)), kid: "ob1-suite", alg: "ES256", use: "sig" }] };
   const tokenApi = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (await import("./api.ts")).restApp(() => {}, () => checkerOver(settings, createLocalJWKSet(jwks))).fetch });
-  const mint = (scope: string, sub = "operator", act?: string) =>
-    new SignJWT({ scope, ...(act ? { act: { sub: act } } : {}) }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid: "ob1-suite" })
-      .setIssuer(settings.issuer).setAudience(settings.audience).setSubject(sub).setIssuedAt().setExpirationTime("10m").sign(privateKey);
+  // A token as the authorization server signs one: the GUI's own (client_id gui); one the MCP service exchanged for
+  // a connector (client_id mcp, the connector nested in act); a service's, whose subject is its client id.
+  const mint = (scope: string, as: { gui: true } | { connector: string } | { service: string }) => {
+    const claims = "gui" in as ? { client_id: "gui" } : "connector" in as ? { client_id: "mcp", act: { sub: "mcp", act: { sub: as.connector } } } : { client_id: as.service };
+    return new SignJWT({ scope, ...claims }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid: "ob1-suite" })
+      .setIssuer(settings.issuer).setAudience(settings.audience).setSubject("service" in as ? as.service : "operator").setIssuedAt().setExpirationTime("10m").sign(privateKey);
+  };
   const asToken = async (method: string, path: string, token: string, body?: unknown) => {
     const r = await fetch(`http://127.0.0.1:${tokenApi.port}${path}`, { method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: r.status, body: await r.json() as Record<string, unknown> };
   };
-  const write = await mint("brain:write", "operator", "mcp");
-  const cap = await asToken("POST", "/v1/thoughts", write, { content: "lambda: captured with an exchanged token" });
-  assert(cap.status === 201 && typeof cap.body.id === "string", `an exchanged write token captures (${cap.status} ${JSON.stringify(cap.body).slice(0, 80)})`);
-  const [row] = await sql`SELECT actor_name, canonical_agent_id::text AS agent, origin, actor_context->'act' AS act FROM thought_audit WHERE thought_id = ${String(cap.body.id)}::uuid AND action = 'capture'`;
-  const [agent] = await sql`SELECT a.canonical_agent_id::text AS id, k.scope FROM ob1_agents a JOIN ob1_agent_keys k ON k.canonical_agent_id = a.canonical_agent_id WHERE a.label = 'oauth:operator'`;
-  assert(row?.actor_name === "oauth:operator" && row?.origin === "open-brain-api" && typeof agent?.id === "string" && row?.agent === agent.id,
-    `the audit row's subject is oauth:operator, its agent the registry's for that label, its door the REST core (${JSON.stringify(row)})`);
-  assert(same(row?.act, { name: "oauth:mcp" }), `…and its act the MCP service, from the token's signed act, by name alone (${JSON.stringify(row?.act)})`);
-  assert(agent?.scope === null, `the registry records no scope for an oauth: subject, whatever its tokens hold (${JSON.stringify(agent)})`);
-  const read = await mint("brain:read", "operator", "mcp");
+  const audited = async (id: unknown) => (await sql`SELECT actor_name, actor_kind, trust, canonical_agent_id::text AS agent, origin, actor_context->'act' AS act FROM thought_audit WHERE thought_id = ${String(id)}::uuid AND action = 'capture'`)[0];
+  // Classified before their first request, as an operator may (set_agent_kind upserts by label): connector A an agent, the GUI the operator. Connector B is left unclassified.
+  await sql`SELECT set_agent_kind(${"oauth:operator+connector-a"}, ${"agent"}), set_agent_kind(${"oauth:operator+gui"}, ${"operator"})`;
+  const caps: Record<string, { status: number; body: Record<string, unknown> }> = {};
+  for (const [who, as] of [["a", { connector: "connector-a" }], ["b", { connector: "connector-b" }], ["gui", { gui: true }]] as const) {
+    caps[who] = await asToken("POST", "/v1/thoughts", await mint("brain:write", as), { content: `lambda: captured through ${who}` });
+  }
+  assert(Object.values(caps).every((c) => c.status === 201 && typeof c.body.id === "string"), `two connectors' exchanged write tokens and the GUI's capture (${Object.values(caps).map((c) => c.status).join(" ")})`);
+  const [ra, rb, rg] = [await audited(caps.a.body.id), await audited(caps.b.body.id), await audited(caps.gui.body.id)];
+  const agents: { label: string; id: string; scope: string | null }[] = await sql`SELECT a.label, a.canonical_agent_id::text AS id, k.scope FROM ob1_agents a JOIN ob1_agent_keys k ON k.canonical_agent_id = a.canonical_agent_id WHERE a.label LIKE 'oauth:operator%' ORDER BY a.label`;
+  const idOf = (label: string) => agents.find((x) => x.label === label)?.id;
+  assert(ra?.actor_name === "oauth:operator+connector-a" && rb?.actor_name === "oauth:operator+connector-b" && rg?.actor_name === "oauth:operator+gui",
+    `Verify 1: each audit row names its own client — the two connectors and the GUI (${ra?.actor_name}, ${rb?.actor_name}, ${rg?.actor_name})`);
+  assert(ra?.agent === idOf("oauth:operator+connector-a") && rb?.agent === idOf("oauth:operator+connector-b") && rg?.agent === idOf("oauth:operator+gui") && new Set([ra?.agent, rb?.agent, rg?.agent]).size === 3 && ra?.origin === "open-brain-api",
+    `…each its own registry row, its agent the registry's for its label, its door the REST core (${JSON.stringify(agents.map((x) => x.label))})`);
+  assert(!agents.some((x) => x.label === "oauth:operator"), "…and no one row for the subject alone");
+  assert(same(ra?.act, { name: "oauth:mcp" }) && same(rb?.act, { name: "oauth:mcp" }) && rg?.act === null, `a connector's act is the MCP service that carried it, from the token's signed act, by name alone; the GUI's own token has none (${JSON.stringify([ra?.act, rb?.act, rg?.act])})`);
+  assert(ra?.actor_kind === "agent" && ra?.trust === "agent" && rg?.actor_kind === "operator" && rg?.trust === "operator" && rb?.actor_kind === null,
+    `Verify 3: the connector classified agent writes at agent trust while the GUI writes at operator trust; the unclassified one is unknown (${JSON.stringify([ra?.actor_kind, ra?.trust, rg?.actor_kind, rg?.trust, rb?.actor_kind])})`);
+  assert(agents.every((x) => x.scope === null), `the registry records no scope for an oauth: principal, whatever its tokens hold (${JSON.stringify(agents.map((x) => x.scope))})`);
+  const read = await mint("brain:read", { connector: "connector-a" });
   const readCap = await asToken("POST", "/v1/thoughts", read, { content: "lambda: a read token may not capture" });
   assert(readCap.status === 403 && readCap.body.needs === "capture", `a read token cannot capture (${readCap.status} ${JSON.stringify(readCap.body)})`);
-  const [still] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${subjectHash(settings.issuer, "operator")}`;
-  assert(still?.scope === null, `…and a token of another scope from the same subject leaves the row's scope as it was (${JSON.stringify(still)})`);
-  const direct = await asToken("POST", "/v1/thoughts", await mint("brain:capture", "runner"), { content: "lambda: a service's capture" });
-  const [svc] = await sql`SELECT actor_name, actor_context->'act' AS act FROM thought_audit WHERE thought_id = ${String(direct.body.id)}::uuid AND action = 'capture'`;
-  assert(direct.status === 201 && svc?.actor_name === "oauth:runner" && svc?.act === null, `a service's client-credentials token: its subject oauth:runner, no act (${direct.status} ${JSON.stringify(svc)})`);
-  await sql`SELECT revoke_agent_key(${subjectHash(settings.issuer, "operator")}, ${"rest suite"})`;
-  const revoked = await asToken("GET", "/v1/whoami", await mint("brain:write"));
-  assert(revoked.status === 401 && revoked.body.code === "REVOKED" && revoked.body.credential === "token", `the subject revoked in the registry: its next token 401 REVOKED, credential token (${revoked.status} ${JSON.stringify(revoked.body)})`);
+  const [still] = await sql`SELECT scope FROM ob1_agent_keys WHERE key_hash = ${subjectHash(settings.issuer, "operator", "connector-a")}`;
+  assert(still?.scope === null, `…and a token of another scope from the same client leaves the row's scope as it was (${JSON.stringify(still)})`);
+  const direct = await asToken("POST", "/v1/thoughts", await mint("brain:capture", { service: "runner" }), { content: "lambda: a service's capture" });
+  const svc = await audited(direct.body.id);
+  assert(direct.status === 201 && svc?.actor_name === "oauth:runner" && svc?.act === null, `a service's client-credentials token: its subject alone, oauth:runner, no act (${direct.status} ${JSON.stringify(svc)})`);
+  await sql`SELECT revoke_agent_key(${subjectHash(settings.issuer, "operator", "connector-a")}, ${"rest suite"})`;
+  const revoked = await asToken("GET", "/v1/whoami", await mint("brain:write", { connector: "connector-a" }));
+  assert(revoked.status === 401 && revoked.body.code === "REVOKED" && revoked.body.credential === "token", `connector A revoked in the registry: its next token 401 REVOKED, credential token (${revoked.status} ${JSON.stringify(revoked.body)})`);
+  const [other, gui] = [await asToken("GET", "/v1/whoami", await mint("brain:write", { connector: "connector-b" })), await asToken("GET", "/v1/whoami", await mint("brain:write", { gui: true }))];
+  assert(other.status === 200 && other.body.name === "oauth:operator+connector-b" && gui.status === 200 && gui.body.name === "oauth:operator+gui",
+    `…while connector B and the GUI, signed in as the same operator, go on (${other.status} ${gui.status})`);
   tokenApi.stop(true);
 }
 

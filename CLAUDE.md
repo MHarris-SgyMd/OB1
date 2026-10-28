@@ -4,7 +4,7 @@ This file helps AI coding tools (Claude Code, Codex, Cursor, etc.) work effectiv
 
 ## What This Repo Is
 
-Open Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. This repo contains the extensions, recipes, schemas, dashboards, integrations, and skills that the community builds on top of the core Open Brain setup.
+Open Brain is a persistent AI memory system — one database (Postgres + pgvector), one MCP protocol, any AI client. This repo contains the extensions, recipes, schemas, integrations, skills and plugins that the community builds on top of the core Open Brain setup.
 
 **License:** FSL-1.1-MIT. No commercial derivative works. Keep this in mind when generating code or suggesting dependencies.
 
@@ -15,10 +15,9 @@ extensions/     — Curated, ordered learning path (6 builds). Do NOT add withou
 primitives/     — Reusable concept guides (must be referenced by 2+ extensions). Curated.
 recipes/        — Standalone capability builds. Open for community contributions.
 schemas/        — Database table extensions. Open.
-dashboards/     — Frontend templates (Vercel/Netlify). Open.
 integrations/   — Webhooks, capture sources and clients of the brain. Open. A new surface on the brain is a plugin.
 skills/         — Reusable AI client skills and prompt packs. Open.
-plugins/        — Operations, tables and GUI pages (rendered by SMD-2280) added to the brain itself (SMD-2310). Curated: they run inside its servers.
+plugins/        — Operations, tables and GUI pages (rendered by the operator GUI, dashboard/, SMD-2280) added to the brain itself (SMD-2310). Curated: they run inside its servers. A community dashboard is a plugin's pages.
 docs/           — Setup guides, FAQ, companion prompts.
 resources/      — Official companion files and packaged exports.
 ```
