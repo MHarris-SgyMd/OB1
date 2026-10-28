@@ -1395,9 +1395,29 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       // Names outside the alphabet, judged by the record against the scheduler's model: unmade, aside; made since, cleared (review pass 7).
       [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "my embed model"), "aside"],
       [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "new-embed"), "scheduler:-:poll:0"],
+      // Stopped, under a configuration whose key no row carries: started again it runs no re-embed (SMD-3486).
+      [reembedRunner([sleepEnded], "reembed:my embed@1024", "reembed:my embed@1024", "my embed", "my embed").by, "nobody"],
+      [reembedRunner([sleepStale], "reembed:new-embed@NaN", "reembed:new-embed@NaN", undefined, "new-embed").by, "nobody"],
     ];
     const wrong = cells.map(([got, want], i) => (got === want ? null : `cell ${i}: ${got}, not ${want}`)).filter((x) => x !== null);
     assert(wrong.length === 0, `reembedRunner answers each cell — follower, scheduler (set down, a switch made since, its conflicts), aside, stopped, nobody (${wrong.join("; ") || "all"})`);
+    // What the scheduler runs re-embed under is what the rows carry (SMD-3486): reembedKeyUnfit null exactly where
+    // the parse keeps its row's `reembedJob` and a hand follower's row under that key — `<model>@<dim>` at most 120
+    // (review pass 1) — so a name outside the alphabet, one too long, or a width past nine digits, runs none.
+    const { reembedKeyUnfit } = await import("./brain-info.ts");
+    const pairs: [string, number, ReturnType<typeof reembedKeyUnfit>][] = [
+      ["new-embed", 1024, null], ["org/model:tag", 768, null], ["hf.co/a/b:Q4_K_M", 1, null], ["new-embed", 999_999_999, null],
+      ["x".repeat(115), 1024, null], ["x".repeat(116), 1024, "model"], ["x".repeat(110), 999_999_999, null], ["x".repeat(111), 999_999_999, "model"], ["x".repeat(200), 1024, "model"],
+      ["my embed", 1024, "model"], ["x".repeat(201), 1024, "model"], ["x $(echo SHELL-TEXT)", 1024, "model"], ["", 1024, "model"], ["modèle", 1024, "model"],
+      ["new-embed", 0, "width"], ["new-embed", -8, "width"], ["new-embed", 1.5, "width"], ["new-embed", NaN, "width"], ["new-embed", 1e9, "width"],
+    ];
+    const unfitWrong = pairs.map(([m, d, want]) => {
+      const got = reembedKeyUnfit(m, d);
+      const key = `reembed:${m}@${d}`;
+      const carried = markOf("heartbeat:sleep", { reembedJob: key })?.reembedJob !== undefined && markOf(`heartbeat:${key}`, { job: key }) !== undefined;
+      return got === want && carried === (want === null) ? null : `${JSON.stringify(m.slice(0, 20))}(${m.length})@${d}: ${got}, carried ${carried}`;
+    }).filter((x) => x !== null);
+    assert(unfitWrong.length === 0, `reembedKeyUnfit says a model and width form a key exactly where the sleep row and a hand follower's row carry it (${unfitWrong.join("; ") || "all"})`);
     const now = [switchNow({ recorded: "a", configured: "b" }, "b"), switchNow({ recorded: "a", configured: "b" }, "c"), switchNow({ recorded: "a", configured: "b" }, undefined), switchNow({ recorded: "a", configured: "b" }, "")];
     assert(JSON.stringify(now) === JSON.stringify([{ made: true, holds: "b" }, { made: false, holds: "c" }, { made: true, holds: "a" }, { made: true, holds: "a" }]),
       `switchNow reads a switch against the record as it stands (${JSON.stringify(now)})`);

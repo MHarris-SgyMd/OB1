@@ -1533,6 +1533,14 @@ else {
   const oldScheduler = await run(SQL_ENV);
   assert(/the pass to \S+ @ \d+ has not finished/.test(row(oldScheduler.out, "re-embed pass")) && !/the sleep scheduler runs this key/.test(row(oldScheduler.out, "re-embed pass")) && /Finish it/.test(fix(oldScheduler.out, "re-embed pass")),
          `a scheduler row with no re-embed key — v1.9.0's — is not credited with the pass (${row(oldScheduler.out, "re-embed pass")})`);
+  // …and under a model name no row carries, the sleep row says why the scheduler runs none, as its start did (SMD-3486); a v1.9.0 row under a name that fits says nothing of it.
+  const unfitName = row((await run({ ...SQL_ENV, OB1_EMBEDDING_MODEL: "my embed model" })).out, "sleep");
+  // A row that carries its key runs re-embed whatever a checkout is configured for: nothing of it said there.
+  await hb("heartbeat:sleep", { running: true });
+  const unfitCheckout = row((await run({ ...SQL_ENV, OB1_EMBEDDING_MODEL: "my embed model" })).out, "sleep");
+  assert(/; re-embed does not run in sleep — this stack's OB1_EMBEDDING_MODEL is no model name its row can carry \(ASCII letters, digits and \. _ : @ \/ \+ -, the name and its width at most 120 characters as <name>@<width>\); any backlog is re-embedded by hand, as the vector models and re-embed pass rows say$/.test(unfitName)
+      && !/does not run in sleep/.test(row(oldScheduler.out, "sleep")) && /^\s*[✓!]\s+sleep\s/.test(unfitCheckout) && !/does not run in sleep/.test(unfitCheckout),
+         `a scheduler with no re-embed key under a model name its row cannot carry says so on the sleep row, and one whose row carries its key does not (${unfitName} | ${row(oldScheduler.out, "sleep")} | ${unfitCheckout})`);
   // Awake: waiting for the quiet — or, resting after a sleep its budget stopped, for a live call and the quiet (review pass 2).
   await hb("heartbeat:sleep", { running: false });
   const schedAwake = row((await run(SQL_ENV)).out, "re-embed pass");
@@ -4270,6 +4278,10 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", reads: "yes", slept: { from: await at(60), to: null } }), 10);
       const oldBesideFix = fix((await run(LOG_ON)).out, "sleep");
       assert(!/A re-embed follower run by hand runs here/.test(oldBesideFix), `beside v1.9.0's scheduler, no one is told to stop the hand follower (${oldBesideFix})`);
+      // The same row under a model name no row carries is this version's, kept out of re-embed, which still refuses beside a follower (SMD-3486 review pass 1).
+      const unfitBesideFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model" })).out, "sleep");
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), .*: at its next poll, awake or asleep, the scheduler refuses beside it and ends, every pass with it\./.test(unfitBesideFix),
+        `a scheduler kept out of re-embed by its model name is told of the hand follower it refuses beside (${unfitBesideFix})`);
       // …and a hand follower stopped beside it is no row to retire for a scheduler that will not take its work: started again, as before (review pass 7).
       await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
       const oldStoppedFix = fix((await run(LOG_ON)).out, "workers");
@@ -4288,6 +4300,33 @@ else {
       const bothStoppedFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
       assert(/reembed:stub-embed@1024 stopped, and the sleep scheduler runs re-embed here instead once it is started again \(the sleep row\), .*retire the row/.test(bothStoppedFix) && !/start it again — cd db && bun reembed\.ts/.test(bothStoppedFix),
         `a stopped hand follower beside a stopped scheduler is told to retire its row, not to start too (${bothStoppedFix})`);
+      // …but under a model name no row carries, the scheduler started again runs no re-embed, and still refuses beside a
+      // follower: the row retired, a one-shot run for the backlog (SMD-3486 review passes 1 and 2). Its sleep row says so too.
+      const unfitStopped = await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model", OB1_EMBEDDING_DIM: "1024" });
+      const unfitStoppedFix = fix(unfitStopped.out, "workers");
+      const retiredUnfit = /reembed:stub-embed@1024 stopped, and the sleep scheduler here will not run beside a re-embed follower, nor runs re-embed under this stack's model name \(the sleep row\): it was a reembed\.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:stub-embed@1024' — and re-embed with a one-shot run when there is work, cd db && bun reembed\.ts --url \$DATABASE_URL \(the vector models row says when\); its pass under reembed:stub-embed@1024, to another model or width, is the re-embed pass row's to end, if it has not\./;
+      assert(retiredUnfit.test(unfitStoppedFix) && !/runs re-embed here instead|start it again/.test(unfitStoppedFix) && /; started again, re-embed does not run in sleep — this stack's OB1_EMBEDDING_MODEL is no model name its row can carry/.test(row(unfitStopped.out, "sleep")),
+        `beside a stopped scheduler configured with a model name no row carries, a stopped hand follower is retired for a one-shot run, and the sleep row says re-embed will not run (${unfitStoppedFix} | ${row(unfitStopped.out, "sleep")})`);
+      // The same beside this version's running scheduler under such a name, its row with no key (review pass 2).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      const unfitRunningFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
+      assert(retiredUnfit.test(unfitRunningFix), `beside a running scheduler kept out of re-embed by its model name, a stopped hand follower is retired for a one-shot run (${unfitRunningFix})`);
+      // With no scheduler at all, "start it again" would be refused under such a name: the row retired, a one-shot run;
+      // a backfill under its own key finished by its --job (SMD-3486 review pass 3).
+      await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+      await beat("heartbeat:reembed:backfill1", v({ job: "reembed:backfill1", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const unfitAlone = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
+      await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:backfill1'`;
+      assert(/reembed:stub-embed@1024 stopped, and under this stack's model name a re-embed follower is refused, its heartbeat row being one no reader takes: it was a reembed\.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:stub-embed@1024' — and re-embed with a one-shot run when there is work, cd db && bun reembed\.ts --url \$DATABASE_URL \(the vector models row says when\)/.test(unfitAlone)
+          && /reembed:backfill1 stopped, .*— and re-embed with a one-shot run when there is work, its own pass finished under its key — cd db && bun reembed\.ts --url \$DATABASE_URL --job reembed:backfill1\./.test(unfitAlone)
+          && !/start it again|--follow\b(?! run by hand)/.test(unfitAlone),
+        `with no scheduler, under a model name no row carries, stopped hand followers are retired for a one-shot run, a backfill by its own key — never "start it again" (${unfitAlone})`);
+      // A stopped row set down for its last sleep, under such a name: started again it runs no re-embed, so no set-down to mend (review pass 3).
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", outcome: "stopped", ended: true, reads: "yes", aside: { reembed: { kind: "provider" } } }), 20);
+      const unfitDownFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model", OB1_EMBEDDING_DIM: "1024" })).out, "sleep");
+      const fitDownFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "sleep");
+      assert(!/mend that before it starts again/.test(unfitDownFix) && /mend that before it starts again/.test(fitDownFix),
+        `a stopped row's set-down is no fix under a model name that keeps re-embed out once started again, and is under one that fits (${unfitDownFix} | ${fitDownFix})`);
       // A hand follower under a backfill key stopped beside a running scheduler: the scheduler runs the model's own key alone (SMD-2679 PR 4b).
       await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
       await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
