@@ -79,8 +79,9 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 }
 // The largest body the GUI takes is a thought's edited text (SMD-3322), posted as multipart so its text is not
 // percent-encoded (three bytes a byte for anything not ASCII): 1 MB, which the edit page holds a thought's text under
-// (EDIT_MAX_BYTES), saying so of a thought past it rather than letting its Save fail. The sign-in form's key and a
-// plugin page's form (the example's note, 2,000 characters at most) are far smaller.
+// as a browser posts it (EDIT_MAX_BYTES, postedBytes), saying so of a thought past it rather than letting its Save
+// fail. Every other request — the sign-in form's key, signed out, among them — is held to 64 kB by its declared
+// length in hooks.server.ts, as all were before.
 env.BODY_SIZE_LIMIT = "1M";
 const publicOrigin = env.OB1_PUBLIC_ORIGIN?.trim();
 const problem = publicOrigin ? originProblem(publicOrigin) : null;

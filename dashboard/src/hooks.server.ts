@@ -1,9 +1,10 @@
-import { redirect, type Handle } from '@sveltejs/kit';
+import { error, redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { env } from '$env/dynamic/private';
 import { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } from '$lib/server/listener';
 import { revocations } from '$lib/server/rest';
 import { closeSession, cookieOptions, onTokensEnded, readSession } from '$lib/server/session';
+import { EDIT_PATH, SMALL_BODY_BYTES } from '$lib/server/writes';
 
 // Tokens no session holds any more, however it ended, are revoked at the AS (SMD-3307; review pass 3).
 onTokensEnded((t) => void revocations.add(t));
@@ -40,6 +41,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.cookies.delete(event.locals.sessionCookie, cookieOptions(event.url, breakglass));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);
+	// The body limit is an edit's 1 MB (serve.ts); every other request — a sign-in, signed out, among them — is held to
+	// 64 kB, as the GUI held them all before (SMD-3322 review pass 2). By its declared length: one sent without a length
+	// is still cut at serve.ts's limit.
+	const length = Number(event.request.headers.get('content-length') ?? 0);
+	if (length > SMALL_BODY_BYTES && !(session && EDIT_PATH.test(event.url.pathname))) error(413, 'That is more than this page takes.');
 	return guarded(await resolve(event));
 };
 

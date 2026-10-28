@@ -58,8 +58,11 @@
  *     time altered, or stale (keeping that stale time in the form); the delete
  *     confirmed, the list saying so once from its flash cookie and never from
  *     a link, the thought then a 404 — and a read key is offered neither (no
- *     links; the pages' 403; its posts refused). It
- *     prints the thought's id, for CI to read its audit rows.
+ *     links; the pages' 403; its posts refused). A body past 64 kB is refused
+ *     anywhere but an edit's post, a sign-in's signed out among them, and a
+ *     thought whose text would post past the edit page's 1,000,000 bytes (its
+ *     line breaks sent as CRLF) is offered no form. It prints the thought's
+ *     id, for CI to read its audit rows.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs, with
@@ -738,7 +741,13 @@ async function writesArm() {
   if (!id) return bad(`the write arm's capture over /mcp gave no thought id (${captured.status})`);
   console.log(`  ·  the write arm's thought: ${id}`);
 
+  // Only an edit's post may carry more than 64 kB (hooks.server.ts, review pass 2): signed out, a sign-in's is refused.
+  const bigSignin = await post("/signin", { key: "k".repeat(70_000) });
+  assert(bigSignin.status === 413 && cookie === "", `signed out, a sign-in past 64 kB is refused before it is read (${bigSignin.status})`);
+
   await signIn(WRITE_KEY!);
+  const bigDelete = await post(`/thoughts/${id}/delete?/delete`, { pad: "p".repeat(70_000) });
+  assert(bigDelete.status === 413 && (await get(`/thoughts/${id}`)).status === 200, `signed in, a post past 64 kB to any page but an edit is refused, the thought kept (${bigDelete.status})`);
   const page = await get(`/thoughts/${id}`);
   assert(page.status === 200 && page.html.includes(`href="/dashboard/thoughts/${id}/edit"`) && page.html.includes(`href="/dashboard/thoughts/${id}/delete"`), `a thought's page offers the write key Edit and Delete (${page.status})`);
 
@@ -790,6 +799,22 @@ async function writesArm() {
     console.log("  ·  no --read-key: the write arm's read-key checks skipped");
   }
 
+  // A text of many short lines posts larger than it is stored, a byte more a break (CRLF): 800 kB stored, 1.2 MB posted,
+  // past the edit page's 1,000,000 bytes, so it is offered no form to lose an edit in (review pass 2).
+  const lines = await fetch(`${ORIGIN}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": WRITE_KEY! },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "capture_thought", arguments: { content: `Many lines (SMD-3322, ${marker})${"\n.".repeat(400_000)}` } } }),
+  });
+  const linesId = /id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(await lines.text())?.[1];
+  if (!linesId) bad(`the write arm's many-lined capture gave no thought id (${lines.status})`);
+  else {
+    const tall = await get(`/thoughts/${linesId}/edit`);
+    assert(tall.status === 200 && tall.html.includes('data-testid="too-large"') && !tall.html.includes('data-testid="edit-form"'), `a thought of 400,000 short lines, 800 kB stored, which a browser posts as 1.2 MB, is offered no edit form, the page saying why (${tall.status})`);
+    const gone = await post(`/thoughts/${linesId}/delete?/delete`, {});
+    assert(gone.status === 303, `…and is deleted (${gone.status})`);
+  }
+
   const confirm = await get(`/thoughts/${id}/delete`);
   assert(confirm.status === 200 && confirm.html.includes('data-testid="delete-form"') && confirm.html.includes(marker), `its delete page asks first, naming the thought (${confirm.status})`);
   // A link cannot make the list say a thought was deleted: the notice comes from the delete's flash cookie alone.
@@ -799,7 +824,8 @@ async function writesArm() {
   assert(deleted.status === 303 && deleted.location === "/dashboard/thoughts" && deleted.flash === `${FLASH}=${id}`, `the write key deletes it: 303 to the list, with a flash cookie naming it (${deleted.status} → ${deleted.location})`);
   const withFlash = async () => {
     const r = await fetch(`${BASE}/thoughts`, { redirect: "manual", headers: { cookie: `${cookie}; ${deleted.flash}` } });
-    return { status: r.status, html: await r.text(), cleared: (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${FLASH}=;`) && /Max-Age=0/i.test(c)) };
+    // Cleared with the attributes it was set with, or the browser keeps it.
+    return { status: r.status, html: await r.text(), cleared: (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${FLASH}=;`) && /Max-Age=0/i.test(c) && attributesHold(c)) };
   };
   const list = await withFlash();
   assert(list.status === 200 && new RegExp(`data-testid="deleted"[^>]*>[^<]*<span[^>]*>${id}<`).test(list.html) && list.cleared, "…which says what was deleted, and clears the cookie as it does");

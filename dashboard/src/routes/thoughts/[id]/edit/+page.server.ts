@@ -2,7 +2,7 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { base } from '$app/paths';
 import { codeOf, may, read, write } from '$lib/server/rest';
-import { EDIT_MAX_BYTES, notYours } from '$lib/server/writes';
+import { EDIT_MAX_BYTES, notYours, postedBytes } from '$lib/server/writes';
 import type { FetchedThought } from '$lib/types';
 
 // A thought's text, edited (SMD-3322): update_thought under the visitor's
@@ -17,16 +17,17 @@ import type { FetchedThought } from '$lib/types';
 // Server-rendered alone, as the thought's own page: the text rides once, in the field.
 export const csr = false;
 
-const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const tooLarge = (n: number) =>
-	`This text is ${n.toLocaleString('en-US')} bytes, past the ${EDIT_MAX_BYTES.toLocaleString('en-US')} this page saves. Edit it through update_thought over the MCP server or the REST core instead.`;
+	`This text posts as ${n.toLocaleString('en-US')} bytes, past the ${EDIT_MAX_BYTES.toLocaleString('en-US')} this page saves. Edit it through update_thought over the MCP server or the REST core instead.`;
+/** The time the core writes as updated_at, ISO 8601 or Postgres's text form: what an unaltered form posts back. */
+const TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 
 export const load: PageServerLoad = async (event) => {
 	const session = event.locals.session!;
 	if (!may(session, 'update_thought')) error(403, notYours('edit'));
 	const thought = (await read(event, session, 'fetch', { id: event.params.id })) as FetchedThought;
 	const updatedAt = thought.metadata.updated_at;
-	const size = bytes(thought.text);
+	const size = postedBytes(thought.text);
 	// A text the page could not post back is not put in a field to be edited and lost: said, and left out.
 	const editable = size <= EDIT_MAX_BYTES;
 	return {
@@ -51,10 +52,10 @@ export const actions: Actions = {
 		if (!content.trim()) return fail(400, { ...kept, error: 'A thought cannot be left empty. To remove it, delete it.' });
 		// No Postgres text holds a NUL: the core's 500 (SMD-2534). Refused here, not stripped, since the text is the visitor's words.
 		if (content.includes('\0')) return fail(400, { ...kept, error: 'A thought cannot hold a NUL character.' });
-		if (bytes(content) > EDIT_MAX_BYTES) return fail(413, { ...kept, error: tooLarge(bytes(content)) });
+		if (postedBytes(content) > EDIT_MAX_BYTES) return fail(413, { ...kept, error: tooLarge(postedBytes(content)) });
 		// The time the page read: without it the edit would overwrite whatever changed since, which this page exists not
 		// to do. One that is no time at all is a form altered by hand, which the core would answer with a fault (review pass 1).
-		if (!since || !Number.isFinite(Date.parse(since))) return fail(400, { ...kept, error: 'This form has lost the time its thought was read. Open the thought again and edit from there.' });
+		if (!TIME.test(since) || !Number.isFinite(Date.parse(since))) return fail(400, { ...kept, error: 'This form has lost the time its thought was read. Open the thought again and edit from there.' });
 		const id = event.params.id;
 		const answer = await write(event, session, 'update_thought', { id, content, if_unchanged_since: since });
 		if (answer.ok) redirect(303, `${base}/thoughts/${encodeURIComponent(id)}`);
