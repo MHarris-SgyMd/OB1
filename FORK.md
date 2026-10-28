@@ -943,7 +943,7 @@ Then update the pin table at the top of this file.
 ### Vendored content: audit once, hold the delta
 
 Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+`schemas/` and `primitives/` is upstream's community tree,
 vendored wholesale at the pin, so we ship its worst advice with its best under
 this repository's name. The rule (SMD-1251, change 51): **audit the tree once
 and hold the delta** — a standing check carries each audit so a rebase cannot
@@ -1185,11 +1185,9 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Two overlapping dashboards** (the operator GUI at `dashboard/`, and the
-  SvelteKit `dashboards/open-brain-dashboard`). The GUI is the one the ADR
-  builds on (`docs/operator-surface-tiers.md`); the SvelteKit one retires with
-  SMD-3310. The two Next.js dashboards, which spoke to the retired
-  `open-brain-rest` gateway, retired with SMD-3309.
+- **Overlapping dashboards: fixed.** The one canonical dashboard is the
+  operator GUI at `/dashboard` (`dashboard/README.md`). The other three and the
+  `dashboards/` category retired (SMD-3309, SMD-3310).
 - **`sensitivity-tiers` does not exist.** The `weekly-digest` recipe and its
   code reference it as a primitive (both Next dashboards did, until SMD-3309).
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
