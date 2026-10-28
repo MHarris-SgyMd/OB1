@@ -680,14 +680,39 @@ console.log("\n[11] The migrator's lock (SMD-3379): a plugin file pending takes 
     await hold();
     const noop = await runMigrate({ plugins: "example" });
     assert(noop.code === 0 && !noop.out.includes("handed back"), `a run with the plugin in place and nothing pending takes no lock: it goes on beside a held one (exit ${noop.code})`);
-    // A plugin file pending: taken before the core is read again, so the run writes nothing.
-    await sql`DELETE FROM public.plugin_migrations WHERE plugin = 'example' AND name = '002_deliveries.sql'`;
+    // A plugin file pending, its table gone with its ledger row, so a run of the file shows: refused before it runs, nothing written.
+    const pend002 = () => sql.begin(async (tx: SQL) => { await tx.unsafe("DROP TABLE plugin_example.deliveries"); await tx`DELETE FROM public.plugin_migrations WHERE plugin = 'example' AND name = '002_deliveries.sql'`; });
+    const deliveries = async () => !(await one<{ absent: boolean }>(sql`SELECT to_regclass('plugin_example.deliveries') IS NULL AS absent`)).absent;
+    await pend002();
     const pending = await runMigrate({ plugins: "example" });
     const left = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM public.plugin_migrations WHERE plugin = 'example' AND name = '002_deliveries.sql'`);
-    assert(refusedBy(pending) && left.n === 0, `a plugin file pending beside a held lock: refused, exit 2, naming backend ${pid}, the file not recorded (exit ${pending.code}, ${left.n} row(s): ${pending.err.slice(0, 200)})`);
+    const ranAnyway = await deliveries();
+    assert(refusedBy(pending) && left.n === 0 && !ranAnyway, `a plugin file pending beside a held lock: refused, exit 2, naming backend ${pid}, the file neither run nor recorded (exit ${pending.code}, ${left.n} row(s), table ${ranAnyway ? "made" : "absent"}: ${pending.err.slice(0, 200)})`);
     await letGo();
     const caught = await runMigrate({ plugins: "example" });
     assert(caught.code === 0 && caught.out.includes("  ✓  002_deliveries.sql  applied"), `…and once it is let go, the file applies (exit ${caught.code})`);
+    // Another run applies the pending file and lets the lock go after this one read the plugin ledger, without the lock, and before it takes it
+    // (review pass 2): this one reads the file's row again under the lock, and skips it, where it re-ran the file and failed on a duplicate key.
+    await pend002();
+    let other: { code: number; out: string } | null = null;
+    const raced = await (async () => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await migrate({ url: URL_, pluginPassword: PLUGIN_PW, plugins: "example", writer: {
+        out: (l: string) => {
+          out.push(l);
+          if (other === null && l.startsWith("  plugin example ")) {
+            const child = Bun.spawnSync(["bun", join(HERE, "..", "db", "migrate.ts"), "--url", URL_], { cwd: join(HERE, "..", "db"), env: { ...process.env, OB1_ENV_FILES: "off", OB1_PLUGINS: "example", OB1_PLUGIN_DB_PASSWORD: PLUGIN_PW } as Record<string, string> });
+            other = { code: child.exitCode ?? -1, out: `${child.stdout.toString()}${child.stderr.toString()}` };
+          }
+        },
+        err: (l: string) => err.push(l),
+      } });
+      return { code, out: out.join("\n"), err: err.join("\n") };
+    })();
+    const otherRun = other as { code: number; out: string } | null;
+    assert(otherRun !== null && otherRun.code === 0 && otherRun.out.includes("  ✓  002_deliveries.sql  applied") && raced.code === 0 && raced.out.includes("  ·  002_deliveries.sql  already applied") && !/FAILED/.test(raced.err) && (await deliveries()),
+      `a run whose plugin ledger was read before another applied the file and let the lock go reads the file's row again under the lock and skips it (the other: exit ${otherRun?.code}; this one: exit ${raced.code}${raced.err ? `: ${raced.err.slice(0, 160)}` : ""})`);
     // A hand-back with nothing pending: the core and every file in place, the schema another's.
     await sql`ALTER SCHEMA plugin_example OWNER TO CURRENT_USER`;
     await hold();

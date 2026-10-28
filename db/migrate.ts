@@ -124,8 +124,9 @@ const PLUGINS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "plugins
  * closed here. It must be a single connection, opened with the `max: 1`
  * option: the run sets session state that must hold on the connection its
  * statements run on, and leaves it there — lock_timeout, pgvector's schema on
- * search_path when it is off the path, and the `ob1.acl_*` settings several
- * migrations set. So pass a client dedicated to the run (the CLI passes its
+ * search_path when it is off the path, the `ob1.acl_*` settings several
+ * migrations set, and `application_name` `ob1-migrate` once the run asks for its
+ * lock (SMD-3379). So pass a client dedicated to the run (the CLI passes its
  * own), not a connection a pool will hand to someone else after — and not a
  * transaction's handle, which the check passes but whose migrations then fail
  * on their own BEGIN. Without `sql`, the run opens one connection on `url` and
@@ -783,21 +784,35 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // The run's lock (SMD-3379), taken before it writes anything. Taken once,
   // held until run() returns; a run refused for it has written nothing, as
   // each call stands before the first write of its kind and a run that took
-  // none earlier wrote none. The refusal names the holding backend: a run
-  // that was killed keeps it until its statement ends on the server.
+  // none earlier wrote none. "took" when it was taken just now: what the
+  // caller read to decide on its write was read without it, and another run
+  // may have done that write and let the lock go since, so the caller reads
+  // it again (review pass 2). "had" when this run held it already. The
+  // refusal names the holding backend: a run that was killed keeps it until
+  // its statement ends on the server.
   let lockRefused = false;
-  const takeLock = async (): Promise<boolean> => {
-    if (lock.held) return true;
+  const takeLock = async (): Promise<"took" | "had" | false> => {
+    if (lock.held) return "had";
     await sql.unsafe("SET application_name = 'ob1-migrate'");
     const [{ got }] = (await sql`SELECT pg_try_advisory_lock(hashtext(${MIGRATE_LOCK})) AS got`) as { got: boolean }[];
     if (got) {
       lock.held = true;
-      return true;
+      return "took";
     }
-    const [holder] = (await sql.unsafe(MIGRATE_LOCK_HOLDER_SQL, [MIGRATE_LOCK]).catch(() => [])) as { pid: number; backend_start: Date | null }[];
-    const who = holder ? `backend ${holder.pid}${holder.backend_start ? `, connected ${new Date(holder.backend_start).toISOString()}` : ""}` : "a backend that has just let it go";
+    // Who holds it, read without taking it. No row: it was let go between the
+    // try and this read. A read that failed: the holder is unknown, not gone.
+    let holder: { pid: number; backend_start: Date | null } | undefined;
+    let unread = false;
+    try {
+      [holder] = (await sql.unsafe(MIGRATE_LOCK_HOLDER_SQL, [MIGRATE_LOCK])) as { pid: number; backend_start: Date | null }[];
+    } catch {
+      unread = true;
+    }
+    const who = holder
+      ? `backend ${holder.pid}${holder.backend_start ? `, connected ${new Date(holder.backend_start).toISOString()},` : ""} holds`
+      : unread ? "a backend this role could not read holds" : "a backend held, and has just let go,";
     err(
-      `Refused: another migrate.ts run is applying to this database now — ${who} holds the ${MIGRATE_LOCK} advisory lock (SMD-3379).\n` +
+      `Refused: another migrate.ts run is applying to this database now — ${who} the ${MIGRATE_LOCK} advisory lock (SMD-3379).\n` +
         "  Wait for it to finish, then run this again: it applies only what that run leaves. Nothing was changed." +
         (holder ? `\n  A run that was killed keeps the lock until its statement ends on the server; to end it now: SELECT pg_terminate_backend(${holder.pid});` : "")
     );
@@ -1458,8 +1473,11 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         return;
       }
       if (!before.to_public) return;
-      // A write on a run that may have had nothing else to apply (SMD-3379).
-      if (!(await takeLock())) return;
+      // A write on a run that may have had nothing else to apply (SMD-3379);
+      // read again once the lock is taken, as another run may have done it.
+      const taken = await takeLock();
+      if (!taken) return;
+      if (taken === "took" && !(await state()).to_public) return;
       await begin((tx: SQL) => tx.unsafe(file.sql));
       if ((await state()).to_public) {
         // A warning where every role reaches the view: in public, where preflight's "plugin tables" row reads, or in a
@@ -1517,6 +1535,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       `;
     }
     const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
+    /** Whether the ledger below was read under the run's lock: a file decided from a read without it is read again once the lock is taken (review pass 2). */
+    const recordedLocked = lock.held;
     const recorded = new Map<string, string>(
       ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
     );
@@ -1546,8 +1566,10 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     if (!dryRun && hasFiles) {
       try {
         const [{ present }] = (await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS present`) as { present: boolean }[];
-        if (!present) {
-          if (!(await takeLock())) return 2;
+        const taken = !present && (await takeLock());
+        if (!present && !taken) return 2;
+        const madeMeanwhile = taken === "took" && ((await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${PLUGIN_LOGIN_ROLE}) AS present`) as { present: boolean }[])[0].present;
+        if (!present && !madeMeanwhile) {
           const [{ statement }] = (await sql`SELECT format('CREATE ROLE %I LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', ${PLUGIN_LOGIN_ROLE}::text, ${opts.pluginPassword ?? ""}::text) AS statement`) as { statement: string }[];
           await sql.unsafe(statement);
           out(`  ✓  role ${PLUGIN_LOGIN_ROLE}  made (LOGIN, NOINHERIT; SET on each plugin's role, nothing else)`);
@@ -1581,12 +1603,20 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         // CREATEROLE role's own grant on a role it makes has ADMIN alone
         // (createrole_self_grant unset). The files themselves run on the
         // login role, so the migrator needs no SET to run them.
-        const [state] = (await sql`
-          SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
-                 EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema`) as { role: boolean; schema: boolean }[];
-        const loginCan = state.role && (await can(sql, PLUGIN_LOGIN_ROLE, p.role));
-        if (!dryRun && (!state.role || !state.schema || !loginCan)) {
-          if (!(await takeLock())) return 2;
+        const readState = async () => {
+          const [s] = (await sql`
+            SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${p.role}) AS role,
+                   EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${p.schema}) AS schema`) as { role: boolean; schema: boolean }[];
+          return { ...s, loginCan: s.role && (await can(sql, PLUGIN_LOGIN_ROLE, p.role)) };
+        };
+        let state = await readState();
+        const missing = () => !state.role || !state.schema || !state.loginCan;
+        if (!dryRun && missing()) {
+          const taken = await takeLock();
+          if (!taken) return 2;
+          if (taken === "took") state = await readState();
+        }
+        if (!dryRun && missing()) {
           try {
             await begin(async (tx: SQL) => {
               if (!state.role) await tx.unsafe(`CREATE ROLE ${quoteIdent(p.role)} NOLOGIN`);
@@ -1611,10 +1641,17 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         // migrator to own the object, or be a superuser, and to SET ROLE to
         // the role.
         if (!dryRun && state.schema) {
-          const [{ owner }] = (await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[];
-          const foreign = await pluginForeignOwned(sql, p.schema, p.role);
+          const readOwners = async () => ({
+            owner: ((await sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = ${p.schema}`) as { owner: string }[])[0].owner,
+            foreign: await pluginForeignOwned(sql, p.schema, p.role),
+          });
+          let { owner, foreign } = await readOwners();
           if (owner !== p.role || foreign.length > 0) {
-            if (!(await takeLock())) return 2;
+            const taken = await takeLock();
+            if (!taken) return 2;
+            if (taken === "took") ({ owner, foreign } = await readOwners());
+          }
+          if (owner !== p.role || foreign.length > 0) {
             try {
               await begin(async (tx: SQL) => {
                 if (!me.superuser && !(await can(tx, me.who, p.role))) await tx.unsafe(setGrant(p.role, "CURRENT_USER"));
@@ -1647,6 +1684,21 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
             continue;
           }
           if (!(await takeLock())) return 2;
+          // The ledger was read before the lock: another run may have applied
+          // this file and let the lock go since (review pass 2).
+          if (!recordedLocked) {
+            const [now] = (await sql`SELECT sha256 FROM public.plugin_migrations WHERE plugin = ${p.name} AND name = ${m.name}`) as { sha256: string }[];
+            if (now && now.sha256 !== m.sha) {
+              err(`  ⚠  ${p.name}/${m.name}  ALREADY APPLIED BUT FILE CHANGED (was ${now.sha256}, now ${m.sha})`);
+              pluginDrifted++;
+              continue;
+            }
+            if (now) {
+              out(`  ·  ${m.name}  already applied`);
+              pluginSkipped++;
+              continue;
+            }
+          }
           try {
             await (await loginSql()).begin(async (tx: SQL) => {
               await tx.unsafe(`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`);

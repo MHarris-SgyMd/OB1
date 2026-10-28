@@ -75,6 +75,13 @@ to write take none, so the no-op the compose stack's `migrate` service runs on
 every `up` goes on beside one. The lock is a signal, not a barrier: the run
 waits for nothing else to stop. Before it, two runs at once raced on the
 ledger's rows and the catalog's, and one failed at once on a duplicate key.
+What a run reads to decide on a write before it holds the lock, it reads again
+once it takes it, as another run may have made that write and let the lock go
+meanwhile. A `--dry-run` on an empty database still makes the empty ledger
+table, as it always has, and takes no lock: it applies nothing. Where 096 cannot
+take PUBLIC's grant on `pg_stat_statements` back (this role does not own the
+views), each run tries again, and so takes the lock, warning each time until
+the owner applies the file.
 
 ### 4. A schema with no ledger
 
@@ -5620,8 +5627,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1752 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1022 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1753 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

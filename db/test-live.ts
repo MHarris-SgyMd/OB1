@@ -18139,6 +18139,22 @@ if (want("44")) {
       const fnAfter = await publicReads();
       assert(fnHealed.code === 0 && /ran again: PUBLIC could read pg_stat_statements/.test(fnHealed.stdout) && !fnAfter,
         `a grant to PUBLIC on the function alone is taken back by the next plain run too (exit ${fnHealed.code}, after ${fnAfter})`);
+      // The re-run is a write a run with nothing pending makes, so it waits for the migrator's lock (SMD-3379): beside a held one the run is refused and PUBLIC's grant stays; the next run, the lock let go, takes it back.
+      await xsql.unsafe("GRANT SELECT ON pg_stat_statements TO PUBLIC");
+      const lockHolder = new SQL({ url: URL_!, max: 1 });
+      let heldRun: { code: number; out: string } = { code: -1, out: "" };
+      let grantKept = false;
+      try {
+        await lockHolder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        heldRun = await migrate();
+        grantKept = await publicReads();
+      } finally {
+        await lockHolder.close();
+      }
+      const freed = await migrate();
+      const freedAfter = await publicReads();
+      assert(heldRun.code === 2 && / holds the ob1:migrate advisory lock/.test(heldRun.out) && grantKept && freed.code === 0 && /ran again: PUBLIC could read pg_stat_statements/.test(freed.stdout) && !freedAfter,
+        `096's re-run beside a held migrator lock: refused, exit 2, PUBLIC's grant left; taken back once the lock is let go (exit ${heldRun.code}, kept ${grantKept}; then exit ${freed.code}, public ${freedAfter})`);
       // A plain run as a role that does not own the views, over a grant to PUBLIC: it may not take it back, warns naming the file, and exits 0; the owner's next run does (review pass 3: that branch went untested).
       if (MIG_URL !== URL_) {
         let warned: { code: number; stdout: string; stderr: string } | null = null;
