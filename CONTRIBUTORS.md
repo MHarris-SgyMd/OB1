@@ -20,7 +20,7 @@ See the [Contributor Ladder](CONTRIBUTING.md#contributor-ladder) for how progres
 
 | Emoji | Type | Description |
 | ----- | ---- | ----------- |
-| 💻 | code | Code contributions (recipes, schemas, dashboards, integrations) |
+| 💻 | code | Code contributions (recipes, schemas, integrations) |
 | 📖 | docs | Documentation |
 | 💡 | ideas | Ideas and use cases |
 | 🧪 | testing | Testing contributions and reporting results |

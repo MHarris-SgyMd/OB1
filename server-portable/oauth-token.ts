@@ -18,10 +18,18 @@
  * What it becomes is a Principal like a key's, so every rule after the
  * authentication (scopes, the registry, egress, jobs, the audit row) is the
  * key's:
- * - `name` is `oauth:<sub>`. A key's name cannot hold `:` (auth.ts
- *   parseKeyRecords, keygen.ts), so no key reads as a signed-in identity;
- * - `keyHash` is a digest of the issuer and subject, fixed per subject: the
- *   agent registry's key for it (its CHECK wants 64 hex) and job ownership's;
+ * - `name` is `oauth:<sub>+<client>`: the subject, and the client it signed
+ *   in through (SMD-3064) — the token's own `client_id` (the GUI's `gui`), or
+ *   on an exchanged token the connector the authorization server nests in its
+ *   `act`. So each client is a principal of its own: its own registry row,
+ *   kind and trust, revocation and job ownership. A service's token, whose
+ *   subject is its own client id, is `oauth:<sub>` alone. A key's name cannot
+ *   hold `:` (auth.ts parseKeyRecords, keygen.ts), so no key reads as a
+ *   signed-in identity, and no subject holds `+`, so no subject reads as
+ *   another's client;
+ * - `keyHash` is a digest of the issuer, subject and client, fixed per
+ *   principal: the agent registry's key for it (its CHECK wants 64 hex) and
+ *   job ownership's;
  * - `act` is `oauth:<act.sub>` on an exchanged token: the MCP service that
  *   carried it.
  *
@@ -97,9 +105,14 @@ export function keyScopeOf(scope: unknown): Exclude<Scope, "forward"> | null {
   return held.has("brain:read") ? "read" : "capture";
 }
 
-/** The subject's fixed digest: the registry's key for an OAuth identity, as a key's digest is a key's. */
-export function subjectHash(issuer: string, sub: string): string {
-  return createHash("sha256").update(`oauth\n${issuer}\n${sub}`).digest("hex");
+/**
+ * A principal's fixed digest: the registry's key for an OAuth identity, as a
+ * key's digest is a key's. Of the subject alone for a service's token, of the
+ * subject and the client it signed in through otherwise (SMD-3064). Neither
+ * part holds a newline, so no two principals share a digest.
+ */
+export function subjectHash(issuer: string, sub: string, client?: string): string {
+  return createHash("sha256").update(`oauth\n${issuer}\n${sub}${client === undefined ? "" : `\n${client}`}`).digest("hex");
 }
 
 /**
@@ -109,6 +122,26 @@ export function subjectHash(issuer: string, sub: string): string {
  * row can carry as they are.
  */
 const SUBJECT = /^[A-Za-z0-9._~-]{1,128}$/;
+
+/**
+ * Whether a client a subject signs in through can be named (SMD-3064): an id
+ * the authorization server gave (a static client's, a registered one's), held
+ * as a subject is, or a client metadata document's https URL (CIMD) of a
+ * host, an optional port and a path alone. A URL is held to those: no comma
+ * (an egress term list splits on commas), no `+` (the name's separator), no
+ * credentials, and no query or fragment, which the CIMD draft says a client id
+ * should not hold.
+ * At most 180 characters, so `oauth:operator+<client>` fits the search tools'
+ * 200-character `actor` filter. deploy/auth/layout.ts holds the same rule, so
+ * the authorization server issues no token for a client this one refuses; the
+ * REST suite holds the two equal.
+ */
+export function clientNameable(id: string): boolean {
+  return id.length <= 180 && /^(?:[A-Za-z0-9._~-]{1,128}|https:\/\/[A-Za-z0-9.-]{1,100}(?::[0-9]{1,5})?\/[A-Za-z0-9._~\/%-]{0,170})$/.test(id);
+}
+
+/** The longest caller name: the search tools' `actor` filter takes at most this many characters (core/schemas.ts). */
+const NAME_MAX = 200;
 
 /**
  * No keys to check a token with: the key set could not be read and none read
@@ -253,12 +286,26 @@ export function checkerOver(settings: TokenSettings, keys: JWTVerifyGetKey): Tok
     if (typeof sub !== "string" || !SUBJECT.test(sub)) return { status: "invalid", why: "sub is not a subject this server names" };
     const scope = keyScopeOf(payload.scope);
     if (!scope) return { status: "scope" };
-    const principal: Principal = { name: `oauth:${sub}`, scope, keyHash: subjectHash(settings.issuer, sub) };
+    // The client the subject signed in through: on an exchanged token, the
+    // connector nested in its `act` (the exchanging MCP service is the outer
+    // actor, recorded as `act`); otherwise the token's own client_id.
+    let client: unknown = payload.client_id;
+    let carrier: string | undefined;
     if (payload.act !== undefined) {
-      const actor = (payload.act as { sub?: unknown } | null)?.sub;
-      if (typeof actor !== "string" || !SUBJECT.test(actor)) return { status: "invalid", why: "act names no actor this server names" };
-      principal.act = { name: `oauth:${actor}` };
+      const act = payload.act as { sub?: unknown; act?: { sub?: unknown; act?: unknown } | null } | null;
+      if (typeof act?.sub !== "string" || !SUBJECT.test(act.sub)) return { status: "invalid", why: "act names no actor this server names" };
+      if (typeof act.act?.sub !== "string" || act.act.act !== undefined) return { status: "invalid", why: "act names no one client the subject signed in through" };
+      carrier = act.sub;
+      client = act.act.sub;
     }
+    if (typeof client !== "string" || !clientNameable(client)) return { status: "invalid", why: "names no client this server names" };
+    // A service's own token: the subject is the client, one name.
+    const own = client === sub && carrier === undefined;
+    const principal: Principal = own
+      ? { name: `oauth:${sub}`, scope, keyHash: subjectHash(settings.issuer, sub) }
+      : { name: `oauth:${sub}+${client}`, scope, keyHash: subjectHash(settings.issuer, sub, client) };
+    if (principal.name.length > NAME_MAX) return { status: "invalid", why: `names a caller longer than ${NAME_MAX} characters` };
+    if (carrier !== undefined) principal.act = { name: `oauth:${carrier}` };
     return { status: "ok", principal };
   };
 }

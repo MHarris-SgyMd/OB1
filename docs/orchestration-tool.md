@@ -53,6 +53,26 @@ decision 1, `operator-surface-tiers.md`):
 - Decision 1's C2 and C3 record what the POC measured on 2026-09-25,
   including each tool's own MCP client.
 
+**Amended by SMD-3215** (`brain-coordinator.md`, accepted 2026-10-28; not
+yet built):
+- Decision 2 is reversed: n8n becomes a default service of every brain,
+  not an opt-in profile, so a brain plus Claude Code runs it too.
+- Decision 4's REST-core boundary holds. A plugin workflow holds a `run`
+  key that grants nothing alone; with an open run's id it acts as that
+  run's caller within the run's bound, writes included. A template still
+  holds no standing write key.
+- Decision 5: OB1 still ships templates, now also each plugin's workflows
+  (`plugins/<name>/workflows/`), and n8n becomes the runtime for plugin
+  operations.
+- Decision 7 is reversed for plugin operations: a plugin operation, a call
+  on demand, runs as an n8n workflow carried by a run. The core's own tools
+  never do, and extension tools stay on the brain's MCP server.
+- Gate 2: brain content passes through n8n's memory during a plugin run and
+  is saved nowhere in n8n, since a plugin workflow saves no run. "Nothing
+  holds a write key" becomes the `run` key's rule.
+- Gate 1's reading holds. With decision 2 reversed, every brain runs
+  software under the SUL, which the maintainer accepted.
+
 ## The decision
 
 1. **n8n, over Activepieces and Windmill.** n8n and Activepieces passed every

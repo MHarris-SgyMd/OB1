@@ -51,7 +51,8 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   `auth` profile, it is traded (RFC 8693) at the authorization server's token endpoint
   on the mesh, as the `mcp` client (`OB1_AUTH_SECRET_MCP`), for a token whose audience
   is the REST core; that token rides `Authorization: Bearer` on every call, and the
-  REST core records the subject (`oauth:operator`) with this server as `act`
+  REST core records the operator and the connector it signed in through
+  (`oauth:operator+<client>`, SMD-3064) with this server as `act`
   (`oauth:mcp`). The keyed routes at the origin's `Host` (a scan's job links, the
   worker mirrors) trade it too; `/health`'s record stays a key's.
   - The claims are read first, only to refuse: another issuer, any audience but
@@ -250,7 +251,7 @@ cd ../server-portable && bun test-auth.ts   # 191 — test-auth's assertions, he
 cd ../server-portable && ../db/with-postgres.sh bun test-e2e-sql.ts   # 673 — the whole server over MCP on real Postgres, held to this server the same way
 cd ../server-portable && bun test-server.ts   # 1223 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop, a tool call past its client waited on
 cd ../server-portable && bun test-plugins.ts   # 282 — plugins in the contract, an enabled plugin's operation as this server's tool
-cd ../server-portable && ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
+cd ../server-portable && ../db/with-postgres.sh bun test-plugins-sql.ts   # 116 — the example's operations, pinned over REST and read back through this server
 ```
 
 Every server-portable suite that drives an MCP server drives this one, through `stack.ts`

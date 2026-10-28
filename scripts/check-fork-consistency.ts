@@ -47,7 +47,7 @@
  *      (DENO_EXCEPTIONS counts per file; none today); and a file that imports the SQL shim (Bun's client)
  *      imports no specifier Bun cannot resolve (`jsr:`, `npm:`, a URL), itself
  *      or through the files it imports (SMD-1480)
- *  12. a .sql file under db/ or any of the eight category directories runs
+ *  12. a .sql file under db/ or any of the seven category directories runs
  *      nothing that needs Supabase — no `service_role`, `authenticated` or
  *      `anon`, no `auth.uid()`, `auth.role()` or `auth.users`, no
  *      `supabase_`-prefixed name, no RLS or policy — comments excepted by a
@@ -245,8 +245,7 @@
  * 22b. the retired Cloudflare Workers target stays retired (SMD-3152): no
  *      server-portable/wrangler.toml or store-postgrest.ts, no wrangler or
  *      supabase-js in server-portable/package.json, and no file outside the
- *      history (changes/, CHANGELOG.md, FORK.md) and dashboards/ (whose Next
- *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
+ *      history (changes/, CHANGELOG.md, FORK.md) that names `wrangler`, or
  *      — outside code, where the refusal is spelled — sets OB1_STORE to
  *      postgrest; probes for both patterns
  * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
@@ -2245,7 +2244,7 @@ const DENO_PROBES: [string, string[]][] = [
   // and a rule on the string "Deno" would refuse every README's code block; a file that hides its runtime that way
   // is a review finding, not a checker's.
 ];
-/** The files check 11 reads: every code extension check 22's CODE_FILE reads, less the markup ones (a `Deno` in a Svelte or HTML script is check 22's kind of rare, and the roots' markup is the dashboards'). */
+/** The files check 11 reads: every code extension check 22's CODE_FILE reads, less the markup ones (a `Deno` in a Svelte or HTML script is check 22's kind of rare). */
 const BUN_CODE_FILE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 /** [entry, deps, the gaps it must report]: specifiers Bun does not resolve, in the entry and through a dependency. */
 const SPECIFIER_PROBES: [string, string[], string[]][] = [
@@ -2359,10 +2358,10 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ among them (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
-const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "dashboards", "integrations", "skills", "plugins"];
+const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "integrations", "skills", "plugins"];
 
 function checkSupabaseIsms() {
   for (const dir of SQL_RULE_DIRS) {
@@ -5544,9 +5543,9 @@ checkSupabaseJsImports();
 // supabase-js, and no live file names `wrangler` or sets OB1_STORE to
 // postgrest. A code file is exempt from the second pattern alone: the refusal
 // and its tests spell the selection they refuse. The history (changes/,
-// CHANGELOG.md, FORK.md) records what was; dashboards/ is exempt from both,
-// since open-brain-dashboard-next deploys to Cloudflare with wrangler of its
-// own, which is not the brain server.
+// CHANGELOG.md, FORK.md) records what was. dashboards/ was exempt from both
+// while the Next dashboard deployed to Cloudflare with wrangler of its own;
+// it retired with SMD-3309, and the exemption with it.
 /** `wrangler` as a word, any case. */
 const WRANGLER_WORD = /\bwrangler\b/i;
 /**
@@ -5587,7 +5586,7 @@ function checkRetiredTarget() {
   for (const dep of ["wrangler", "@supabase/supabase-js"]) {
     if (pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]) fail("server-portable/package.json", `names ${dep}, which only the retired Workers target and PostgREST store needed (SMD-3152)`);
   }
-  const files = citationFiles().filter((rel) => !isHistory(rel) && !rel.startsWith("dashboards/"));
+  const files = citationFiles().filter((rel) => !isHistory(rel));
   if (!files.includes("SETUP.md")) fail(SELF, "check 22b's listing does not reach SETUP.md — the listing is broken, not the tree clean");
   for (const rel of files) {
     const text = readFileSync(join(ROOT, rel), "utf8");
@@ -5758,7 +5757,7 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   ["cd mcp-server && npm install", false],
   ["cd server-portable && npm run dev:docs", false],
   ["cd server-portable && bun test && npm run lint", false],
-  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard-next && npm run dev", false],
+  ["cd server-portable && bun test && cd ../recipes/life-engine && npm run dev", false],
   ["cd server-portable && bun keygen.ts && cd ../integrations/slack-capture && bun index.ts", false],
   ["npm --prefix server-portable install", false],
   ["docker run --name ob1-server-test postgres:17", false],
@@ -7599,7 +7598,7 @@ function listenProblems(text: string, allowed: string[] = []): ListenProblem[] {
 
 // PR 1's three, a suite of another directory, two smoke scripts (`smoke.ts`, `smoke-oauth.ts`) and an .mjs suite: a narrowed
 // pattern drops one (PR 2a review passes 3–4).
-const LISTEN_WALK_HELD = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts", "mcp-server/test-mcp.ts", "dashboards/open-brain-dashboard/smoke.ts", "dashboard/smoke-oauth.ts", "recipes/session-capture-hook/test-session-capture.mjs"];
+const LISTEN_WALK_HELD = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts", "mcp-server/test-mcp.ts", "dashboard/smoke.ts", "dashboard/smoke-oauth.ts", "recipes/session-capture-hook/test-session-capture.mjs"];
 /**
  * What is wrong with check 42's walk itself: it must reach the suites PR 1 held and dozens beside them (51 today), or a
  * narrowed walk passes silently; and each LISTEN_EVERY_ADDRESS entry must name a file it reads (PR 2a review pass 2).

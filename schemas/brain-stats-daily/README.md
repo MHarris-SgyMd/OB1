@@ -20,7 +20,6 @@ The RPCs read `source_type` and `sensitivity_tier` columns from the [enhanced-th
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md)) with the core `thoughts` table.
 - The [enhanced-thoughts](../enhanced-thoughts/) schema, which adds the `source_type` and `sensitivity_tier` columns these RPCs read. Install it first — if those columns are missing, the RPCs will error the first time you call them (PL/pgSQL validates column references at execution, not at `CREATE FUNCTION`).
-- **Optional:** the [open-brain-dashboard-next](../../dashboards/open-brain-dashboard-next/) dashboard if you want the `HeatmapSourceFilter` component wired up — see the snippet README at [`dashboard-snippets/README.md`](dashboard-snippets/README.md).
 
 ## Security Model
 
@@ -74,8 +73,6 @@ SUPABASE (from your Open Brain setup)
      -H "Content-Type: application/json" \
      -d '{"p_days": 180}'
    ```
-
-6. (Optional) Wire up the source-filter pill row — see [`dashboard-snippets/README.md`](dashboard-snippets/README.md) for copy-paste instructions for `open-brain-dashboard-next`.
 
 ## Expected Outcome
 

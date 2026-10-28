@@ -133,10 +133,6 @@ SUPABASE (from your Open Brain setup)
 
 If you *want* to expose the RPC to anon clients on purpose (a public "who's in this brain" page), add `GRANT EXECUTE ON FUNCTION public.crm_person_tiers(...) TO anon;` in a follow-up migration, and consider RLS policies first.
 
-## Optional Dashboard Snippet
-
-`dashboard-snippets/page.tsx` is a drop-in Next.js App Router page that renders the output of the RPC as a tier-grouped people list. It uses a server-side `getSupabaseServerClient()` helper (service-role recommended) to match the least-privilege grants above. See `dashboard-snippets/README.md` for install instructions — short version: copy the file into your dashboard at `app/crm/page.tsx` and update the Supabase client import path.
-
 ## Expected Outcome
 
 After running the migration:
@@ -159,6 +155,3 @@ Solution: Stored `relationship_tier` defaults to `unknown` on new inserts. Updat
 
 **Issue: "foreign key violation" inserting into `crm_person_mentions`**
 Solution: `thought_id` is not foreign-keyed to `thoughts` on purpose (the core `thoughts` table structure is not modified by this schema). The violation is therefore against `crm_persons` — confirm the `person_id` exists first.
-
-**Issue: Dashboard page throws "crm_person_tiers RPC failed"**
-Solution: Run `NOTIFY pgrst, 'reload schema';` in SQL Editor so PostgREST picks up the new function, then reload the dashboard.

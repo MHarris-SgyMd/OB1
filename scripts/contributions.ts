@@ -12,7 +12,6 @@ import { join } from "node:path";
 export const CATEGORIES = [
   "recipes",
   "schemas",
-  "dashboards",
   "integrations",
   "skills",
   "primitives",

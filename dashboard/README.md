@@ -9,9 +9,12 @@ signed-in visitor's own key, or the authorization server's token for them (SMD-3
 holds no store, no key list and no brain key of its own; its one secret is the AS's `gui`
 client's.
 
-It replaces the three dashboards under `dashboards/`, which retire as this one takes
-over what each did (SMD-2280's plan: read views first, then plugin pages, then
-sign-in through the authorization server, then the old dashboards' retirement).
+It is the brain's one dashboard. It replaced the three under the retired
+`dashboards/` category (SMD-2280's plan: read views first, then plugin pages,
+then sign-in through the authorization server, then the old dashboards'
+retirement). The two Next.js ones retired with SMD-3309, whose record says what
+this GUI took from them and what it dropped; the SvelteKit one and the category
+retired with SMD-3310.
 
 | File | What it is |
 |---|---|

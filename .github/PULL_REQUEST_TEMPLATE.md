@@ -3,7 +3,6 @@
 <!-- Check one -->
 - [ ] Recipe (`/recipes`)
 - [ ] Schema (`/schemas`)
-- [ ] Dashboard (`/dashboards`)
 - [ ] Integration (`/integrations`)
 - [ ] Skill (`/skills`)
 - [ ] Repo improvement (docs, CI, templates)

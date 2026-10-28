@@ -112,13 +112,6 @@ jobs:
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
 
-      # The dashboard's reply parsers (SMD-2510): src/lib/api.ts's three, fed the
-      # server's own replies from server-portable/render.ts, so a reply's shape
-      # and the dashboard's reader cannot drift apart. render.ts imports only
-      # local files, so nothing is installed. Bun only, no database.
-      - name: Dashboard reply parsers
-        run: bun dashboards/open-brain-dashboard/test-parsers.ts
-
       # The forwarder's self-check (SMD-2583): which lookup answers it dials —
       # an address on front alone, never its own, the gateway, a network or
       # broadcast address or a link-local one, and none when no default route
@@ -1192,44 +1185,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards (SMD-1801): Bun installs and builds them, and
-      # drives the SvelteKit one against the stack at the end of this job.
+      # Bun runs the operator GUI's smokes against the stack in this job. (It also
+      # built and drove the old SvelteKit dashboard until SMD-3310 retired it.)
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
-
-      # SMD-2251. The three dashboards need nothing from the stack, and built in
-      # series after it they added 35 s to this job. So they build here, in the
-      # background, one after another while the stack comes up (mostly waiting
-      # on health checks, not CPU), and "The three dashboards build" below
-      # waits for them and reports each. The two Next dashboards read their env
-      # at build time — the gateway URL and a session secret, any values. Each
-      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
-      # one limit, which the wait step reads for its labels and cap; a hang
-      # ends as 124 and the next dashboard still builds. The subshell's output
-      # goes to files: otherwise this step would wait for the whole build.
-      - name: The three dashboards start building, in the background
-        id: dashboards
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
-        run: |
-          out="$RUNNER_TEMP/dashboards"
-          mkdir -p "$out"
-          limit_s=240
-          echo "$limit_s" > "$out/limit"
-          (
-            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-              check=""
-              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
-              start=$SECONDS
-              rc=0
-              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
-              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
-            done
-            touch "$out/done"
-          ) > "$out/runner.log" 2>&1 < /dev/null &
-          echo "$!" > "$out/pid"
 
       # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -2258,81 +2218,6 @@ jobs:
             exit 1
           fi
           echo "No supabase binary in the running stack."
-
-      # SMD-1801. The three dashboards build from their pinned installs, with no
-      # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which SMD-1931 retired; they retire with
-      # SMD-2280's harvest. The SvelteKit one speaks MCP to
-      # the server this stack serves, so it is driven too, below.
-      # They build in the background from the job's start (SMD-2251); this step
-      # waits for that and reports it — each dashboard's log folded when it
-      # passed and open under an error when it failed, and a line per dashboard
-      # of exit code and seconds. It runs when a stack step failed too, so a
-      # broken build is never hidden behind one. The wait ends when the
-      # background shell writes its done mark or dies without it, or at a cap
-      # a minute past the three limits and their kill-after grace. A dead shell
-      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
-      # its state is read instead (review pass 1). timeout TERMs a build's
-      # process group, and its child, the `sh -c` running the chain, dies on
-      # it (dash does not exec the last command of an && list), so a hang is
-      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
-      # from outside.
-      - name: The three dashboards build
-        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
-        run: |
-          out="$RUNNER_TEMP/dashboards"
-          pid=$(cat "$out/pid")
-          limit_s=$(cat "$out/limit")
-          cap=$((3 * (limit_s + 10) + 60))
-          running() {
-            local state
-            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
-          }
-          start=$SECONDS
-          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
-          echo "waited $((SECONDS - start)) s for the background build"
-          if [ ! -e "$out/done" ]; then
-            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
-            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
-            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
-            exit 1
-          fi
-          failed=0
-          summaries=""
-          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            read -r rc secs < "$out/$d.rc"
-            why=$rc
-            case $rc in
-              124) why="124, over the $limit_s s limit" ;;
-              137) why="137, killed from outside, most likely out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$d — built"
-              cat "$out/$d.log"
-              echo "::endgroup::"
-            else
-              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
-              cat "$out/$d.log"
-              failed=1
-            fi
-            summaries+="  $d: exit $rc in $secs s"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$failed" = 0 ]
-
-      # The SvelteKit dashboard as a browser uses it, against the stack that is
-      # up: a wrong key refused at /signin, the write key signed in and the JSON
-      # its first page loads (thought_stats through its proxy) reaching the
-      # database, the read key signed in and refused capture — 403 from the
-      # proxy, before the server is asked — and the capture-only key refused at
-      # sign-in. deploy/.env holds hashes; the raw keys minted above ride in the
-      # three OB1_SMOKE_* variables.
-      - name: The SvelteKit dashboard, driven against the stack
-        working-directory: dashboards/open-brain-dashboard
-        env:
-          MCP_URL: http://127.0.0.1:8010/mcp
-        run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
       # SMD-2760. What comes back after a reboot is each container's restart
       # policy. Postgres had none, so on Docker a reboot would bring the
@@ -3758,13 +3643,16 @@ jobs:
       # SMD-2286 step 1: the REST core accepts the authorization server's
       # tokens, and only its own. A real sign-in and consent (restart-check.ts
       # --tokens) gives an /mcp token, exchanged as the MCP service for a REST
-      # core one, as the MCP server does at the hop. The REST core, recreated
-      # to read the configured .env and asked on its own port inside its
-      # container (it is published only by an overlay), names the caller
-      # oauth:operator with the MCP service as act, refuses the /mcp token
-      # (Verify: the MCP-audience token sent straight to it) and a read token's
-      # capture (Verify), and a write token's capture writes an audit row
-      # naming both. The authorization server stopped, the keys it read are
+      # core one, as the MCP server does at the hop. Each sign-in registers a
+      # client of its own, a connector. The REST core, recreated to read the
+      # configured .env and asked on its own port inside its container (it is
+      # published only by an overlay), names the caller by the operator and
+      # its connector, oauth:operator+<client> (SMD-3064: the exchange nests
+      # the connector in act), with the MCP service as act, refuses the /mcp
+      # token (Verify: the MCP-audience token sent straight to it) and a read
+      # token's capture (Verify), and two connectors' write tokens each write
+      # an audit row naming its own connector and the MCP service (SMD-3064's
+      # Verify 1). The authorization server stopped, the keys it read are
       # still used; read none (the REST core recreated), a token is a 503 with
       # Retry-After 30, never let through. And through the proxy's /mcp at the
       # origin's Host, where the MCP server built on the REST core trades each
@@ -3776,7 +3664,7 @@ jobs:
         run: |
           auth() { docker compose -f compose.yaml --profile auth "$@"; }
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          # The step above filled the store's cap of 3 (its volume stays); the two
+          # The step above filled the store's cap of 3 (its volume stays); the three
           # sign-ins here register a client each, so this start's cap is higher
           # (the shell's value is compose's over .env's).
           OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
@@ -3790,18 +3678,26 @@ jobs:
           export OB1_AUTH_OPERATOR_PASSWORD
           read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:read)
           write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
+          write2_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
           # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer, cut at 15 s.
           at_api() { T="$2" auth exec -T -e P="$1" -e T -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined, signal: AbortSignal.timeout(15000) }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
           check() { local got="$1" want="$2" filter="$3" what="$4"; if ! { [ "${got%% *}" = "$want" ] && jq -e "$filter" <<<"$(cut -d' ' -f3- <<<"$got")" > /dev/null; }; then echo "$what answered \"${got:0:300}\""; exit 1; fi; }
           api_w=$(jq -r .api <<<"$write_t")
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator" and .scope == "write" and .act == {"name": "oauth:mcp"}' "whoami with an exchanged write token"
+          who_w="oauth:operator+$(jq -r .client <<<"$write_t")"
+          who_w2="oauth:operator+$(jq -r .client <<<"$write2_t")"
+          [ "$who_w" != "$who_w2" ] || { echo "two sign-ins registered one client, $who_w"; exit 1; }
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\" and .scope == \"write\" and .act == {\"name\": \"oauth:mcp\"}" "whoami with an exchanged write token"
           check "$(at_api /v1/whoami "$(jq -r .mcp <<<"$read_t")")" 401 '.code == "UNAUTHORIZED" and .credential == "token"' "whoami with the /mcp token"
           check "$(at_api /v1/thoughts "$(jq -r .api <<<"$read_t")" POST '{"content":"SMD-2286: a read token may not capture"}')" 403 '.code == "FORBIDDEN" and .needs == "capture"' "a capture with an exchanged read token"
-          got=$(at_api /v1/thoughts "$api_w" POST '{"content":"SMD-2286: captured with an exchanged token"}')
-          check "$got" 201 '.id | type == "string"' "a capture with an exchanged write token"
-          id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
-          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
-          [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
+          for t in "$write_t" "$write2_t"; do
+            who="oauth:operator+$(jq -r .client <<<"$t")"
+            # Each connector's own text: a capture of text the brain holds answers with the thought it has, and its audit row.
+            got=$(at_api /v1/thoughts "$(jq -r .api <<<"$t")" POST "{\"content\":\"SMD-2286: captured with $who's exchanged token\"}")
+            check "$got" 201 '.id | type == "string"' "a capture with $who's exchanged write token"
+            id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
+            row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
+            [ "$row" = "$who oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not \"$who\" and the MCP service as act"; exit 1; }
+          done
           # The JSON-RPC answer to a POST to the proxy's /mcp at the origin's Host with this /mcp token, its bearer
           # read from a file (curl -H @file), never a command line; an event stream's data line, or the JSON body.
           # Read to its end (tail, not head): a tools/list line is some 22 KB, and a reader that leaves early
@@ -3818,7 +3714,7 @@ jobs:
           jq -e '(.result.isError // false) == false and (.result.content[0].text | contains("Total thoughts: "))' <<<"$stats" > /dev/null || { echo "a read token's thought_stats through /mcp answered \"${stats:0:300}\""; exit 1; }
           rm -f "$bearer_file"
           auth stop auth
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator"' "whoami, the authorization server stopped and its keys already read,"
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\"" "whoami, the authorization server stopped and its keys already read,"
           auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
           got=$(at_api /v1/whoami "$api_w")
           check "$got" 503 '.code == "BUSY" and .credential == "token"' "whoami, the authorization server stopped and no keys read,"

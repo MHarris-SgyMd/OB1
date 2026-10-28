@@ -142,7 +142,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
       securitySchemes: {
         brainKey: { type: "apiKey", in: "header", name: "x-brain-key" },
         accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
-        bearer: { type: "http", scheme: "bearer", description: "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>` (SMD-2286)." },
+        bearer: { type: "http", scheme: "bearer", description: "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>+<client>`, the subject and the client it signed in through, or a service's `oauth:<sub>` alone (SMD-2286, SMD-3064)." },
         // Beside a caller's key, never alone: the MCP server's forward-scope key, recorded as the request's `act` (SMD-2284).
         forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in, so it is the MCP server's alone. Read only inside the stack: the public /api route deletes it." },
       },
