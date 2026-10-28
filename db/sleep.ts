@@ -91,10 +91,10 @@
  * re-embed runs in that sleep; at a poll, the set-aside clears and the next
  * sleep with work re-embeds. A brain with vectors from before migration 021,
  * which carry no model, re-embeds them in its first sleeps — one call a row,
- * across sleeps the clock ends — and the start line and --dry-run count them
- * (reembed.ts --dry-run before upgrading). The extraction follower runs
- * alone until its pool is drained — nothing pending, in flight or not yet in the pool —
- * because consolidation judges a thought against neighbours that must be
+ * across sleeps the clock ends — and the first sleep's start line and
+ * --dry-run count them (reembed.ts --dry-run before upgrading). The
+ * extraction follower runs alone until its pool is drained — nothing
+ * pending, in flight or not yet in the pool — because consolidation judges a thought against neighbours that must be
  * extracted first (consolidate.ts's header; deploy/README.md's "Start extract
  * alone on a backlog", a rule there until now). The consolidation follower
  * then joins it, beside it as the workers profile runs the two (SMD-2424):
@@ -318,7 +318,7 @@ import { join } from "node:path";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { budgetWords, heldWords, REEMBED_DOWN, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type ReembedDown, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
+import { budgetWords, heldWords, REEMBED_DOWN, shellWord, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type ReembedDown, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { reembedBacklog, run as runReembed } from "./reembed.ts";
@@ -806,6 +806,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const JOBS: Record<PassName, string> = { reembed: reembedKey(EMBED.model, EMBED.dim), extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg) };
   /** Whether this stack's embedding width forms a key: a width that is no positive whole number keeps re-embed out of sleep, said once (review pass 2: it crashed the first sleep). */
   const REEMBED_OK = Number.isSafeInteger(EMBED.dim) && EMBED.dim > 0;
+  /** Its re-embed key on its heartbeat row, where its width forms one (review pass 5). */
+  const REEMBED_JOB = REEMBED_OK ? JOBS.reembed : undefined;
   /** --dump-dir: every consolidation verdict, appended to the pass key's own file (SMD-3203). */
   const DUMP = opts.dumpDir === undefined ? undefined : passDumpFile(opts.dumpDir, JOBS.consolidate);
 
@@ -855,7 +857,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const endAtStart = async (refused?: StartRefusal): Promise<void> => {
     if (!FOLLOW) return;
-    const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
+    const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
     const last = await lastSlept(sql).catch(() => null);
     if (last) once.slept?.(last);
     // The start refusal that ended it, when a pass's start was the cause:
@@ -905,7 +907,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** Whether a record sets re-embed aside: one there, and unlike this stack's model (none is recorded by the pass's first pool). */
   const switched = (recorded: string): boolean => recorded !== "" && recorded !== EMBED.model;
   const asideLine = (recorded: string): string =>
-    `  re-embed set aside: the brain records ${recorded}, this stack is configured for ${EMBED.model} — to keep ${EMBED.model}, run OB1_EMBEDDING_MODEL=${EMBED.model} bun db/reembed.ts --switch-model (the record is read again each poll); to keep ${recorded}, set OB1_EMBEDDING_MODEL=${recorded} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep (this scheduler reads its environment once at its start). Extraction and consolidation run on`;
+    `  re-embed set aside: the brain records ${recorded}, this stack is configured for ${EMBED.model} — to keep ${EMBED.model}, run OB1_EMBEDDING_MODEL=${shellWord(EMBED.model)} bun db/reembed.ts --switch-model (the record is read again each poll); to keep ${recorded}, set OB1_EMBEDDING_MODEL=${shellWord(recorded)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep (this scheduler reads its environment once at its start). Extraction and consolidation run on`;
   /**
    * Re-embed set aside for a model switch it will not make (SMD-2679 PR 4b,
    * the maintainer's choice): the model the brain records while it differs
@@ -1021,7 +1023,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
-    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
+    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
   stamper.aside?.(asideWord());
   /** The sleeps stopped on the budget since this process began, on the row with the budget in force (SMD-2679). */
@@ -1103,10 +1105,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * provider rather than that its passes run (SMD-2905).
    */
   const waitingMidPass = new Set<PassName>();
-  const sayWaiting = async (): Promise<void> => {
+  const sayWaiting = async (outcome?: "ok" | "failed"): Promise<void> => {
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
     stamper.waitingMidPass?.(PASSES.filter((p) => waitingMidPass.has(p)));
-    await stamper.alive();
+    await stamper.alive(outcome);
   };
   /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
   const through = (pass: PassName): PassStamper => ({
@@ -1130,7 +1132,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     async providerWait(on) {
       if (on) waitingMidPass.add(pass);
       else waitingMidPass.delete(pass);
-      await sayWaiting();
+      // Re-embed's provider not answering is the provider's state, not a
+      // failure (SMD-2679 PR 4b): the failed word its follower stamps as the
+      // wait begins goes at once, not at the poll that sets it down, where the
+      // row read failed for that poll. Extraction's wait reads failed, as before.
+      const cleared = on && pass === "reembed" && words.reembed === "failed";
+      if (cleared) delete words.reembed;
+      await sayWaiting(cleared ? sleepOutcome() : undefined);
     },
   });
 
