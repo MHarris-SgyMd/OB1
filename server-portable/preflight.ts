@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, reembedKeyModel, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -4066,12 +4066,15 @@ if (configFailed) {
             // sleep with work (SMD-2679 PR 4b, review pass 3): no hand run
             // offered beside it, whose writes on a vectorless row, audited and
             // not marked background, wake it (review pass 7: not every write).
-            // Who runs them, the re-embed pass row's own answer (reembedRunner): the scheduler, or a follower run by hand.
-            // A width that forms no key keeps re-embed out of sleep (sleep.ts's REEMBED_OK): no scheduler to credit (review pass 5).
+            // Who runs them, the re-embed pass row's own answer
+            // (reembedRunner): the scheduler, or a follower run by hand. A
+            // width that forms no key keeps re-embed out of sleep (sleep.ts's
+            // REEMBED_OK): no scheduler to credit (review pass 5). The
+            // scheduler's own key where its fresh row carries one, a
+            // checkout's configuration aside (review passes 5 and 6).
             const ownKey = Number.isSafeInteger(embDim) && embDim > 0 ? reembedKey(embModel, embDim) : null;
-            // The scheduler's own key where its row carries one, a checkout's configuration aside (review pass 5).
             const sleepRow = facts.workers ? sleepBeatOf(facts.workers.heartbeats) : undefined;
-            const schedulerKey = (sleepRow && !sleepRow.stale && !sleepRow.ended && sleepRow.reembedJob) || ownKey;
+            const schedulerKey = (sleepRow && freshBeat(sleepRow) && sleepRow.reembedJob) || ownKey;
             const runner = schedulerKey === null ? ({ by: "nobody" } as const) : reembedRunner(facts.workers?.heartbeats, schedulerKey, ownKey ?? schedulerKey, recorded.embedding_model, embModel);
             // A switch the scheduler set aside: the sleep row's two ways out, not a hand run beside it (review pass 5).
             // Only where its row shows the switch: a record changed while it is awake is set aside at its next sleep, until then the row says nothing (review pass 6).
@@ -4262,8 +4265,8 @@ if (configFailed) {
               // main's way out was lost). Under the key's own model, by --job
               // where it is not the shell's; not under a model change, which
               // refuses acceptance.
-              const keyNamed = parseReembedKey(key);
-              const keyEnv = keyNamed && keyNamed.model !== embModel ? `OB1_EMBEDDING_MODEL=${shellWord(keyNamed.model)} ` : "";
+              const named = parseReembedKey(key);
+              const keyEnv = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${shellWord(named.model)} ` : "";
               const failedFix = (taker: string) =>
                 `Once their cause is fixed, the retry_failed tool (work_type ${key}) puts the failed rows back to pending, which ${taker} takes${recordDiffers && keyEnv === "" ? "" : `; for one the provider refuses permanently, cd db && ${keyEnv}bun reembed.ts --url $DATABASE_URL${key === configuredKey ? "" : ` --job ${key}`} --accept-failed <thought-id…>`}.`;
               // Who runs re-embed under this key: the one answer every row reads
@@ -4310,7 +4313,6 @@ if (configFailed) {
                 }
                 continue;
               }
-              const named = parseReembedKey(key);
               // A scheduler stopped or stale here takes the configured key up
               // again once started: the choice is named, not two workers (review
               // pass 3: "finish it" beside the sleep row's "start it again").
@@ -4799,8 +4801,8 @@ if (configFailed) {
               // The sleep scheduler running here refuses beside a claim follower:
               // one stopped for it is retired, not started again (review pass 3).
               const sleepBeat = sleepBeatOf(w.heartbeats);
-              const sleepRuns = sleepBeat !== undefined && !sleepBeat.stale && !sleepBeat.ended;
-              // A scheduler with a row, stopped or stale, takes re-embed again once started: a hand follower started too would make it refuse (review pass 3).
+              const sleepRuns = sleepBeat !== undefined && freshBeat(sleepBeat);
+              // A scheduler whose row carries a re-embed key — running, or once started again — takes re-embed: a hand follower started too would make it refuse (review passes 3 and 7).
               const sleepHere = sleepBeat !== undefined && sleepBeat.reembedJob !== undefined;
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
@@ -4914,23 +4916,20 @@ if (configFailed) {
             // matches. Its failed outcome may be another pass's too, which the
             // fix leaves to the log (review pass 2).
             const set = h.aside?.reembed;
-            // The record put right since the row's word — a --switch-model while
-            // awake, or a scheduler stopped — is read at the next sleep's start
-            // (review pass 1: both ways out were offered for a switch made);
+            // The record put right since the row's word is read at the
+            // scheduler's next poll asleep, its next sleep awake, or its next
+            // sleep once started again (review pass 1: both ways out were
+            // offered for a switch made);
             // the record as the brain holds it now, where it moved on again
             // (review pass 2), or removed (review pass 5), by the shared reader.
             // The model the switch is judged against: a running scheduler's
             // own; a stopped one's, this configuration's, which its restart
             // reads (review pass 7: the dead process's offered back).
-            const cfgModel = set?.kind !== "model-switch" ? embModel
-              : down ? embModel
+            const cfgModel = set?.kind !== "model-switch" || down ? embModel
               : set.unprintable ? reembedKeyModel(h.reembedJob) ?? embModel
               : set.configured;
-            const sw = set?.kind === "model-switch"
-              ? (set.unprintable
-                ? { made: !recorded.embedding_model || recorded.embedding_model === cfgModel, holds: "" }
-                : switchNow({ recorded: set.recorded, configured: cfgModel }, recorded.embedding_model))
-              : null;
+            // An unprintable switch's recorded is empty: its `holds` is never read.
+            const sw = set?.kind === "model-switch" ? switchNow({ recorded: set.recorded, configured: cfgModel }, recorded.embedding_model) : null;
             const holds = sw?.holds ?? "";
             const madeWords = set?.kind === "model-switch" ? (!recorded.embedding_model ? "the record removed since" : `the switch to ${set.unprintable ? "this stack's model" : cfgModel} made since`) : "";
             const setDetail = !set ? ""

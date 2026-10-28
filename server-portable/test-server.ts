@@ -1329,7 +1329,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `the scheduler's re-embed key is carried when a model's own key, and never off another worker's row (${JSON.stringify(jobs)})`);
   // Who runs re-embed under a key (SMD-2679 PR 4b-2, review pass 4): the one answer preflight's rows read, cell by cell.
   {
-    const { reembedRunner, switchNow } = await import("./brain-info.ts");
+    const { reembedRunner, shellWord, switchNow } = await import("./brain-info.ts");
     const OWN = "reembed:new-embed@1024";
     const beatOf = (key: string, extra: Record<string, unknown> = {}, ageS = 1) =>
       parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...extra }), at, age_s: ageS }]).heartbeats[0];
@@ -1371,7 +1371,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       [run([withAside(sleepFresh, sw)], OWN, "new-embed"), "scheduler:-:poll:0"],
       [run([withAside(sleepAwake, sw)], OWN, "new-embed"), "scheduler:-:sleep:0"],
       [run([sleepFresh], OWN, "old-embed"), "aside"],
-      // A set-aside naming another model than this configuration's: no key of this one's (review pass 5).
+      // A set-aside naming another model than the one its row runs: only a forged row could (review pass 5).
       [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "old-embed", configured: "other-embed" } })], OWN, "other-embed"), "nobody"],
       // Freshness read for each follower, and for the scheduler only on its own key (review pass 5: unpinned).
       [run([sleepFresh, handOwnEnded], OWN, "new-embed"), "scheduler:-:-:0"],
@@ -1388,7 +1388,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       // Stopped, judged by this configuration, which its restart reads, not its old row's key (review pass 6).
       [run([beatOf("heartbeat:sleep", { outcome: "stopped", ended: true, reembedJob: "reembed:old-embed@1024" })], OWN, "new-embed"), "stopped"],
       [run([beatOf("heartbeat:sleep", { outcome: "stopped", ended: true, reembedJob: "reembed:old-embed@1024" })], "reembed:old-embed@1024", "new-embed"), "nobody"],
-      // An empty record is none, as the scheduler reads it; a switch with names outside the alphabet is still a switch (review pass 6).
+      // An empty record is none, as the scheduler reads it (review pass 6).
       [run([withAside(sleepFresh, sw)], OWN, ""), "scheduler:-:poll:0"],
       [run([sleepFresh], OWN, ""), "scheduler:-:-:0"],
       [run([sleepEnded], OWN, ""), "stopped"],
@@ -1402,7 +1402,6 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     assert(JSON.stringify(now) === JSON.stringify([{ made: true, holds: "b" }, { made: false, holds: "c" }, { made: true, holds: "a" }, { made: true, holds: "a" }]),
       `switchNow reads a switch against the record as it stands (${JSON.stringify(now)})`);
     // One shell word for a name or key from the database, preflight's and the scheduler's log alike (review passes 6 and 7).
-    const { shellWord } = await import("./brain-info.ts");
     const words = ["qwen3-embedding:4b", "org/model@q8_0", "my model", "a'b $(x)", "reembed:x@1:$(id)"].map(shellWord);
     assert(JSON.stringify(words) === JSON.stringify(["qwen3-embedding:4b", "org/model@q8_0", "'my model'", "'a'\\''b $(x)'", "'reembed:x@1:$(id)'"]),
       `shellWord leaves a model name's alphabet as it is and single-quotes the rest (${JSON.stringify(words)})`);

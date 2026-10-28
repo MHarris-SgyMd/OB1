@@ -276,8 +276,8 @@ export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; co
  * takes the key up; review pass 5); `conflicts`, the fresh hand followers it
  * refuses beside at its next poll, ending.
  * `aside`: the scheduler fresh, a model switch keeping re-embed out — set
- * aside by its word, or a record unlike this configuration, which its next
- * sleep sets aside.
+ * aside by its word, or a record unlike its model, which its next sleep
+ * sets aside.
  * `stopped`: its row stale or ended, from a scheduler that ran re-embed —
  * it takes this configuration's key (`ownKey`, `ownModel`) up once started,
  * the restart reading the configuration, not its old row (review pass 6).
@@ -292,7 +292,8 @@ export type ReembedRunner =
   | { by: "aside"; beat: WorkerHeartbeat }
   | { by: "stopped"; beat: WorkerHeartbeat }
   | { by: "nobody" };
-const freshBeat = (b: WorkerHeartbeat): boolean => !b.stale && !b.ended;
+/** A heartbeat row neither stale nor ended. */
+export const freshBeat = (b: WorkerHeartbeat): boolean => !b.stale && !b.ended;
 /**
  * A model name or claim key as a shell word: as it is in a model name's
  * alphabet, else single-quoted, so text read from the database prints as one
@@ -338,13 +339,10 @@ export function reembedRunner(beats: readonly WorkerHeartbeat[] | null | undefin
   if (!freshBeat(sleep)) return recordDiffers ? { by: "nobody" } : { by: "stopped", beat: sleep };
   const set = sleep.aside?.reembed;
   if (set?.kind === "model-switch") {
-    // Names outside the alphabet: judged by the record against the scheduler's model, as a switch made since clears (review pass 7).
-    if (set.unprintable) return recorded === undefined || recorded === schedModel ? { by: "scheduler", beat: sleep, down: null, clears: sleep.running ? "poll" : "sleep", conflicts: handFollowersOf(beats) } : { by: "aside", beat: sleep };
-    // Only a forged row names another model than the one it runs.
-    if (set.configured !== schedModel) return { by: "nobody" };
-    return switchNow(set, recorded).made
-      ? { by: "scheduler", beat: sleep, down: null, clears: sleep.running ? "poll" : "sleep", conflicts: handFollowersOf(beats) }
-      : { by: "aside", beat: sleep };
+    // Only a forged row names another model than the one it runs; names outside the alphabet are judged by the record alone (review pass 7).
+    if (!set.unprintable && set.configured !== schedModel) return { by: "nobody" };
+    // Made since its word — the record its model, or none — it clears.
+    return recordDiffers ? { by: "aside", beat: sleep } : { by: "scheduler", beat: sleep, down: null, clears: sleep.running ? "poll" : "sleep", conflicts: handFollowersOf(beats) };
   }
   if (recordDiffers) return { by: "aside", beat: sleep };
   return { by: "scheduler", beat: sleep, down: set ? set.kind : null, clears: null, conflicts: handFollowersOf(beats) };

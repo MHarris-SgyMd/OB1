@@ -4260,7 +4260,7 @@ else {
       const bothDownFix = fix((await run(LOG_ON)).out, "sleep");
       assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /The workers profile's followers run here \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
         `a scheduler kept down by a hand re-embed follower and the workers' is told of both (${bothDownFix})`);
-      // Running beside a hand follower started since: it refuses at its next sleep and ends, so said now (review pass 1: every row passed).
+      // Running beside a hand follower started since: it refuses at its next poll and ends, so said now (review pass 1: every row passed).
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
       await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: false, outcome: "ok", reads: "yes", slept: { from: await at(300), to: await at(130) } }), 10);
       const besideFix = fix((await run(LOG_ON)).out, "sleep");

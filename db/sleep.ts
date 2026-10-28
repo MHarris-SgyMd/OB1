@@ -93,8 +93,8 @@
  * which carry no model, re-embeds them in its first sleeps — one call a row,
  * across sleeps the clock ends — and the first sleep's start line and
  * --dry-run count them (reembed.ts --dry-run before upgrading). The
- * extraction follower runs alone until its pool is drained — nothing pending, in flight or not yet in the pool —
- * because consolidation judges a thought against neighbours that must be
+ * extraction follower runs alone until its pool is drained — nothing
+ * pending, in flight or not yet in the pool — because consolidation judges a thought against neighbours that must be
  * extracted first (consolidate.ts's header; deploy/README.md's "Start extract
  * alone on a backlog", a rule there until now). The consolidation follower
  * then joins it, beside it as the workers profile runs the two (SMD-2424):
@@ -806,6 +806,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const JOBS: Record<PassName, string> = { reembed: reembedKey(EMBED.model, EMBED.dim), extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg) };
   /** Whether this stack's embedding width forms a key: a width that is no positive whole number keeps re-embed out of sleep, said once (review pass 2: it crashed the first sleep). */
   const REEMBED_OK = Number.isSafeInteger(EMBED.dim) && EMBED.dim > 0;
+  /** Its re-embed key on its heartbeat row, where its width forms one (review pass 5). */
+  const REEMBED_JOB = REEMBED_OK ? JOBS.reembed : undefined;
   /** --dump-dir: every consolidation verdict, appended to the pass key's own file (SMD-3203). */
   const DUMP = opts.dumpDir === undefined ? undefined : passDumpFile(opts.dumpDir, JOBS.consolidate);
 
@@ -855,7 +857,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   const endAtStart = async (refused?: StartRefusal): Promise<void> => {
     if (!FOLLOW) return;
-    const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_OK ? JOBS.reembed : undefined, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
+    const once = passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message})`) });
     const last = await lastSlept(sql).catch(() => null);
     if (last) once.slept?.(last);
     // The start refusal that ended it, when a pass's start was the cause:
@@ -1021,7 +1023,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
-    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_OK ? JOBS.reembed : undefined, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
+    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
   stamper.aside?.(asideWord());
   /** The sleeps stopped on the budget since this process began, on the row with the budget in force (SMD-2679). */
