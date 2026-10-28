@@ -250,7 +250,7 @@ cd ../server-portable && bun test-auth.ts   # 191 — test-auth's assertions, he
 cd ../server-portable && ../db/with-postgres.sh bun test-e2e-sql.ts   # 673 — the whole server over MCP on real Postgres, held to this server the same way
 cd ../server-portable && bun test-server.ts   # 1198 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop, a tool call past its client waited on
 cd ../server-portable && bun test-plugins.ts   # 282 — plugins in the contract, an enabled plugin's operation as this server's tool
-cd ../server-portable && ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
+cd ../server-portable && ../db/with-postgres.sh bun test-plugins-sql.ts   # 116 — the example's operations, pinned over REST and read back through this server
 ```
 
 Every server-portable suite that drives an MCP server drives this one, through `stack.ts`
