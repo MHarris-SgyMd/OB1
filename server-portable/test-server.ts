@@ -3273,14 +3273,24 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const bare = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => silentSse() });
   const kept = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
   // The ceiling, at a small scale: a stream silent for 1250 ms with a 50 ms
-  // frame and a 500 ms ceiling stops pinging at the ceiling and says so once.
-  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
-  // loaded runner's timer drift room on both sides. A first tick late past the
-  // ceiling sends none, so the scale is what a stall of the event loop has to
-  // outlast: at 20 ms and 200 ms, a stall of ~120 ms at the start failed it,
-  // which the job's other suites beside this one did once (SMD-3470).
+  // frame and a 500 ms ceiling pings until the ceiling, stops there and says
+  // so once. Nominally nine frames, about twenty-four uncapped. A stall of the
+  // event loop at the stream's start takes frames off the front (a first tick
+  // past the ceiling sends none), so the frames hold only that it pinged and
+  // that it stopped (at most ten), and that it stopped at the ceiling, not
+  // before, is the stall's own time, on the clock sse.ts reads. At 20 ms and
+  // 200 ms with a floor of four frames, a stall of ~140 ms at the start failed
+  // it, and the job's other suites beside this one caused one (SMD-3470); a
+  // stall of up to ~450 ms passes now.
   let stalls = 0;
-  const capped = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(1250), { intervalMs: 50, maxMs: 500, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+  let stalledAfterMs = 0;
+  const capped = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    fetch: (req) => {
+      const began = performance.now();
+      return withSseKeepalive(silentSse(1250), { intervalMs: 50, maxMs: 500, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; stalledAfterMs = performance.now() - began; } });
+    },
+  });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -3324,9 +3334,10 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
   assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
   assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
-  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
+  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 1 && frames(cappedRun.text) <= 10,
     `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 1250 ms at 50 ms with a 500 ms ceiling)`);
   assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
+  assert(stalledAfterMs >= 500, `…at the ceiling, not before it (${Math.round(stalledAfterMs)} ms after the stream began, its ceiling 500 ms)`);
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
   assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),

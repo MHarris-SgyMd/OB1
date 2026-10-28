@@ -915,7 +915,8 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
   const mint = async (claims: Record<string, unknown>) => {
-    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, ...claims })}`;
+    const nowS = Math.floor(Date.now() / 1000);
+    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: nowS, exp: nowS + 600, ...claims })}`;
     const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(head)));
     return `${head}.${Buffer.from(sig).toString("base64url")}`;
   };
@@ -951,7 +952,12 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
     const subject = claimsOf(form.get("subject_token") ?? "");
     const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp" }, exp: subject.exp, client_id: "mcp" });
-    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
+    // The token's lifetime as issued, not read off the wall clock: the
+    // exchanger below runs on `clock`, so a wall-clock answer read 599 when
+    // the mint and the trade fell either side of a second, and the "594 s on"
+    // row then asked at the entry's last instant and traded again (SMD-3470's
+    // review, once in ~14 runs beside the background suites).
+    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - (subject.iat as number), scope: subject.scope });
   };
   let clock = Date.now();
   let keysDown = false;
