@@ -601,7 +601,9 @@ export interface ReembedOptions {
   /**
    * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
    * claim, before the start's drain and before each follower poll's pool. A
-   * worker waits holding no claim, and a stop while it waits ends it there.
+   * worker waits holding no claim, and a stop while it waits ends it there, as
+   * does the drain ending for a reason of its own (the provider's outage or
+   * refusal, a halt on its first answer, the record moving, a worker's throw).
    * A claim takes one thought under it unless `batch` says otherwise, so a
    * closed gate holds a worker after the thought in hand, not after eight.
    * The start's own pool is made before the pass's stop exists, and is not
@@ -2182,7 +2184,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
           if (!(await admitted(ADMIT, gate))) return;
-          if (stopping || haltedByProvider || configError !== null || outage.reason !== null) return;
+          if (stopping || haltedByProvider || configError !== null || outage.reason !== null || switchedTo !== null) return;
         }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
@@ -2194,6 +2196,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
             if (r && r.value !== embedConfig.embeddingModel) {
               switchedTo = r.value;
+              // A worker waiting at the admit gate wakes to it: the follower ends now (review pass 2).
+              drainEnds.abort();
               return;
             }
           }

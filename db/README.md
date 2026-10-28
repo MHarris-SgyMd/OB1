@@ -5775,7 +5775,7 @@ signal, SMD-2679), so run() returns at once, as extract's does — a database
 statement waiting on a lock has no bound, and a vector already sent lands.
 
 The three claim workers take `admit` (`lease.ts`'s `Admit`, SMD-3379 PR 1b),
-a gate awaited with the pass's first-stop signal wherever the pass would start
+a gate awaited with the pass's stop signal wherever the pass would start
 new work: before each claim; at the start of each pass, before its pool and
 counts (re-embed's before the start's drain and each poll's pool, its start's
 own pool being made before the pass's stop exists); before each window of a

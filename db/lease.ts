@@ -302,7 +302,7 @@ export const MAX_TIMER_MS = 2147483647;
 
 /**
  * A claim worker's admit gate (SMD-3379 PR 1b), an engine option: awaited,
- * with the pass's first-stop signal, wherever the pass would start new work —
+ * with the pass's stop signal, wherever the pass would start new work —
  * before each claim, at the start of each pass (its pool and counts), before
  * each window of a long thought and before each pair of a thought's
  * consolidation. Resolved, the work goes on; pending, the worker waits, its
