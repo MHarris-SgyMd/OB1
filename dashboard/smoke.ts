@@ -53,11 +53,13 @@
  *     `--notes-only` runs that arm alone.
  *   - the write verbs (SMD-3322), with `--writes`: a thought captured for the
  *     arm over the proxy's /mcp under the write key is edited and deleted on
- *     its own pages — the edit refused in words when its text is empty, and
- *     when the time it was read is stale, which keeps that stale time in the
- *     form; the delete confirmed, the list saying so, the thought then a 404 —
- *     and a read key is offered neither (no links; the pages' 403; its posts
- *     refused). It prints the thought's id, for CI to read its audit rows.
+ *     its own pages — the edit posted as the page's multipart form does, a
+ *     160 kB text of it saved, refused in words when its text is empty, its
+ *     time altered, or stale (keeping that stale time in the form); the delete
+ *     confirmed, the list saying so once from its flash cookie and never from
+ *     a link, the thought then a 404 — and a read key is offered neither (no
+ *     links; the pages' 403; its posts refused). It
+ *     prints the thought's id, for CI to read its audit rows.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs, with
@@ -96,6 +98,8 @@ if (!BASE || !WRITE_KEY || (NOTES !== undefined && NOTES !== "on" && NOTES !== "
 const ORIGIN = new URL(BASE).origin;
 /** The session cookie: its name carries the origin's port when the origin names one (listener.ts sessionCookieName, SMD-3352), written out here, not imported, so a GUI that drops it fails this smoke. */
 const COOKIE = new URL(BASE).port ? `ob1_dashboard_session_${new URL(BASE).port}` : "ob1_dashboard_session";
+/** The delete's flash cookie, named after the session cookie (writes.ts deletedCookie): written out here, as COOKIE is. */
+const FLASH = `${COOKIE}_deleted`;
 
 let pass = 0;
 let fail = 0;
@@ -702,11 +706,17 @@ function hidden(html: string, name: string): string | undefined {
   return v?.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 }
 
-/** A form post as a browser makes it, to a page's own action: its status, where it sends, and its page. */
-async function post(path: string, fields: Record<string, string>) {
-  const r = await fetch(`${BASE}${path}`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams(fields).toString() });
+/**
+ * A form post as a browser makes it, to a page's own action — url-encoded, or multipart as the edit page's form
+ * posts (`multipart`) — its status, where it sends, its page, and the flash cookie it set, if any.
+ */
+async function post(path: string, fields: Record<string, string>, multipart = false) {
+  const body = multipart ? Object.entries(fields).reduce((f, [k, v]) => (f.append(k, v), f), new FormData()) : new URLSearchParams(fields).toString();
+  const { "content-type": _, ...noType } = FORM;
+  const r = await fetch(`${BASE}${path}`, { method: "POST", redirect: "manual", headers: headers(multipart ? noType : FORM), body });
   takeCookie(r);
-  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
+  const flash = (r.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).find((c) => c.startsWith(`${FLASH}=`)) ?? "";
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), flash };
 }
 
 /**
@@ -735,23 +745,30 @@ async function writesArm() {
   const edit = await get(`/thoughts/${id}/edit`);
   const since = hidden(edit.html, "if_unchanged_since") ?? "";
   assert(edit.status === 200 && edit.html.includes('data-testid="edit-form"') && edit.html.includes(marker) && since !== "", `its edit page holds the text and the time it was read (${edit.status}, ${since || "no time"})`);
-  assert(/<form[^>]*action="\?\/save"[^>]*data-testid="edit-form"/.test(edit.html), "…its form posting to its own save action");
+  assert(/<form[^>]*action="\?\/save"[^>]*enctype="multipart\/form-data"[^>]*data-testid="edit-form"/.test(edit.html), "…its form posting to its own save action as multipart, so its text is not percent-encoded");
+  // A browser drops one line break straight after <textarea>: the page puts one there, so a text starting with a break keeps it.
+  assert(/<textarea[^>]*>\n/.test(edit.html), "…its field opening with the line break a browser drops, so the text's own first character survives");
 
-  const empty = await post(`/thoughts/${id}/edit?/save`, { content: "  \r\n ", if_unchanged_since: since });
+  const empty = await post(`/thoughts/${id}/edit?/save`, { content: "  \r\n ", if_unchanged_since: since }, true);
   assert(empty.status === 400 && /data-testid="edit-error"[^>]*>[^<]*cannot be left empty/.test(empty.html), `an empty text is refused in words (${empty.status})`);
+  const altered = await post(`/thoughts/${id}/edit?/save`, { content: "never saved", if_unchanged_since: "notatime" }, true);
+  assert(altered.status === 400 && /data-testid="edit-error"[^>]*>[^<]*lost the time its thought was read/.test(altered.html), `…and so is a form whose time was altered to none, before the core sees it (${altered.status})`);
 
-  const text = `The operator GUI smoke edited this thought (SMD-3322, ${marker}).\r\nIts second line.`;
-  const saved = await post(`/thoughts/${id}/edit?/save`, { content: text, if_unchanged_since: since });
-  assert(saved.status === 303 && saved.location === `/dashboard/thoughts/${id}`, `the write key saves an edit: 303 back to the thought (${saved.status} → ${saved.location})`);
+  // Past the 64 kB the GUI took before (review pass 1): 160 kB of text, two bytes a character, posted as the form posts it.
+  const wide = "é".repeat(80_000);
+  const text = `The operator GUI smoke edited this thought (SMD-3322, ${marker}).\r\nIts second line.\r\n${wide}`;
+  const saved = await post(`/thoughts/${id}/edit?/save`, { content: text, if_unchanged_since: since }, true);
+  assert(saved.status === 303 && saved.location === `/dashboard/thoughts/${id}`, `the write key saves an edit of 160 kB: 303 back to the thought (${saved.status} → ${saved.location})`);
   const after = await get(`/thoughts/${id}`);
-  assert(after.status === 200 && after.html.includes(`edited this thought (SMD-3322, ${marker}).\nIts second line.`), "…which shows the new text, its CRLF break saved as one line break");
+  assert(after.status === 200 && after.html.includes(`edited this thought (SMD-3322, ${marker}).\nIts second line.\n${wide}`), "…which shows the new text whole, each CRLF break saved as one line break");
 
   // The time first read is stale now: the second save is refused, and the form keeps that time, not the one the
   // page reads afresh after the refusal, so saving again cannot overwrite the change it was just told of.
-  const stale = await post(`/thoughts/${id}/edit?/save`, { content: `${text} Again.`, if_unchanged_since: since });
+  const stale = await post(`/thoughts/${id}/edit?/save`, { content: `${text} Again.`, if_unchanged_since: since }, true);
   assert(stale.status >= 400 && /data-testid="edit-error"[^>]*>[^<]*changed after this page read it/.test(stale.html), `an edit from a stale read is refused in words (${stale.status})`);
   assert(hidden(stale.html, "if_unchanged_since") === since && stale.html.includes(" Again."), "…its form keeping the stale time it posted and the text typed");
-  assert(!(await get(`/thoughts/${id}`)).html.includes(" Again."), "…and the thought keeps the saved edit");
+  const kept = await get(`/thoughts/${id}`);
+  assert(kept.status === 200 && kept.html.includes(`${wide}<`) && !kept.html.includes(" Again."), "…and the thought keeps the saved edit");
 
   if (READ_KEY) {
     const held = cookie;
@@ -761,20 +778,31 @@ async function writesArm() {
     assert(asRead.status === 200 && !asRead.html.includes('data-testid="edit-link"') && !asRead.html.includes('data-testid="delete-link"'), `the read key's thought page offers no Edit and no Delete (${asRead.status})`);
     const [editPage, deletePage] = [await get(`/thoughts/${id}/edit`), await get(`/thoughts/${id}/delete`)];
     assert(editPage.status === 403 && deletePage.status === 403, `…and its edit and delete pages are 403s (${editPage.status}, ${deletePage.status})`);
-    const [readEdit, readDelete] = [await post(`/thoughts/${id}/edit?/save`, { content: "never saved", if_unchanged_since: since }), await post(`/thoughts/${id}/delete?/delete`, {})];
+    // Refused either way: the actions' own gates spare the core a call it would refuse, and the load that runs after a
+    // refused action answers the page's 403 whatever the action did, so these hold the refusal, not which side made it.
+    const [readEdit, readDelete] = [await post(`/thoughts/${id}/edit?/save`, { content: "never saved", if_unchanged_since: since }, true), await post(`/thoughts/${id}/delete?/delete`, {})];
     assert(readEdit.status === 403 && readDelete.status === 403, `…its posts to them refused (${readEdit.status}, ${readDelete.status})`);
     await signOut();
     cookie = held;
     const still = await get(`/thoughts/${id}`);
-    assert(still.status === 200 && !still.html.includes("never saved"), "…and the thought is as the write key left it");
+    assert(still.status === 200 && still.html.includes(`${wide}<`) && !still.html.includes("never saved"), "…and the thought is as the write key left it");
+  } else {
+    console.log("  ·  no --read-key: the write arm's read-key checks skipped");
   }
 
   const confirm = await get(`/thoughts/${id}/delete`);
   assert(confirm.status === 200 && confirm.html.includes('data-testid="delete-form"') && confirm.html.includes(marker), `its delete page asks first, naming the thought (${confirm.status})`);
+  // A link cannot make the list say a thought was deleted: the notice comes from the delete's flash cookie alone.
+  const spoofed = await get(`/thoughts?deleted=${id}`);
+  assert(spoofed.status === 200 && !spoofed.html.includes('data-testid="deleted"'), "a link naming a thought as deleted makes the list say nothing");
   const deleted = await post(`/thoughts/${id}/delete?/delete`, {});
-  assert(deleted.status === 303 && deleted.location === `/dashboard/thoughts?deleted=${id}`, `the write key deletes it: 303 to the list (${deleted.status} → ${deleted.location})`);
-  const list = await get(`/thoughts?deleted=${id}`);
-  assert(list.status === 200 && new RegExp(`data-testid="deleted"[^>]*>[^<]*<span[^>]*>${id}<`).test(list.html), "…which says what was deleted");
+  assert(deleted.status === 303 && deleted.location === "/dashboard/thoughts" && deleted.flash === `${FLASH}=${id}`, `the write key deletes it: 303 to the list, with a flash cookie naming it (${deleted.status} → ${deleted.location})`);
+  const withFlash = async () => {
+    const r = await fetch(`${BASE}/thoughts`, { redirect: "manual", headers: { cookie: `${cookie}; ${deleted.flash}` } });
+    return { status: r.status, html: await r.text(), cleared: (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${FLASH}=;`) && /Max-Age=0/i.test(c)) };
+  };
+  const list = await withFlash();
+  assert(list.status === 200 && new RegExp(`data-testid="deleted"[^>]*>[^<]*<span[^>]*>${id}<`).test(list.html) && list.cleared, "…which says what was deleted, and clears the cookie as it does");
   const gone = await get(`/thoughts/${id}`);
   assert(gone.status === 404, `…and the thought is then a 404 (${gone.status})`);
   await signOut();

@@ -1832,8 +1832,8 @@ jobs:
       # read here, in order: the capture, carried by the MCP server (its
       # forwarder as act), then the one edit saved and the delete, each a
       # direct call to the REST core with no carrier, as the GUI makes them,
-      # all under the smoke key's name, as Verify asks. Its keys come from
-      # this job's environment, off the process list. Here, not after the
+      # all under the smoke key's name, as Verify asks. The smoke reads its
+      # keys from this job's environment, off its command line. Here, not after the
       # next step: that one configures the authorization server, and the GUI
       # then offers no key sign-in (review pass 1). The smoke imports only
       # dashboard/src/lib/browse.ts and format.ts, which import nothing, so

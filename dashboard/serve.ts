@@ -77,9 +77,11 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     }, deadlineMs).unref();
   });
 }
-// The only bodies the GUI takes are the sign-in form's key and a plugin page's form (the example's note, 2,000
-// characters at most): 64 kB, not adapter-node's 512 kB.
-env.BODY_SIZE_LIMIT = "64K";
+// The largest body the GUI takes is a thought's edited text (SMD-3322), posted as multipart so its text is not
+// percent-encoded (three bytes a byte for anything not ASCII): 1 MB, which the edit page holds a thought's text under
+// (EDIT_MAX_BYTES), saying so of a thought past it rather than letting its Save fail. The sign-in form's key and a
+// plugin page's form (the example's note, 2,000 characters at most) are far smaller.
+env.BODY_SIZE_LIMIT = "1M";
 const publicOrigin = env.OB1_PUBLIC_ORIGIN?.trim();
 const problem = publicOrigin ? originProblem(publicOrigin) : null;
 if (publicOrigin && !problem) {
