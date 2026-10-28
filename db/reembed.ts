@@ -51,7 +51,11 @@
  * follower ends it so, exit 2, read at each poll and before each worker's
  * batch (SMD-2679 PR 4b) — the batches in hand meanwhile may write its
  * model's vectors over the new pass's, which the new model's data rule
- * returns to its pool. A poll costs
+ * returns to its pool. A follower of its own (no caller's stamper) whose
+ * heartbeat key no reader takes — a model name or --job outside a model
+ * name's alphabet, or too long for the key — is refused, exit 2, writing no
+ * row: neither the scheduler nor preflight would see it, and the scheduler
+ * would run beside it; a one-shot run writes no row (SMD-3486). A poll costs
  * a scan of thoughts (the rows not at the target) and of the job's succeeded
  * rows (the data rule), as consolidate.ts's poll costs its pool's scan.
  * Outages are waited out as the claim workers' are (worker-bootstrap.ts,
@@ -482,6 +486,7 @@ import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, providerDown, reso
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
 import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, modelMissing, OUTAGE_MS, outageWait, probeUntil, ProviderOutage, throughOutage, waitOut, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
+import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
 import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -953,6 +958,19 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return refused("usage", `  ✗ ${problems[problems.length - 1]}`);
   }
   for (const w of embeddingConfigWarnings(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS)) err(`  ⚠  ${w}`);
+  // A follower of its own whose heartbeat row no reader takes — a model name
+  // outside the alphabet, or one too long for the key — is seen by neither the
+  // sleep scheduler, which would run beside it, nor preflight: refused, as the
+  // scheduler keeps such a name out of sleep. A one-shot run writes no row
+  // (SMD-3486 review pass 2). This refusal does not print the key: what makes
+  // it unfit may be a character a log should not carry either. Not through refused(): its
+  // onStart would end a row under that key, which no reader takes either.
+  if (FOLLOW && opts.stamper === undefined && !STATUS_ONLY && !DRY_RUN && !heartbeatKeyCarried(stampKey("reembed", JOB))) {
+    err(
+      `\n  Refusing to follow: this follower's heartbeat row would be one the sleep scheduler and preflight do not read — the model name or --job holds a character outside ASCII letters, digits and . _ : @ / + -, or is too long for the key (at most 120 characters after heartbeat:reembed:).\n` +
+        `  Neither would see it, and the scheduler would run beside it. Run it without --follow: a one-shot run writes no row, and re-embeds what there is.`);
+    return 2;
+  }
 
   /**
    * A Writer's throw from inside processRow, the embedder's own lines
@@ -1066,7 +1084,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     // counts are the key's, not this shell's, and say so.
     say(`  --job ${JOB} names ${parseReembedKey(JOB)!.model}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
   } else {
-    say(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
+    say(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${shellWord(`${JOB}:<suffix>`)}`);
   }
   // The --job refusal first: a key naming another model is refused before the
   // model-change refusal below can ask for --switch-model on its behalf.
@@ -1076,7 +1094,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   if (modelChange && FOLLOW && !STATUS_ONLY && !DRY_RUN) {
     return refused("model-switch",
       `\n  Refusing to follow: ob1_config records ${recorded.embedding_model} and this follower is configured for ${embedConfig.embeddingModel}.\n` +
-        `  A follower never switches the model. To switch, run by hand: OB1_EMBEDDING_MODEL=${embedConfig.embeddingModel} bun db/reembed.ts --url … --switch-model\n` +
+        `  A follower never switches the model. To switch, run by hand: OB1_EMBEDDING_MODEL=${shellWord(embedConfig.embeddingModel)} bun db/reembed.ts --url … --switch-model\n` +
         `  If OB1_EMBEDDING_MODEL is simply set wrong for this follower, fix it instead.`);
   }
   if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
@@ -1084,7 +1102,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       `\n  Refusing to re-embed with a model other than the one ob1_config records without --switch-model.\n` +
         `  Every vector in the corpus would be replaced by ${embedConfig.embeddingModel}'s, and ob1_config\n` +
         `  would be updated so preflight accepts a server configured for it. If that is the intent:\n` +
-        `    OB1_EMBEDDING_MODEL=${embedConfig.embeddingModel} bun db/reembed.ts --url … --switch-model\n` +
+        `    OB1_EMBEDDING_MODEL=${shellWord(embedConfig.embeddingModel)} bun db/reembed.ts --url … --switch-model\n` +
         `  If OB1_EMBEDDING_MODEL is simply set wrong in this shell, fix it instead.`
     );
   }
@@ -1456,7 +1474,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const refuseCurrent = (model: string, how: string) =>
       refuse(
         `it names the ${how} model (${model} @ ${currentDim}), so its pass can be finished —\n` +
-          `  cd db && OB1_EMBEDDING_MODEL=${model} bun reembed.ts --url … --job ${key} — or its failed rows accepted with --accept-failed.\n` +
+          `  cd db && OB1_EMBEDDING_MODEL=${shellWord(model)} bun reembed.ts --url … --job ${shellWord(key)} — or its failed rows accepted with --accept-failed.\n` +
           `  --retire is for a pass the record has moved on from.`
       );
     if (isCurrent(currentModel)) return refuseCurrent(currentModel, recorded.embedding_model === undefined ? "configured" : "recorded");
