@@ -6216,8 +6216,11 @@ if (want("10")) {
   const editedRun = runExtract({ url: URL_!, env, workers: 1, admit: atEdited.admit, writer: { out: () => {}, err: () => {} } });
   const editedWaiting = await pollUntil(async () => atEdited.waiting === 1, 10_000);
   await sql`UPDATE ob1_config SET value = 'extract:elsewhere@p0' WHERE key = 'entity_extraction_key'`;
-  await sql`SELECT update_thought(${editedNote}::uuid, 'Kenji rewrote the registry notes.', NULL, NULL::vector)`;
-  await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
+  try {
+    await sql`SELECT update_thought(${editedNote}::uuid, 'Kenji rewrote the registry notes.', NULL, NULL::vector)`;
+  } finally {
+    await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
+  }
   await Bun.sleep(200);
   atEdited.open();
   const editedCode = await editedRun;
@@ -6226,6 +6229,23 @@ if (want("10")) {
          `…a long note edited while its worker waits, still its claim, has no more of its old text sent and is extracted again at its new text (${ledgerCalls - editedFrom} old window(s) sent, ${editedAfter}, exit ${editedCode})`);
   await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:elsewhere@p0'`;
   await sql`SELECT delete_thought(${editedNote}::uuid, NULL::jsonb)`;
+  // …and one edited under the key the trigger follows, which requeues it: no
+  // more of its old text sent, counted edited, not lost, and extracted again
+  // at its new text (review pass 5).
+  const requeuedNote = await seed(Array.from({ length: 6 }, (_, p) => `The requeued ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita requeued point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atRequeued = heldGate(3);
+  const requeuedFrom = ledgerCalls;
+  const requeuedLines: string[] = [];
+  const requeuedRun = runExtract({ url: URL_!, env, workers: 1, admit: atRequeued.admit, writer: { out: (l) => requeuedLines.push(l), err: (l) => requeuedLines.push(l) } });
+  const requeuedWaiting = await pollUntil(async () => atRequeued.waiting === 1, 10_000);
+  await sql`SELECT update_thought(${requeuedNote}::uuid, 'Kenji rewrote the requeued registry notes.', NULL, NULL::vector)`;
+  await Bun.sleep(200);
+  atRequeued.open();
+  const requeuedCode = await requeuedRun;
+  const requeuedSummary = requeuedLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(requeuedWaiting && ledgerCalls - requeuedFrom === 1 && /, 1 edited mid-extraction and re-queued/.test(requeuedSummary) && !/no longer this worker's/.test(requeuedSummary) && (await statusOf(requeuedNote)) === "succeeded" && requeuedCode <= 1,
+         `…one edited under the key the trigger follows has no more of its old text sent, is counted edited, and is extracted at its new text (${ledgerCalls - requeuedFrom} old window(s) sent, exit ${requeuedCode}: ${requeuedSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${requeuedNote}::uuid, NULL::jsonb)`;
   // A pause moves the thought's time held on (N17): a hard stop while the
   // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
   // and stalls nothing (review pass 3).

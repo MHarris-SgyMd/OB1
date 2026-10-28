@@ -309,7 +309,10 @@ export const MAX_TIMER_MS = 2147483647;
  * on; pending, the worker waits, its claim and lease kept mid-thought and none
  * held between thoughts; rejected once the signal has aborted, the worker
  * stops as a stop finds it there. An open gate resolves whatever its signal
- * says, so a gate that never closes runs as none; one a worker waits at must
+ * says, and should answer with a promise already settled (a plain `async`
+ * function with no await does), since one that is not reads as a wait and
+ * costs the claim's read again (`admitted`'s "waited") at every window and
+ * pair; so a gate that never closes runs as none. One a worker waits at must
  * reject, never resolve, once its signal aborts, and must take its listener
  * off the signal when it resolves — the engine's signal lives the whole pass.
  * The engine's signal also aborts when the pass ends for a reason of its own —
@@ -337,26 +340,29 @@ export class AdmitThrow extends Error {
  * the admit gate held its worker mid-thought (SMD-3379 PR 1b-1, review passes
  * 3 and 4): a live write is what closes the gate, so a delete or an edit of
  * that thought lands while its worker waits, and its text must not go to the
- * provider after. "ours"; "deleted", the thought gone; "lost", the claim the
- * pool's or another's again (an edit's requeue, a reap); "moved", still this
- * worker's but its text changed (an edit under a key nothing requeues).
+ * provider after. "ours"; "deleted", the thought gone; "requeued", the claim
+ * the pool's again (an edit's requeue under the key 016 follows); "lost",
+ * another's or settled (a reap); "moved", still this worker's but its text
+ * changed (an edit under a key nothing requeues).
  * `fingerprint` is the claim's, by the engine's own rule: `coalesced` reads
  * the stored key first, as extraction does, else the text's.
  */
-export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean): Promise<"ours" | "deleted" | "lost" | "moved"> {
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
   const [r] = (await sql`
     SELECT (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END
               FROM thoughts WHERE id = ${id}::uuid) AS fingerprint,
-           EXISTS (SELECT 1 FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job} AND status = 'claimed' AND worker_id = ${workerId}) AS ours`) as { fingerprint: string | null; ours: boolean }[];
+           c.status, c.worker_id
+      FROM (SELECT 1) one LEFT JOIN thought_work_claims c ON c.thought_id = ${id}::uuid AND c.work_type = ${job}`) as { fingerprint: string | null; status: string | null; worker_id: string | null }[];
   if (r.fingerprint === null) return "deleted";
-  if (!r.ours) return "lost";
+  if (r.status === "pending") return "requeued";
+  if (r.status !== "claimed" || r.worker_id !== workerId) return "lost";
   return fingerprint === null || r.fingerprint === fingerprint ? "ours" : "moved";
 }
 
 /** The claim on the thought in hand found not this worker's to go on with after the admit gate held it (claimAfterWait): nothing more of it is sent. */
 export class ClaimGoneAtGate extends Error {
-  constructor(readonly claim: "deleted" | "lost" | "moved") {
-    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "moved" ? "edited" : "requeued or reaped"} while its worker waited at the admit gate`);
+  constructor(readonly claim: "deleted" | "requeued" | "lost" | "moved") {
+    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "lost" ? "reaped" : "edited"} while its worker waited at the admit gate`);
     this.name = "ClaimGoneAtGate";
   }
 }

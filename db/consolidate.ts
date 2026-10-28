@@ -1615,7 +1615,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     | { outcome: "abandoned" }
     /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
     | { outcome: "lost" }
-    /** Edited while its worker waited at the admit gate, still its claim: put back in the pool for the new text, nothing more judged (review pass 4). */
+    /** Edited while its worker waited at the admit gate, still its claim: the worker puts it back in the pool for the new text, nothing more judged (review passes 4 and 5). */
     | { outcome: "moved" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
@@ -1741,15 +1741,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         if (through === "waited") {
           const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false).catch(() => "ours" as const);
           if (claim === "deleted") return { outcome: "vanished" };
-          if (claim === "lost") return { outcome: "lost" };
-          if (claim === "moved") {
-            // Still ours, its text moved (063 requeues a judged thought only
-            // through its proposals): back to the pool for the new text; if
-            // that fails, the worker ends and its finally returns the claim.
-            if (hardStopped) return { outcome: "abandoned" };
-            if (!(await sql`SELECT requeue_thought_work(${JOB}, ${row.id}::uuid)`.then(() => true, () => false))) throw new StoppedBetweenPairs();
-            return { outcome: "moved" };
-          }
+          if (claim === "lost" || claim === "requeued") return { outcome: "lost" };
+          // Still ours, its text moved (063 requeues a judged thought only
+          // through its proposals): the worker puts it back in the pool.
+          if (claim === "moved") return { outcome: "moved" };
           const rest = candidates.slice(at).map((x) => x.older_id);
           const fresh = (await sql`
             SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector FROM thoughts
@@ -2182,9 +2177,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               }
             }
             if (hardStopped) return;
-            judged++;
-            if (ticketCalls === null) totals.ticketCallsUnread++;
-            else totals.ticketCalls += ticketCalls;
+            // Not judged: another holds it, or it goes back for its new text (review pass 5).
+            if (outcome.outcome !== "lost" && outcome.outcome !== "moved") {
+              judged++;
+              if (ticketCalls === null) totals.ticketCallsUnread++;
+              else totals.ticketCalls += ticketCalls;
+            }
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -2241,6 +2239,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             continue;
           }
           if (outcome.outcome === "moved") {
+            // Back to the pool for its new text, out of the heartbeat's set first;
+            // if that fails, the worker stops and its finally returns it (review pass 5).
+            const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
+            if (requeued !== null) {
+              hb.held.add(b.thought_id);
+              err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
+              return;
+            }
             lost++;
             err(`  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
             continue;

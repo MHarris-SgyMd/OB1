@@ -1549,10 +1549,19 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (e instanceof ClaimGoneAtGate) {
                   if (hardStopped) return;
                   // Still ours, its text moved under a key nothing requeues: back to the
-                  // pool for the new text, as a stale write is; if that fails, the finally
-                  // returns it with this worker's leases (review pass 4).
-                  if (e.claim === "moved" && !(await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => true, () => false))) return;
-                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "moved" ? { outcome: "superseded" } : { outcome: "lost" };
+                  // pool for the new text, as a stale write is, out of the heartbeat's
+                  // set first; if that fails, the finally returns it with this worker's
+                  // leases (review passes 4 and 5).
+                  if (e.claim === "moved") {
+                    hb.held.delete(b.thought_id);
+                    const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
+                    if (requeued !== null) {
+                      hb.held.add(b.thought_id);
+                      err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
+                      return;
+                    }
+                  }
+                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "lost" ? { outcome: "lost" } : { outcome: "superseded" };
                   continue;
                 }
                 // The database went away under the write: not the thought's, so
