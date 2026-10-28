@@ -253,6 +253,14 @@ const provider = new Provider(L.issuer, {
       if (key !== "ob1_third_party_rule") return;
       delete (metadata as Record<string, unknown>)[key];
       if (Object.hasOwn(L.clients, String(metadata.client_id))) return;
+      // A client whose id the REST core cannot name (layout.ts clientNameable)
+      // would sign in and be refused at every call. Refused here, it is no
+      // client at all: not at its authorization, its refresh or its exchange
+      // (SMD-3064 review pass 2). A registered client's id is the library's
+      // own, always nameable; a metadata document's URL may not be.
+      if (!clientNameable(String(metadata.client_id))) {
+        throw new errors.InvalidClientMetadata("the brain names each client it serves, and cannot name this client id: an id of letters, digits and . _ ~ -, at most 128 characters, or a metadata document URL of https:// in lower case, a host, an optional port and a path of those characters and / %, at most 180 characters in all");
+      }
       const declared = metadata.grant_types as unknown;
       if (declared !== undefined && (!Array.isArray(declared) || declared.some((g) => typeof g !== "string"))) {
         throw new errors.InvalidClientMetadata("grant_types must be an array of strings");
@@ -372,9 +380,8 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   if (claims.sub !== OPERATOR) throw new errors.InvalidGrant("subject_token names no known account");
   // The library writes client_id into every access token it signs (RFC 9068 §2.2); one without it was not signed here.
   if (typeof claims.client_id !== "string" || !claims.client_id) throw new errors.InvalidGrant("subject_token names no client");
-  // The sign-in refuses such a client (interaction, below); one whose grant
-  // let it through with no interaction is refused here, as the MCP server
-  // reads invalid_grant: sign in again, which then says why (SMD-3064).
+  // The client validator refuses such a client before it holds a token
+  // (extraClientMetadata, above); this holds if the two ever drift (SMD-3064).
   if (!clientNameable(claims.client_id)) throw new errors.InvalidGrant("subject_token's client has an id the REST core cannot name");
 
   const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));
@@ -453,14 +460,6 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   // layout.ts says what reaches the REST core that way.)
   if (noKeysScope(asking.scope.split(" ").filter(Boolean))) {
     return provider.interactionFinished(req, res, { error: "invalid_scope", error_description: "brain:read with brain:capture names no access key's scope: ask for brain:write, which reads and captures, or for one of them" }, { mergeWithLastSubmission: false });
-  }
-  // A client the REST core cannot name (layout.ts clientNameable: a metadata
-  // document URL that is not `https://`, in lower case, then a host and a plain
-  // path, or is over 180 characters) would sign in and be refused at every
-  // call: it is sent
-  // back before the sign-in (SMD-3064).
-  if (!clientNameable(asking.clientId)) {
-    return provider.interactionFinished(req, res, { error: "unauthorized_client", error_description: "the brain names each client it serves, and cannot name this client id: a metadata document URL must be https://, a host and a path of letters, digits and . _ ~ / % - alone, at most 180 characters" }, { mergeWithLastSubmission: false });
   }
   if (req.method === "GET" && !action) {
     if (prompt.name === "login") return send(res, 200, loginPage(asking, `${base}/login`));

@@ -3665,8 +3665,10 @@ refused there; it reaches the REST core only exchanged by the MCP server.
 - **Upgrading past SMD-3064:** the one name `oauth:operator` is gone, and
   nothing that named it binds a client now. A ban on it in the registry no
   longer refuses anyone: ban each client by its own name. An egress term
-  naming it no longer matches: an `OB1_EGRESS_DENY` term
-  `actor:oauth:operator` stops refusing, so name each client in its place.
+  naming it no longer matches, so name each client in its place: an
+  `OB1_EGRESS_DENY` term `actor:oauth:operator` stops refusing, and an
+  `OB1_EGRESS_ALLOW` term stops admitting, so text the GUI and connectors
+  send no longer leaves for a provider that the allow list gated.
   A classification of it, and a search's `actor` filter, match only the
   rows written before.
 - **The keys:** it reads this server's signing keys on the mesh and keeps

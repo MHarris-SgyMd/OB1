@@ -497,14 +497,15 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   assert(r.status === 200 && r.body.name === `oauth:operator+${longest}` && r.body.name.length <= 200, `…and the longest one taken, 180 characters, named whole within the 200-character actor filter (${r.status} ${String(r.body.name).length})`);
   r = await json(await call("/v1/whoami", await mint({ sub: "a".repeat(128), client_id: longest })));
   assert(r.status === 401 && r.body.credential === "token", `a caller name past 200 characters (a 128-character subject and that client) is refused, whatever its parts (${r.status})`);
-  // The authorization server refuses, before a sign-in and at the exchange, exactly the clients this server cannot name (SMD-3064 review pass 1).
+  // The authorization server refuses, as a client at all and at the exchange, exactly the clients this server cannot name (SMD-3064 review passes 1 and 2).
   const clients = [
     "gui", "mcp", "mcp-canary", "runner", "sVSJFn-GM1K_MdkSMjoqVTA29i8Q3PByRQHepaZBRb6", cimd, longest, `${longest}a`, "a".repeat(128), "a".repeat(129),
     "https://cimd.test/client/run-1.json", "https://h.example:8443/c", "https://h.example/a%2Fb", "HTTPS://claude.ai/x", "https://claude.ai/x?y=1", "https://claude.ai/x#f",
     "https://u@claude.ai/x", "https://claude.ai", "https://claude.ai/a+b", "https://claude.ai/a:b", "https://claude.ai/a,b", "http://claude.ai/x", "a b", "a+b", "", "operator",
+    `https://${"h".repeat(100)}/x`, `https://${"h".repeat(101)}/x`, "https://h.example:12345/x", "https://h.example:123456/x",
   ];
   const disagree = clients.filter((c) => clientNameable(c) !== authClientNameable(c));
-  assert(disagree.length === 0 && clients.filter((c) => clientNameable(c)).length === 12, `the REST core and the authorization server name the same ${clients.length} sample clients alike (${clients.filter((c) => clientNameable(c)).length} nameable)${disagree.length ? `, differ: ${disagree.join(" ")}` : ""}`);
+  assert(disagree.length === 0 && clients.filter((c) => clientNameable(c)).length === 14, `the REST core and the authorization server name the same ${clients.length} sample clients alike (${clients.filter((c) => clientNameable(c)).length} nameable)${disagree.length ? `, differ: ${disagree.join(" ")}` : ""}`);
 
   // An exchanged token names the MCP service as act, and the connector the operator signed in through as the client
   // (the act nested in it, SMD-3064), signed; a forwarder slot beside it is checked and does not replace it.
