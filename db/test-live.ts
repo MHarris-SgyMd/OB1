@@ -50,8 +50,8 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, LEASE_MARGIN_S, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
-import { subjectCurrent, subjectPrompt } from "../server-portable/subject.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { metadataTicket, subjectCurrent, subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
@@ -6811,8 +6811,8 @@ if (want("10h")) {
     if (!mayCreateC) {
       skip("the first naming refused while a login role cannot write the trigger's claims", "the connection's role cannot CREATE ROLE");
     } else {
-      const CROLE = "ob1_live_capture_only", EROLE = "ob1_live_embed_only", UROLE = "ob1_live_edit_only", IROLE = "ob1_live_noinsert";
-      const dropC = () => sql.unsafe(`DO $$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY['${CROLE}', '${EROLE}', '${UROLE}', '${IROLE}'] LOOP IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END IF; END LOOP; END $$`);
+      const CROLE = "ob1_live_capture_only", EROLE = "ob1_live_embed_only", UROLE = "ob1_live_edit_only", IROLE = "ob1_live_noinsert", NROLE = "ob1_live_enrich_only";
+      const dropC = () => sql.unsafe(`DO $$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY['${CROLE}', '${EROLE}', '${UROLE}', '${IROLE}', '${NROLE}'] LOOP IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END IF; END LOOP; END $$`);
       await dropC();
       try {
         // INSERT and UPDATE on the claims are not enough: requeue_thought_work's upsert reads the conflict (review pass
@@ -6824,15 +6824,45 @@ if (want("10h")) {
         await sql.unsafe(`CREATE ROLE ${CROLE} LOGIN; GRANT INSERT ON thoughts TO ${CROLE}; GRANT INSERT, UPDATE ON thought_work_claims TO ${CROLE};
           CREATE ROLE ${EROLE} LOGIN; GRANT UPDATE (embedding) ON thoughts TO ${EROLE};
           CREATE ROLE ${UROLE} LOGIN; GRANT UPDATE (content) ON thoughts TO ${UROLE}; GRANT SELECT, INSERT ON thought_work_claims TO ${UROLE};
-          CREATE ROLE ${IROLE} LOGIN; GRANT INSERT ON thoughts TO ${IROLE}; GRANT SELECT, UPDATE ON thought_work_claims TO ${IROLE}`);
+          CREATE ROLE ${IROLE} LOGIN; GRANT INSERT ON thoughts TO ${IROLE}; GRANT SELECT, UPDATE ON thought_work_claims TO ${IROLE};
+          GRANT SELECT ON ob1_config TO ${CROLE}, ${UROLE}, ${IROLE};
+          CREATE ROLE ${NROLE} LOGIN; GRANT SELECT, UPDATE ON thoughts TO ${NROLE}`);
+        // The enrichment recipe's role, SELECT and UPDATE on thoughts and nothing on ob1_config, is not flagged: 016's
+        // trigger already refuses its captures and text edits, pool or no (review pass 4).
         const capDry = await sweep({ dryRun: true, model: false });
         const capRun = await sweep({ model: false });
         await sql.unsafe(`GRANT SELECT ON thought_work_claims TO ${CROLE}; GRANT UPDATE ON thought_work_claims TO ${UROLE}; GRANT INSERT ON thought_work_claims TO ${IROLE}`);
         const capGranted = await sweep({ dryRun: true, model: false });
         assert(capRun.code === 2 && /Refusing to name a subject pool: naming the pool would fail the captures of ob1_live_capture_only, ob1_live_edit_only, ob1_live_noinsert: 113's trigger writes a work claim .* cannot SELECT, INSERT and UPDATE thought_work_claims\. Grant them that \(GRANT SELECT, INSERT, UPDATE ON thought_work_claims/.test(capRun.stderr)
             && (await named()) === "" && /A run would be refused: naming the pool would fail the captures of ob1_live_capture_only/.test(capDry.stdout)
-            && !/would fail the captures/.test(capGranted.stdout) && !/ob1_live_embed_only/.test(capRun.stderr + capDry.stdout),
+            && !/would fail the captures/.test(capGranted.stdout) && !/ob1_live_embed_only|ob1_live_enrich_only/.test(capRun.stderr + capDry.stdout),
           `the first naming is refused while a login role can write thoughts but not SELECT, INSERT and UPDATE the claims, nothing named, a dry run saying so, and not once it can (exit ${capRun.code}: ${capRun.stderr.trim().split("\n")[0]?.slice(0, 120)})`);
+        // A metadata edit that moves no ticket reads nothing as its writer, so that role — with the audit trigger's
+        // thought_audit, as the recipe's README grants — still enriches a thought filed under one; an edit that moves the
+        // ticket reads ob1_config as it, pool or no, as 113's header says (review pass 4, run-it: the trigger reading
+        // ob1_config first for a filed thought survived every suite). In one transaction, rolled back.
+        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${NROLE}`);
+        const undo = new Error("rolled back");
+        let keptEdit = "", movedEdit = "";
+        try {
+          await sql.begin(async (tx) => {
+            await tx.unsafe(`SET LOCAL ROLE ${NROLE}`);
+            await tx`UPDATE thoughts SET metadata = metadata || ${{ probe: "enriched" }}::jsonb WHERE id = ${filed}::uuid`;
+            keptEdit = "written";
+            try {
+              await tx.savepoint(async (sp) => { await sp`UPDATE thoughts SET metadata = metadata || ${{ issue: "SMD-70" }}::jsonb WHERE id = ${filed}::uuid`; });
+              movedEdit = "written";
+            } catch (e) {
+              movedEdit = (e as Error).message;
+            }
+            throw undo;
+          });
+        } catch (e) {
+          if (e !== undo) keptEdit ||= (e as Error).message;
+        }
+        const [{ filedMeta }] = (await sql`SELECT metadata AS "filedMeta" FROM thoughts WHERE id = ${filed}::uuid`) as { filedMeta: Record<string, unknown> }[];
+        assert(keptEdit === "written" && /permission denied for table ob1_config/.test(movedEdit) && JSON.stringify(filedMeta) === JSON.stringify({ issue: "SMD-7" }),
+          `a role with no ob1_config writes a filed thought's metadata, its ticket unmoved; moving the ticket reads ob1_config as it (kept: ${keptEdit.slice(0, 80)}; moved: ${movedEdit.slice(0, 80)}; after: ${JSON.stringify(filedMeta)})`);
       } finally {
         await dropC();
         await sql`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`;
@@ -6998,8 +7028,10 @@ if (want("10h")) {
         && (await named()) === POOL && (await filledKey()) === "" && ownCalls === asked,
       `a pooling that breaks off leaves the pool named, its pooling unfinished, nothing asked, exit 1 (exit ${broken.code}: ${broken.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 140)})`);
     const brokenDry = await sweep({ dryRun: true });
-    assert(/^ {2}pool subjects:r1\.2:p2r: named, its pooling unfinished: a run pools the 5 thought\(s\) with no current subject$/m.test(brokenDry.stdout),
-      `…a dry run then says it is named, its pooling unfinished (review pass 2: one said it was not named) (${brokenDry.stdout.split("\n").find((l) => /pool subjects/.test(l))?.trim().slice(0, 110)})`);
+    // …and the claims the pool holds, which a run takes (review pass 4: the dry run hid them).
+    assert(/^ {2}pool subjects:r1\.2:p2r: named, its pooling unfinished: a run pools the 5 thought\(s\) with no current subject$/m.test(brokenDry.stdout)
+        && /^ {2}pool subjects:r1\.2:p2r: \d+ pending/m.test(brokenDry.stdout),
+      `…a dry run then says it is named, its pooling unfinished (review pass 2: one said it was not named), and what it holds (${brokenDry.stdout.split("\n").filter((l) => /pool subjects/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
     // A thought deleted under the pooling fails its claim's key (23503), and the pooling is made again (review pass 2: a
     // pooling without the retry broke off): one such refusal, raised by a trigger of the test's own on the first row.
     await sql.unsafe(`CREATE SEQUENCE zz_pool_once; CREATE FUNCTION zz_pool_once() RETURNS trigger LANGUAGE plpgsql AS $zz$ BEGIN IF NEW.work_type = 'subjects:r1.2:p2r' AND nextval('zz_pool_once') = 1 THEN RAISE EXCEPTION USING ERRCODE = 'foreign_key_violation', MESSAGE = 'zz: a thought gone under the pooling'; END IF; RETURN NEW; END $zz$; CREATE TRIGGER zz_pool_once BEFORE INSERT ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_pool_once()`);
@@ -7012,7 +7044,7 @@ if (want("10h")) {
     }
     assert(retriedPooling, "…the pooling refused once for a thought gone under it is made again");
     const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!;
-    assert(/^ {2}pool subjects:r1\.2:p2r: named, its pooling unfinished: the 5 thought\(s\) with no current subject pooled now$/m.test(reRun.stdout) && (await filledKey()) === POOL,
+    assert(/^ {2}pool subjects:r1\.2:p2r: named, its pooling broken off before: the 5 thought\(s\) with no current subject pooled now$/m.test(reRun.stdout) && (await filledKey()) === POOL,
       `…and the next run pools them, its pooling marked finished (${reRun.stdout.split("\n").find((l) => /pool subjects/.test(l))?.trim().slice(0, 120)})`);
     assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one (1 with a new key); 2 the model named nothing for (1 out-of-date subject(s) closed), 1 answered not as JSON of the expected shape"
         && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2r" && ownCalls === asked + 4,
@@ -7111,11 +7143,12 @@ if (want("10h")) {
 
     // The spawned CLI prints what the sweep in this process does (masked seconds), each run from the model's pool, so
     // each names the rules' and pools the same three.
-    const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules", "--switch-key"], { env: env as Record<string, string>, cwd: HERE });
+    // With --retry-failed too, so the comparison holds its wiring through the CLI (review pass 4: no case did).
+    const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules", "--switch-key", "--retry-failed"], { env: env as Record<string, string>, cwd: HERE });
     await setNamed(POOL);
-    const inProcess = await sweep({ model: false, switchKey: true });
+    const inProcess = await sweep({ model: false, switchKey: true, retryFailed: true });
     await setNamed(POOL);
-    assert(same(untimed(spawned), untimed(inProcess)) && /named \(subjects:r1\.2:p2r was\), and the 3 thought\(s\)/.test(inProcess.stdout),
+    assert(same(untimed(spawned), untimed(inProcess)) && /named \(subjects:r1\.2:p2r was\), and the 3 thought\(s\)/.test(inProcess.stdout) && /^ {2}--retry-failed: \d+ failed claim\(s\) returned to the pool$/m.test(spawned.stdout),
       `the CLI's --subjects rules --switch-key prints what the sweep in this process does, stream by stream (exit ${spawned.code}: ${spawned.stdout.trim().split("\n").slice(-1)[0]})`);
     // Two runs at a key's change: one names the pool and pools, the other, waiting on the pool's lock, finds it pooled,
     // and between them each pooled thought is asked once (review pass 1: both pooled, the second requeueing what the
@@ -7219,6 +7252,10 @@ if (want("10h")) {
     await sql`INSERT INTO thought_work_claims (thought_id, work_type) VALUES (${release}::uuid, 'subjects:other')`;
     const keepDry = await sweep({ dryRun: true, limit: 50 });
     await sql`DELETE FROM thought_work_claims WHERE thought_id = ${release}::uuid AND work_type = 'subjects:other'`;
+    // rebuild.ts --status names the sweep as what drains the subject pool (review pass 4: "no worker in this tree").
+    const rebuildPools = await runScript(["bun", join(HERE, "rebuild.ts"), "--url", URL_!, "--status"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+    assert(rebuildPools.code === 0 && rebuildPools.out.includes("    subjects:r1.2:p2r  →  bun db/extract-entities.ts --url <url> --subjects\n"),
+      `rebuild.ts --status names --subjects as the subject pool's drainer (${rebuildPools.out.split("\n").find((l) => /subjects:r1/.test(l))?.trim().slice(0, 120)})`);
     assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3 \(1 with an out-of-date subject\)\. Nothing was written, pooled or asked\./.test(keepDry.stdout),
       `a dry run counts a subject the door would keep as kept, each pooled thought once (exit ${keepDry.code}: ${keepDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
@@ -7474,12 +7511,15 @@ if (want("10h")) {
         && goneRun.code === 0 && tally(goneRun) === "0 subject(s) recorded; 1 the model named nothing for" && (await claimOf(garbled))?.status === "succeeded",
       `a gone worker's lease run out is counted, taken and finished (exit ${goneRun.code}: ${tally(goneRun)})`);
     // …and one run out at its last attempt: the pool line counts it, and the run's claim fails it, said, exit 1 (review
-    // pass 2: it failed without a word, exit 0).
+    // pass 2: it failed without a word, exit 0). A thought pooled beside it has the run claim again after its first
+    // claim's reaping, so the count runs from the first claim, not the last (review pass 4: a window moved at each
+    // claim lived).
     await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-gone', claimed_at = now() - interval '2 hours', ttl_expires_at = now() - interval '1 hour', attempt_count = 3, finished_at = NULL WHERE thought_id = ${utf}::uuid AND work_type = ${POOL}`;
+    await sql`SELECT requeue_thought_work(${POOL}, ${filed}::uuid)`;
     const spentRun = await sweep();
-    assert(spentRun.code === 1 && /^ {2}pool subjects:r1\.2:p2r: 0 pending, 1 leased \(1 run out at their last attempt, failed by the next claim\)/m.test(spentRun.stdout)
-        && /1 claim\(s\) whose lease ran out at its last attempt failed as this run claimed/.test(spentRun.stderr) && (await claimOf(utf))?.status === "failed",
-      `a lease run out at its last attempt is counted, failed by the run's claim, said, exit 1 (exit ${spentRun.code}: ${spentRun.stderr.trim().split("\n")[0]?.slice(0, 120)})`);
+    assert(spentRun.code === 1 && /^ {2}pool subjects:r1\.2:p2r: 1 pending, 1 leased \(1 run out at their last attempt, failed by the next claim\)/m.test(spentRun.stdout)
+        && /^ {2}1 thought\(s\) in /m.test(spentRun.stdout) && /1 claim\(s\) whose lease ran out at its last attempt failed while this run claimed/.test(spentRun.stderr) && (await claimOf(utf))?.status === "failed" && (await claimOf(filed))?.status === "succeeded",
+      `a lease run out at its last attempt is counted, failed by the run's first claim, said after its next, exit 1 (exit ${spentRun.code}: ${spentRun.stderr.trim().split("\n")[0]?.slice(0, 120)}; ${tally(spentRun)})`);
     // A stop during a pause for the provider ends the sweep there, the call not made again (review pass 2: four were).
     await sql`SELECT requeue_thought_work(${POOL}, ${garbled}::uuid)`;
     const pauseStop = new AbortController();
@@ -7504,6 +7544,33 @@ if (want("10h")) {
       await lockProbe.close();
     }
     assert(lentCode === 0 && lockFree, `a caller's client of one connection: the run names, pools and ends, the pool's lock let go with the client still open (exit ${lentCode}, lock ${lockFree ? "free" : "held"})`);
+    // A ticket filed while no pool was named — before 113, or between pools — is read at the next naming: "no current
+    // subject" reads the ticket the thought is filed under, not its fingerprint alone (review pass 4: the naming took a
+    // filed thought's model subject, or a rule's whose ticket moved, as current, and the claims' rules check never saw
+    // it).
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+    await sql`SELECT update_thought(${utf}::uuid, NULL, ${{ ticket: "SMD-78" }}::jsonb)`;
+    await sql`SELECT update_thought(${filed}::uuid, NULL, ${{ issue: "SMD-79" }}::jsonb)`;
+    const filedUnpooled = await sweep({ model: false });
+    const utfFiled = await standingOf(utf), filedMoved = await standingOf(filed);
+    assert(/^2 subject\(s\) recorded \(2 by the ticket filed under\), 2 in place of a standing one \(2 with a new key\)/.test(tally(filedUnpooled)) && utfFiled?.key === "ticket:SMD-78" && utfFiled.by === "metadata" && filedMoved?.key === "ticket:SMD-79",
+      `a ticket filed or moved while no pool was named is read at the next naming, the rule's subject in place of the model's and of the old ticket's (exit ${filedUnpooled.code}: ${tally(filedUnpooled)}; ${filedMoved?.key})`);
+    // The filed ticket in SQL against metadataTicket, value by value: the key's length at its edge, and what JavaScript's
+    // trim takes that the locale's [[:space:]] may not (review pass 4, cold read: a no-break space about an id).
+    const metas: unknown[] = [{}, { ticket: "SMD-1" }, { ticket: " SMD-2 " }, { ticket: "\tSMD-3\n" }, { ticket: "smd-4" }, { ticket: 5 }, { ticket: "S-6" },
+      { ticket: "SMD-7", issue: "SMD-8" }, { ticket: "not one", issue: "SMD-9" }, { ticket: null, issue: "SMD-10" }, { issue: "SMD-11" }, { issue: ["SMD-12"] },
+      { ticket: `SMD-${"9".repeat(197)}` }, { ticket: `SMD-${"9".repeat(196)}` }, { ticket: "SMD-13 and more" }, [], "SMD-14", null,
+      { ticket: "\u00a0SMD-15\u3000" }, { ticket: "not one", issue: "\ufeffSMD-16\u2028" }];
+    const filedGot = (await sql`
+      SELECT ${filedTicketSql(sql)} AS filed
+        FROM (SELECT v.i, v.m AS metadata FROM jsonb_array_elements(${JSON.stringify(metas)}::text::jsonb) WITH ORDINALITY AS v(m, i)) t
+       ORDER BY t.i`) as { filed: string | null }[];
+    const filedDiffer = filedGot.flatMap((r, i) => {
+      const want = metadataTicket(metas[i] as Record<string, unknown> | null);
+      return (r.filed ?? null) === want ? [] : [`${JSON.stringify(metas[i]).slice(0, 40)}: ${r.filed} vs ${want}`];
+    });
+    assert(filedGot.length === metas.length && filedDiffer.length === 0,
+      `the sweep's SQL reads the filed ticket as metadataTicket does (${metas.length} values; differing: ${filedDiffer.slice(0, 3).join("; ") || "none"})`);
     // The sweep's SQL against subjectCurrent, cell by cell under both settings (review pass 1: an off arm matching
     // anywhere in the key, or skipping the prefix, lived): every way by every pass key here, odd ones and NULLs among
     // them.

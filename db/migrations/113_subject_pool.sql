@@ -41,8 +41,12 @@
 --     and writes nothing. Under the door's advisory lock, the thought locked
 --     FOR KEY SHARE first, as record_thought_subject. The sweep calls it when
 --     the model names nothing for a thought whose subject is out of date.
---   * Grants: none new. The trigger runs as the writer of the thought, and
---     its pool writes are 016's: SELECT, INSERT and UPDATE on
+--   * Grants: none issued, and one read is new. The trigger runs as the
+--     writer of the thought, so an edit that moves metadata.ticket or
+--     metadata.issue reads ob1_config as the caller from 113 on, pool or no:
+--     the SELECT a role that captures has needed since 016's trigger, which
+--     a role that only edits metadata did not. Its pool writes are 016's:
+--     SELECT, INSERT and UPDATE on
 --     thought_work_claims (the worker group's; requeue_thought_work's upsert
 --     reads the conflict), which a capturing role needs once a pool is
 --     named, as once extraction is enabled, and which preflight's write
@@ -58,11 +62,16 @@
 --     text moved stands at its old fingerprint until the sweep takes it, as
 --     111 says.
 --   * The share alarm for a judge model that answers garbage (PR 5b).
+--   * A fold's replay (SMD-2117, ob1.projecting_replay): this trigger, as
+--     016's, does not tell one from a live write, so a fold with a pool
+--     named pools each thought it replays. The fold decides for both.
 --
 -- SAFETY
 --   A new trigger function, a trigger and a new function: no existing row
 --   changes, and the trigger writes nothing until the sweep has named its
---   pool.
+--   pool. Before then it reads ob1_config, as the caller, on a capture, a
+--   text edit or an edit that moves the ticket: the last a read a role that
+--   only edits metadata did not make before 113 (Grants, above).
 --
 -- Idempotent: CREATE OR REPLACE, the trigger dropped by name first.
 -- =============================================================================

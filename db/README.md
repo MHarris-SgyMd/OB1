@@ -2174,16 +2174,19 @@ puts each new or edited thought back in the pool `ob1_config.subject_pool_key`
 names, through 016's `requeue_thought_work`, as 016's trigger does for the
 extraction pass; with no pool named it does nothing, and a metadata edit moves
 nothing, nor reads anything as the caller, unless it files the thought under
-another ticket (`metadata.ticket`, else `metadata.issue`, the metadata rule's fields). The sweep claims from it as the extraction
+another ticket (`metadata.ticket`, else `metadata.issue`, the metadata rule's fields):
+such an edit reads `ob1_config` as the caller from 113 on, pool or no, as a
+capture does. The sweep claims from it as the extraction
 pass claims from its own, so a claim finished is the record that a thought was
 asked at its text. `close_thought_subject(thought, facet, fingerprint)` closes
 the standing subject the model now names nothing for, under the door's advisory
 lock, only while the thought's text is the one read and that facet still stands
 (`stale`, `moved` or `none` otherwise), so a subject a pass wrote since the
 sweep read it stands. Refuses by name without 015, 016 or 111; a re-apply is a
-no-op. No grant moves, but the trigger runs as the caller, as 016's does: once
-a pool is named a capturing role needs `SELECT, INSERT, UPDATE` on
-`thought_work_claims`, which preflight checks (below). The sweep's place in
+no-op. No grant is issued, but the trigger runs as the caller, as 016's does: a
+ticket edit reads `ob1_config` (above), and once a pool is named a capturing
+role needs `SELECT, INSERT, UPDATE` on `thought_work_claims`, which preflight
+checks (below). The sweep's place in
 sleep is SMD-3306 PR 6. test-schema [101] (the trigger, a blank key, the ticket
 filed later, each action of the close and its refusals), test-upgrade [20be] (refused without each
 prerequisite; onto a populated brain at 112, nothing moved, no pool until one
@@ -2897,7 +2900,7 @@ bun extract-entities.ts --url … --subjects rules        # …the rules alone, 
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused), its pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once)
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once)
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3198,7 +3201,8 @@ during it ends the CLI at once, and the pooling, one statement, runs on to its e
 on the server, holding the lock below, unmarked. One run
 names and pools at a time, under a session advisory lock, a run that waits for
 another saying so. The first naming is
-refused while a login role can write thoughts but not the claims the trigger
+refused while a login role that can capture — it reads `ob1_config`, without
+which 016's trigger refuses it already — cannot write the claims the trigger
 writes as it, which would fail its every capture. Each claim is one thought,
 leased for the limit a call and five minutes more, renewed before a call is asked
 again; a run that stops hands back what it holds, a second signal the claim in
@@ -3216,7 +3220,9 @@ fingerprint), and an out-of-date subject standing on it is closed through 113's
 the text read, so a subject a pass wrote since stands. A thought the pass gave a
 current subject after it was pooled is finished unasked, so long as the rules
 agree now: a ticket filed on it since a model keyed it, another ticket than the
-one a rule read, or none where one was, is read again. An answer that is not
+one a rule read, or none where one was, is read again. A subject the ticket a
+thought is filed under disagrees with is no current subject at a naming either,
+so a ticket moved before 113, or under another pool, is read then. An answer that is not
 JSON with a subject, a call past the limit, a row the egress gate refuses and a
 key the door refuses each fail the claim, the subject standing, are said, and
 exit 1, as the pass fails a malformed answer; `--retry-failed` puts the failed
@@ -5700,11 +5706,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3082 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1783 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1787 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 366 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 370 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

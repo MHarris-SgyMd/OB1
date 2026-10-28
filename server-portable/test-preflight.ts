@@ -3117,6 +3117,12 @@ else {
       await claims.unsafe("GRANT SELECT ON thought_work_claims TO ob1_pf_capture");
       assert(poolNoSelect.code === 1 && /GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolNoSelect.out),
              `…and one lacking SELECT there too is refused, the GRANT naming it (exit ${poolNoSelect.code})`);
+      // A blank key names no pool, as 113's trigger reads it: the work-claim writes are not asked for (review pass 4,
+      // run-it: preflight reading '' as a pool named survived every suite).
+      await claims.unsafe("UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_key'");
+      const poolBlank = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(poolBlank.out) && !/thought_work_claims/.test(writeLine(poolBlank.out)),
+             `…and under a blank key, which names no pool, the role is not asked for them (exit ${poolBlank.code}: ${writeLine(poolBlank.out).trim().slice(0, 120)})`);
       await claims.unsafe("DELETE FROM ob1_config WHERE key = 'subject_pool_key'");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the

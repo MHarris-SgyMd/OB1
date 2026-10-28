@@ -1828,7 +1828,8 @@ if (configFailed) {
           // capture — unconditionally, before it even looks at the key — and, while
           // entity_extraction_key is set, upserts a thought_work_claims row. So the
           // trigger's mere presence makes SELECT on ob1_config a hard capture-path
-          // requirement, and a set key adds thought_work_claims INSERT/UPDATE. The
+          // requirement, and a set key adds thought_work_claims SELECT/INSERT/UPDATE
+          // (the upsert reads the conflict: SMD-3306 PR 5, review pass 2). The
           // trigger is read via pg_trigger (tgrelid = to_regclass, so an absent
           // thoughts matches nothing rather than raising); the key inside CASE
           // guards, so has_table_privilege — which raises for a relation it cannot

@@ -106,9 +106,11 @@ type Report = {
   irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[];
 };
 
-/** The worker that drains a pool, by the key's prefix (db/config.mjs's three key shapes). */
+/** The worker that drains a pool, by the key's prefix (db/config.mjs's three key shapes, and subject.ts's subjectPoolKey). */
 function drainer(pool: string): string {
   if (pool.startsWith("reembed:")) return "bun db/reembed.ts --url <url>";
+  // The subject pool (113, SMD-3306): the rules' pool has no question in its key.
+  if (pool.startsWith("subjects:")) return `bun db/extract-entities.ts --url <url> --subjects${pool.includes(":p") ? "" : " rules"}`;
   if (pool.startsWith("extract:")) return "bun db/extract-entities.ts --url <url>";
   if (pool.startsWith("consolidate:")) return "bun db/consolidate.ts --url <url>";
   return "(no worker in this tree drains this key)";
