@@ -1168,10 +1168,11 @@ for (const s of SERVERS) {
   assert(short?.join() === "last-event-id", `…and names the header a list leaves out (its own probe: ${short === null ? "unread" : short.join(", ") || "none missing"})`);
 }
 
-// The files this test cannot import — a Next.js route, a README's code block, a
-// Node stub — say the same thing in their text. (The cost recipe's per-session
-// sample, read here for SMD-1497's and SMD-1607's shapes, left with the recipe —
-// SMD-1800.)
+// The files this test cannot import — a Next.js route, a README's code block —
+// say the same thing in their text. (The cost recipe's per-session sample, read
+// here for SMD-1497's and SMD-1607's shapes, left with the recipe — SMD-1800;
+// the Agent Dashboard walkthrough's Node stub left with the Next dashboards —
+// SMD-3309.)
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
@@ -1183,9 +1184,6 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
     must: [/import \{ createHash, timingSafeEqual \} from "node:crypto"/, /function secretMatches\(/, /timingSafeEqual\(digest\(presented\), digest\(expected\)\)/, /if \(!secretMatches\(secret, TELEGRAM_WEBHOOK_SECRET\)\)/],
     // Deno 2 removed crypto.subtle.timingSafeEqual; a sample that calls it fails every webhook on Supabase.
     mustNot: [/secret !== TELEGRAM_WEBHOOK_SECRET/, /crypto\.subtle\.timingSafeEqual/] },
-  { file: "docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs",
-    must: [/function secretMatches\(/, /timingSafeEqual\(digest\(presented\), digest\(expected\)\)/, /secretMatches\(provided, accessKey\)/],
-    mustNot: [/provided === accessKey/] },
 ];
 for (const t of TEXT_ONLY) {
   const text = readFileSync(join(ROOT, t.file), "utf8");

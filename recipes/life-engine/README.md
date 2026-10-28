@@ -820,7 +820,7 @@ After setup, you'll have:
 - Add more habits and track streaks over time
 - Connect additional Open Brain extensions for richer context
 - Experiment with different loop intervals (15m for busy days, 1h for relaxed days)
-- Build a [dashboard](../../dashboards/) to visualize your habit and mood data
+- Build a dashboard page for your habit and mood data, as a plugin's page in the operator GUI ([`plugins/`](../../plugins/))
 - Share your Life Engine configuration with the community
 
 ---

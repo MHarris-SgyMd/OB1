@@ -101,7 +101,7 @@ exactly one disposition.
   ~~`work-operating-model-activation`~~ (the three retired, SMD-2920 and SMD-2923), ~~`x-twitter-import`~~ (holds no client since
   SMD-2493; `local-brain-no-mcp`, also listed here, was retired by SMD-1800 instead).
 - **adjacent follow-up filed:** SMD-1929 (purge inherited NBJ brand/funnel assets under
-  `dashboards/` + `docs/`, outside this triage's four directories).
+  `dashboards/` + `docs/`, outside this triage's four directories; the `dashboards/` half retired with that category, SMD-3310).
 
 **Guard follow-ups (SMD-1924 verify item — "a newly vendored file redefining a core object
 fails CI"):**
@@ -122,8 +122,8 @@ fails CI"):**
    retired (SMD-2103); `git grep smart-ingest-tables` finds only this note and `changes/`.
 2. **`recipes/content-fingerprint-dedup` stale paths** — `recipes/email-history-import`'s
    `pull-gmail.ts` pointed at `primitives/content-fingerprint-dedup`; **fixed** to `recipes/…`
-   here. The `dashboards/ob1-canonical-landing` upstream GitHub URL is an SMD-1929 item
-   (upstream branding/links), left for it.
+   here. The `dashboards/ob1-canonical-landing` upstream GitHub URL was an SMD-1929 item
+   (upstream branding/links); the landing retired with the `dashboards/` category (SMD-3310).
 3. **`schemas/workflow-status`** — **no fix needed.** `migration.sql` already uses
    `ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS …` on both columns (idempotent, re-runnable);
    the earlier "bare `ADD COLUMN` collision" note was a misread of the README example. The
@@ -378,7 +378,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | Artifact | Disposition | Justification |
 |---|---|---|
 | `agent-memory` | keep + audited | Governed-memory **sidecar** tables (memory records, provenance, use-policy, review, recall traces, audit) — all in their own names, core `thoughts` untouched (not a hazard); no `db/` migration replicates them (not superseded). Depended on by `agent-memory-api` / `hermes-agent-memory` / `openclaw-agent-memory` and CI `test-writes.ts` SIDECARS. |
-| `brain-stats-daily` | keep + audited | Dashboard daily-bucket heatmap RPCs (`brain_stats_daily*`), own functions only, core untouched. Distinct from migration 024 (`thought_stats_summary`, a single summary) — not superseded. Standalone dashboard schema; unreferenced ≠ dead (dashboards are an open category). |
+| `brain-stats-daily` | keep + audited | Dashboard daily-bucket heatmap RPCs (`brain_stats_daily*`), own functions only, core untouched. Distinct from migration 024 (`thought_stats_summary`, a single summary) — not superseded. Standalone dashboard schema; unreferenced ≠ dead (dashboards were an open category until SMD-3310; a page over it would now be a plugin's). |
 | `crm-person-tiers` | keep + audited | Own `crm_persons` / `crm_person_mentions` tables + tiers RPC, core untouched (not a hazard). Wired into the fork's own `db/config.mjs` ROLE_GRANTS and `db/README` grants; optional companion to the `gmail-smart-pull` recipe. |
 | `enhanced-thoughts` | keep + audited *(revises seed "remove/fence hazard")* | The SMD-1250 `upsert_thought` clobber is **gone from the current file** (only additive `ALTER … ADD COLUMN` + non-core functions `search_thoughts_text` / `brain_stats_aggregate` / `get_thought_connections`), and check 7 of the guard now blocks its return. Load-bearing: CI `test-writes.ts` SIDECARS applies it, and `entity-extraction-worker` / `consolidation-workers` reference its columns (`enhanced-mcp` and `rest-api` did until SMD-1931). Residual is a documented *deployment* grant caveat (anon + SECURITY DEFINER), not a file hazard. |
 | `entity-extraction` | keep + audited *(revises seed "remove")* | Community `public.entities` / `edges` / `thought_entities` / queue (distinct from the fork's `ob1_*` in migration 016 — they coexist). Required by `schemas/typed-reasoning-edges` (errors without it), used by the vendored worker, `recipes/brain-health-monitoring` ops-views, and CI `test-writes.ts` (reads `consolidation_log`). Fails "verified no references." |
@@ -392,7 +392,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `thought-work-claims` | **remove** *(no-parity posture)* | Already a **comment-only stub** — all upstream DDL was stripped under SMD-1250 (it would have clobbered 015's `release_thought` / `release_claims_for_worker`). Migration 015 owns the real `thought_work_claims` (evals + `db/config.mjs` grants use it). The stub's only content is upstream documentation. Removal PR: delete the folder; guard check 7 still fences the function names regardless. |
 | `typed-reasoning-edges` | keep + audited + rebuild-ticket **SMD-1253** | Own `thought_edges` table + upsert RPC (granted by `db/config.mjs`); required by `recipes/typed-edge-classifier` (matches its CHECK constraint). Requires `entity-extraction`. Not rebuilt in core; rebuild tracked under SMD-1253. |
 | `wiki-pages` | ~~keep + audited + rebuild-ticket SMD-949~~ → **retired (SMD-1812)** *(no-parity posture; rebuilt in core)* | Was upstream's `wiki_pages` / `wiki_sections` / `wiki_section_revisions` + three RPCs. Migration 064 is the fork's page store — `pages` (a page is a thought: its id, its render as the content), `page_sections`, `page_section_revisions`, `write_page_section`'s regen guard, lineage rows for generated sections — under names of its own, so a brain that applied the file by hand keeps its tables untouched. Directory removed, README index row → core, community grant rows out (`pages` group instead). The wiki recipes' pages belong there (SMD-2143). |
-| `workflow-status` | keep + audited | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration; `migration.sql` uses `ADD COLUMN IF NOT EXISTS` on both columns (idempotent, re-runnable — no install-order collision with `enhanced-thoughts`). Live consumers: `dashboards/open-brain-dashboard-next` (Workflow board requires the columns) and `open-brain-rest`. Distinct from the heavier `enhanced-thoughts`. |
+| `workflow-status` | keep + audited | Minimal "add `status` / `status_updated_at` + `idx_thoughts_status`" migration; `migration.sql` uses `ADD COLUMN IF NOT EXISTS` on both columns (idempotent, re-runnable — no install-order collision with `enhanced-thoughts`). Its consumers, the Next.js dashboard's Workflow board and `open-brain-rest`, both retired (SMD-3309, SMD-1931); none is left, and the schema retires with SMD-3260. Distinct from the heavier `enhanced-thoughts`. |
 
 ### `docs/drafts/` (3)
 
@@ -402,7 +402,7 @@ remaining drafts are unreferenced markdown working-notes.
 
 | Artifact | Disposition | Justification |
 |---|---|---|
-| `agent-memory-branding-dna.md` | **remove** | Upstream (NBJ) product-identity guidance for "NBJ OB1 Agent Memory." Zero references; no fork value under the fork's own-identity / no-parity posture. The sibling brand *assets* it prescribes (`docs/assets/agent-memory/brand/`, `dashboards/.../public/brand/`) are covered by follow-up **SMD-1929**. |
+| `agent-memory-branding-dna.md` | **remove** | Upstream (NBJ) product-identity guidance for "NBJ OB1 Agent Memory." Zero references; no fork value under the fork's own-identity / no-parity posture. The sibling brand *assets* it prescribes (`docs/assets/agent-memory/brand/`, and the Next.js dashboard's `public/brand/` until it retired with SMD-3309) are covered by follow-up **SMD-1929**. |
 | `agent-memory-staging-deploy-notes.md` | **remove** | Upstream launch/staging notes (references `NAT-833`, "Jonathan's personal OB1 database"); explicitly transitional ("use it to update the public guides"). Zero references. *Before deleting: confirm the operational nuggets (Hono `/agent-memory-api/*` path normalization) are captured in `integrations/agent-memory-api/README`; fold if not.* |
 | `discord-chunking-discussion.md` | **remove** | Resolved design discussion — all three proposals landed in core (chunking → 007, fingerprint → 003, full-text → 011). Historical; zero references. |
 

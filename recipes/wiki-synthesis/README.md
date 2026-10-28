@@ -145,19 +145,6 @@ node scripts/backfill-gmail-wikis.mjs
 
 The run state log lives at `./data/wiki-synthesis-state.jsonl`. Re-running the script is resume-safe — previously-ok threads are skipped, ineligible threads stay logged, and failed threads retry up to `MAX_ATTEMPTS` (3). Pass `--re-evaluate` to force a re-check of already-synthesized threads.
 
-### 5. (Optional) Wire it into a dashboard
-
-If you run a Next.js-based Open Brain dashboard, copy the files from [`dashboard-snippets/`](./dashboard-snippets/) into your app:
-
-- `components/GenerateAutobiographyButton.tsx` — a Client Component that drives a Server Action.
-- `app/wiki/page.tsx` — the `/wiki` index that lists generated articles and exposes a one-click regenerate button.
-- `app/wiki/[slug]/page.tsx` — a `/wiki/<slug>` detail page that renders the selected article.
-
-The snippets assume a Tailwind setup with theme tokens like `bg-bg-surface`, `text-text-primary`, `border-violet/40`. Swap these for whatever your dashboard theme uses. You must also add your own authentication guard before surfacing personal content — the snippets ship with `// e.g. await requireSessionOrRedirect();` placeholders.
-
-> [!WARNING]
-> The Server Action spawns a Node subprocess that can exceed Next.js's default server-action timeout when running a full (multi-year) autobiography. Use the year dropdown to scope one year at a time, or run the CLI directly for full generations.
-
 ## Expected Outcome
 
 **Topic mode, after a successful autobiography run:**

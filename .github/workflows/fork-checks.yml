@@ -112,13 +112,6 @@ jobs:
       - name: Session capture hook
         run: bun recipes/session-capture-hook/test-session-capture.mjs
 
-      # The dashboard's reply parsers (SMD-2510): src/lib/api.ts's three, fed the
-      # server's own replies from server-portable/render.ts, so a reply's shape
-      # and the dashboard's reader cannot drift apart. render.ts imports only
-      # local files, so nothing is installed. Bun only, no database.
-      - name: Dashboard reply parsers
-        run: bun dashboards/open-brain-dashboard/test-parsers.ts
-
       # The forwarder's self-check (SMD-2583): which lookup answers it dials —
       # an address on front alone, never its own, the gateway, a network or
       # broadcast address or a link-local one, and none when no default route
@@ -1130,44 +1123,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards (SMD-1801): Bun installs and builds them, and
-      # drives the SvelteKit one against the stack at the end of this job.
+      # Bun runs the operator GUI's smokes against the stack in this job. (It also
+      # built and drove the old SvelteKit dashboard until SMD-3310 retired it.)
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
-
-      # SMD-2251. The three dashboards need nothing from the stack, and built in
-      # series after it they added 35 s to this job. So they build here, in the
-      # background, one after another while the stack comes up (mostly waiting
-      # on health checks, not CPU), and "The three dashboards build" below
-      # waits for them and reports each. The two Next dashboards read their env
-      # at build time — the gateway URL and a session secret, any values. Each
-      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
-      # one limit, which the wait step reads for its labels and cap; a hang
-      # ends as 124 and the next dashboard still builds. The subshell's output
-      # goes to files: otherwise this step would wait for the whole build.
-      - name: The three dashboards start building, in the background
-        id: dashboards
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
-        run: |
-          out="$RUNNER_TEMP/dashboards"
-          mkdir -p "$out"
-          limit_s=240
-          echo "$limit_s" > "$out/limit"
-          (
-            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-              check=""
-              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
-              start=$SECONDS
-              rc=0
-              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
-              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
-            done
-            touch "$out/done"
-          ) > "$out/runner.log" 2>&1 < /dev/null &
-          echo "$!" > "$out/pid"
 
       # The stack end to end: bring up Postgres, apply the schema and
       # serve MCP, with no Supabase CLI installed and no supabase.com account.
@@ -2196,81 +2156,6 @@ jobs:
             exit 1
           fi
           echo "No supabase binary in the running stack."
-
-      # SMD-1801. The three dashboards build from their pinned installs, with no
-      # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which SMD-1931 retired; they retire with
-      # SMD-2280's harvest. The SvelteKit one speaks MCP to
-      # the server this stack serves, so it is driven too, below.
-      # They build in the background from the job's start (SMD-2251); this step
-      # waits for that and reports it — each dashboard's log folded when it
-      # passed and open under an error when it failed, and a line per dashboard
-      # of exit code and seconds. It runs when a stack step failed too, so a
-      # broken build is never hidden behind one. The wait ends when the
-      # background shell writes its done mark or dies without it, or at a cap
-      # a minute past the three limits and their kill-after grace. A dead shell
-      # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
-      # its state is read instead (review pass 1). timeout TERMs a build's
-      # process group, and its child, the `sh -c` running the chain, dies on
-      # it (dash does not exec the last command of an && list), so a hang is
-      # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
-      # from outside.
-      - name: The three dashboards build
-        if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
-        run: |
-          out="$RUNNER_TEMP/dashboards"
-          pid=$(cat "$out/pid")
-          limit_s=$(cat "$out/limit")
-          cap=$((3 * (limit_s + 10) + 60))
-          running() {
-            local state
-            state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
-          }
-          start=$SECONDS
-          while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
-          echo "waited $((SECONDS - start)) s for the background build"
-          if [ ! -e "$out/done" ]; then
-            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
-            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
-            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
-            exit 1
-          fi
-          failed=0
-          summaries=""
-          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            read -r rc secs < "$out/$d.rc"
-            why=$rc
-            case $rc in
-              124) why="124, over the $limit_s s limit" ;;
-              137) why="137, killed from outside, most likely out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$d — built"
-              cat "$out/$d.log"
-              echo "::endgroup::"
-            else
-              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
-              cat "$out/$d.log"
-              failed=1
-            fi
-            summaries+="  $d: exit $rc in $secs s"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$failed" = 0 ]
-
-      # The SvelteKit dashboard as a browser uses it, against the stack that is
-      # up: a wrong key refused at /signin, the write key signed in and the JSON
-      # its first page loads (thought_stats through its proxy) reaching the
-      # database, the read key signed in and refused capture — 403 from the
-      # proxy, before the server is asked — and the capture-only key refused at
-      # sign-in. deploy/.env holds hashes; the raw keys minted above ride in the
-      # three OB1_SMOKE_* variables.
-      - name: The SvelteKit dashboard, driven against the stack
-        working-directory: dashboards/open-brain-dashboard
-        env:
-          MCP_URL: http://127.0.0.1:8010/mcp
-        run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
       # SMD-2760. What comes back after a reboot is each container's restart
       # policy. Postgres had none, so on Docker a reboot would bring the

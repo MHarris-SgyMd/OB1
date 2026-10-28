@@ -943,7 +943,7 @@ Then update the pin table at the top of this file.
 ### Vendored content: audit once, hold the delta
 
 Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+`schemas/` and `primitives/` is upstream's community tree,
 vendored wholesale at the pin, so we ship its worst advice with its best under
 this repository's name. The rule (SMD-1251, change 51): **audit the tree once
 and hold the delta** — a standing check carries each audit so a rebase cannot
@@ -1185,13 +1185,11 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`).
-  All three sign in with one of the server's access keys sealed in a cookie
-  (SMD-1801 brought the SvelteKit one to the shape the Next two had), but the
-  first speaks MCP to the server and the other two speak to the `open-brain-rest`
-  gateway, and nothing says which is canonical. Pick one before depending on any.
-- **`sensitivity-tiers` does not exist.** Both Next dashboards, the
-  `weekly-digest` recipe and its code reference it as a primitive.
+- **Overlapping dashboards: fixed.** The one canonical dashboard is the
+  operator GUI at `/dashboard` (`dashboard/README.md`). The other three and the
+  `dashboards/` category retired (SMD-3309, SMD-3310).
+- **`sensitivity-tiers` does not exist.** The `weekly-digest` recipe and its
+  code reference it as a primitive (both Next dashboards did, until SMD-3309).
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
