@@ -2,30 +2,38 @@
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought with no current subject is
  * given its own subject, the rules' or, for the rest, the judge model's (server-portable/subject.ts), through
  * migration 111's record_thought_subject. A subject is current when it stands at the thought's text and was found
- * under the current rules and question (subjectCurrent).
+ * under the current rules and question, a model's with its reasoning on when the question is asked with it on
+ * (subjectCurrent).
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
  *   bun db/extract-entities.ts --url … --subjects --dry-run      # how many each would find; writes and asks nothing
  *   bun db/extract-entities.ts --url … --subjects --limit 50     # at most this many thoughts
- *   --timeout SECONDS (300, per model call)
+ *   --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off)
+ *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
  *   exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering ·
- *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
+ *   2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal (the first
+ *   after the call in hand, which can run to the limit a call; a second at once)
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
  * it is extracted. This sweep is the rest: thoughts extracted before 111, those the rules leave to the model, those
- * whose text moved since their subject was found, and those found under a rule or question that has changed since.
+ * whose text moved since their subject was found, those found under a rule or question that has changed since, and,
+ * while the question is asked with the judge model's reasoning on, those a model found with it off.
  * It is also the backfill, after 111 and after each such change: 111's door replaces a subject found under another
  * pass key, so a changed rule finds again the subjects it found, and those alone. Version 1's one key for both rules
  * is taken whole, once: its filed tickets are found again unchanged, under the metadata rule's own key (review pass 5).
+ * The question is asked with the judge model's reasoning on unless OB1_SUBJECT_REASONING says off (PR 4: Verify item
+ * 1 was met that way and missed without, though the difference alone was not significant), at about 8x the time a
+ * call, and the default --timeout follows it. A subject a model found with its reasoning off is taken again while it
+ * is on (`@p2` under `@p2r`); turning it off takes none again.
  * It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * Each run reads every thought, its count and its pages, whatever is left to do: a run by hand, at a brain's size
- * today. PR 4 bounds that before sleep runs the sweep (review pass 5: a PGlite run timed the count at 5.9 s over a
+ * today. PR 5 bounds that before sleep runs the sweep (review pass 5: a PGlite run timed the count at 5.9 s over a
  * million synthetic thoughts, so at a billion it alone would outrun sleep's 300 s statement timeout). `--limit` counts
  * each thought taken, in id order from the first, so one a run leaves, to the model or unanswered, is taken first
  * again by the next.
@@ -33,7 +41,7 @@
  * A model answer naming nothing records nothing, so the next sweep asks again, and an out-of-date subject stands
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
  * reading which one, so closing it here could close one a pass wrote since the sweep read the thought. Until SMD-3306
- * PR 4 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
+ * PR 5 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
  * different keys by when each was found. A run's summary says how many of the thoughts it finished keep an
  * out-of-date subject; a dry run, how many of those it would ask hold one, and how many of the rules' replacements
  * would take a new key (a model's it cannot know before asking). So do an answer that is not JSON with
@@ -47,7 +55,7 @@ import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, SUBJECT_MODEL_SUFFIX, subjectModelKey, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
+import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -69,6 +77,23 @@ export async function recordSubject(sql: SQL, row: { id: string; fingerprint: st
   return r.r as SubjectWrite;
 }
 
+/**
+ * subject.ts's subjectCurrent in SQL, over a standing subject facet `f`: a rule's under that rule's key now, a model's
+ * under the current question by any model, with its reasoning on while `reasoningOn`. False or NULL where the payload
+ * lacks `by` or `judge_key`, either of which the sweep's NOT EXISTS reads as not current. test-live [10h] holds it to
+ * subjectCurrent row by row under both settings.
+ */
+export function currentSubjectSql(sql: SQL, reasoningOn: boolean) {
+  const [withReasoning, without] = [subjectModelSuffix(true), subjectModelSuffix(false)];
+  return sql`CASE f.payload->>'by'
+               WHEN 'metadata' THEN f.payload->>'judge_key' = ${subjectRuleKey("metadata")}
+               WHEN 'first_line' THEN f.payload->>'judge_key' = ${subjectRuleKey("first_line")}
+               WHEN 'model' THEN starts_with(f.payload->>'judge_key', ${SUBJECT_KEY_PREFIX})
+                             AND (right(f.payload->>'judge_key', ${withReasoning.length}::int) = ${withReasoning}
+                                  OR (${!reasoningOn}::boolean AND right(f.payload->>'judge_key', ${without.length}::int) = ${without}))
+               ELSE false END`;
+}
+
 /** A database error's SQLSTATE. */
 const sqlState = (e: unknown): string | undefined => {
   const { errno, code } = (e ?? {}) as { errno?: unknown; code?: unknown };
@@ -80,7 +105,8 @@ const databaseDown = (e: unknown) => `\n  The database stopped answering (${Stri
 
 /**
  * What one sweep is asked: `model` false for the rules alone; `limit` 0 for no limit; `timeout` in seconds, per model
- * call (300 left out). `sql` is the caller's client in place of `url`, never closed here; `env` what the run reads,
+ * call (left out, 900 with the judge model's reasoning on and 300 off). `sql` is the caller's client in place of `url`,
+ * never closed here; `env` what the run reads,
  * process.env when absent. `signal` stops the sweep after the thought in hand, as the CLI's first signal does;
  * `onPass` is handed the sweep's stop as its thoughts begin, whose second call aborts the model call in hand too.
  * A dry run hears neither: it reads on.
@@ -127,7 +153,10 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
     }
   }
   const LIMIT = opts.limit ?? 0;
-  const TIMEOUT_S = opts.timeout ?? 300;
+  const resolved = resolveEmbedConfig(env as EmbedEnv);
+  // A reasoning call runs long: of 200 the 27B answered with its reasoning on, two took over 300 s, the slowest 369 s,
+  // where the slowest of 160 without it took 133 s (SMD-3306 PR 4): each default about 2.4x and 2.3x the slowest.
+  const TIMEOUT_S = opts.timeout ?? (subjectReasoningOn(resolved) ? 900 : 300);
   if (opts.sql != null && noUrl && env.OB1_WORKER_KEY && !DRY_RUN) {
     // The pass's rule (extract-entities.ts's run): the key resolves on a connection of its own.
     err("extract-entities.ts --subjects resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
@@ -137,7 +166,7 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
     err(STOPPED_EARLY);
     return 130;
   }
-  const cfg: EmbedConfig = { ...resolveEmbedConfig(env as EmbedEnv), timeoutMs: TIMEOUT_S * 1000 };
+  const cfg: EmbedConfig = { ...resolved, timeoutMs: TIMEOUT_S * 1000 };
   const sql = opts.sql ?? openSql(opts.url as string, { max: 2 });
   try {
     return await sweep(sql, cfg, { MODEL, DRY_RUN, LIMIT, env, url: opts.url ?? "", signal: opts.signal, onPass: opts.onPass, out, err });
@@ -158,10 +187,14 @@ async function sweep(
   o: { MODEL: boolean; DRY_RUN: boolean; LIMIT: number; env: Record<string, string | undefined>; url: string; signal?: AbortSignal; onPass?: (stop: PassStop) => void; out: Writer["out"]; err: Writer["err"] },
 ): Promise<number> {
   const { MODEL, DRY_RUN, LIMIT, env, out, err } = o;
-  const judgeKey = subjectModelKey(cfg.judgeModel);
+  const reasoning = subjectReasoning(cfg);
+  const reasoningOn = subjectReasoningOn(cfg);
+  /** The effort each question sends, which a refusal names (review pass 2): nothing at the default, with reasoning on. */
+  const sentEffort = cfg.subjectReasoning.reasoning_effort;
+  const judgeKey = subjectModelKey(cfg.judgeModel, reasoningOn);
   /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
   const wouldRefuse: string[] = [];
-  out(`  subjects: the rules (${subjectRuleKey("metadata")}, ${subjectRuleKey("first_line")})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature} (${judgeKey})` : ", no model (--subjects rules)"}`);
+  out(`  subjects: the rules (${subjectRuleKey("metadata")}, ${subjectRuleKey("first_line")})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}, reasoning ${reasoning}, at most ${cfg.timeoutMs / 1000} s a call (${judgeKey})` : ", no model (--subjects rules)"}`);
   if (MODEL) {
     out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
     // A policy that refuses whatever the row: stop before the first call, as the pass does (SMD-1903).
@@ -213,18 +246,13 @@ async function sweep(
   }
 
   // No current subject: none standing at the thought's text, or one found under another rule's key or an older
-  // question's (subject.ts's subjectCurrent, read here in SQL: a model's at the current question, by any model).
+  // question's, or a model's found with its reasoning off when the question is asked with it on.
   const NO_CURRENT_SUBJECT = sql`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
        WHERE f.thought_id = t.id AND f.kind = 'subject' AND f.valid_until IS NULL
          AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
-         AND CASE f.payload->>'by'
-               WHEN 'metadata' THEN f.payload->>'judge_key' = ${subjectRuleKey("metadata")}
-               WHEN 'first_line' THEN f.payload->>'judge_key' = ${subjectRuleKey("first_line")}
-               WHEN 'model' THEN starts_with(f.payload->>'judge_key', ${SUBJECT_KEY_PREFIX})
-                             AND right(f.payload->>'judge_key', ${SUBJECT_MODEL_SUFFIX.length}::int) = ${SUBJECT_MODEL_SUFFIX}
-               ELSE false END)`;
+         AND ${currentSubjectSql(sql, reasoningOn)})`;
   let total: number;
   try {
     total = Number(((await sql`SELECT count(*)::int AS n FROM thoughts t WHERE ${NO_CURRENT_SUBJECT}`) as { n: number }[])[0].n);
@@ -234,7 +262,7 @@ async function sweep(
     return 2;
   }
   const todo = LIMIT ? Math.min(LIMIT, total) : total;
-  out(`  ${total} thought(s) with no current subject: none at their text, or one found under an older rule or question${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
+  out(`  ${total} thought(s) with no current subject: none at their text, or one found under an older rule or question${reasoningOn ? ", or by a model with its reasoning off" : ""}${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
 
   /**
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
@@ -290,7 +318,12 @@ async function sweep(
           return { egress: e.message };
         }
         const kind = classifyError(e);
-        if (kind === "thought") return { unanswered: (e as Error).message };
+        if (kind === "thought") {
+          // A timeout names the sweep's limit, which --timeout sets over the provider's knob the message names (review
+          // pass 2).
+          const timedOut = e instanceof ProviderError && e.kind === "timeout";
+          return { unanswered: timedOut ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
+        }
         if (kind === "transient" && attempt < TRANSIENT_PAUSES_MS.length) {
           await sleepUnless(TRANSIENT_PAUSES_MS[attempt], stop.signal);
           if (stop.signal.aborted) throw e;
@@ -347,7 +380,7 @@ async function sweep(
         if (hardStop.signal.aborted || stop.signal.aborted) return false;
         const kind = classifyError(e);
         endedBy = kind === "fatal"
-          ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider. Nothing was recorded for this thought.` }
+          ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider${sentEffort === undefined ? "" : `, and OB1_SUBJECT_REASONING, which sent reasoning_effort ${JSON.stringify(sentEffort)}`}. Nothing was recorded for this thought.` }
           : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
         return false;
       }
@@ -376,7 +409,7 @@ async function sweep(
       key = a.key;
       by = "model";
       judge = judgeKey;
-      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, answer: a.answer });
+      recipe = subjectRecipe({ by: "model", model: cfg.judgeModel, temperature: cfg.metadataTemperature, reasoning, answer: a.answer });
     }
     // Past the hard stop nothing more is written.
     if (hardStop.signal.aborted) return false;

@@ -19,6 +19,7 @@ Every extension README names the file to run and the environment it reads. The t
 |---------|-------|
 | Server file | `extensions/extension-name/index.ts` |
 | Port | `8787` (any free port; `PORT` unset means 8000, the stack's published port, which podman's `gvproxy` may hold too) |
+| Listen address | every address, unset; `OB1_LISTEN_HOST` names one IP address instead (`127.0.0.1` keeps the server to this machine). A value that is not one, or a link-local one, stops the server at start, in words; one this host does not have stops it with Bun's own error, `Is port N in use?` on macOS, EADDRNOTAVAIL on Linux (SMD-3323) |
 | Environment | `SUPABASE_URL` (the Postgres connection string — the shim keeps the variable's name), `MCP_ACCESS_KEYS`, and whatever else the README lists (`DEFAULT_USER_ID`, `OPENROUTER_API_KEY`, …) |
 
 Replace `extension-name` below with the extension's directory name.
@@ -101,7 +102,7 @@ Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its
 
 A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the stack ([`SETUP.md`](../../SETUP.md), "Connect a client"):
 
-- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the stack's on 8000, each extension on its own.
+- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself, so start the server with `OB1_LISTEN_HOST=127.0.0.1` and it listens on the loopback alone. One proxy fronts every port you run: the stack's on 8000, each extension on its own.
 - **Any host that runs Bun and reaches the brain's Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile`, the brain's server image, is the shape to copy.
 
 Save the HTTPS form of the Connection URL, then follow the [Remote MCP Connection](../remote-mcp/) guide to connect it to your AI client. Keep the process up the way you keep any service up — a systemd unit, a compose service, a process manager; `bun` restarts in a second and the URL and key stay.

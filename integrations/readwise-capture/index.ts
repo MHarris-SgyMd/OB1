@@ -26,7 +26,7 @@
 // without one Readwise API call per highlight.
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
-import { secretMatches } from "../_shared/auth.ts";
+import { listenOn, secretMatches } from "../_shared/auth.ts";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -277,5 +277,6 @@ const handler = async (req: Request): Promise<Response> => {
 
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: handler,
 };

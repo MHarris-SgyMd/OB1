@@ -19,6 +19,10 @@
  *     name it, post hoc);
  *   - a note's first-line ticket that is only context (the model, asked instead, agreed 0.950 to the rule's 0.750);
  *   - vague model phrases.
+ * Version 2 met Verify item 1's bar, the raters' own agreement less 0.05, on a third fresh draw with the judge model
+ * reasoning (0.945 against 0.941, Linear 18d6fd63). Without reasoning it missed on that draw and on the second (0.933
+ * against 0.941; 0.918 against 0.930, e58bd13a), though what reasoning changed was not significant alone (8 thoughts
+ * better, 4 worse). So the question is asked with reasoning unless OB1_SUBJECT_REASONING says off.
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest and finds again a subject found under an older rule or question (db/subject-sweep.ts). A key is
@@ -312,32 +316,53 @@ export const SUBJECT_RULE_VERSIONS: Readonly<Record<Exclude<SubjectBy, "model">,
 export const SUBJECT_KEY_PREFIX = "subject:";
 /** The pass key of a subject a rule found: 111's judge_key, `subject:<rule>@r<n>`. */
 export const subjectRuleKey = (by: Exclude<SubjectBy, "model">): string => `${SUBJECT_KEY_PREFIX}${by}@r${SUBJECT_RULE_VERSIONS[by]}`;
+
+/**
+ * The reasoning the question is asked with (OB1_SUBJECT_REASONING, embed.ts's subjectReasoning), as a recipe and the
+ * sweep name it: `on`, the provider's default, which for a thinking model is to think; `off`; or the effort asked for.
+ */
+export function subjectReasoning(cfg: Pick<EmbedConfig, "subjectReasoning">): string {
+  const effort = cfg.subjectReasoning.reasoning_effort;
+  return effort === undefined ? "on" : effort === "none" ? "off" : String(effort);
+}
+/** Whether the question is asked with the model's reasoning on, at its default or an effort (the key's `r`). */
+export const subjectReasoningOn = (cfg: Pick<EmbedConfig, "subjectReasoning">): boolean => subjectReasoning(cfg) !== "off";
+/**
+ * How the pass key of a subject the current question found ends, whatever model answered it: `r` after the version
+ * when the model's reasoning was on, as decide mode's `@p<n>d<m>` names its own variant. An effort asked for is keyed
+ * the same, though only the provider's default was measured; the recipe names it.
+ */
+export const subjectModelSuffix = (reasoning: boolean): string => `@p${SUBJECT_PROMPT_VERSION}${reasoning ? "r" : ""}`;
 /** The pass key of a subject the judge model found, beside extraction's `extract:<model>@p<n>`. */
-export const subjectModelKey = (model: string): string => `${SUBJECT_KEY_PREFIX}${model}@p${SUBJECT_PROMPT_VERSION}`;
-/** How the pass key of a subject the current question found ends, whatever model answered it. */
-export const SUBJECT_MODEL_SUFFIX = `@p${SUBJECT_PROMPT_VERSION}`;
+export const subjectModelKey = (model: string, reasoning: boolean): string => `${SUBJECT_KEY_PREFIX}${model}${subjectModelSuffix(reasoning)}`;
 
 /**
  * Whether a standing subject was found under the current rules and question: a rule's under that rule's key now, a
- * model's under the current question, by any model. A judge model changed since does not make a subject out of date,
- * and nothing asks it again yet. This is the rule's statement, with no caller at run time: the sweep reads the same
- * in SQL (db/subject-sweep.ts's NO_CURRENT_SUBJECT); test-thoughts holds this arm by arm, and test-live [10h] the SQL.
+ * model's under the current question, by any model, and with its reasoning on when the question is asked with it on
+ * (`reasoning`). A judge model changed since does not make a subject out of date, and nothing asks it again yet.
+ * Reasoning turned on does, since the model's subjects met Verify item 1's bar with it and missed without (SMD-3306),
+ * though what it changed was not significant alone; reasoning turned off does not: off spares the asks to come its
+ * cost, and keeps what was asked with it on. This is the rule's statement, with no caller at run time: the sweep reads
+ * the same in SQL (db/subject-sweep.ts's currentSubjectSql); test-thoughts holds this arm by arm, and test-live [10h]
+ * the SQL against it, row by row.
  */
-export function subjectCurrent(by: string | null, judge: string | null): boolean {
+export function subjectCurrent(by: string | null, judge: string | null, reasoning: boolean): boolean {
   if (by === "metadata" || by === "first_line") return judge === subjectRuleKey(by);
-  return by === "model" && judge !== null && judge.startsWith(SUBJECT_KEY_PREFIX) && judge.endsWith(SUBJECT_MODEL_SUFFIX);
+  return by === "model" && judge !== null && judge.startsWith(SUBJECT_KEY_PREFIX)
+    && (judge.endsWith(subjectModelSuffix(true)) || (!reasoning && judge.endsWith(subjectModelSuffix(false))));
 }
 
 /**
  * The judge model's own subject for one thought: one call at the chat endpoint, as decide mode's writer is asked,
- * through providerCall, which refuses before the request when the egress gate says the row may not leave (kind
- * `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the subject at most 200 code points, for a recipe, null when
- * the answer gave no subject string; `key` is read from the subject whole (subjectKey): a ticket or a release only
- * when the thought's own text names it, a PR when its number appears there, null when it named nothing a key holds.
+ * with the question's own reasoning (`cfg.subjectReasoning`), through providerCall, which refuses before the request
+ * when the egress gate says the row may not leave (kind `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the
+ * subject at most 200 code points, for a recipe, null when the answer gave no subject string; `key` is read from the
+ * subject whole (subjectKey): a ticket or a release only when the thought's own text names it, a PR when its number
+ * appears there, null when it named nothing a key holds.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answer: string | null; key: string | null }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
-    model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: ownSubjectMessages(side),
+    model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.subjectReasoning, messages: ownSubjectMessages(side),
   }, subject, signal);
   const raw = d?.choices?.[0]?.message?.content ?? "";
   const whole = ownSubjectOf(raw, SUBJECT_READ_MAX);

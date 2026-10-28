@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectRuleKey } from "./subject.ts";
+import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectOf, ruleSubject, sessionHeaderTicket, SUBJECT_PROMPT_VERSION, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -193,6 +193,14 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
          "OB1_METADATA_REASONING is trimmed like its siblings — 'low ' from a .env file is an effort of low, not 'low '");
   assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "OFF" }).metadataReasoning) === JSON.stringify({ reasoning_effort: "none" }),
          "…and off/false/0 mean none, as .env.example says");
+  // The subject question's own knob (SMD-3306 PR 4): read the same way, but on when unset, and neither knob reads the other.
+  const subjectFields = (v: string | undefined) => JSON.stringify(resolveEmbedConfig({ OB1_SUBJECT_REASONING: v }).subjectReasoning);
+  assert([undefined, "", "  ", "on", " TRUE ", "1"].every((v) => subjectFields(v) === "{}") && ["off", " Off ", "false", "0", "none"].every((v) => subjectFields(v) === JSON.stringify({ reasoning_effort: "none" }))
+      && subjectFields(" high ") === JSON.stringify({ reasoning_effort: "high" }),
+    "OB1_SUBJECT_REASONING: unset or empty is on (the provider's default), off, false, 0 and none send none, any other word the effort, trimmed");
+  assert(JSON.stringify(resolveEmbedConfig({ OB1_METADATA_REASONING: "high" }).subjectReasoning) === "{}" && JSON.stringify(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "on" }).metadataReasoning) === JSON.stringify({ reasoning_effort: "none" })
+      && JSON.stringify(unset.metadataReasoning) === JSON.stringify({ reasoning_effort: "none" }),
+    "…and it is the subject question's alone: OB1_METADATA_REASONING does not set it, and it leaves extraction's off");
   // The pool size took the same "" (compose's unset) and made a pool of 0.
   assert(poolSizeFrom(undefined) === DEFAULT_PG_POOL && poolSizeFrom("") === DEFAULT_PG_POOL && poolSizeFrom("  ") === DEFAULT_PG_POOL,
          `OB1_PG_POOL unset or '' is the default pool (${DEFAULT_PG_POOL}), not Number('') = 0, which Bun's SQL refuses at construction`);
@@ -2763,25 +2771,35 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(ownSubjectOf('{"subject":null,"deliverables":[]}') === "", "a null subject is the model naming none, as \"\" is, not an answer of another shape (review pass 2)");
 
   // The pass keys, one a rule (version 2: the first line's rule changed, the filed ticket's did not), and the lineage recipes.
-  assert(subjectRuleKey("metadata") === "subject:metadata@r1" && subjectRuleKey("first_line") === "subject:first_line@r2" && subjectModelKey("qwen3.8:27b") === "subject:qwen3.8:27b@p2",
-    "each rule's key and the model's, beside extract's `extract:<model>@p<n>`");
+  assert(subjectRuleKey("metadata") === "subject:metadata@r1" && subjectRuleKey("first_line") === "subject:first_line@r2"
+      && subjectModelKey("qwen3.8:27b", true) === "subject:qwen3.8:27b@p2r" && subjectModelKey("qwen3.8:27b", false) === "subject:qwen3.8:27b@p2",
+    "each rule's key and the model's, beside extract's `extract:<model>@p<n>`: `r` when it was asked with its reasoning on (PR 4)");
+  assert(subjectReasoning(resolveEmbedConfig({})) === "on" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "0" })) === "off" && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })) === "off"
+      && subjectReasoning(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "Low" })) === "low"
+      && subjectReasoningOn(resolveEmbedConfig({})) && subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "low" })) && !subjectReasoningOn(resolveEmbedConfig({ OB1_SUBJECT_REASONING: "none" })),
+    "the reasoning's name, for a recipe and the sweep's line: on, off (an effort of none is off), or the effort; on at its default or an effort");
   assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rule_version: 2 })
     && JSON.stringify(subjectRecipe({ by: "metadata" })) === JSON.stringify({ deterministic: true, rule: "metadata", rule_version: 1 }), "a rule's recipe: deterministic, the rule and its version");
-  const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, answer: "PR 727" });
-  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 2 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.answer === "PR 727",
-    "the model's: its model, the question's version and hash, and what it answered");
-  // Current: a rule's subject under that rule's key now, a model's under the current question by any model. Version 1's
-  // one rules key, the first line's version 1 and the question's version 1 are out of date, and the sweep finds them again.
-  const current: [string | null, string | null, boolean][] = [
-    ["metadata", "subject:metadata@r1", true], ["first_line", "subject:first_line@r2", true], ["model", "subject:qwen3.8:27b@p2", true], ["model", "subject:another-model@p2", true],
-    ["metadata", "subject:rules@r1", false], ["first_line", "subject:rules@r1", false], ["first_line", "subject:first_line@r1", false], ["metadata", "subject:first_line@r2", false],
-    ["model", "subject:qwen3.8:27b@p1", false], ["model", "subject:x@p12", false], ["model", "subject:x@p20", false], ["model", "subject:metadata@r1", false], ["model", "extract:x@p2", false], ["model", null, false], [null, "subject:metadata@r1", false], ["other", "subject:x@p2", false],
+  const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, reasoning: "on", answer: "PR 727" });
+  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 2 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.reasoning === "on" && modelRecipe.answer === "PR 727",
+    "the model's: its model, the question's version and hash, the reasoning it was asked with, and what it answered");
+  // Current: a rule's subject under that rule's key now, a model's under the current question by any model, with its
+  // reasoning on while the question is asked with it on (PR 4). Version 1's one rules key, the first line's version 1
+  // and the question's version 1 are out of date, and the sweep finds them again; so is a model's found with its
+  // reasoning off, while it is on. Turning it off keeps those found with it on.
+  const current: [string | null, string | null, boolean, boolean][] = [
+    ["metadata", "subject:metadata@r1", true, true], ["first_line", "subject:first_line@r2", true, true],
+    ["model", "subject:qwen3.8:27b@p2r", true, true], ["model", "subject:another-model@p2r", true, true], ["model", "subject:qwen3.8:27b@p2", false, true], ["model", "subject:another-model@p2", false, true],
+    ["metadata", "subject:rules@r1", false, false], ["first_line", "subject:rules@r1", false, false], ["first_line", "subject:first_line@r1", false, false], ["metadata", "subject:first_line@r2", false, false],
+    ["model", "subject:qwen3.8:27b@p1", false, false], ["model", "subject:x@p12", false, false], ["model", "subject:x@p20", false, false], ["model", "subject:x@p1r", false, false], ["model", "subject:x@p12r", false, false],
+    ["model", "subject:x@p2rr", false, false], ["model", "subject:metadata@r1", false, false], ["model", "extract:x@p2", false, false], ["model", "extract:x@p2r", false, false], ["model", null, false, false],
+    [null, "subject:metadata@r1", false, false], ["other", "subject:x@p2", false, false], ["other", "subject:x@p2r", false, false],
   ];
-  for (const [by, judge, want] of current) assert(subjectCurrent(by, judge) === want, `current: ${by} under ${judge} → ${want}`);
+  for (const [by, judge, on, off] of current) assert(subjectCurrent(by, judge, true) === on && subjectCurrent(by, judge, false) === off, `current: ${by} under ${judge} → ${on} with reasoning on, ${off} off`);
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}'];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}', '{"subject":"OB1 release 2.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}', '{"subject":"v02.0.0","deliverables":[]}', '{"subject":"PR 727","deliverables":[]}'];
   const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
@@ -2792,6 +2810,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     const b0 = bodies[0] as { model?: string; response_format?: { type?: string }; temperature?: number; messages?: { content: string }[] };
     assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(names727)[0].content,
       "asked of the judge model, JSON, at the metadata temperature, with the question");
+    assert(!("reasoning_effort" in b0) && cfg.metadataReasoning.reasoning_effort === "none",
+      "…with its reasoning on, the provider's default (PR 4), where extraction's knob, unset, would turn it off");
     const none = await askOwnSubject(cfg, sides[1], subject);
     assert(none.answer === "" && none.key === null, "an empty subject: no key");
     const bad = await askOwnSubject(cfg, sides[1], subject);
@@ -2822,10 +2842,14 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
       "…a release's possessive goes with it too, as a ticket's does; one the thought names is its key (review pass 6)");
     assert(subjectKey("GPT-4 evaluation", only()) === "phrase:gpt-4 evaluation" && subjectKey("SMD-999 → the dashboard review", only()) === "phrase:the dashboard review",
       "…the guard drops tickets alone, a model name's id staying in the phrase, and the trim takes a symbol a dropped ticket leaves (review pass 6)");
+    const off = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_SUBJECT_REASONING: "off", OB1_METADATA_REASONING: "on" });
+    const offAnswer = await askOwnSubject(off, names727, subject);
+    assert(offAnswer.key === "pr:727" && (bodies[8] as { reasoning_effort?: string }).reasoning_effort === "none",
+      `…and off when OB1_SUBJECT_REASONING says off, extraction's knob on: the question's own (${JSON.stringify(bodies[8]?.reasoning_effort)})`);
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
-    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 8, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 9, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
   }

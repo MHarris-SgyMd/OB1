@@ -7311,8 +7311,8 @@ checkStarReads();
  * address, by its file and a fragment that names it and no other, with why; a fragment that names none, several, or
  * one already held is reported, as is an entry whose file the walk no longer reads (walkProblems, with the walk's
  * own floor). Its probe pins each of these. PR 1 held test-rest.ts, test-server.ts and db/test-support.ts; PR 2a
- * every suite and smoke script. Without git the walk cannot list them, and the check is skipped with a word, as
- * check 41 is.
+ * every suite and smoke script; PR 2b the vendored servers extensions/test-auth.ts starts, so its exception went.
+ * Without git the walk cannot list them, and the check is skipped with a word, as check 41 is.
  */
 /**
  * The files check 42 reads: every `test-*` or `smoke*` JavaScript or TypeScript file git tracks or would track,
@@ -7338,7 +7338,6 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
   ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
-  ["extensions/test-auth.ts", 'PORT: "0", ...live.env', "the vendored servers, which read no OB1_LISTEN_HOST until the ticket's PR 2b"],
 ];
 
 /**

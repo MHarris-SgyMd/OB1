@@ -1,14 +1,12 @@
 # server-portable
 
 The Open Brain REST core (`api.ts`) and the core every brain operation runs
-in, with no dependency on Deno or on Supabase's function host. It began as a
-runtime-neutral build of the MCP server, with the same tools and wire behaviour
-as upstream's Edge Function build (`server/index.ts`, in this fork until
-SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
-PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
-
-This exists so the runtime decision in the Supabase migration could be made
-last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
+in. It began as a runtime-neutral build of the MCP server, so the runtime could
+be chosen last, with the same tools and wire behaviour as upstream's Edge
+Function build (`server/index.ts`, in this fork until SMD-1800). The runtime
+chosen was Bun: the brain runs as the compose stack (`SETUP.md`). That MCP
+server, this directory's `index.ts`, retired in SMD-2287 PR 6b, and `/mcp` is
+`mcp-server/`, a client of this REST core. The
 Cloudflare Workers target and the PostgREST store it needed were retired in
 SMD-3152 — no brain ran them.
 
@@ -31,8 +29,8 @@ Three changes.
 3. **The data layer is an interface.** Every database call goes through the
    `ThoughtStore` interface in `store.ts`; the SQL store is its implementation.
 
-The second change is what makes the file testable; the third is Phase 2 of the
-migration.
+The second change is what makes the file testable; the third is what let the
+SQL store replace the PostgREST one.
 
 ## Choosing a model provider
 

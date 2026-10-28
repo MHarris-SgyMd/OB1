@@ -23,7 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   bun db/extract-entities.ts --url … --subjects [rules]     # each thought's own subject, where none is current (db/subject-sweep.ts)
+ *   bun db/extract-entities.ts --url … --subjects [rules]     # each thought's own subject, where none is current (db/subject-sweep.ts; its --timeout is 900 s with the judge model's reasoning on, 300 off)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
@@ -174,8 +174,10 @@
  * record_thought_subject at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
  * thoughts extracted before 111, those no rule keys, which it asks the judge
- * model about, those whose text moved, and those whose subject an older rule
- * or question found. A brain before 111, or a role
+ * model about, those whose text moved, those whose subject an older rule or
+ * question found, and, while the question is asked with the judge model's
+ * reasoning on (OB1_SUBJECT_REASONING), those a model found with it off. A
+ * brain before 111, or a role
  * without the grants 111's door needs, records no subject and says so once;
  * the entities stand either way.
  */
@@ -2037,7 +2039,8 @@ if (import.meta.main) {
       process.exit(2);
     }
     const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
-    const timeout = cli.int("timeout", { absent: 300, min: 1, max: MAX_CALL_TIMEOUT_S });
+    // Absent, the sweep's own default, which follows the question's reasoning (SMD-3306 PR 4).
+    const timeout = cli.has("timeout") ? cli.int("timeout", { absent: 0, min: 1, max: MAX_CALL_TIMEOUT_S }) : undefined;
     const sql = openSql(url, { max: 2 });
     let uninstall = () => {};
     await closeThenExit(sql, async () => {

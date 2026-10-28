@@ -99,6 +99,7 @@ Create `integrations/slack-capture/index.ts` in your checkout of this repository
 
 ```typescript
 import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Postgres client in supabase-js's shape
+import { listenOn } from "../_shared/auth.ts"; // OB1_LISTEN_HOST: one IP address to listen on, every address unset
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""; // ignored by the shim; the credentials are in the URL
@@ -221,8 +222,8 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-// Bun serves the default export on PORT (8000 unset).
-export default { port: Number(process.env.PORT || 8000), fetch: handler };
+// Bun serves the default export on PORT (8000 unset), on OB1_LISTEN_HOST's address (every address unset).
+export default { port: Number(process.env.PORT || 8000), ...listenOn(process.env.OB1_LISTEN_HOST), fetch: handler };
 ```
 
 ### Run It
@@ -248,7 +249,7 @@ Replace the values with:
 
 ### Put It Behind HTTPS
 
-Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789. The sample checks no Slack signature — anyone who learns the URL can post an event shaped like Slack's and store a thought — so keep the URL private, or add Slack's signing-secret check before exposing it for long — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**.
+Slack calls this server from its side, so it needs an HTTPS URL that reaches port 8789. The sample checks no Slack signature — anyone who learns the URL can post an event shaped like Slack's and store a thought — so keep the URL private, or add Slack's signing-secret check before exposing it for long — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. That URL is your **Capture URL**.
 
 Save this URL — you'll need it in Step 4.
 

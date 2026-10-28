@@ -106,7 +106,7 @@ import { createClient } from "../../compat/supabase-sql/index.ts"; // Bun's Post
 // auth.ts is server-portable/auth.ts, copied beside the extensions and held
 // identical by extensions/test-auth.ts. Never
 // compare a key with `!==` yourself (the fork's consistency check refuses it).
-import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
+import { authenticateRequest, canWrite, listenOn, type Principal } from "../_shared/auth.ts";
 // The reply kept alive while a tool runs, and a client that leaves logged: Bun
 // closes a stream silent for 8–12 s (SMD-1864, SMD-2001). _shared/sse.ts is
 // server-portable/sse.ts, held identical by extensions/test-auth.ts.
@@ -152,9 +152,11 @@ app.all("*", async (c) => {
   return mcpReply(c, () => transport.handleRequest(c));
 });
 
-// Bun serves the entry module's default export on PORT (8000 unset); the suites import `fetch`.
+// Bun serves the entry module's default export on PORT (8000 unset), on OB1_LISTEN_HOST's address (every address
+// unset); the suites import `fetch`.
 export default {
   port: Number(process.env.PORT || 8000),
+  ...listenOn(process.env.OB1_LISTEN_HOST),
   fetch: app.fetch,
 };
 ```
@@ -271,7 +273,7 @@ Before submitting, verify:
 - [ ] `metadata.json` validates against `/.github/metadata.schema.json`
 - [ ] `schema.sql` uses `IF NOT EXISTS`, includes indexes, carries no RLS, no `auth.*` call and no `GRANT` to a Supabase role (check 12), and its tables are in `ROLE_GRANTS.extensions` and `CONTRIB_SCHEMA_FILES`
 - [ ] `schema.sql` does NOT modify the `thoughts` table
-- [ ] `index.ts` follows the exact server structure (imports, auth, Hono app)
+- [ ] `index.ts` follows the exact server structure (imports, auth, Hono app), its tail spreading `...listenOn(process.env.OB1_LISTEN_HOST)` between `port` and `fetch` (extensions/test-auth.ts fails a server without it)
 - [ ] `index.ts` tools return `{ content: [{ type: "text" as const, text }] }` format
 - [ ] `index.ts` tools have try/catch with `isError: true` error handling
 - [ ] `README.md` includes the Bun run (`PORT=8787 bun extensions/{extension-slug}/index.ts`) with `SUPABASE_URL` and `MCP_ACCESS_KEYS`
