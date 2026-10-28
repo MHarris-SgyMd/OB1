@@ -152,7 +152,7 @@ The input was the three-dashboard analysis (`docs/operator-gui-dashboards-analys
   - Forwarding works in every state and needs no authorization server. Keys therefore survive its outage, the capture hook included.
 - **GUI** (built with the GUI itself, SMD-2280; moved there from SMD-2286 on 2026-10-16, together with the revocation page):
   - A confidential client using authorization code with PKCE, asking for the REST core as the resource (RFC 8707).
-  - Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard uses for the key today.
+  - Tokens live in the sealed server-side session and never reach the browser, the same pattern the SvelteKit dashboard used for the key (retired, SMD-3310).
   - Sign-in is a passkey with a password fallback while configured (decision 15), and a key when not.
   - Break-glass key sign-in stays available on a separate port published only on `127.0.0.1`. Neither the source IP nor `Host` can tell local from public, because every documented tunnel dials `127.0.0.1`.
   - **As built (SMD-2280 PR 1, `dashboard/`):** key sign-in alone, checked by the REST core's `GET /v1/whoami`, and off while configured. The session is server-side: the cookie holds a random id, and the key stays in the GUI's memory, so no key or anything sealed from it reaches the browser (the SvelteKit dashboard sealed the key into its cookie). Code and PKCE, break-glass and the revocation page moved to SMD-3307; its PR 1 signs in by code and PKCE as the confidential `gui` client, the access and refresh tokens held in that same server-side session. Its PR 2 is break-glass: the `breakglass` service, under the auth profile, publishes `127.0.0.1:${BREAKGLASS_PORT:-8001}` (a literal loopback, no `_BIND` knob) to the proxy's `breakglass` entrypoint, whose one router takes `/dashboard` to the GUI with `X-OB1-Listener: breakglass` set, and the `web` entrypoint deletes that header from every request; the GUI offers key sign-in there alone while configured, whatever the authorization server's state, its session bound to that listener and its form taken from that port's own loopback origin. Its PR 3 is the page of grants (`/dashboard/grants`): the authorization server serves an admin listener on port 3001 on the mesh, which no proxy rule routes to, taking the `gui` client's credentials alone; the page lists the live grants and revokes one whole, its refresh tokens refused at once and its access token lapsing within the 600 s lifetime (the maintainer's choice of 2026-10-26: no revocation list, no shorter tokens).
@@ -194,7 +194,7 @@ Decided 2026-09-27 (SMD-2308, decisions 9–12).
 - **A plugin that needs an inbound webhook** (a capture source) is exposed at `/hooks/<name>`, off by default and turned on per plugin.
 - **Plugins are curated.** They run in the brain's own processes (the REST core's and the MCP server's) with the brain's privileges, so every plugin is maintainer-reviewed. `integrations/` stops being an open category for anything that touches the brain. Contributions that never touch the brain are out of this repo's surface.
 - **The six curated extensions port to plugins** (SMD-2311). Each tool becomes an operation. Each `schema.sql` becomes plugin migrations that adopt existing tables. professional-crm's direct `thoughts` read (`extensions/professional-crm/index.ts:480-485`) becomes a core-operation call. Upstream's multi-user `user_id` columns get a decision for each plugin (SMD-1716 stays deferred).
-- **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280).
+- **Community UI** is a plugin's GUI pages in the canonical GUI (decision 11). The Next dashboards' snippets (`schemas/*/dashboard-snippets`, `recipes/wiki-synthesis/dashboard-snippets`) are ported that way or retired (SMD-2280). All three were retired with the Next dashboard (SMD-3309).
 - **Identity** is the REST core's (decision 12). No plugin mints or checks its own keys.
 
 **As built (SMD-2310, 2026-10-08).** The mechanism settles what the decisions left open:
@@ -259,11 +259,11 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 
 | Surface | Retires when |
 |---|---|
-| `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. |
+| `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. **Met and retired** (SMD-3309). |
 | `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931). **Met and retired** (SMD-1931 PR 3). |
 | server-portable's MCP registration | The MCP server passes parity and the stable tier's `/mcp` routes to it (SMD-2287) |
 | The Cloudflare Workers target and the PostgREST store it selects | **Retired** ahead of SMD-2287's cutover, since no brain ran them (SMD-3152, SMD-2288's step 1) |
-| `dashboards/open-brain-dashboard` (current SvelteKit) | The REST core and MCP server are stable (decision 2) |
+| `dashboards/open-brain-dashboard` (the old SvelteKit one) | The REST core and MCP server are stable (decision 2). **Retired** with the `dashboards/` category (SMD-3310); the clause was dropped 2026-10-27, since no compose service ever ran it. |
 
 ## What this reverses or amends
 
@@ -275,7 +275,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 - **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
 - **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retired, with SMD-1931 recording the disposition and SMD-2288 the removal (PR 1). SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281, held for that, fall away with it.
 
-- **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
+- **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them; the `dashboards/` rows went with that category, SMD-3310). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
 
 ## Not decided here
 

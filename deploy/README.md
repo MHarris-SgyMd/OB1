@@ -865,7 +865,7 @@ root reports that 404 itself.
 | `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
 | curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it has a route of its own. A `scan_thoughts` handle's links are now under the endpoint the call came to |
 | n8n | `http://server:8000/` in an MCP Client node you built | an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, on the `egress` network and not through the proxy (SMD-2295). Nothing answers at `server` since SMD-2287 PR 6b retired it, and the profile's brain credential is pinned to `api` since SMD-2295 |
-| any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
+| any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
 Two more things belong here, though neither applies until the stack has a
 public origin and the `auth` profile on (SMD-2382):

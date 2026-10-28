@@ -85,7 +85,7 @@ without human review.
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - **Enhanced thoughts schema** applied — install `schemas/enhanced-thoughts` first (adds type, importance, sensitivity columns and utility RPCs)
-- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). A dashboard's per-item "view thought" link carries that UUID to `open-brain-dashboard-pro`'s thought page, which takes one since SMD-2128 (its `Thought.id: number` typing is SMD-2152's)
+- **Smart ingest tables** applied — install `schemas/smart-ingest` to create the `ingestion_jobs` and `ingestion_items` tables plus the `append_thought_evidence` RPC. On this fork the two item columns that hold a thought id (`matched_thought_id`, `result_thought_id`) are `uuid`, as `thoughts.id` is here (SMD-2128): an executed item records the thought it wrote or matched, and re-applying the file to a brain that had upstream's `bigint` columns retypes them in place (its header says what is kept, and that the rewrite locks the table). (The Pro dashboard's per-item "view thought" link carried that UUID to its thought page from SMD-2128 until that dashboard retired with SMD-3309.)
 - At least one LLM API key for extraction: OpenRouter (recommended), OpenAI, or Anthropic
 - An embedding API key: OpenRouter or OpenAI (required for semantic deduplication)
 - [Bun](https://bun.sh) 1.4+ and a checkout of this repository — the server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/))
@@ -240,7 +240,6 @@ Execute a previously dry-run job.
 
 **Today's user-facing surfaces:**
 
-- **Browser (dashboard):** The Next.js dashboard at `dashboards/open-brain-dashboard-next` includes an "Add to Brain" page that POSTs to this server and auto-decides between single-thought capture and multi-thought extraction. Install the dashboard separately if you want a non-CLI capture surface.
 - **CLI / scripts / webhooks:** The HTTP API documented above. Suitable for batch imports, custom capture pipelines, or terminal workflows.
 - **CLI agents:** Claude Code, Codex, Cursor, and similar tools can call the HTTP endpoint directly through their shell.
 

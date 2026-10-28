@@ -4,7 +4,7 @@
 
 ## What It Does
 
-Extends the `thoughts` table with two columns that track workflow state. This enables the [Workflow board](../../dashboards/open-brain-dashboard-next/#workflow-board) in the Next.js dashboard and the `progress_task` MCP tool for AI-assisted task management.
+Extends the `thoughts` table with two columns that track workflow state. Nothing in this tree reads them today: the Next.js dashboard's Workflow board retired with SMD-3309, and the `progress_task` MCP tool they were written for is not served. The schema retires with SMD-3260.
 
 **Valid statuses:** `new`, `planning`, `active`, `review`, `done`, `archived`
 
@@ -89,7 +89,7 @@ After running the migration:
 
 ## MCP Integration
 
-Once the schema is applied, a `progress_task` tool lets AI assistants manage task status conversationally. It was written to add to `server-portable/index.ts`, the brain's MCP server until SMD-2287 retired it (PR 6b); an operation added to the brain is now a plugin (`plugins/README.md`, SMD-2310), and this one waits on that port (SMD-3260):
+Once the schema is applied, a `progress_task` tool lets AI assistants manage task status conversationally. It was written to add to `server-portable/index.ts`, the brain's MCP server until SMD-2287 retired it (PR 6b); an operation added to the brain is now a plugin (`plugins/README.md`, SMD-2310). It won't be ported: with the Next dashboard's Kanban gone (SMD-3309), nothing reads the columns, and SMD-3260 retires the schema. The tool as written:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|

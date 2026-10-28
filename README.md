@@ -136,14 +136,9 @@ Plain-text skill packs you can drop into Claude Code, Codex, or other AI clients
 | [World Model Readiness Diagnostic](skills/world-model-diagnostic/) | Runs a 20-minute world-model diagnostic that maps paradigm fit, audits the boundary layer, and labels findings by confidence | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [OpenClaw Agent Memory Skill Pack](skills/openclaw-agent-memory/) | Teaches OpenClaw agents to recall, write back, report usage, and respect OB1 provenance/use-policy rules | OB1 Team |
 
-### [`/dashboards`](dashboards/) — Frontend Templates
+### [`/dashboard`](dashboard/) — The Brain's Dashboard
 
-Host on Vercel or Netlify, pointed at your Open Brain server and signed into with one of its access keys. Two community-built options — pick the framework you prefer.
-
-| Dashboard | What It Does | Contributor |
-| --------- | ------------ | ----------- |
-| [Open Brain Dashboard](dashboards/open-brain-dashboard/) | SvelteKit dashboard with MCP proxy; sign in with one of the server's access keys | [@headcrest](https://github.com/headcrest) |
-| [Open Brain Dashboard (Next.js)](dashboards/open-brain-dashboard-next/) | Full-featured Next.js dashboard — 8 pages, dark theme, smart ingest, quality auditing | [@alanshurafa](https://github.com/alanshurafa) |
+The brain serves its own dashboard at `/dashboard`: the operator GUI in [`dashboard/`](dashboard/), a client of the REST core that the compose stack runs. A community dashboard is now a plugin's pages there ([`plugins/`](plugins/), SMD-2308). The `dashboards/` category of standalone templates retired with SMD-3310.
 
 ### [`/integrations`](integrations/) — New Connections
 
@@ -176,7 +171,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full details. The short version:
 
 - **Extensions** are curated — discuss with maintainers before submitting
 - **Primitives** should be referenced by 2+ extensions to justify extraction
-- **Recipes, schemas, dashboards, integrations, and skills** are open for community contributions
+- **Recipes, schemas, integrations, and skills** are open for community contributions
 - Every PR runs through an automated review agent that checks structure, secrets, SQL safety, dependencies, and documentation quality
 - If the agent passes, a human maintainer reviews for quality and clarity
 - Your contribution needs a README with real instructions and a `metadata.json` with structured info
