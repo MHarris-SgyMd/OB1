@@ -1316,11 +1316,97 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { reembed: { kind: "model-switch", recorded: "same", configured: "same" } },
     { reembed: { kind: "model-switch", recorded: "x".repeat(201), configured: "new-embed" } },
     { reembed: { kind: "model-switch", recorded: "old\nembed", configured: "new-embed" } },
+    { reembed: { kind: "model-switch", recorded: "old-embed", configured: "x $(echo SHELL-TEXT) #" } },
     { extract: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } },
     "model-switch",
   ].map((a) => markOf("heartbeat:sleep", { aside: a })?.aside ?? null);
-  assert(JSON.stringify(asides) === JSON.stringify([asideOk, { reembed: { kind: "model" } }, null, null, null, null, null, null, null]) && markOf("heartbeat:reembed:new-embed@1024", { aside: asideOk })?.aside === undefined,
+  assert(JSON.stringify(asides) === JSON.stringify([asideOk, { reembed: { kind: "model" } }, null, null, null, null, null, { reembed: { kind: "model-switch", recorded: "", configured: "", unprintable: true } }, null, null]) && markOf("heartbeat:reembed:new-embed@1024", { aside: asideOk })?.aside === undefined,
     `the scheduler's re-embed set aside is carried when of the shape — a model switch with two model names that differ, or a kind that set it down for the sleep, its names left off — and never off another worker's row (${JSON.stringify(asides)})`);
+  // The scheduler's own re-embed key (SMD-2679 PR 4b-2, review pass 5): a model's own key, on its row only, else left off.
+  const jobs = ["reembed:new-embed@1024", "reembed:org/model:tag@768", "reembed:new-embed@1024:ctx", "extract:x@p2", "reembed:x $(echo) #@1024", "reembed:new-embed@0", 7]
+    .map((j) => markOf("heartbeat:sleep", { reembedJob: j })?.reembedJob ?? null);
+  assert(JSON.stringify(jobs) === JSON.stringify(["reembed:new-embed@1024", "reembed:org/model:tag@768", null, null, null, null, null]) && markOf("heartbeat:board-sync", { reembedJob: "reembed:new-embed@1024" })?.reembedJob === undefined,
+    `the scheduler's re-embed key is carried when a model's own key, and never off another worker's row (${JSON.stringify(jobs)})`);
+  // Who runs re-embed under a key (SMD-2679 PR 4b-2, review pass 4): the one answer preflight's rows read, cell by cell.
+  {
+    const { reembedRunner, switchNow } = await import("./brain-info.ts");
+    const OWN = "reembed:new-embed@1024";
+    const beatOf = (key: string, extra: Record<string, unknown> = {}, ageS = 1) =>
+      parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...extra }), at, age_s: ageS }]).heartbeats[0];
+    const sleepFresh = beatOf("heartbeat:sleep", { running: true, reembedJob: OWN });
+    const sleepAwake = beatOf("heartbeat:sleep", { reembedJob: OWN });
+    const sleepStale = beatOf("heartbeat:sleep", { reembedJob: OWN }, 99_999);
+    const sleepEnded = beatOf("heartbeat:sleep", { outcome: "stopped", ended: true, reembedJob: OWN });
+    // v1.9.0's scheduler runs no re-embed and writes no key: fresh or ended, no re-embed of its (review pass 6).
+    const sleepOld = beatOf("heartbeat:sleep", { running: true });
+    const sleepOldEnded = beatOf("heartbeat:sleep", { outcome: "stopped", ended: true });
+    const handOwn = beatOf(`heartbeat:${OWN}`, { job: OWN, running: true });
+    const handCtx = beatOf(`heartbeat:${OWN}:ctx`, { job: `${OWN}:ctx`, running: true });
+    const handOwnEnded = beatOf(`heartbeat:${OWN}`, { job: OWN, outcome: "stopped", ended: true });
+    const handCtxStale = beatOf(`heartbeat:${OWN}:ctx`, { job: `${OWN}:ctx`, running: true }, 99_999);
+    const withAside = (b: typeof sleepFresh, aside: unknown) => beatOf("heartbeat:sleep", { running: b.running, aside, reembedJob: OWN });
+    const sw = { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } };
+    const run = (beats: (typeof sleepFresh)[] | null, key: string, recorded: string | undefined) => {
+      const r = reembedRunner(beats, key, OWN, recorded, "new-embed");
+      return r.by === "scheduler" ? `scheduler:${r.down ?? "-"}:${r.clears ?? "-"}:${r.conflicts.length}` : r.by;
+    };
+    const cells: [string, string][] = [
+      [run(null, OWN, "new-embed"), "nobody"],
+      [run([], OWN, "new-embed"), "nobody"],
+      [run([sleepFresh], OWN, "new-embed"), "scheduler:-:-:0"],
+      [run([sleepFresh], OWN, undefined), "scheduler:-:-:0"],
+      [run([sleepFresh], `${OWN}:ctx`, "new-embed"), "nobody"],
+      [run([sleepFresh, handOwn], OWN, "new-embed"), "follower"],
+      [run([sleepFresh, handCtx], OWN, "new-embed"), "scheduler:-:-:1"],
+      [run([handCtx], `${OWN}:ctx`, "new-embed"), "follower"],
+      [run([sleepStale], OWN, "new-embed"), "stopped"],
+      [run([sleepEnded], OWN, "new-embed"), "stopped"],
+      [run([sleepEnded], OWN, "old-embed"), "nobody"],
+      [run([withAside(sleepFresh, { reembed: { kind: "provider" } })], OWN, "new-embed"), "scheduler:provider:-:0"],
+      [run([withAside(sleepFresh, { reembed: { kind: "outage" } })], OWN, "new-embed"), "scheduler:outage:-:0"],
+      [run([withAside(sleepFresh, sw)], OWN, "old-embed"), "aside"],
+      [run([withAside(sleepFresh, sw)], OWN, "third-embed"), "aside"],
+      // No record is no switch to the scheduler (sleep.ts's `switched`): the set-aside clears (review pass 5).
+      [run([withAside(sleepFresh, sw)], OWN, undefined), "scheduler:-:poll:0"],
+      [run([withAside(sleepFresh, sw)], OWN, "new-embed"), "scheduler:-:poll:0"],
+      [run([withAside(sleepAwake, sw)], OWN, "new-embed"), "scheduler:-:sleep:0"],
+      [run([sleepFresh], OWN, "old-embed"), "aside"],
+      // A set-aside naming another model than this configuration's: no key of this one's (review pass 5).
+      [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "old-embed", configured: "other-embed" } })], OWN, "other-embed"), "nobody"],
+      // Freshness read for each follower, and for the scheduler only on its own key (review pass 5: unpinned).
+      [run([sleepFresh, handOwnEnded], OWN, "new-embed"), "scheduler:-:-:0"],
+      [run([sleepFresh, handCtxStale], OWN, "new-embed"), "scheduler:-:-:0"],
+      [run([withAside(sleepFresh, sw), handCtx], OWN, "new-embed"), "scheduler:-:poll:1"],
+      [run([sleepStale], `${OWN}:ctx`, "new-embed"), "nobody"],
+      // The scheduler's own key by its row, where a checkout is configured otherwise (review pass 5).
+      [run([beatOf("heartbeat:sleep", { running: true, reembedJob: "reembed:other-embed@1024" })], "reembed:other-embed@1024", "other-embed"), "scheduler:-:-:0"],
+      [run([beatOf("heartbeat:sleep", { running: true, reembedJob: "reembed:other-embed@1024" })], OWN, "other-embed"), "nobody"],
+      [run([beatOf("heartbeat:sleep", { running: true, reembedJob: "reembed:other-embed@1024" })], "reembed:other-embed@1024", "new-embed"), "aside"],
+      // No key on its row: a scheduler that runs no re-embed, fresh or stopped (review pass 6: v1.9.0 credited).
+      [run([sleepOld], OWN, "new-embed"), "nobody"],
+      [run([sleepOldEnded], OWN, "new-embed"), "nobody"],
+      // Stopped, judged by this configuration, which its restart reads, not its old row's key (review pass 6).
+      [run([beatOf("heartbeat:sleep", { outcome: "stopped", ended: true, reembedJob: "reembed:old-embed@1024" })], OWN, "new-embed"), "stopped"],
+      [run([beatOf("heartbeat:sleep", { outcome: "stopped", ended: true, reembedJob: "reembed:old-embed@1024" })], "reembed:old-embed@1024", "new-embed"), "nobody"],
+      // An empty record is none, as the scheduler reads it; a switch with names outside the alphabet is still a switch (review pass 6).
+      [run([withAside(sleepFresh, sw)], OWN, ""), "scheduler:-:poll:0"],
+      [run([sleepFresh], OWN, ""), "scheduler:-:-:0"],
+      [run([sleepEnded], OWN, ""), "stopped"],
+      // Names outside the alphabet, judged by the record against the scheduler's model: unmade, aside; made since, cleared (review pass 7).
+      [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "my embed model"), "aside"],
+      [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "new-embed"), "scheduler:-:poll:0"],
+    ];
+    const wrong = cells.map(([got, want], i) => (got === want ? null : `cell ${i}: ${got}, not ${want}`)).filter((x) => x !== null);
+    assert(wrong.length === 0, `reembedRunner answers each cell — follower, scheduler (set down, a switch made since, its conflicts), aside, stopped, nobody (${wrong.join("; ") || "all"})`);
+    const now = [switchNow({ recorded: "a", configured: "b" }, "b"), switchNow({ recorded: "a", configured: "b" }, "c"), switchNow({ recorded: "a", configured: "b" }, undefined), switchNow({ recorded: "a", configured: "b" }, "")];
+    assert(JSON.stringify(now) === JSON.stringify([{ made: true, holds: "b" }, { made: false, holds: "c" }, { made: true, holds: "a" }, { made: true, holds: "a" }]),
+      `switchNow reads a switch against the record as it stands (${JSON.stringify(now)})`);
+    // One shell word for a name or key from the database, preflight's and the scheduler's log alike (review passes 6 and 7).
+    const { shellWord } = await import("./brain-info.ts");
+    const words = ["qwen3-embedding:4b", "org/model@q8_0", "my model", "a'b $(x)", "reembed:x@1:$(id)"].map(shellWord);
+    assert(JSON.stringify(words) === JSON.stringify(["qwen3-embedding:4b", "org/model@q8_0", "'my model'", "'a'\\''b $(x)'", "'reembed:x@1:$(id)'"]),
+      `shellWord leaves a model name's alphabet as it is and single-quotes the rest (${JSON.stringify(words)})`);
+  }
   const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
   // Since SMD-3214 db/supervise.ts's guard writes one on any compose follower's row, so every worker's is read.
   assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === "key" && markOf("heartbeat:extract:x", { refused: "identity" })?.refused === "identity" && markOf("heartbeat:extract:x", { refused: "made-up" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,

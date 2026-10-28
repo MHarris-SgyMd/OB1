@@ -3917,7 +3917,9 @@ recreating `sleep` (and `api`): the scheduler reads its environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
 with no model, and its first sleeps re-embed and label them, one embedding
 call a row, before they extract, across as many sleeps as the clock needs;
-the start line and `--dry-run` count them, and `reembed.ts --dry-run` before
+the first sleep's start line and `--dry-run` count them (a later sleep's
+start line counts only rows not yet claimed, so follow the `re-embed pass`
+row), and `reembed.ts --dry-run` before
 upgrading says how many. Then extraction alone until its
 pool drains, then consolidation beside it — the order "Start `extract` alone
 on a backlog" asks of an operator. A wake hard-stops the passes: every lease returned, the model call in
@@ -4090,15 +4092,29 @@ after a live call and the quiet" while it waits for one (`resting`), no
 warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
 that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
 above). Since SMD-2679's PR 4b its `waiting` and `waitingMidPass` name
-`reembed` too, and `aside` carries re-embed set aside on a model switch —
+`reembed` too, `reembedJob` is its own re-embed key (`reembed:<model>@<dim>`,
+which preflight reads whose key it is from, not from its own environment; a
+row without one is read as a scheduler that runs no re-embed — v1.9.0's, one
+whose width forms no key, or one whose model name falls outside a model
+name's alphabet — and a stopped one by the configuration its restart takes),
+and `aside` carries re-embed set aside on a model switch —
 `{ reembed: { kind: "model-switch", recorded, configured } }`, the model the
-brain records and the stack's — until a sleep finds the record put right, or
-set down for the sleep — `{ reembed: { kind } }`, one of `provider`, `model`,
-`egress`, `tables`, `usage`, `statement`, `outage`, `failed` — until the next
-sleep begins. The row's outcome reads failed while re-embed is set aside, or
-down for a cause the operator mends (all but `outage`, its provider's state),
-so preflight's `sleep` row flags it as "its last pass failed"; that row names
-the aside itself from SMD-2679's next PR.
+brain records and the stack's — until the record is put right (read at each
+sleep's start and each of its polls while aside; awake, at the next sleep),
+or set down for the sleep —
+`{ reembed: { kind } }`, one of `provider`, `model`, `egress`, `tables`,
+`usage`, `statement`, `outage`, `failed` — until the next sleep begins. The
+row's outcome reads failed while re-embed is set aside, or down for a cause
+the operator mends (all but `outage`, its provider's state; while re-embed
+waits mid-pass for its provider, the row does not read failed). Preflight's
+`sleep` row names the set-aside or set-down and its remedy: for a switch,
+both ways out, or, once the record matches, when the set-aside clears; for a
+stopped scheduler, the remedy comes before the restart. Its `re-embed pass`
+row treats the scheduler's own key's unfinished pass (`reembedJob`) as its
+work, not something to finish by hand, unless the record names another model
+— a stopped scheduler's offered beside the hand run, one or the other; the rows
+read one answer for who runs re-embed (`reembedRunner` in
+server-portable/brain-info.ts, SMD-2679 PR 4b).
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most

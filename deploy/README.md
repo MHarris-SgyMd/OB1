@@ -2195,7 +2195,7 @@ brain from before migration 021:** its unlabelled vectors are re-embedded and
 labelled by the first sleeps, one embedding call a row, before extraction;
 `bun db/reembed.ts --dry-run` says how many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
-`heartbeat:sleep` (preflight's `sleep` row says it from SMD-2679's next PR),
+`heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where it can print the model names),
 and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
 re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
 back and recreate `api` and `sleep`, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds

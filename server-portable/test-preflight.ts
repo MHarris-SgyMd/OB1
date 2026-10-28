@@ -1513,6 +1513,81 @@ else {
   // The configured key's pass stopped with no lease held: no dead worker, no reclaim (review pass 2).
   assert(/the pass to \S+ @ \d+ has not finished/.test(during.out) && !/a worker died|reclaims the expired/.test(during.out.split("\n").filter((l) => /re-embed pass|→/.test(l)).join("\n")),
          "a configured key's pass with no claimed row names no dead worker and no reclaim");
+  // Under the sleep scheduler (SMD-2679 PR 4b): between its sleeps it holds no
+  // lease, so the configured key's pass is its, with no "finish it" beside it;
+  // set down for a sleep, the cause's remedy; a hand follower's, its own words.
+  // A scheduler's row carries its re-embed key, as sleep.ts's does since review pass 5; a case says otherwise to plant an older one.
+  const hb = (key: string, value: object) =>
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${key}, ${JSON.stringify({ v: 1, every_s: 60, outcome: "ok", ...(key === "heartbeat:sleep" ? { reembedJob: KEY } : {}), ...value })}, now() - interval '10 seconds')
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  await hb("heartbeat:sleep", { running: true });
+  const sched = await run(SQL_ENV);
+  assert(new RegExp(`re-embed pass\\s+${rx(KEY)}: 6 thoughts — .* — the sleep scheduler runs this key, re-embed first in each sleep with work \\(stamped 1\\d s ago; asleep, its passes running\\)`).test(row(sched.out, "re-embed pass")) && !/Finish it/.test(fix(sched.out, "re-embed pass")),
+         `the configured key's pass under a running scheduler is the scheduler's, with no "finish it" (${row(sched.out, "re-embed pass")} | ${fix(sched.out, "re-embed pass")})`);
+  // …its failed row retried once mended, or one refused permanently accepted: a retry of that fails every sleep (review pass 1).
+  assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
+      && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
+         `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
+  // v1.9.0's scheduler runs no re-embed and writes no key: the pass is not its, "finish it" as main's (review pass 6: credited, a pass hidden).
+  await hb("heartbeat:sleep", { running: true, reembedJob: undefined });
+  const oldScheduler = await run(SQL_ENV);
+  assert(/the pass to \S+ @ \d+ has not finished/.test(row(oldScheduler.out, "re-embed pass")) && !/the sleep scheduler runs this key/.test(row(oldScheduler.out, "re-embed pass")) && /Finish it/.test(fix(oldScheduler.out, "re-embed pass")),
+         `a scheduler row with no re-embed key — v1.9.0's — is not credited with the pass (${row(oldScheduler.out, "re-embed pass")})`);
+  // Awake: waiting for the quiet — or, resting after a sleep its budget stopped, for a live call and the quiet (review pass 2).
+  await hb("heartbeat:sleep", { running: false });
+  const schedAwake = row((await run(SQL_ENV)).out, "re-embed pass");
+  await hb("heartbeat:sleep", { running: false, resting: true });
+  const schedResting = row((await run(SQL_ENV)).out, "re-embed pass");
+  assert(/\(stamped 1\d s ago; awake, its passes waiting for the brain to go quiet\)/.test(schedAwake) && /\(stamped 1\d s ago; awake, resting — the next sleep begins after a live call and the quiet\)/.test(schedResting),
+         `awake, the scheduler's key waits for the quiet; resting, for a live call and the quiet (${schedAwake} | ${schedResting})`);
+  await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "provider" } } });
+  const schedDown = await run(SQL_ENV);
+  assert(/!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*; re-embed set down for this sleep \(provider\); 1 failed row\(s\) it will not retry$/m.test(schedDown.out)
+      && /^\s*→ The provider refused the embedding probe: check the embedding endpoint's key and base URL .*\. The next sleep with work tries it again, with no second worker\. Once their cause is fixed, the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, .* --accept-failed <thought-id…>\.$/m.test(fix(schedDown.out, "re-embed pass")),
+         `a scheduler whose re-embed was set down for the sleep warns with the cause's remedy, the embedding endpoint's (${row(schedDown.out, "re-embed pass")} | ${fix(schedDown.out, "re-embed pass")})`);
+  // A hand follower on another key beside it: the scheduler refuses at its next poll and ends, so the row warns (review pass 4).
+  await hb("heartbeat:sleep", { running: true });
+  await hb(`heartbeat:${KEY}:ctx`, { job: `${KEY}:ctx`, running: true });
+  const schedConflict = await run(SQL_ENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${KEY}:ctx`}`;
+  assert(new RegExp(`the sleep scheduler runs this key, .*; a re-embed follower run by hand runs beside it \\(${rx(KEY)}:ctx\\), so it refuses at its next poll and ends`).test(row(schedConflict.out, "re-embed pass")) && /Stop that follower first, as the sleep row says, or the scheduler ends\./.test(fix(schedConflict.out, "re-embed pass")),
+         `a hand follower beside the scheduler makes its key's row warn that it ends (${row(schedConflict.out, "re-embed pass")} | ${fix(schedConflict.out, "re-embed pass")})`);
+  // A record unlike this configuration: the next sleep sets re-embed aside, so the key is not the scheduler's — the
+  // record's own words, both ways out (review pass 1: the scheduler was credited with a key it would set aside).
+  const [{ value: recordedBefore }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+  await hb("heartbeat:sleep", { running: true });
+  await claims`UPDATE ob1_config SET value = 'another-recorded-model' WHERE key = 'embedding_model'`;
+  let schedSwitch = "";
+  try {
+    schedSwitch = row((await run(SQL_ENV)).out, "re-embed pass");
+  } finally {
+    await claims`UPDATE ob1_config SET value = ${recordedBefore} WHERE key = 'embedding_model'`;
+  }
+  assert(/no longer the recorded model \(another-recorded-model/.test(schedSwitch) && !/the sleep scheduler runs this key/.test(schedSwitch),
+         `a record unlike this configuration keeps the switch's own words, not the scheduler's (${schedSwitch})`);
+  // A checkout configured otherwise than the scheduler: its row's own key says whose key it is (review pass 5: "stopped", "finish it").
+  await hb("heartbeat:sleep", { running: false, reembedJob: KEY });
+  const otherCheckout = row((await run({ ...SQL_ENV, OB1_EMBEDDING_MODEL: "another-checkout-model" })).out, "re-embed pass");
+  assert(new RegExp(`${rx(KEY)}: 6 thoughts — .* — the sleep scheduler runs this key`).test(otherCheckout) && !/stopped before it finished/.test(otherCheckout),
+         `a checkout configured otherwise still reads the scheduler's key by its row (${otherCheckout})`);
+  // A switch made since its word — the record this configuration's now — is the scheduler's to take up, not "finish it" (review pass 2).
+  await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: recordedBefore } } });
+  const schedMade = await run(SQL_ENV);
+  assert(/the sleep scheduler runs this key, .*; set aside until its next poll — the brain records this stack's model now, or none — and the next sleep with work takes this key up/.test(row(schedMade.out, "re-embed pass")) && !/Finish it/.test(fix(schedMade.out, "re-embed pass")),
+         `a switch made since the scheduler's word leaves the key the scheduler's (${row(schedMade.out, "re-embed pass")} | ${fix(schedMade.out, "re-embed pass")})`);
+  // A scheduler stopped: "finish it" by hand, or start the scheduler, which runs it — one or the other (review pass 3).
+  await hb("heartbeat:sleep", { running: false, outcome: "stopped", ended: true });
+  const schedStopped = fix((await run(SQL_ENV)).out, "re-embed pass");
+  assert(/Finish it: cd db && bun reembed\.ts .* Or start the sleep scheduler again \(the sleep row\), which runs it first in its next sleep with work — one or the other, not both\.$/.test(schedStopped),
+         `a stopped scheduler's key names the choice, the hand run or the scheduler (${schedStopped})`);
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+  await hb(`heartbeat:${KEY}`, { job: KEY, running: false });
+  const handRun = await run(SQL_ENV);
+  assert(new RegExp(`re-embed pass\\s+${rx(KEY)}: 6 thoughts — .* — a follower is running this key \\(stamped 1\\d s ago\\): 2 pending between its polls`).test(row(handRun.out, "re-embed pass")) && !/Finish it/.test(fix(handRun.out, "re-embed pass")),
+         `a re-embed follower run by hand, between its polls, is running the key, with no "finish it" (${row(handRun.out, "re-embed pass")} | ${fix(handRun.out, "re-embed pass")})`);
+  assert(/which the follower takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(handRun.out, "re-embed pass")),
+         `…its failed row keeps --accept-failed, as the scheduler's does (review pass 2: ${fix(handRun.out, "re-embed pass")})`);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`;
 
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${KEY} AND status IN ('pending', 'failed')`;
   const finished = await run(SQL_ENV);
@@ -1546,6 +1621,12 @@ else {
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
   assert(!/--switch-model/.test(other.out), "…and, with the record and the configuration agreeing, no --switch-model in the remedy");
+  // A claim key a shell would split, printed into the resume command: one quoted word (SMD-2679 PR 4b-2, review pass 7).
+  const ODD = `${KEY}:a b $(x)`;
+  await claims`SELECT enqueue_thoughts(${ODD}, ARRAY[${ids[1]}]::uuid[])`;
+  const oddKey = await run(SQL_ENV);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${ODD}`;
+  assert(oddKey.out.includes(`--job '${ODD}'`) && !oddKey.out.includes(`--job ${ODD}`), `a claim key a shell would split prints as one quoted word (${fix(oddKey.out, "re-embed pass")})`);
   // A worker that died holding the backfill's row: its lease expired, none is
   // live — said so, the reclaim named, then today's remedy (SMD-2423).
   await claims`SELECT claim_thoughts(${CTX}, 'preflight-dead', 1)`;
@@ -2035,6 +2116,44 @@ else {
   assert(/re-embed pass\s+none unfinished/.test(twoModels.out), "…while the claim table, empty, still says no pass is unfinished — the state SMD-1068 was filed for");
   assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${rx(EMBEDDING_MODEL)}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
          "…with the pass as the remedy, and no --switch-model while the record and the configuration agree");
+  // Beside a running sleep scheduler, the scheduler re-embeds them: no hand run, whose writes would wake it (SMD-2679 PR 4b, review pass 3).
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", reembedJob: `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}` })}, now() - interval '10 seconds')
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const scheduledFix = fix((await run(SQL_ENV)).out, "vector models");
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+  assert(/^\s*→ The sleep scheduler re-embeds them, first in each sleep with work — the re-embed pass and sleep rows say where it stands\.$/.test(scheduledFix) && !/bun reembed\.ts/.test(scheduledFix),
+         `beside a running scheduler, vector models leaves the rows to it, with no hand run (${scheduledFix})`);
+  // A follower run by hand on the key takes them: the same answer the re-embed pass row reads (review pass 4).
+  const ownKey = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${ownKey}`}, ${JSON.stringify({ v: 1, job: ownKey, every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const followedFix = fix((await run(SQL_ENV)).out, "vector models");
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${ownKey}`}`;
+  assert(/^\s*→ The re-embed follower running here takes them — the re-embed pass row says where it stands\.$/.test(followedFix),
+         `beside a follower run by hand, vector models leaves the rows to it (${followedFix})`);
+  // A scheduler beside a hand follower on another key: once that follower is stopped, not a hand run beside it (acceptance run, review pass 4).
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", reembedJob: ownKey })}, now() - interval '10 seconds'),
+                 (${`heartbeat:${ownKey}:ctx`}, ${JSON.stringify({ v: 1, job: `${ownKey}:ctx`, every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const conflictedFix = fix((await run(SQL_ENV)).out, "vector models");
+  await claims`DELETE FROM ob1_config WHERE key IN ('heartbeat:sleep', ${`heartbeat:${ownKey}:ctx`})`;
+  assert(/^\s*→ The sleep scheduler re-embeds them once the re-embed follower run by hand beside it is stopped — the sleep row says which\.$/.test(conflictedFix) && !/bun reembed\.ts/.test(conflictedFix),
+         `beside a scheduler and a hand follower, vector models names no hand run (${conflictedFix})`);
+  // A stopped scheduler: the choice, as the re-embed pass row names it; a scheduler set aside for a switch: the sleep row's ways out (review pass 5).
+  const vmBeat = (value: object) => claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, outcome: "ok", reembedJob: ownKey, ...value })}, now() - interval '10 seconds')
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  await vmBeat({ running: false, outcome: "stopped", ended: true });
+  const vmStopped = fix((await run(SQL_ENV)).out, "vector models");
+  await vmBeat({ running: true, reembedJob: `reembed:other-embed@${EMBEDDING_DIM}`, aside: { reembed: { kind: "model-switch", recorded: EMBEDDING_MODEL, configured: "other-embed" } } });
+  const vmAside = fix((await run(SQL_ENV)).out, "vector models");
+  // A record unlike the scheduler's model, its row not yet showing the switch (set at its next sleep): no pointer to a sleep row that says nothing (review pass 6).
+  await vmBeat({ running: true, reembedJob: `reembed:other-embed@${EMBEDDING_DIM}` });
+  const vmPending = fix((await run(SQL_ENV)).out, "vector models");
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
+  assert(!/set aside for this switch/.test(vmPending), `a switch the scheduler's row does not show yet sends no one to the sleep row (${vmPending})`);
+  assert(/The sleep scheduler, stopped now, re-embeds them once started again \(the sleep row\) — or by hand, cd db && bun reembed\.ts --url \$DATABASE_URL: one or the other, not both\./.test(vmStopped)
+      && /^\s*→ The sleep scheduler has re-embed set aside for this switch — the sleep row gives both ways out\.$/.test(vmAside),
+         `vector models names a stopped scheduler's choice, and a set-aside's ways out by the sleep row (${vmStopped} | ${vmAside})`);
   const twoJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   /**
@@ -2089,8 +2208,13 @@ else {
   const recordMoved = await run(SQL_ENV);
   assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${rx(EMBEDDING_MODEL)}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${rx(EMBEDDING_MODEL)}`).test(recordMoved.out),
          "with the record on another model, the rows at the configured one are the ones out of place against the record");
-  assert(/Finish the switch to other-model: cd db && OB1_EMBEDDING_MODEL=other-model bun reembed\.ts --url \$DATABASE_URL, and configure the server for it; or, if .* stands: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model, which re-embeds the rows at other-model instead\./.test(recordMoved.out),
+  assert(/Finish the switch to other-model: cd db && OB1_EMBEDDING_MODEL=other-model bun reembed\.ts --url \$DATABASE_URL, and configure the server for it \(and the sleep scheduler, which reads it once: recreate api and sleep\); or, if .* stands: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model, which re-embeds the rows at other-model instead\./.test(recordMoved.out),
          "…and the remedy gives both directions rather than a --switch-model from this shell that would revert the switch");
+  // A recorded name a shell would split, printed into a command: one quoted word (SMD-2679 PR 4b-2, review pass 6).
+  await claims`UPDATE ob1_config SET value = ${"other model $(x)"} WHERE key = 'embedding_model'`;
+  const quotedFix = fix((await run(SQL_ENV)).out, "vector models");
+  assert(/cd db && OB1_EMBEDDING_MODEL='other model \$\(x\)' bun reembed\.ts --url \$DATABASE_URL, and configure/.test(quotedFix),
+         `a recorded model a shell would split is printed as one quoted word in the command (${quotedFix})`);
   await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
   await claims.unsafe("ALTER TABLE thoughts DROP COLUMN embedding_model");
   const noColumn = await run(SQL_ENV);
@@ -3764,7 +3888,7 @@ else {
     assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure \(last stamped 2 min ago, every 60 s\)$/.test(row(endedOut.out, "workers")) && /ended on a failure 2 min ago — its log says why: start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts/.test(fix(endedOut.out, "workers")),
       `a follower ended on a failure reads ended and names its restart (${row(endedOut.out, "workers")} | ${fix(endedOut.out, "workers")})`);
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", malformed: { answers: 48, bad: 48, alarm: true } }), 30);
-    assert(/stopped 30 s ago: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db/.test(fix((await run(SQL_ENV)).out, "workers")),
+    assert(/stopped 3\d s ago: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a stopped follower whose last block tripped the alarm is told to check the model before the restart");
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed" }), 10);
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
@@ -3961,7 +4085,111 @@ else {
       // Re-embed's, since the scheduler runs it (SMD-2679 PR 4b): carried and said by its name.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], slept: { from: await at(130), to: null } }), 10);
       const reembedRow = row((await run(LOG_ON)).out, "sleep");
-      assert(/asleep, reembed waiting for the provider mid-pass/.test(reembedRow), `the scheduler's re-embed pass waiting mid-pass is said by its name (${reembedRow})`);
+      assert(/asleep, re-embed waiting for the provider mid-pass/.test(reembedRow), `the scheduler's re-embed pass waiting mid-pass is said by its name, as the scheduler writes it (${reembedRow})`);
+      // …and its fix names the embedding endpoint's row, not chat's (SMD-2679 PR 4b).
+      const reembedWaitFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/Re-embed waiting for the provider mid-pass: the provider stopped answering — check it, and the embedding provider row here \(--deep calls it\)/.test(reembedWaitFix) && !/--deep probes chat/.test(reembedWaitFix),
+        `re-embed's wait names the embedding provider's row (${reembedWaitFix})`);
+      assert(/re-embed is set down for the sleep at the scheduler's next poll, extraction going on, and the next sleep with work tries it again\.$/.test(reembedWaitFix) && !/goes on by itself|back in the pool meanwhile/.test(reembedWaitFix),
+        `…and says the sleep sets re-embed down, not that the pass goes on by itself (review pass 1: ${reembedWaitFix})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed", "extract"], slept: { from: await at(130), to: null } }), 10);
+      const bothWaitFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/check it, and the model provider rows here \(--deep probes chat\) and the embedding provider row here \(--deep calls it\)/.test(bothWaitFix),
+        `re-embed and extraction waiting name both providers' rows (${bothWaitFix})`);
+      assert(/the pass goes on by itself once it answers; re-embed is set down for the sleep at the scheduler's next poll, .*, the thoughts in hand back in the pool meanwhile\./.test(bothWaitFix),
+        `…each wait's own ending, extraction's going on and re-embed's set down (${bothWaitFix})`);
+      // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
+      // The brain recording the switch's model, as the scheduler read it.
+      const [{ value: recordSwitch }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+      await claims`UPDATE ob1_config SET value = 'old-embed' WHERE key = 'embedding_model'`;
+      let switched = { out: "" };
+      try {
+        switched = await run(LOG_ON);
+      } finally {
+        await claims`UPDATE ob1_config SET value = ${recordSwitch} WHERE key = 'embedding_model'`;
+      }
+      // Names outside a model name's alphabet: the switch still said, without them (review pass 6: hidden, a generic fix).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
+      const [{ value: recordUnprintable }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+      await claims`UPDATE ob1_config SET value = 'my embed model' WHERE key = 'embedding_model'`;
+      let unprintable = { out: "" };
+      try {
+        unprintable = await run(LOG_ON);
+      } finally {
+        await claims`UPDATE ob1_config SET value = ${recordUnprintable} WHERE key = 'embedding_model'`;
+      }
+      // …and, the record this stack's model since, made: no ways out, as a printable switch made since (review pass 7).
+      const unprintableMade = await run(LOG_ON);
+      assert(/; re-embed set aside at its word, the switch to this stack's model made since$/.test(row(unprintableMade.out, "sleep")) && /The brain records this stack's model now, as this stack is configured: the set-aside clears at the scheduler's next poll\./.test(fix(unprintableMade.out, "sleep")),
+        `a switch with names outside the alphabet, made since, clears as a printable one does (${row(unprintableMade.out, "sleep")} | ${fix(unprintableMade.out, "sleep")})`);
+      assert(/; re-embed set aside for a model switch — its model names hold characters preflight does not print; its log names them$/.test(row(unprintable.out, "sleep"))
+          && /Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out/.test(fix(unprintable.out, "sleep")) && !/Its last pass failed/.test(fix(unprintable.out, "sleep")),
+        `a switch with names outside the alphabet is said without them, not as a generic failure (${row(unprintable.out, "sleep")} | ${fix(unprintable.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
+      // The record moved on again since the row's word: the fix names it as it stands (review pass 2).
+      const movedFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(new RegExp(`set aside while the brain records ${rx(recordSwitch)} and this stack is configured for new-embed: .*to keep ${rx(recordSwitch)}, set OB1_EMBEDDING_MODEL=${rx(recordSwitch)} `).test(movedFix),
+        `a record moved on since the row's word is named as it stands (${movedFix})`);
+      const movedRow = row((await run(LOG_ON)).out, "sleep");
+      assert(new RegExp(`re-embed set aside — the brain records ${rx(recordSwitch)}, this stack is configured for new-embed$`).test(movedRow),
+        `…and so does the row's detail (review pass 4: ${movedRow})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(900), to: await at(700) } }), 30);
+      // Stopped, the switch judged by this configuration, which its restart reads: the record already it, made (review pass 7: new-embed offered back).
+      const stoppedMadeFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/The brain records \S+ now, as this stack is configured: the set-aside clears at the scheduler's next sleep once it is started again\./.test(stoppedMadeFix) && !/OB1_EMBEDDING_MODEL=new-embed/.test(stoppedMadeFix),
+        `a stopped scheduler's switch, the record this configuration's, reads made — not the dead process's model offered back (${stoppedMadeFix})`);
+      const [{ value: recordStopped }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+      await claims`UPDATE ob1_config SET value = 'old-embed' WHERE key = 'embedding_model'`;
+      let stoppedSwitchFix = "";
+      try {
+        stoppedSwitchFix = fix((await run(LOG_ON)).out, "sleep");
+      } finally {
+        await claims`UPDATE ob1_config SET value = ${recordStopped} WHERE key = 'embedding_model'`;
+      }
+      assert(/Re-embed is set aside while the brain records .* recreate api and sleep, which read it once\./.test(stoppedSwitchFix) && !/run on meanwhile/.test(stoppedSwitchFix),
+        `a stopped scheduler's switch is not said to let the others run on (review pass 4: ${stoppedSwitchFix})`);
+      assert(/!\s+sleep\s+.*; re-embed set aside — the brain records old-embed, this stack is configured for new-embed$/.test(row(switched.out, "sleep"))
+          && /Re-embed is set aside while the brain records old-embed and this stack is configured for new-embed: to keep new-embed, cd db && OB1_EMBEDDING_MODEL=new-embed bun reembed\.ts --url \$DATABASE_URL --switch-model .*; to keep old-embed, set OB1_EMBEDDING_MODEL=old-embed \(and OB1_EMBEDDING_DIM to its width\) in deploy\/\.env and recreate api and sleep/.test(fix(switched.out, "sleep"))
+          && !/Its last pass failed/.test(fix(switched.out, "sleep")),
+        `a model switch set aside is said, with both ways out and not the generic failure (${row(switched.out, "sleep")} | ${fix(switched.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model" } }, slept: { from: await at(130), to: null } }), 10);
+      const modelDownFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/Re-embed was set down for this sleep — pull the embedding model its log names .* — a setting changed in deploy\/\.env is read once, so recreate sleep after it \(and api, for the embedding's\): /.test(modelDownFix),
+        `a set-down mended in deploy/.env names the recreate the scheduler needs (review pass 3: ${modelDownFix})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "provider" } }, slept: { from: await at(130), to: null } }), 10);
+      const setDown = await run(LOG_ON);
+      assert(/; re-embed set down for this sleep \(provider\)$/.test(row(setDown.out, "sleep"))
+          && /Re-embed was set down for this sleep — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; extraction and consolidation run on, and the next sleep with work tries it again\./.test(fix(setDown.out, "sleep")),
+        `re-embed set down for the sleep is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
+      // An outage's set-down adds no failed word: a failed outcome beside it is another pass's, said too (review pass 1).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "outage" } }, slept: { from: await at(130), to: null } }), 10);
+      const outageFailedFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/Its last pass failed/.test(outageFailedFix) && /Re-embed was set down for this sleep — its provider did not answer/.test(outageFailedFix),
+        `beside an outage's set-down, a failed outcome is another pass's and still said (${outageFailedFix})`);
+      // A switch put right since the row's word — the record now this stack's — clears at the next sleep: no ways out offered (review pass 1).
+      const [{ value: recordNow }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: recordNow } }, slept: { from: await at(300), to: await at(130) } }), 10);
+      const madeRun = await run(LOG_ON);
+      const madeFix = fix(madeRun.out, "sleep");
+      // …its detail says the switch made, not a record and a configuration that read the same (acceptance run, review pass 4).
+      assert(new RegExp(`re-embed set aside at its word, the switch to ${rx(recordNow)} made since$`).test(row(madeRun.out, "sleep")), `a switch made since reads as made in the detail (${row(madeRun.out, "sleep")})`);
+      assert(new RegExp(`The brain records ${rx(recordNow)} now, as this stack is configured: the set-aside clears at the scheduler's next sleep\\.`).test(madeFix) && !/--switch-model/.test(madeFix),
+        `a switch made since the row's word is said as made, clearing at the next sleep (${madeFix})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: recordNow } }, slept: { from: await at(130), to: null } }), 10);
+      const madeAsleepFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/the set-aside clears at the scheduler's next poll\./.test(madeAsleepFix), `asleep, a switch made since clears at the next poll, which reads the record (review pass 2: ${madeAsleepFix})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "ok", aside: { reembed: { kind: "outage" } }, slept: { from: await at(300), to: await at(130) } }), 10);
+      const lastDown = await run(LOG_ON);
+      assert(/; re-embed set down for its last sleep \(outage\)$/.test(row(lastDown.out, "sleep"))
+          && /Re-embed was set down for its last sleep — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep")),
+        `awake, a set-down speaks of the last sleep, an outage naming the embedding provider (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
+      const endedDown = await run(LOG_ON);
+      assert(/at its last word, re-embed set down for its last sleep \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))
+          && /Its last sleep set re-embed down \(provider\) — the provider refused the embedding probe: .*; mend that before it starts again, or its first sleep sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
+          && !/for the embedding's\): /.test(fix(endedDown.out, "sleep")),
+        `an ended row's set-down is its last word, its cause to mend before the restart, in that order (${row(endedDown.out, "sleep")} | ${fix(endedDown.out, "sleep")})`);
       // Not of the shape — a pass it does not run, a name twice — left off: the row reads as it did before.
       for (const bad of [["board-sync"], ["extract", "extract"], "extract"]) {
         await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: bad, slept: { from: await at(130), to: null } }), 10);
@@ -4008,7 +4236,7 @@ else {
       assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write wakes it; a search does not$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, take sleep out of COMPOSE_PROFILES in deploy\/\.env and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
         `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
       // …and a follower stopped for a scheduler running here is retired, not started again.
-      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(60), to: null } }), 10);
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: true, slept: { from: await at(60), to: null } }), 10);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", ended: true }), 30);
       const retired = await run(LOG_ON);
       assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
@@ -4021,17 +4249,60 @@ else {
       const handRetiredFix = fix(handRetired.out, "workers");
       assert(/it was a reembed\.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:stub-embed@1024'/.test(handRetiredFix) && !/COMPOSE_PROFILES/.test(handRetiredFix),
         `a re-embed follower stopped beside a running scheduler is a hand run: retire its row, with no profile to change (${handRetiredFix})`);
-      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", outcome: "failed", ended: true, reads: "yes" }), 20);
       await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, running: true, outcome: null }), 10);
       const handDown = await run(LOG_ON);
       const handDownFix = fix(handDown.out, "sleep");
-      assert(/A re-embed follower run by hand runs here \(heartbeat:reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(handDownFix) && !/workers profile/.test(handDownFix),
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(handDownFix) && !/workers profile/.test(handDownFix),
         `a scheduler kept down by a hand re-embed follower is told to stop that run, not to choose a profile (${handDownFix})`);
       // Beside the workers' followers too, the hand run is named as well: their fix alone leaves the scheduler refusing (review pass 4).
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
       const bothDownFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/A re-embed follower run by hand runs here \(heartbeat:reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /The workers profile's followers run here \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /The workers profile's followers run here \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
         `a scheduler kept down by a hand re-embed follower and the workers' is told of both (${bothDownFix})`);
+      // Running beside a hand follower started since: it refuses at its next sleep and ends, so said now (review pass 1: every row passed).
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: false, outcome: "ok", reads: "yes", slept: { from: await at(300), to: await at(130) } }), 10);
+      const besideFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), .*: at its next poll, awake or asleep, the scheduler refuses beside it and ends, every pass with it\./.test(besideFix),
+        `a running scheduler beside a hand re-embed follower is told it will end at its next poll (${besideFix})`);
+      // v1.9.0's scheduler — no key on its row — does not refuse beside a hand follower, which may be the only worker: no stop said (review pass 7).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      const oldBesideFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(!/A re-embed follower run by hand runs here/.test(oldBesideFix), `beside v1.9.0's scheduler, no one is told to stop the hand follower (${oldBesideFix})`);
+      // …and a hand follower stopped beside it is no row to retire for a scheduler that will not take its work: started again, as before (review pass 7).
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const oldStoppedFix = fix((await run(LOG_ON)).out, "workers");
+      assert(!/runs re-embed here instead/.test(oldStoppedFix) && /reembed:stub-embed@1024 stopped .*: start it again/.test(oldStoppedFix),
+        `beside v1.9.0's scheduler, a stopped hand follower is told to start again, not retired (${oldStoppedFix})`);
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, running: true, outcome: null }), 10);
+      // Ended on a refusal of its own, a hand follower started after: the refusal's remedy first, then the follower (SMD-2679 PR 4b).
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", outcome: "failed", ended: true, refused: "provider", reads: "yes" }), 20);
+      const refusedHandFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/^\s*→ A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), .*, before the scheduler starts\. sleep ended 2\d s ago on a pass's start refusal \(provider\): /.test(refusedHandFix),
+        `beside a refusal of the scheduler's own, the hand follower started after it is stopped first, then the cause and the start (review pass 4: ${refusedHandFix})`);
+      // A hand follower stopped beside a scheduler stopped too: still the scheduler's to take over once started, not two starts (review pass 3).
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", outcome: "stopped", ended: true, reads: "yes" }), 20);
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const bothStoppedFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
+      assert(/reembed:stub-embed@1024 stopped, and the sleep scheduler runs re-embed here instead once it is started again \(the sleep row\), .*retire the row/.test(bothStoppedFix) && !/start it again — cd db && bun reembed\.ts/.test(bothStoppedFix),
+        `a stopped hand follower beside a stopped scheduler is told to retire its row, not to start too (${bothStoppedFix})`);
+      // A hand follower under a backfill key stopped beside a running scheduler: the scheduler runs the model's own key alone (SMD-2679 PR 4b).
+      await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: true, reads: "yes", slept: { from: await at(60), to: null } }), 10);
+      await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
+      await beat("heartbeat:reembed:stub-embed@1024:ctx", v({ job: "reembed:stub-embed@1024:ctx", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const backfillFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
+      assert(/heartbeat:reembed:stub-embed@1024:ctx' — rather than start it again\. The scheduler runs reembed:stub-embed@1024 alone, not reembed:stub-embed@1024:ctx: whatever that pass left, a one-shot run finishes — cd db && bun reembed\.ts --url \$DATABASE_URL --job reembed:stub-embed@1024:ctx\./.test(backfillFix)
+          && !/not reembed:stub-embed@1024: whatever/.test(backfillFix),
+        `a backfill key's follower is told the scheduler takes none of its work, the model's own key not (${backfillFix})`);
+      // Under another model's key, reembed.ts refuses that --job: the re-embed pass row's to say (review pass 1).
+      await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:stub-embed@1024:ctx'`;
+      await beat("heartbeat:reembed:old-embed@768", v({ job: "reembed:old-embed@768", every_s: 60, outcome: "stopped", ended: true }), 30);
+      const otherKeyFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "workers");
+      assert(/not reembed:old-embed@768, a pass to another model or width: the re-embed pass row says how it ends, if it has not\./.test(otherKeyFix) && !/--job reembed:old-embed@768/.test(otherKeyFix),
+        `another model's key is not offered a --job reembed.ts refuses (${otherKeyFix})`);
+      await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:old-embed@768'`;
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
 
       // The thoughts its wakes hold back (SMD-2694): one gaining windows across

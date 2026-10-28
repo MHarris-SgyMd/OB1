@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, RESTART_OVERDUE_S, SLEEP_STALLED_JOIN, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, reembedKeyModel, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -44,7 +44,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
-import { restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves
+import { parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -259,7 +259,6 @@ const runningWords = (l: Leases, c: PassCounts) =>
 /** A pass whose only claimed rows' leases expired: its worker died holding them. */
 const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
-/** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
 /**
  * What mends a follower db/supervise.ts holds (SMD-3214), null for a row it
  * did not end: the cause first — "start it again" is wrong for a service
@@ -278,10 +277,28 @@ function heldFix(h: WorkerHeartbeat, name: string): string | null {
   return `${name}'s supervisor was due to run it again ${ago(-left)} ago, and nothing has stamped since: if its container is gone, start it — ${recreate}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`;
 }
 
-const providerWaitWords = (passes: readonly string[], midPass = false) => `${passes.join(" and ")} waiting for the provider ${midPass ? "mid-pass" : `at ${passes.length > 1 ? "their" : "its"} start`}`;
+/** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
+const providerWaitWords = (passes: readonly string[], midPass = false) => `${passes.map((p) => (p === "reembed" ? "re-embed" : p)).join(" and ")} waiting for the provider ${midPass ? "mid-pass" : `at ${passes.length > 1 ? "their" : "its"} start`}`;
 /** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
 const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
   [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
+/** The rows to check for passes waiting on their provider: re-embed's is the embedding endpoint, the others' chat (SMD-2679 PR 4b). */
+const providerRows = (passes: readonly string[]) =>
+  [passes.some((p) => p !== "reembed") ? "the model provider rows here (--deep probes chat)" : null, passes.includes("reembed") ? "the embedding provider row here (--deep calls it)" : null].filter((r) => r !== null).join(" and ");
+/**
+ * What mends the cause that set the sleep scheduler's re-embed down for a
+ * sleep (heartbeat:sleep's `aside`, SMD-2679 PR 4b): a refusal's remedy as a
+ * re-embed follower's, and the scheduler's own words for the rest.
+ */
+const reembedDownRemedy = (kind: ReembedDown, stopped = false): string =>
+  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it)"
+  : kind === "statement" ? `a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
+  : kind === "failed" ? "it ended by itself, and its log gives the reason"
+  // A setting the scheduler reads once, at its start (review pass 3: a follower's words alone) — where a
+  // setting can be the cause; a stopped scheduler's restart is its own fix (review pass 4: said twice).
+  : kind === "provider" || kind === "model" || kind === "egress"
+    ? `${startRefusalRemedy(kind, "reembed")} — a setting changed in deploy/.env is read once, so recreate sleep after it (and api, for the embedding's)${stopped ? "" : `: ${restartCommand("sleep", null)}`}`
+  : startRefusalRemedy(kind, "reembed");
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
@@ -4022,7 +4039,7 @@ if (configFailed) {
                 ledgerRemedy("021", APPLY_021));
           } else {
             // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
-            const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");
+            const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
             // The column's width first: the key reembed.ts writes is at the
             // column's width whatever a hand-edited record says (third review pass).
@@ -4045,6 +4062,28 @@ if (configFailed) {
               unlabelled ? `${unlabelled} unlabelled (model unknown)` : null,
             ].filter((s): s is string => s !== null);
             const detail = [`${at} at ${atModel}`, ...rest].join(", ");
+            // A running sleep scheduler re-embeds them itself, first in each
+            // sleep with work (SMD-2679 PR 4b, review pass 3): no hand run
+            // offered beside it, whose writes on a vectorless row, audited and
+            // not marked background, wake it (review pass 7: not every write).
+            // Who runs them, the re-embed pass row's own answer (reembedRunner): the scheduler, or a follower run by hand.
+            // A width that forms no key keeps re-embed out of sleep (sleep.ts's REEMBED_OK): no scheduler to credit (review pass 5).
+            const ownKey = Number.isSafeInteger(embDim) && embDim > 0 ? reembedKey(embModel, embDim) : null;
+            // The scheduler's own key where its row carries one, a checkout's configuration aside (review pass 5).
+            const sleepRow = facts.workers ? sleepBeatOf(facts.workers.heartbeats) : undefined;
+            const schedulerKey = (sleepRow && !sleepRow.stale && !sleepRow.ended && sleepRow.reembedJob) || ownKey;
+            const runner = schedulerKey === null ? ({ by: "nobody" } as const) : reembedRunner(facts.workers?.heartbeats, schedulerKey, ownKey ?? schedulerKey, recorded.embedding_model, embModel);
+            // A switch the scheduler set aside: the sleep row's two ways out, not a hand run beside it (review pass 5).
+            // Only where its row shows the switch: a record changed while it is awake is set aside at its next sleep, until then the row says nothing (review pass 6).
+            const byAside = runner.by === "aside" && runner.beat.aside?.reembed.kind === "model-switch" ? "The sleep scheduler has re-embed set aside for this switch — the sleep row gives both ways out." : null;
+            const accepted = acceptedCount ? "; the accepted rows return through --retry-fallbacks, or when their thought is edited" : "";
+            const bySchedule = runner.by === "scheduler" && runner.conflicts.length === 0
+              ? `The sleep scheduler re-embeds them, first in each sleep with work — the re-embed pass and sleep rows say where it stands${accepted}.`
+              : runner.by === "follower" ? `The re-embed follower running here takes them — the re-embed pass row says where it stands${accepted}.`
+              // Not a hand run beside a running scheduler (the acceptance run of review pass 4): its sleep row says the way on.
+              : runner.by === "scheduler" ? `The sleep scheduler re-embeds them once the re-embed follower run by hand beside it is stopped — the sleep row says which${accepted}.`
+              : runner.by === "stopped" ? `The sleep scheduler, stopped now, re-embeds them once started again (the sleep row) — or by hand, cd db && bun reembed.ts --url $DATABASE_URL: one or the other, not both${accepted}.`
+              : null;
             if (unaccepted > 0) {
               // Judged against the RECORD — what the corpus is meant to be at.
               // When the record and this server's configuration disagree the
@@ -4055,9 +4094,9 @@ if (configFailed) {
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
                   `${unaccepted} vector(s) at another model (${others.filter((r) => r.c > r.accepted).map((r) => `${r.model}: ${r.c - r.accepted}`).join(", ")}) beside ${detail} — searches rank across the two${recordDiffers ? `; the record says ${recorded.embedding_model} and this server embeds with ${embModel}` : ""}`,
-                  recordDiffers
-                    ? `The record (${recorded.embedding_model}) and this server (${embModel}) disagree, so which rows are out of place depends on which stands. Finish the switch to ${recorded.embedding_model}: cd db && OB1_EMBEDDING_MODEL=${recorded.embedding_model} bun reembed.ts --url $DATABASE_URL, and configure the server for it; or, if ${embModel} stands: cd db && bun reembed.ts --url $DATABASE_URL --switch-model, which re-embeds the rows at ${recorded.embedding_model} instead.`
-                    : `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`);
+                  byAside ?? (recordDiffers
+                    ? `The record (${recorded.embedding_model}) and this server (${embModel}) disagree, so which rows are out of place depends on which stands. Finish the switch to ${recorded.embedding_model}: cd db && OB1_EMBEDDING_MODEL=${shellWord(recorded.embedding_model)} bun reembed.ts --url $DATABASE_URL, and configure the server for it (and the sleep scheduler, which reads it once: recreate api and sleep); or, if ${embModel} stands: cd db && bun reembed.ts --url $DATABASE_URL --switch-model, which re-embeds the rows at ${recorded.embedding_model} instead.`
+                    : bySchedule ?? `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`));
             } else if (at + unlabelled + otherCount === 0) {
               add("vector models", "ok", "no vectors stored yet");
             } else if (at === 0) {
@@ -4074,7 +4113,7 @@ if (configFailed) {
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
                   `no vector is known to be at ${atModel}: ${rest.join(", ")} — ${acceptedCount ? "nothing is at the model the record names" : "nothing vouches for them, and the corpus may be at any model the record was ever moved to"}`,
-                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it${acceptedCount ? "; the accepted rows return through --retry-fallbacks, or when their thought is edited" : ""}.`);
+                  byAside ?? bySchedule ?? `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it${acceptedCount ? "; the accepted rows return through --retry-fallbacks, or when their thought is edited" : ""}.`);
             } else {
               add("vector models", "ok", detail);
             }
@@ -4130,7 +4169,7 @@ if (configFailed) {
          * DELETE they named before (SMD-1067).
          */
         try {
-          const { ACCEPTED_CAVEAT_PREFIX, formatPassCounts, parseReembedKey, passUnfinished, poolModelFor, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
+          const { ACCEPTED_CAVEAT_PREFIX, formatPassCounts, passUnfinished, poolModelFor, REEMBED_KEY_PREFIX } = await import("../db/config.mjs");
           const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
@@ -4217,7 +4256,65 @@ if (configFailed) {
                 add("re-embed pass", r.status, r.detail, r.fix);
                 continue;
               }
+              // A running worker's failed rows: retried once their cause is
+              // fixed, or one the provider refuses permanently accepted — a
+              // retry of that fails again at every pass (review passes 1 and 2:
+              // main's way out was lost). Under the key's own model, by --job
+              // where it is not the shell's; not under a model change, which
+              // refuses acceptance.
+              const keyNamed = parseReembedKey(key);
+              const keyEnv = keyNamed && keyNamed.model !== embModel ? `OB1_EMBEDDING_MODEL=${shellWord(keyNamed.model)} ` : "";
+              const failedFix = (taker: string) =>
+                `Once their cause is fixed, the retry_failed tool (work_type ${key}) puts the failed rows back to pending, which ${taker} takes${recordDiffers && keyEnv === "" ? "" : `; for one the provider refuses permanently, cd db && ${keyEnv}bun reembed.ts --url $DATABASE_URL${key === configuredKey ? "" : ` --job ${key}`} --accept-failed <thought-id…>`}.`;
+              // Who runs re-embed under this key: the one answer every row reads
+              // (brain-info.ts's reembedRunner, SMD-2679 PR 4b-2, review pass 4).
+              const runner = reembedRunner(facts.workers?.heartbeats, key, configuredKey, recorded.embedding_model, embModel);
+              // A re-embed follower run by hand, fresh on this key: between its
+              // polls it holds no lease, and "finish it" would start a second
+              // worker beside it (SMD-2679 PR 4b, as the consolidate row's).
+              if (runner.by === "follower") {
+                const follower = runner.beat;
+                const words = `${key}: ${formatPassCounts(c)} — a follower is running this key (stamped ${ago(follower.ageS)} ago${follower.running && follower.waitingMidPass?.length ? ", waiting for the embedding provider mid-pass" : ""}): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`;
+                if (c.failed) add("re-embed pass", "warn", `${words}; ${c.failed} failed row(s) the running pass will not retry`, failedFix("the follower"));
+                else add("re-embed pass", "ok", words);
+                continue;
+              }
+              // The sleep scheduler, fresh, on its row's own key: it runs
+              // re-embed first in each sleep with work, and between its
+              // sleeps holds no lease (SMD-2679 PR 4b). Set aside, the key falls
+              // to the record's own words below, as its sleep row says; a dead
+              // worker's leases keep theirs. The scheduler's key is its row's
+              // (`reembedJob`, review pass 5); a row without one runs no
+              // re-embed (review pass 6).
+              if (runner.by === "scheduler" && l.expired === 0) {
+                const sleeping = runner.beat;
+                const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
+                // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
+                const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "awake, its passes waiting for the brain to go quiet";
+                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : awake})`;
+                // Its failed rows: retried once their cause is fixed, or one the
+                // provider refuses permanently accepted — a retry of that fails
+                // again, every sleep (review pass 1: main's way out was lost).
+                const failedWords = c.failed ? `; ${c.failed} failed row(s) it will not retry` : "";
+                const made = runner.clears ? `; set aside until ${runner.clears === "poll" ? "its next poll" : "its next sleep"} — the brain records this stack's model now, or none — and the next sleep with work takes this key up` : "";
+                // A hand follower beside it: it refuses at its next poll and ends, so the key is not its for long (review pass 4).
+                const conflict = runner.conflicts.length ? `; a re-embed follower run by hand runs beside it (${runner.conflicts.map((b) => b.job ?? b.key).join(", ")}), so it refuses at its next poll and ends` : "";
+                const conflictFix = runner.conflicts.length ? " Stop that follower first, as the sleep row says, or the scheduler ends." : "";
+                if (runner.down) {
+                  add("re-embed pass", "warn", `${words}; re-embed set down for ${sleeping.running ? "this" : "its last"} sleep (${runner.down})${failedWords}${conflict}`,
+                      `${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. The next sleep with work tries it again, with no second worker.${c.failed ? ` ${failedFix("its next sleep")}` : ""}${conflictFix}`);
+                } else if (c.failed || conflict) {
+                  add("re-embed pass", "warn", `${words}${made}${failedWords}${conflict}`, `${c.failed ? failedFix("its next sleep") : ""}${conflictFix}`.trim());
+                } else {
+                  add("re-embed pass", "ok", `${words}${made}`);
+                }
+                continue;
+              }
               const named = parseReembedKey(key);
+              // A scheduler stopped or stale here takes the configured key up
+              // again once started: the choice is named, not two workers (review
+              // pass 3: "finish it" beside the sleep row's "start it again").
+              const schedulerStopped = runner.by === "stopped";
               // Superseded: the key names a model or width that is not the
               // current one — the recorded model, or this server's when nothing
               // is recorded (as reembed.ts's --retire judges, so the two agree:
@@ -4235,7 +4332,7 @@ if (configFailed) {
               const otherWidth = named !== null && named.dim !== widthHere;
               // The tool's own flag, not a hand DELETE: it refuses the recorded
               // model's keys and a key with a live lease (SMD-1067).
-              const retire = `retire its record: cd db && ${cmd("", ` --retire ${key}`)}`;
+              const retire = `retire its record: cd db && ${cmd("", ` --retire ${shellWord(key)}`)}`;
               if (otherModel) {
                 // A switch that was abandoned or reverted: the recorded model
                 // has moved on, so finishing this pass under the current shell
@@ -4248,11 +4345,11 @@ if (configFailed) {
                 // (third review pass).
                 add("re-embed pass", "warn",
                     `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is ${recorded.embedding_model === undefined ? `not this server's model (${embModel}; nothing is recorded)` : `no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? widthHere})`}; its rows describe a switch that was abandoned or reverted`,
-                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
+                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${shellWord(named.model)} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
               } else if (key === configuredKey) {
                 add("re-embed pass", "warn",
                     `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two${l.expired > 0 ? `; ${diedWords(l)}` : ""}`,
-                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt("", "", c, recordDiffers)}`);
+                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt("", "", c, recordDiffers)}${schedulerStopped ? " Or start the sleep scheduler again (the sleep row), which runs it first in its next sleep with work — one or the other, not both." : ""}`);
               } else if (otherWidth) {
                 // The same model at another width. Migration 006 keeps the
                 // recorded width equal to the column's, so no run can finish
@@ -4262,10 +4359,10 @@ if (configFailed) {
                     `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${widthHere}; a width change is a schema migration that does not exist yet, so no run can finish this`,
                     `Nothing can complete it (reembed.ts refuses a width other than the column's); ${retire}`);
               } else {
-                const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";
+                const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${shellWord(named.model)} ` : "";
                 add("re-embed pass", "warn",
                     `${key}: ${formatPassCounts(c)} — ${l.expired > 0 ? diedWords(l) : "a pass under this key stopped before it finished"}`,
-                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt(envPrefix, ` --job ${key}`, c, recordDiffers && envPrefix === "")}`);
+                    `${l.expired > 0 ? reclaim(key) : ""}${finishIt(envPrefix, ` --job ${shellWord(key)}`, c, recordDiffers && envPrefix === "")}`);
               }
             }
             if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");
@@ -4701,13 +4798,29 @@ if (configFailed) {
             } else {
               // The sleep scheduler running here refuses beside a claim follower:
               // one stopped for it is retired, not started again (review pass 3).
-              const sleepRuns = w.heartbeats.some((b) => b.worker === "sleep" && !b.stale && !b.ended);
+              const sleepBeat = sleepBeatOf(w.heartbeats);
+              const sleepRuns = sleepBeat !== undefined && !sleepBeat.stale && !sleepBeat.ended;
+              // A scheduler with a row, stopped or stale, takes re-embed again once started: a hand follower started too would make it refuse (review pass 3).
+              const sleepHere = sleepBeat !== undefined && sleepBeat.reembedJob !== undefined;
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
                 // A re-embed follower is a hand run — no compose service runs one — so its fix is the row alone (review pass 3).
-                if ((h.stale || h.ended) && sleepRuns && h.worker === "reembed") return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                // Under another key than the model's own — a backfill — the scheduler takes none of its work (SMD-2679 PR 4b).
+                if ((h.stale || h.ended) && sleepHere && h.worker === "reembed") {
+                  const own = (sleepRuns && sleepBeat?.reembedJob) || reembedKey(embModel, embDim);
+                  // A backfill under this model and width: a one-shot run finishes it. Under another model or width,
+                  // reembed.ts refuses that --job, and the re-embed pass row says what does (review pass 1).
+                  const named = h.job && h.job !== own ? parseReembedKey(h.job) : null;
+                  const backfill = named === null ? "" : named.model === embModel && named.dim === embDim
+                    ? ` The scheduler runs ${own} alone, not ${h.job}: whatever that pass left, a one-shot run finishes — cd db && bun reembed.ts --url $DATABASE_URL --job ${h.job}.`
+                    : ` The scheduler runs ${own} alone, not ${h.job}, a pass to another model or width: the re-embed pass row says how it ends, if it has not.`;
+                  // When the scheduler takes re-embed, by the shared answer (review pass 5: "runs it here" while a switch kept it out).
+                  const ownRunner = reembedRunner(w.heartbeats, own, own, recorded.embedding_model, embModel);
+                  const when = ownRunner.by === "aside" && ownRunner.beat.aside?.reembed.kind === "model-switch" ? " once its model switch is settled (the sleep row)" : sleepRuns ? "" : " once it is started again (the sleep row)";
+                  return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead${when}, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.${backfill}`;
+                }
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
@@ -4794,15 +4907,58 @@ if (configFailed) {
             const stuck = down ? [] : held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
             const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its wakes — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
             const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.stops} sleep(s) stopped on it since ${down ? "it last started" : "it started"}` : "";
-            const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}`;
+            // Re-embed set aside or down by the scheduler, by its own word
+            // (SMD-2679 PR 4b): extraction and consolidation run on. A set-down
+            // speaks of one sleep, so an ended row's is its last word, its cause
+            // to mend before the restart; a model switch stays until the record
+            // matches. Its failed outcome may be another pass's too, which the
+            // fix leaves to the log (review pass 2).
+            const set = h.aside?.reembed;
+            // The record put right since the row's word — a --switch-model while
+            // awake, or a scheduler stopped — is read at the next sleep's start
+            // (review pass 1: both ways out were offered for a switch made);
+            // the record as the brain holds it now, where it moved on again
+            // (review pass 2), or removed (review pass 5), by the shared reader.
+            // The model the switch is judged against: a running scheduler's
+            // own; a stopped one's, this configuration's, which its restart
+            // reads (review pass 7: the dead process's offered back).
+            const cfgModel = set?.kind !== "model-switch" ? embModel
+              : down ? embModel
+              : set.unprintable ? reembedKeyModel(h.reembedJob) ?? embModel
+              : set.configured;
+            const sw = set?.kind === "model-switch"
+              ? (set.unprintable
+                ? { made: !recorded.embedding_model || recorded.embedding_model === cfgModel, holds: "" }
+                : switchNow({ recorded: set.recorded, configured: cfgModel }, recorded.embedding_model))
+              : null;
+            const holds = sw?.holds ?? "";
+            const madeWords = set?.kind === "model-switch" ? (!recorded.embedding_model ? "the record removed since" : `the switch to ${set.unprintable ? "this stack's model" : cfgModel} made since`) : "";
+            const setDetail = !set ? ""
+              : `; ${down ? "at its last word, " : ""}re-embed ${set.kind === "model-switch" && sw?.made ? `set aside${down ? "" : " at its word"}, ${madeWords}` : set.kind === "model-switch" && set.unprintable ? "set aside for a model switch — its model names hold characters preflight does not print; its log names them" : set.kind === "model-switch" ? `set aside — the brain records ${holds}, this stack is configured for ${cfgModel}` : `set down for ${h.running && !down ? "this" : "its last"} sleep (${set.kind})`}`;
+            const otherPass = h.outcome === "failed" ? " Another pass's failure, if any, its log says." : "";
+            const setFix = !set ? null
+              : set.kind === "model-switch" && set.unprintable && !sw?.made
+                ? `Re-embed is set aside for a model switch: the scheduler's log names both models and the two ways out — --switch-model, or the recorded model back in deploy/.env with api and sleep recreated.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
+              : set.kind === "model-switch" && sw?.made
+                ? `The brain records ${!recorded.embedding_model ? "no embedding model now, which is no switch" : `${set.unprintable ? "this stack's model" : cfgModel} now, as this stack is configured`}: the set-aside clears at the scheduler's ${down ? "next sleep once it is started again" : h.running ? "next poll" : "next sleep"}.`
+              : set.kind === "model-switch"
+                ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
+                : down ? (set.kind === "outage" ? null : `Its last sleep set re-embed down (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first sleep sets re-embed down again.`)
+                : `Re-embed was set down for ${h.running ? "this" : "its last"} sleep — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next sleep with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
+            const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}${setDetail}`;
             const fixes: string[] = [];
+            // An ended row's set-down is mended first: the restart below starts it (review pass 2: the order read restart, then mend).
+            if (down && set && set.kind !== "model-switch" && setFix !== null) fixes.push(setFix);
             // Followers running here keep a scheduler down: it refuses beside
             // them, so "start it again" alone would only refuse again (review pass 3).
             const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
             // A re-embed follower run by hand keeps it down too: its fix is to stop that run (review pass 3).
-            const handFollowers = w.heartbeats.filter((b) => b.worker === "reembed" && !b.stale && !b.ended);
-            const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
-            if (down && handFollowers.length && !followers.length) {
+            // Only beside a scheduler that runs re-embed — its row carries the key: v1.9.0's
+            // does not refuse beside one, which may be the only worker (review pass 7).
+            const handFollowers = h.reembedJob !== undefined ? handFollowersOf(w.heartbeats) : [];
+            const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.job ?? b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
+            // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4 of PR 4b-1).
+            if (down && handFollowers.length && !followers.length && !refusedBy) {
               fixes.push(`${handFix} — then start the scheduler again — ${restartCommand("sleep", null)}.`);
             } else if (down && followers.length) {
               // Beside the workers' followers, named too: their fix alone would leave the scheduler refusing (review pass 4).
@@ -4812,6 +4968,8 @@ if (configFailed) {
               fixes.push(heldFix(h, "sleep") as string);
             } else if (refusedBy) {
               // "Start it again" would only refuse again: the cause comes first (SMD-2752).
+              // A hand follower stopped first, before the refusal's "then start it" (review pass 4: the order read start, then stop).
+              if (handFollowers.length) fixes.push(`${handFix}, before the scheduler starts.`);
               fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}${refusedBy === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
             } else if (down) {
               // Its last sleep stopped on a statement past its timeout: started as it was, it stops there again (review pass 1).
@@ -4819,17 +4977,30 @@ if (configFailed) {
               fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.${again}`);
             } else if (waitingFor || waitingMid) {
               const cap = (t: string) => `${t.charAt(0).toUpperCase()}${t.slice(1)}`;
-              if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
+              // Re-embed's provider is the embedding endpoint (SMD-2679 PR 4b).
+              // Re-embed's wait ends at the scheduler's next poll, set down for the sleep (review pass 1).
+              const waitTail = (passes: readonly string[], one: string, many: string, after: string) => {
+                const others = passes.filter((p) => p !== "reembed").length;
+                return [others ? (others > 1 ? many : one) : null,
+                  passes.includes("reembed") ? "re-embed is set down for the sleep at the scheduler's next poll, extraction going on, and the next sleep with work tries it again" : null]
+                  .filter((t) => t !== null).join("; ") + after;
+              };
+              if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer ${waitingFor.every((p) => p === "reembed") ? "an embedding call" : "a one-token call"} — check it, and ${providerRows(waitingFor)}; ${waitTail(waitingFor, "the pass begins on its own once it answers", "the passes begin on their own once it answers", ".")}`);
               // Mid-pass, the cause is known where "its log says which" was all it had (SMD-2905).
-              if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and the model provider rows here (--deep probes chat); ${waitingMid.length > 1 ? "the passes go on by themselves" : "the pass goes on by itself"} once it answers, the thoughts in hand back in the pool meanwhile.`);
+              if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and ${providerRows(waitingMid)}; ${waitTail(waitingMid, "the pass goes on by itself once it answers", "the passes go on by themselves once it answers", waitingMid.some((p) => p !== "reembed") ? ", the thoughts in hand back in the pool meanwhile." : ".")}`);
             } else if (stmt && !stmtFixed) {
               // Its cause is known where "its log says which" was all it had
               // (SMD-2679); and once the setting passes the bound it stopped
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
-            } else if (h.outcome === "failed") {
+            } else if (h.outcome === "failed" && (setFix === null || set?.kind === "outage")) {
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
             }
+            if (setFix !== null && !(down && set && set.kind !== "model-switch")) fixes.push(setFix);
+            // Running, it refuses beside a hand re-embed follower at its next
+            // poll and ends, every pass with it (review pass 1: all three rows
+            // passed until then; pass 2: a poll, awake or asleep, not a sleep).
+            if (!down && handFollowers.length) fixes.push(`${handFix}: at its next poll, awake or asleep, the scheduler refuses beside it and ends, every pass with it.`);
             if (stuck.length) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
