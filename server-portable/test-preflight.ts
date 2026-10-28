@@ -3110,6 +3110,13 @@ else {
       assert(poolOn.code === 1 && /INSERT, UPDATE on thought_work_claims/.test(writeLine(poolOn.out)) && /016's and 113's enqueue triggers/.test(writeLine(poolOn.out))
                && /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolOn.out),
              `with a subject pool named and extraction off, a role lacking the work-claim writes is refused, the triggers named (exit ${poolOn.code})`);
+      // …and SELECT there: requeue_thought_work's upsert reads the conflict (SMD-3306 PR 5, review pass 2: a role
+      // with INSERT and UPDATE alone passed, and its every capture failed).
+      await claims.unsafe("REVOKE SELECT ON thought_work_claims FROM ob1_pf_capture");
+      const poolNoSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON thought_work_claims TO ob1_pf_capture");
+      assert(poolNoSelect.code === 1 && /GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolNoSelect.out),
+             `…and one lacking SELECT there too is refused, the GRANT naming it (exit ${poolNoSelect.code})`);
       await claims.unsafe("DELETE FROM ob1_config WHERE key = 'subject_pool_key'");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the

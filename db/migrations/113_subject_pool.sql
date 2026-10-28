@@ -41,8 +41,9 @@
 --     FOR KEY SHARE first, as record_thought_subject. The sweep calls it when
 --     the model names nothing for a thought whose subject is out of date.
 --   * Grants: none new. The trigger runs as the writer of the thought, and
---     its pool writes are 016's: INSERT and UPDATE on thought_work_claims
---     (the worker group's), which a capturing role needs once a pool is
+--     its pool writes are 016's: SELECT, INSERT and UPDATE on
+--     thought_work_claims (the worker group's; requeue_thought_work's upsert
+--     reads the conflict), which a capturing role needs once a pool is
 --     named, as once extraction is enabled, and which preflight's write
 --     privileges check enforces then. The close needs what the door's close
 --     needs.

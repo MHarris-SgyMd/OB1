@@ -30,15 +30,18 @@
  * asked again; a claim records no fingerprint, so a switch to another key and back asks again, too, those the model
  * named nothing for. The pooling is marked finished in ob1_config.subject_pool_filled once it commits, so one that
  * broke off (a thought deleted under it, a lost connection) is pooled again by the next run (review pass 1: the pool
- * stood named and its backlog was never pooled). The first naming is refused while a login role can write thoughts
- * but not the claims 113's trigger writes as it, which would fail its every capture.
+ * stood named and its backlog was never pooled). A signal during the naming and pooling ends the CLI at once, the
+ * stop not yet handed out; the pooling, one statement, runs on to its end on the server, holding the pool's lock, and
+ * its end unmarked, the next run pools again. The first naming is refused while a login role can write thoughts but
+ * not the claims 113's trigger writes as it, which would fail its every capture.
  *
  * Each claim is one thought, leased for the limit a call and LEASE_MARGIN_S more, renewed (031's renew_claims) before
  * a call is asked again, so a worker that dies hands it back within that; a run that stops hands back what it holds,
  * and a second signal hands back the claim in hand before the CLI exits. A thought the provider stopped answering on
  * goes back to the end of the pool, so the next run starts with another (review pass 1: it came first again, and
  * ended every run). A thought the extraction pass gave a current subject
- * after it was pooled is finished unasked. A claim finished records that the thought was asked at its text under the
+ * after it was pooled is finished unasked, so long as the rules agree now (a ticket filed, moved or taken away is read
+ * again). A claim finished records that the thought was asked at its text under the
  * pool's key: one the model named nothing for is not asked again until its text or the key changes ("asked, got
  * nothing"), and an out-of-date subject standing on it is closed through close_thought_subject (113), which closes it
  * only while it is still the one read at the text read, so a subject a pass wrote since stands. An answer that is not
@@ -87,8 +90,8 @@ const CLOSE = "close_thought_subject(uuid, uuid, text)";
 /** What the door needs of the role that calls it (111's comment), and where each grant comes from: the sweep's refusals and the pass's say this. */
 export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT and UPDATE on derivations (the capture group's)";
 
-/** What the pool needs of the role (113): the claims' writes, and the pool's name in ob1_config. */
-export const POOL_GRANTS = "INSERT and UPDATE on thought_work_claims and on ob1_config";
+/** What the pool needs of the role (113): the claims' reads and writes, and the pool's name in ob1_config. */
+export const POOL_GRANTS = "SELECT, INSERT and UPDATE on thought_work_claims, and INSERT and UPDATE on ob1_config";
 
 /** A claim's lease past the limit a call: the door's write and the reads beside the call. */
 export const LEASE_MARGIN_S = 300;
@@ -256,7 +259,8 @@ async function sweep(
     SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
        AND has_any_column_privilege('thoughts', 'UPDATE')
        AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can,
-           has_any_column_privilege('thought_work_claims', 'INSERT') AND has_any_column_privilege('thought_work_claims', 'UPDATE')
+           has_table_privilege('thought_work_claims', 'SELECT') AND has_table_privilege('thought_work_claims', 'INSERT')
+       AND has_table_privilege('thought_work_claims', 'UPDATE')
        AND has_any_column_privilege('ob1_config', 'INSERT') AND has_any_column_privilege('ob1_config', 'UPDATE') AS pools`) as { can: boolean; pools: boolean }[];
   if ((!can || !pools) && !DRY_RUN) {
     err(`\n  This role cannot ${can ? "claim from the subject pool: it needs" : "write a thought's subject: record_thought_subject needs"} ${can ? POOL_GRANTS : DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
@@ -310,7 +314,14 @@ async function sweep(
   const pin = DRY_RUN ? null : await sql.reserve();
   const db: SQL = pin ?? sql;
   try {
-    if (pin) await pin`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
+    if (pin) {
+      // Said when another run holds it, naming and pooling (review pass 2: the run waited without a word).
+      const [{ got }] = (await pin`SELECT pg_try_advisory_lock(hashtextextended('ob1:subject-pool', 0)) AS got`) as { got: boolean }[];
+      if (!got) {
+        out("  waiting for another run's naming and pooling of the subject pool");
+        await pin`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
+      }
+    }
     // The pool: the one ob1_config.subject_pool_key names, into which 113's trigger puts new and edited thoughts, and
     // subject_pool_filled, the one whose pooling last finished. A sweep under another key names its own, with --switch-key
     // once another is named, and pools every thought with no current subject — requeued, since a pool used before keeps
@@ -341,19 +352,23 @@ async function sweep(
       wouldRefuse.push(`${why}, and it needs --switch-key`);
     }
     // The first pool named: 113's trigger writes a work claim as the role that captures or edits, so a login role that
-    // can write thoughts but not those claims would fail its every capture (review pass 1). Once a pool is named,
-    // preflight holds a capturing role to them.
+    // can fire it — INSERT on thoughts, or UPDATE of their content or metadata — but cannot make that claim would fail
+    // its every capture (review pass 1). requeue_thought_work's upsert reads the conflict and sets seven columns: SELECT,
+    // INSERT and UPDATE on the table (review pass 2: INSERT and UPDATE alone failed too). Once a pool is named,
+    // preflight holds a capturing role to them. A role reached only through SET ROLE is not asked about.
     if (named === null) {
       const [{ failing }] = (await db`
         SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) AS failing
           FROM pg_roles r
          WHERE r.rolcanlogin
-           AND (has_table_privilege(r.oid, 'thoughts', 'INSERT') OR has_any_column_privilege(r.oid, 'thoughts', 'UPDATE'))
-           AND NOT (has_table_privilege(r.oid, 'thought_work_claims', 'INSERT') AND has_any_column_privilege(r.oid, 'thought_work_claims', 'UPDATE'))`) as { failing: string | null }[];
+           AND (has_any_column_privilege(r.oid, 'thoughts', 'INSERT')
+                OR has_column_privilege(r.oid, 'thoughts', 'content', 'UPDATE') OR has_column_privilege(r.oid, 'thoughts', 'metadata', 'UPDATE'))
+           AND NOT (has_table_privilege(r.oid, 'thought_work_claims', 'SELECT') AND has_table_privilege(r.oid, 'thought_work_claims', 'INSERT')
+                    AND has_table_privilege(r.oid, 'thought_work_claims', 'UPDATE'))`) as { failing: string | null }[];
       if (failing !== null) {
-        const line = `naming the pool would fail the captures of ${failing}: 113's trigger writes a work claim as the role that captures, and they cannot INSERT and UPDATE thought_work_claims`;
+        const line = `naming the pool would fail the captures of ${failing}: 113's trigger writes a work claim as the role that captures, and they cannot SELECT, INSERT and UPDATE thought_work_claims`;
         if (!DRY_RUN) {
-          err(`\n  Refusing to name a subject pool: ${line}. Grant them that (GRANT INSERT, UPDATE ON thought_work_claims TO <role>, or the worker group: cd db && bun migrate.ts --url … --grant <role> --groups worker), then run again.`);
+          err(`\n  Refusing to name a subject pool: ${line}. Grant them that (GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO <role>, or the worker group: cd db && bun migrate.ts --url … --grant <role> --groups worker), then run again.`);
           return 2;
         }
         wouldRefuse.push(line);
@@ -383,6 +398,10 @@ async function sweep(
           const state = sqlState(e);
           if ((state === "23503" || state === "40P01") && attempt < 3) continue;
           if (databaseUnavailable(e)) throw e;
+          if (state === "42501") {
+            err(`\n  This role cannot pool the thoughts (${String((e as Error)?.message ?? e).slice(0, 300)}): the pool needs ${POOL_GRANTS}. Pool ${POOL} is named, and a run as a role that holds them pools them.`);
+            return 2;
+          }
           err(`\n  Pooling the thoughts with no current subject broke off (${String((e as Error)?.message ?? e).slice(0, 300)}): pool ${POOL} is named, and the next run pools them; run it again.`);
           return 1;
         }
@@ -415,9 +434,13 @@ async function sweep(
     SELECT (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'pending')::int AS pending,
            (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'claimed')::int AS claimed,
            (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'claimed' AND ttl_expires_at < now() AND attempt_count < ${MAX_ATTEMPTS})::int AS expired,
-           (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'failed')::int AS failed`) as { pending: number; claimed: number; expired: number; failed: number }[];
+           (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'claimed' AND ttl_expires_at < now() AND attempt_count >= ${MAX_ATTEMPTS})::int AS spent,
+           (SELECT count(*) FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'failed')::int AS failed`) as { pending: number; claimed: number; expired: number; spent: number; failed: number }[];
   if (!(newPool && DRY_RUN)) {
-    out(`  pool ${POOL}: ${pool.pending} pending${pool.claimed ? `, ${pool.claimed} leased${pool.expired ? ` (${pool.expired} run out, taken again)` : ""}` : ""}${pool.failed ? `, ${pool.failed} failed${RETRY_FAILED ? "" : " (--retry-failed asks them again)"}` : ""}${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
+    // A lease run out at its last attempt is failed by the next claim's reaping: said here, and by a run that claims
+    // (review pass 2: the run failed it without a word, and exited 0).
+    const runOut = [pool.expired ? `${pool.expired} run out, taken again` : "", pool.spent ? `${pool.spent} run out at their last attempt, failed by the next claim` : ""].filter(Boolean).join("; ");
+    out(`  pool ${POOL}: ${pool.pending} pending${pool.claimed ? `, ${pool.claimed} leased${runOut ? ` (${runOut})` : ""}` : ""}${pool.failed ? `, ${pool.failed} failed${RETRY_FAILED ? "" : " (--retry-failed asks them again)"}` : ""}${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
   }
 
   /**
@@ -427,8 +450,10 @@ async function sweep(
    * `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's when it released them, across them
    * all: no bucket of their own.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0, lost: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0, lost: 0, lostFailed: 0 };
   let taken = 0;
+  /** Whether this run claimed at all, its claim reaping the pool's run-out leases, those at their last attempt failed. */
+  let claimed = false;
   let llmMs = 0;
   let calls = 0;
   /**
@@ -518,12 +543,16 @@ async function sweep(
    * its claim. False ends the sweep, the thought unfinished and its claim handed back. A dry run counts as a run would.
    */
   async function one(row: Candidate): Promise<Done | false> {
-    // The extraction pass gave it a current subject after it was pooled: finished, unasked.
-    if (row.current) {
+    // Current — the extraction pass gave it a current subject after it was pooled — finished, unasked: so long as the
+    // rules agree now. A ticket it is filed under since a model keyed it, or another ticket than the one a rule
+    // read, or none where one was, is read again (review pass 2: 113's trigger pooled it, and it was finished as
+    // current, its fingerprint the text's alone).
+    const found = ruleSubject(row);
+    const rulesAgree = row.standing_by === "model" ? found === null : found !== null && found.key === row.standing_key && found.by === row.standing_by;
+    if (row.current && rulesAgree) {
       n.current++;
       return { release: "succeeded" };
     }
-    const found = ruleSubject(row);
     let key: string, by: SubjectBy, judge: string, recipe: Recipe;
     if (found && DRY_RUN) {
       // The door keeps a subject found the same way by the same pass at a moved text, and replaces any other standing
@@ -726,17 +755,18 @@ async function sweep(
     } else {
       for (;;) {
         if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break;
-        let claimed: { thought_id: string }[];
+        let got: { thought_id: string }[];
         try {
-          claimed = (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[];
+          claimed = true;
+          got = (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[];
         } catch (e) {
           if (!databaseUnavailable(e)) throw e;
           endedBy = { code: 1, line: databaseDown(e) };
           break;
         }
-        if (claimed.length === 0) break;
+        if (got.length === 0) break;
         taken++;
-        const id = claimed[0].thought_id;
+        const id = got[0].thought_id;
         let row: Candidate | undefined;
         try {
           [row] = (await sql`
@@ -755,15 +785,21 @@ async function sweep(
           continue;
         }
         const done = await one(row);
-        if (done === false || hardStop.signal.aborted) break;
-        // Counted before its release, so a database lost there leaves the counts adding up (review pass 1).
+        if (done === false) break;
+        // Counted before its release, so a database lost there leaves the counts adding up (review pass 1); past the
+        // hard stop the claim is the stop's release's, not this worker's to finish (review pass 2: counted in its
+        // bucket and not seen).
         n.seen++;
+        if (hardStop.signal.aborted) break;
         if (done.release !== "none") {
           try {
             // False: no longer this worker's — an edit put it back in the pool (the trigger), at its new text, or its
             // lease ran out and another run took it — counted and said (review pass 1: nothing said so).
             const [{ ok }] = (await sql`SELECT release_thought(${id}::uuid, ${POOL}, ${workerId}, ${done.release}, ${done.release === "failed" ? done.error : null}) AS ok`) as { ok: boolean }[];
-            if (!ok) n.lost++;
+            if (!ok) {
+              n.lost++;
+              if (done.release === "failed") n.lostFailed++;
+            }
           } catch (e) {
             if (!databaseUnavailable(e)) throw e;
             endedBy = { code: 1, line: databaseDown(e) };
@@ -801,7 +837,7 @@ async function sweep(
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
   const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
-  const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (an edit put the thought back in the pool, or its lease ran out and another run took it)` : "";
+  const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
   out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}`);
   if (endedBy) {
     err(endedBy.line);
@@ -811,7 +847,11 @@ async function sweep(
     err(`\n  stopped after ${n.seen} thought(s): what it held is back in the pool, and the next sweep takes up the rest`);
     return 130;
   }
-  const failedNow = n.unanswered + n.unread + n.egress + n.refusedKey;
+  // A failed claim no longer this run's when released is the pool's again, or gone: no failure for --retry-failed. A
+  // lease this run's claim failed at its last attempt is one.
+  const spent = claimed ? pool.spent : 0;
+  if (spent) err(`\n  ${spent} claim(s) whose lease ran out at its last attempt failed as this run claimed: a worker held each ${MAX_ATTEMPTS} times and did not finish it`);
+  const failedNow = n.unanswered + n.unread + n.egress + n.refusedKey - n.lostFailed + spent;
   if (failedNow > 0) err(`\n  ${failedNow} claim(s) failed: fix the cause and run again with --retry-failed`);
   return failedNow > 0 ? 1 : 0;
 }

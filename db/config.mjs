@@ -2751,9 +2751,10 @@ export const CAPTURE_WRITES = Object.freeze(
  * the capture path — but only while `ob1_config.entity_extraction_key` is set.
  * That trigger fires `AFTER INSERT OR UPDATE OF content ON thoughts`, runs as the
  * calling role (SECURITY INVOKER), and upserts a `thought_work_claims` row
- * (`INSERT … ON CONFLICT DO UPDATE`) — so once extraction is enabled, every
- * capture and content-edit needs INSERT and UPDATE there, even for a role that
- * never runs a worker. Preflight folds these into the `write privileges` check
+ * (`INSERT … ON CONFLICT DO UPDATE`, which reads the conflict and sets seven
+ * columns) — so once extraction is enabled, every capture and content-edit
+ * needs SELECT, INSERT and UPDATE there, even for a role that never runs a
+ * worker (SMD-3306 PR 5, review pass 2: INSERT and UPDATE alone were refused). Preflight folds these into the `write privileges` check
  * exactly when the key is set; a brain that never enabled extraction never needs
  * them. `thought_work_claims` is 015's; the requirement is 016's trigger, and
  * 113's subject-pool trigger (SMD-3306) adds the same pairs while
@@ -2761,6 +2762,7 @@ export const CAPTURE_WRITES = Object.freeze(
  * either key is set.
  */
 export const EXTRACTION_TRIGGER_WRITES = Object.freeze([
+  Object.freeze({ table: "thought_work_claims", privilege: "SELECT", since: "016" }),
   Object.freeze({ table: "thought_work_claims", privilege: "INSERT", since: "016" }),
   Object.freeze({ table: "thought_work_claims", privilege: "UPDATE", since: "016" }),
 ]);
