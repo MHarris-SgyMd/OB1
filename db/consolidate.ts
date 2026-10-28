@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, ADMIT_WAITED_MS, AdmitThrow, admitted, claimAfterWait, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, type Admit, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -350,9 +350,11 @@ export interface ConsolidateOptions {
    * ending for a reason of its own (another worker's outage, the provider's
    * refusal, a worker's throw): between pairs the thought goes back to the
    * pool unrecorded, the proposals written so far standing, and every pair
-   * judged again at its next claim but those it proposed. After a wait both sides are read again before a pair is sent: a
-   * newer side deleted or no longer this worker's has nothing more judged.
-   * Unused by --status, --dry-run and a decision.
+   * judged again at its next claim but those it proposed. When the gate held
+   * it, the thought and every older side still to judge are read again: a
+   * thought deleted or no longer this worker's has nothing more judged, one
+   * edited goes back to the pool for its new text. Unused by --status,
+   * --dry-run and a decision.
    */
   admit?: Admit;
 }
@@ -1611,8 +1613,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
     | { outcome: "abandoned" }
-    /** Edited, requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review pass 3). */
-    | { outcome: "requeued" };
+    /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
+    | { outcome: "lost" }
+    /** Edited while its worker waited at the admit gate, still its claim: put back in the pool for the new text, nothing more judged (review pass 4). */
+    | { outcome: "moved" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
@@ -1718,32 +1722,45 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // No early exit on `stopping` here: a thought is at most --k calls, bounded
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
-    for (const c of candidates) {
+    for (const [at, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
       // here, its claim and lease kept.
       if (ADMIT) {
-        const at = Date.now();
-        let through: boolean;
+        let through: false | "open" | "waited";
         try {
           through = await admitted(ADMIT, gate);
         } catch (e) {
           throw new AdmitThrow(e);
         }
         if (!through) throw new StoppedBetweenPairs();
-        // After a wait both sides are read again: the live write that closed
-        // the gate may be a delete or an edit of either, whose text must not
-        // go to the judge after it (review pass 3). A read that fails goes on, as before.
-        if (Date.now() - at >= ADMIT_WAITED_MS) {
-          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint).catch(() => "ours" as const);
+        // After the gate held it both sides are read again: the live write
+        // that closed the gate may be a delete or an edit of the thought or of
+        // any older side still to judge, whose text must not go to the judge
+        // after it (review passes 3 and 4). A read that fails goes on, as before.
+        if (through === "waited") {
+          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false).catch(() => "ours" as const);
           if (claim === "deleted") return { outcome: "vanished" };
-          if (claim === "gone") return { outcome: "requeued" };
+          if (claim === "lost") return { outcome: "lost" };
+          if (claim === "moved") {
+            // Still ours, its text moved (063 requeues a judged thought only
+            // through its proposals): back to the pool for the new text; if
+            // that fails, the worker ends and its finally returns the claim.
+            if (hardStopped) return { outcome: "abandoned" };
+            if (!(await sql`SELECT requeue_thought_work(${JOB}, ${row.id}::uuid)`.then(() => true, () => false))) throw new StoppedBetweenPairs();
+            return { outcome: "moved" };
+          }
+          const rest = candidates.slice(at).map((x) => x.older_id);
           const fresh = (await sql`
             SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector FROM thoughts
-            WHERE id = ${c.older_id}::uuid`.catch(() => null)) as Row[] | null;
+            WHERE id = ANY(${sql.array(rest, "TEXT")}::uuid[])`.catch(() => null)) as Row[] | null;
           if (fresh !== null) {
-            if (fresh.length === 0) byId.delete(c.older_id);
-            else byId.set(c.older_id, fresh[0]);
+            const now = new Map(fresh.map((o) => [o.id, o]));
+            for (const id of rest) {
+              const o = now.get(id);
+              if (o) byId.set(id, o);
+              else byId.delete(id);
+            }
           }
         }
       }
@@ -2218,9 +2235,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             vanished++;
             continue;
           }
-          if (outcome.outcome === "requeued") {
+          if (outcome.outcome === "lost") {
             lost++;
-            err(`  ${b.thought_id}: edited, requeued or reaped while its worker waited at the admit gate — nothing more was judged; the pool has it again`);
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — requeued or reaped; nothing more of it was judged`);
+            continue;
+          }
+          if (outcome.outcome === "moved") {
+            lost++;
+            err(`  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
             continue;
           }
           let ok: boolean;

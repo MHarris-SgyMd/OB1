@@ -333,47 +333,51 @@ export class AdmitThrow extends Error {
 }
 
 /**
- * A wait at the admit gate the clock sees: an open gate answers in well under
- * a millisecond, a closed one holds the worker for seconds. Past it, a worker
- * mid-thought reads its claim again before it sends more (claimAfterWait).
- */
-export const ADMIT_WAITED_MS = 50;
-
-/**
  * Whether the claim on the thought in hand is still this worker's, read after
- * a wait at the admit gate mid-thought (SMD-3379 PR 1b-1, review pass 3): a
- * live write is what closes the gate, so a delete or an edit of that thought
- * lands while its worker waits, and its text must not go to the provider
- * after. "ours"; "deleted", the thought gone; "gone", the claim the pool's or
- * another's again — an edit's requeue, a reap.
+ * the admit gate held its worker mid-thought (SMD-3379 PR 1b-1, review passes
+ * 3 and 4): a live write is what closes the gate, so a delete or an edit of
+ * that thought lands while its worker waits, and its text must not go to the
+ * provider after. "ours"; "deleted", the thought gone; "lost", the claim the
+ * pool's or another's again (an edit's requeue, a reap); "moved", still this
+ * worker's but its text changed (an edit under a key nothing requeues).
+ * `fingerprint` is the claim's, by the engine's own rule: `coalesced` reads
+ * the stored key first, as extraction does, else the text's.
  */
-export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null): Promise<"ours" | "deleted" | "gone"> {
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean): Promise<"ours" | "deleted" | "lost" | "moved"> {
   const [r] = (await sql`
-    SELECT (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid) AS fingerprint,
+    SELECT (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END
+              FROM thoughts WHERE id = ${id}::uuid) AS fingerprint,
            EXISTS (SELECT 1 FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job} AND status = 'claimed' AND worker_id = ${workerId}) AS ours`) as { fingerprint: string | null; ours: boolean }[];
   if (r.fingerprint === null) return "deleted";
-  // An edit under a key 016 does not requeue leaves the claim this worker's: the text moved is read here.
-  return r.ours && (fingerprint === null || r.fingerprint === fingerprint) ? "ours" : "gone";
+  if (!r.ours) return "lost";
+  return fingerprint === null || r.fingerprint === fingerprint ? "ours" : "moved";
 }
 
-/** The claim on the thought in hand found not this worker's after a wait at the admit gate (claimAfterWait): nothing more of it is sent. */
+/** The claim on the thought in hand found not this worker's to go on with after the admit gate held it (claimAfterWait): nothing more of it is sent. */
 export class ClaimGoneAtGate extends Error {
-  constructor(readonly claim: "deleted" | "gone") {
-    super(`the thought was ${claim === "deleted" ? "deleted" : "edited, requeued or reaped"} while its worker waited at the admit gate`);
+  constructor(readonly claim: "deleted" | "lost" | "moved") {
+    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "moved" ? "edited" : "requeued or reaped"} while its worker waited at the admit gate`);
     this.name = "ClaimGoneAtGate";
   }
 }
 
+/** Raced against the gate's answer: an answer already given beats it, one still to come does not (admitted). */
+const PENDING = Symbol("pending");
+
 /**
- * Wait at the admit gate: true when it let the work through, false when it
- * rejected after `signal` aborted — a stop reaching a waiting worker, or the
- * pass ending for a reason of its own. Any other rejection is the caller's,
- * and is thrown.
+ * Wait at the admit gate: "open" when it let the work through at once,
+ * "waited" when it held the worker first — its promise still pending when
+ * asked, which a worker mid-thought reads its claim again after
+ * (claimAfterWait) — and false when it rejected after `signal` aborted: a stop
+ * reaching a waiting worker, or the pass ending for a reason of its own. Any
+ * other rejection is the caller's, and is thrown.
  */
-export async function admitted(admit: Admit, signal: AbortSignal): Promise<boolean> {
+export async function admitted(admit: Admit, signal: AbortSignal): Promise<false | "open" | "waited"> {
   try {
-    await admit(signal);
-    return true;
+    const answer = admit(signal);
+    if ((await Promise.race([answer, Promise.resolve(PENDING)])) !== PENDING) return "open";
+    await answer;
+    return "waited";
   } catch (e) {
     if (signal.aborted) return false;
     throw e;

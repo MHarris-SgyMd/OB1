@@ -5627,11 +5627,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1766 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1026 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1769 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1028 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 346 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 347 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5783,14 +5783,15 @@ windowed thought that extraction sends; and before each pair consolidation
 judges. A worker waiting between thoughts holds no claim. One waiting
 mid-thought keeps its claim and lease, and extraction moves the thought's time
 held on by the wait and counts none of it as the model's, a hard stop counting
-the thought's time up to the wait. After a wait mid-thought the worker reads
-its claim again before it sends more: the live write that closed the gate may
-be a delete or an edit of that thought, and a thought deleted or no longer
-this worker's has nothing more sent (consolidation reads the pair's older side
-again too). A stop while it waits ends the worker there, as does the pass
-ending for a reason of its own — another worker's provider outage or the
-provider's refusal, a worker's throw: between windows as a first stop does,
-the windows answered kept (with none kept, the claim back in the pool);
+the thought's time up to the wait. When the gate held a worker mid-thought, it
+reads its claim again before it sends more: the live write that closed the
+gate may be a delete or an edit of that thought. A thought deleted or no
+longer this worker's has nothing more sent, and one still its claim but edited
+goes back to the pool for its new text; consolidation reads every older side
+still to judge again too. A stop while it waits ends the worker there, as does
+the pass ending for a reason of its own — another worker's provider outage or
+the provider's refusal, a worker's throw: between windows as a first stop
+does, the windows answered kept (with none kept, the claim back in the pool);
 between pairs with the thought back in the pool unrecorded, its proposals
 written so far standing, and every pair judged again at its next claim but
 those it proposed. A rejection that is no stop ends the pass with the caller's

@@ -2535,7 +2535,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (stopping) break;
       // The admit gate before the poll's pool (SMD-3379 PR 1b), under the follower's stamp (review pass 1).
       let through = true;
-      if (ADMIT) await stamped((async () => { through = await admitted(ADMIT, onStop.signal); })());
+      if (ADMIT) await stamped((async () => { through = (await admitted(ADMIT, onStop.signal)) !== false; })());
       if (!through) break;
       let polled: Start | null;
       try {

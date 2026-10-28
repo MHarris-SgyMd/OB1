@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, ADMIT_WAITED_MS, AdmitThrow, admitted, claimAfterWait, ClaimGoneAtGate, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, ClaimGoneAtGate, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -341,10 +341,10 @@ export interface ExtractOptions {
    * worker there, as does the pass ending for a reason of its own (another
    * worker's outage, the provider's refusal, a worker's throw): between
    * windows as a first stop ends a thought there, its windows answered so far
-   * kept (or, with no kept windows, its claim back in the pool). After a wait
-   * the claim is read again before a window is sent: a thought deleted or no
-   * longer this worker's has nothing more sent. Unused by --status and
-   * --dry-run.
+   * kept (or, with no kept windows, its claim back in the pool). When the
+   * gate held it, the claim is read again before a window is sent: a thought
+   * deleted or no longer this worker's has nothing more sent, one edited goes
+   * back to the pool for its new text. Unused by --status and --dry-run.
    */
   admit?: Admit;
 }
@@ -1133,7 +1133,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     /** Edited while it was being extracted; the trigger has already re-queued it and the pool will redo it. */
     | { outcome: "superseded" }
     /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
-    | { outcome: "abandoned" };
+    | { outcome: "abandoned" }
+    /** Requeued or reaped while its worker waited at the admit gate: nothing more sent, and not this worker's to release (review pass 4). */
+    | { outcome: "lost" };
 
   /**
    * A long thought's answered windows, kept across a claim that does not
@@ -1303,7 +1305,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       const at = Date.now();
       const held = inHand.get(workerId);
       if (held) held.pausedAt = at;
-      let through = false;
+      let through: false | "open" | "waited" = false;
       try {
         through = await admitted(ADMIT, gate);
       } catch (e) {
@@ -1317,11 +1319,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
       }
       if (!through) throw new StoppedBetweenWindows();
-      // After a wait the claim is read again: the live write that closed the
-      // gate may be a delete or an edit of this thought, whose text must not go
-      // to the provider after it (review pass 3). A read that fails goes on, as before.
-      if (Date.now() - at >= ADMIT_WAITED_MS) {
-        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint).catch(() => "ours" as const);
+      // After the gate held it the claim is read again: the live write that
+      // closed the gate may be a delete or an edit of this thought, whose text
+      // must not go to the provider after it (review passes 3 and 4). A read
+      // that fails goes on, as before.
+      if (through === "waited") {
+        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true).catch(() => "ours" as const);
         if (claim !== "ours") throw new ClaimGoneAtGate(claim);
       }
     } : undefined;
@@ -1544,7 +1547,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (e instanceof StoppedBetweenWindows) return;
                 // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
                 if (e instanceof ClaimGoneAtGate) {
-                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : { outcome: "superseded" };
+                  if (hardStopped) return;
+                  // Still ours, its text moved under a key nothing requeues: back to the
+                  // pool for the new text, as a stale write is; if that fails, the finally
+                  // returns it with this worker's leases (review pass 4).
+                  if (e.claim === "moved" && !(await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => true, () => false))) return;
+                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "moved" ? { outcome: "superseded" } : { outcome: "lost" };
                   continue;
                 }
                 // The database went away under the write: not the thought's, so
@@ -1671,6 +1679,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           hb.held.delete(b.thought_id);
           if (outcome.outcome === "vanished") {
             vanished++;
+            continue;
+          }
+          if (outcome.outcome === "lost") {
+            lost++;
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — requeued or reaped; nothing more of it was sent`);
             continue;
           }
           if (outcome.outcome === "superseded") {
