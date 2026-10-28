@@ -3273,21 +3273,21 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const bare = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => silentSse() });
   const kept = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
   // The ceiling, at a small scale: a stream silent for 1250 ms with a 50 ms
-  // frame and a 500 ms ceiling pings until the ceiling, stops there and says
-  // so once. Nominally nine frames, about twenty-four uncapped. A stall of the
+  // frame and a 500 ms ceiling pings until the ceiling, stops there and says so
+  // once. Nominally nine frames, about twenty-four uncapped. A stall of the
   // event loop at the stream's start takes frames off the front (a first tick
-  // past the ceiling sends none), so the frames hold only that it pinged and
-  // that it stopped (at most ten), and that it stopped at the ceiling, not
-  // before, is the stall's own time, on the clock sse.ts reads. At 20 ms and
-  // 200 ms with a floor of four frames, a stall of ~140 ms at the start failed
-  // it, and the job's other suites beside this one caused one (SMD-3470); a
-  // stall under ~450 ms passes now. How often it pings is the gaps between the
-  // frames' arrivals and the tick that stops it (onStall's moment, on the same
-  // clock in this process), judged by their lower median: a stall at the start
-  // takes frames off the front and one later widens a gap, and neither moves
-  // it, where a frame slowed at any multiple widens every gap (a series that
-  // ended at the last frame let a few slow frames pass unjudged, and a plain
-  // median of two gaps moved with one: review pass 3).
+  // past the ceiling sends none), so the frames' count holds only that it
+  // pinged and that it stopped (at most ten); that it stopped at the ceiling,
+  // not before, is held by when onStall ran, on the clock sse.ts reads. At
+  // 20 ms and 200 ms with a floor of four frames, a stall of ~140 ms at the
+  // start failed it, and the job's other suites beside this one caused one
+  // (SMD-3470); a stall under ~450 ms passes now. How often it pings is the
+  // gaps between the frames' arrivals and the tick that stops it (onStall's
+  // moment, on the same clock in this process), judged by their lower median: a
+  // stall at the start takes frames off the front and one later widens a gap,
+  // and neither moves it, where a frame slowed at any multiple widens every gap
+  // (a series that ended at the last frame let a few slow frames pass unjudged,
+  // and a plain median of two gaps moved with one: review pass 3).
   let stalls = 0;
   let stalledAfterMs = 0;
   let stoppedAt = 0;
@@ -3328,6 +3328,7 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
         text += decoder.decode(value, { stream: true });
         for (let n = frames(text) - at.length; n > 0; n--) at.push(performance.now());
       }
+      text += decoder.decode();
       return { ok: true, text, error: "", ms: performance.now() - t0, at };
     } catch (e) {
       const code = (e as { code?: string }).code;
