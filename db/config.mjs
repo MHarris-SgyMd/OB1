@@ -2700,6 +2700,15 @@ export const ROLE_GRANTS = Object.freeze({
 
 /** The advisory lock (`pg_advisory_xact_lock(hashtext(GRANT_LOCK))`) every `migrate.ts --grant` and `db/login-role.ts` take, so two at once in one database queue rather than deadlock or collide on "tuple concurrently updated" over the same catalog rows (SMD-2289). */
 export const GRANT_LOCK = "ob1:grants";
+/**
+ * The session advisory lock (`pg_try_advisory_lock(hashtext(MIGRATE_LOCK))`) a
+ * `migrate.ts` run holds while it applies anything — a pending file, a plugin's,
+ * or `--reapply` — and never for `--dry-run`, `--grant` or a run with nothing to
+ * apply. A second run meanwhile is refused by name, not left to meet the first's
+ * row locks; the sleep scheduler reads it to stop its passes (SMD-3379). A
+ * signal, not a barrier: migrate waits for nothing else to stop.
+ */
+export const MIGRATE_LOCK = "ob1:migrate";
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 /**

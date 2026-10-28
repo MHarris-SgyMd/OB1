@@ -53,6 +53,17 @@
  * applyShadowed (SMD-1421). The session sets one lock_timeout, LOCK_TIMEOUT_S
  * (config.mjs), for everything the migrator does, so a held lock fails the run
  * rather than freezing it and every reader behind it.
+ *
+ * A run that will apply anything — a pending file, a plugin's file or login
+ * role, or --reapply — first takes a session advisory lock, MIGRATE_LOCK
+ * (config.mjs), and holds it until it returns (SMD-3379). It is judged from a
+ * read of the ledger before the ledger is made, so a run refused here writes
+ * nothing; the ledger is read again under the lock, so a run that waited out
+ * another's applies only what that one left. A second run while one holds it
+ * is refused by name, exit 2, rather than meeting the first's row locks at its
+ * lock_timeout. --dry-run, --grant and a run with nothing to apply take no
+ * lock: the sleep scheduler reads it to stop its passes, and a no-op run on
+ * every `compose up` must not stop them.
  */
 
 import type { SQL } from "bun";
@@ -79,6 +90,7 @@ import {
   ROLE_GRANT_GROUPS,
   RETIRED_GRANT_GROUPS,
   GRANT_LOCK,
+  MIGRATE_LOCK,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   grantPresenceSql,
@@ -182,10 +194,14 @@ export async function run(opts: MigrateOptions): Promise<number> {
     return 2;
   }
   const sql = opts.sql ?? openSql(opts.url as string);
+  const lock = { held: false };
   try {
-    return await migrateWith(sql, opts, out, err);
+    return await migrateWith(sql, opts, out, err, lock);
   } finally {
-    // A failing close must not mask the run's own error.
+    // The run's lock goes with it, however it ends: a caller's own connection
+    // lives on past the run (test-live's), and would hold it for the session.
+    // A failing unlock or close must not mask the run's own error.
+    if (lock.held) await sql`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`.catch(() => {});
     if (opts.sql == null) await sql.close().catch(() => {});
   }
 }
@@ -381,7 +397,7 @@ export function lonelyGrantFlag(groups: string | undefined | null, exact: boolea
   return `${groups != null ? "--groups names the groups --grant issues" : "--exact makes --grant all a role holds"}; it does nothing on its own. Pass it with --grant <role>.`;
 }
 
-async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"]): Promise<number> {
+async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], err: Writer["err"], lock: { held: boolean }): Promise<number> {
   const dryRun = opts.dryRun === true;
   const reapply = opts.reapply === true;
 
@@ -757,6 +773,31 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     if (!opts.url) {
       err(`the plugin phase opens its own connection as ${PLUGIN_LOGIN_ROLE}, built from the database URL: pass url beside sql.`);
       return 2;
+    }
+  }
+
+  // The run's lock (SMD-3379), taken when it will apply anything and before
+  // the ledger is made, so a run refused for it writes nothing. Whether it
+  // will is read from the ledger as it stands; the read that decides what runs
+  // comes after, under the lock. In public by name, as the refusal above reads it.
+  if (!dryRun) {
+    const willApply = async (): Promise<boolean> => {
+      if (reapply) return true;
+      const [{ ledger }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
+      const recorded = new Set<string>(ledger ? ((await sql`SELECT name FROM public.schema_migrations`) as { name: string }[]).map((r) => r.name) : []);
+      if (migrations.some((m) => !recorded.has(m.name))) return true;
+      return plugins.some((p) => p.files.length > 0) && (await pluginsNeedLogin(plugins));
+    };
+    if (await willApply()) {
+      const [{ got }] = (await sql`SELECT pg_try_advisory_lock(hashtext(${MIGRATE_LOCK})) AS got`) as { got: boolean }[];
+      if (!got) {
+        err(
+          `Refused: another migrate.ts run is applying to this database now — it holds the ${MIGRATE_LOCK} advisory lock (SMD-3379).\n` +
+            "  Wait for it to finish, then run this again: it applies only what that run leaves. Nothing was changed."
+        );
+        return 2;
+      }
+      lock.held = true;
     }
   }
 

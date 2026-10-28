@@ -416,6 +416,8 @@ export type RoleGrantGroup = "capture" | "server" | "worker" | "extraction" | "s
 export const ROLE_GRANTS: Readonly<Record<RoleGrantGroup, readonly RoleGrant[]>>;
 /** The advisory lock every `migrate.ts --grant` and `db/login-role.ts` take (SMD-2289). */
 export const GRANT_LOCK: string;
+/** The session advisory lock a `migrate.ts` run holds while it applies anything (SMD-3379). */
+export const MIGRATE_LOCK: string;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** Groups a release removed, each with why: `migrate.ts --groups` refuses one by name (`sleep`, SMD-3315). */

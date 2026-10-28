@@ -60,6 +60,15 @@ bun migrate.ts --url postgres://user:pass@host:5432/dbname
 Each migration runs in its own transaction and is recorded in `schema_migrations`,
 so re-running is a no-op and a failure part-way resumes rather than restarting.
 
+A run that will apply anything (a pending file, a plugin's file or login role,
+or `--reapply`) first takes a session advisory lock, `ob1:migrate`
+(`MIGRATE_LOCK`, `config.mjs`), and holds it until it returns (SMD-3379). A
+second run meanwhile is refused by name, exit 2, writing nothing: wait for the
+first, then run again, and it applies only what that one left. `--dry-run`,
+`--grant` and a run with nothing to apply take no lock, so the no-op the
+compose stack's `migrate` service runs on every `up` goes on beside one. The
+lock is a signal, not a barrier: the run waits for nothing else to stop.
+
 ### 4. A schema with no ledger
 
 A schema applied without the migrator has no `schema_migrations` yet. Every
@@ -5604,8 +5613,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1745 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1752 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1022 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
@@ -5680,7 +5689,8 @@ place of the URL and never closed. It must be one connection (the `max: 1`
 option), and it keeps the session state the run sets — lock_timeout, pgvector's
 schema on search_path when it is off the path, the `ob1.acl_*` settings — so
 pass one dedicated to the run, not a pooled connection another caller gets
-next. The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
+next. The run's `ob1:migrate` lock is not kept: `run()` lets it go before it
+returns, on a client passed in too (SMD-3379). The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`
 holds each engine to that: an import opens no connection, prints nothing and
 installs no process listener; the engine's code holds no exit, handler, argv
 scan or console call; and `run()` refuses in the CLI's words before

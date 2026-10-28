@@ -36,7 +36,7 @@
 
 import { SQL } from "bun";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MIGRATE_LOCK, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
@@ -226,6 +226,23 @@ if (!runsHere("1")) {
 
 if (want("1")) {
   console.log("[1] migrate.ts against a real server");
+  // The run's lock (SMD-3379): a run that will apply anything takes
+  // MIGRATE_LOCK first, and one that finds it held is refused by name before
+  // the ledger is made. Held here from another session, on an empty database.
+  // A dry run takes none, so it goes on beside it.
+  const holder = new SQL({ url: URL_, max: 1 });
+  try {
+    await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+    const blocked = await migrate();
+    assert(blocked.code === 2 && /Refused: another migrate\.ts run is applying to this database now — it holds the ob1:migrate advisory lock/.test(blocked.out) && /Nothing was changed\./.test(blocked.out),
+      `a run that would apply, while another holds the lock, is refused by name, exit 2 (exit ${blocked.code})`);
+    const [untouched] = await sql`SELECT to_regclass('public.schema_migrations') IS NULL AS ledger, to_regclass('public.thoughts') IS NULL AS thoughts`;
+    assert(untouched.ledger === true && untouched.thoughts === true, "…and writes nothing, not even the ledger: the lock is taken before the ledger is made");
+    const dryHeld = await migrate("--dry-run");
+    assert(dryHeld.code === 0 && /would apply \d+, skipped 0/.test(dryHeld.out), "--dry-run takes no lock: it runs beside a held one");
+  } finally {
+    await holder.close();
+  }
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
@@ -268,8 +285,40 @@ if (want("1")) {
     assert(againIn.code === 0 && same(againIn, again), "run() in-process on a caller's client re-runs the same no-op, byte for byte on each stream — the client, not the dead URL beside it");
     const [{ one }] = await caller`SELECT 1 AS one`;
     assert(one === 1, "…and leaves the caller's client open");
+    // The lock goes with the run, on a client that outlives it: once after a
+    // run that applied a file (its ledger row taken back, every file being
+    // idempotent), and once after one that applied a file and then failed on
+    // a drifted one (SMD-3379).
+    const advisoryHeld = async () => Number(((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND pid = ${Number(((await caller`SELECT pg_backend_pid() AS p`) as { p: number }[])[0].p)}`) as { c: number }[])[0].c);
+    const [last] = (await sql`SELECT name, sha256 FROM schema_migrations WHERE substr(name, 1, 3) ~ '^[0-9]{3}$' ORDER BY name DESC LIMIT 1`) as { name: string; sha256: string }[];
+    const [first] = (await sql`SELECT name, sha256 FROM schema_migrations WHERE substr(name, 1, 3) ~ '^[0-9]{3}$' ORDER BY name LIMIT 1`) as { name: string; sha256: string }[];
+    await sql`DELETE FROM schema_migrations WHERE name = ${last.name}`;
+    const reapplied = await migrateInProcess({ sql: caller });
+    assert(reapplied.code === 0 && new RegExp(`${last.name.replace(/[.]/g, "\\.")}\\s+applied`).test(reapplied.stdout) && (await advisoryHeld()) === 0,
+      `a run that applied a file on a caller's client lets the lock go when it returns (exit ${reapplied.code}, ${await advisoryHeld()} advisory lock(s) left)`);
+    await sql`DELETE FROM schema_migrations WHERE name = ${last.name}`;
+    await sql`UPDATE schema_migrations SET sha256 = 'drifted' WHERE name = ${first.name}`;
+    try {
+      const failed = await migrateInProcess({ sql: caller });
+      assert(failed.code === 1 && /DRIFTED 1/.test(failed.stdout) && (await advisoryHeld()) === 0,
+        `…and so does one that took it and then failed on a drifted file (exit ${failed.code}, ${await advisoryHeld()} advisory lock(s) left)`);
+    } finally {
+      await sql`UPDATE schema_migrations SET sha256 = ${first.sha256} WHERE name = ${first.name}`;
+    }
   } finally {
     await caller.close();
+  }
+  // A run with nothing to apply takes no lock, so the no-op on every compose up
+  // goes on beside a held one; --reapply always takes it (SMD-3379).
+  const holder2 = new SQL({ url: URL_, max: 1 });
+  try {
+    await holder2`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+    const noop = await migrate();
+    assert(noop.code === 0 && /applied 0, skipped \d+/.test(noop.out), `a run with nothing to apply takes no lock: it goes on beside a held one (exit ${noop.code})`);
+    const reapplyHeld = await migrate("--reapply");
+    assert(reapplyHeld.code === 2 && /holds the ob1:migrate advisory lock/.test(reapplyHeld.out), `--reapply always takes the lock: refused beside a held one (exit ${reapplyHeld.code})`);
+  } finally {
+    await holder2.close();
   }
 
   const ledger = await sql`SELECT count(*)::int AS c FROM schema_migrations`;
