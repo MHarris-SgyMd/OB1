@@ -251,13 +251,102 @@ export interface WorkerHeartbeat {
    * re-embed runs, and for the other workers.
    */
   aside?: SleepAside;
+  /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width forms no key (SMD-2679 PR 4b-2). */
+  reembedJob?: string;
 }
 
 /** What set the scheduler's re-embed pass down for a sleep (WorkerHeartbeat.aside), beside a model switch, which sets it aside. */
 export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "statement", "outage", "failed"] as const;
 /** The sleep scheduler's re-embed pass set aside or down (WorkerHeartbeat.aside). */
 export type ReembedDown = (typeof REEMBED_DOWN)[number];
-export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string } | { kind: ReembedDown } };
+/** `unprintable`: names outside a model name's alphabet, left out (recorded and configured empty) — the kind kept, so a set-aside is not hidden (review pass 6). */
+export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string; unprintable?: true } | { kind: ReembedDown } };
+
+/**
+ * Who runs re-embed under a key, read from the heartbeat rows and the record
+ * (SMD-2679 PR 4b-2, review pass 4): the one answer preflight's `re-embed
+ * pass`, `vector models`, `workers` and `sleep` rows read — each derived it by
+ * a rule of its own, and three review passes found them disagreeing.
+ * `follower`: a fresh `reembed.ts --follow` on the key, run by hand.
+ * `scheduler`: the fresh sleep scheduler on its own key — the one its row
+ * carries (`reembedJob`); a row without one is a scheduler that runs no
+ * re-embed (v1.9.0's; review pass 6) — with the record agreeing — set down
+ * for a sleep (`down`), or a switch made since its word (`clears`: cleared
+ * at its next poll asleep, or its next sleep awake — the next sleep with work
+ * takes the key up; review pass 5); `conflicts`, the fresh hand followers it
+ * refuses beside at its next poll, ending.
+ * `aside`: the scheduler fresh, a model switch keeping re-embed out — set
+ * aside by its word, or a record unlike its model, which its next sleep
+ * sets aside.
+ * `stopped`: its row stale or ended, from a scheduler that ran re-embed —
+ * it takes this configuration's key (`ownKey`, `ownModel`) up once started,
+ * the restart reading the configuration, not its old row (review pass 6).
+ * `nobody`: none of these — and a row whose set-aside names another model
+ * than the one it runs (only a forged row could), or a scheduler whose model
+ * name its row cannot carry (outside the alphabet), read as one that runs no
+ * re-embed.
+ */
+export type ReembedRunner =
+  | { by: "follower"; beat: WorkerHeartbeat }
+  | { by: "scheduler"; beat: WorkerHeartbeat; down: ReembedDown | null; clears: "poll" | "sleep" | null; conflicts: WorkerHeartbeat[] }
+  | { by: "aside"; beat: WorkerHeartbeat }
+  | { by: "stopped"; beat: WorkerHeartbeat }
+  | { by: "nobody" };
+/** A heartbeat row neither stale nor ended. */
+export const freshBeat = (b: WorkerHeartbeat): boolean => !b.stale && !b.ended;
+/**
+ * A model name or claim key as a shell word: as it is in a model name's
+ * alphabet, else single-quoted, so text read from the database prints as one
+ * argument and nothing more in a command to paste — preflight's and the
+ * scheduler's own log line alike (review passes 6 and 7).
+ */
+export const shellWord = (m: string): string => (/^[A-Za-z0-9._:@/+-]+$/.test(m) ? m : `'${m.replace(/'/g, `'\\''`)}'`);
+/** The model a model's own re-embed key names (`reembed:<model>@<dim>`), or null. */
+export const reembedKeyModel = (key: string | undefined): string | null => (key === undefined ? null : REEMBED_OWN_KEY.exec(key)?.[1] ?? null);
+/** A model's own re-embed key, `reembed:<model>@<dim>`, nothing after: the model and the width. */
+const REEMBED_OWN_KEY = /^reembed:([A-Za-z0-9._:@/+-]{1,200})@([1-9][0-9]{0,8})$/;
+/** The sleep scheduler's own row, if it has one, fresh or not. */
+export const sleepBeatOf = (beats: readonly WorkerHeartbeat[]): WorkerHeartbeat | undefined => beats.find((b) => b.worker === "sleep");
+/** The fresh re-embed followers run by hand: the scheduler refuses beside any of them. */
+export const handFollowersOf = (beats: readonly WorkerHeartbeat[]): WorkerHeartbeat[] => beats.filter((b) => b.worker === "reembed" && freshBeat(b));
+/**
+ * A model switch the scheduler set aside, against the record as it stands:
+ * made since its word — the record its model, or none, which the scheduler
+ * reads as no switch (sleep.ts's `switched`; review pass 5) — and the model
+ * the brain holds now, where it is not.
+ */
+export function switchNow(set: { recorded: string; configured: string }, recorded: string | undefined): { made: boolean; holds: string } {
+  const now = recorded === "" ? undefined : recorded;
+  return { made: now === undefined || now === set.configured, holds: now ?? set.recorded };
+}
+export function reembedRunner(beats: readonly WorkerHeartbeat[] | null | undefined, key: string, ownKey: string, recorded: string | undefined, ownModel: string): ReembedRunner {
+  if (!beats) return { by: "nobody" };
+  const follower = beats.find((b) => b.worker === "reembed" && b.job === key && freshBeat(b));
+  if (follower) return { by: "follower", beat: follower };
+  const sleep = sleepBeatOf(beats);
+  // No re-embed key on its row: a scheduler that runs no re-embed (review pass 6).
+  if (sleep === undefined || sleep.reembedJob === undefined) return { by: "nobody" };
+  // An empty record is none, as the scheduler reads it (sleep.ts's `switched`; review pass 6).
+  if (recorded === "") recorded = undefined;
+  // Fresh, its own key and model by its row — a checkout's preflight may be
+  // configured otherwise (review pass 5); stopped, this configuration's, which
+  // its restart reads (review pass 6).
+  const own = freshBeat(sleep) ? REEMBED_OWN_KEY.exec(sleep.reembedJob) : null;
+  const schedKey = own ? sleep.reembedJob : ownKey;
+  const schedModel = own ? own[1] : ownModel;
+  if (key !== schedKey) return { by: "nobody" };
+  const recordDiffers = recorded !== undefined && recorded !== schedModel;
+  if (!freshBeat(sleep)) return recordDiffers ? { by: "nobody" } : { by: "stopped", beat: sleep };
+  const set = sleep.aside?.reembed;
+  if (set?.kind === "model-switch") {
+    // Only a forged row names another model than the one it runs; names outside the alphabet are judged by the record alone (review pass 7).
+    if (!set.unprintable && set.configured !== schedModel) return { by: "nobody" };
+    // Made since its word — the record its model, or none — it clears.
+    return recordDiffers ? { by: "aside", beat: sleep } : { by: "scheduler", beat: sleep, down: null, clears: sleep.running ? "poll" : "sleep", conflicts: handFollowersOf(beats) };
+  }
+  if (recordDiffers) return { by: "aside", beat: sleep };
+  return { by: "scheduler", beat: sleep, down: set ? set.kind : null, clears: null, conflicts: handFollowersOf(beats) };
+}
 
 /** Why a sleep stopped on its budget: its clock spent, or a pass's statement cancelled past statement_timeout (SMD-2679). */
 export const BUDGET_STOPS = ["clock", "statement"] as const;
@@ -270,15 +359,24 @@ export function budgetWords(b: SleepBudget): string {
   return `${b.minutes ? `a ${b.minutes} min clock` : "no clock"}, statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
 }
 
-/** A model name as the row carries one: a non-empty line of at most 200 characters. */
-const modelName = (m: unknown): m is string => typeof m === "string" && m.length > 0 && m.length <= 200 && !/[\u0000-\u001f]/.test(m);
+/**
+ * A model name as the row carries one: at most 200 characters of a model
+ * name's own alphabet — preflight prints it inside commands to paste, so no
+ * space, quote or shell character (review pass 5: `$(…)` reached one).
+ */
+const modelName = (m: unknown): m is string => typeof m === "string" && /^[A-Za-z0-9._:@/+-]{1,200}$/.test(m);
 
 /** The scheduler's passes set aside (WorkerHeartbeat.aside), left off when not of the shape. */
 function parseAside(a: unknown): SleepAside | undefined {
   const r = a !== null && typeof a === "object" ? (a as { reembed?: unknown }).reembed : undefined;
   if (r === null || typeof r !== "object") return undefined;
   const { kind, recorded, configured } = r as Record<string, unknown>;
-  if (kind === "model-switch") return modelName(recorded) && modelName(configured) && recorded !== configured ? { reembed: { kind, recorded, configured } } : undefined;
+  if (kind === "model-switch") {
+    if (modelName(recorded) && modelName(configured)) return recorded !== configured ? { reembed: { kind, recorded, configured } } : undefined;
+    // Names a provider allows but this alphabet does not — a space, say: the set-aside said without them (review pass 6: hidden).
+    const plain = (m: unknown) => typeof m === "string" && m.length > 0 && m.length <= 200 && !/[\u0000-\u001f\u007f]/.test(m);
+    return plain(recorded) && plain(configured) && recorded !== configured ? { reembed: { kind, recorded: "", configured: "", unprintable: true } } : undefined;
+  }
   return (REEMBED_DOWN as readonly unknown[]).includes(kind) ? { reembed: { kind: kind as ReembedDown } } : undefined;
 }
 
@@ -441,6 +539,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const budget = worker === "sleep" ? parseBudget(v!.budget) : undefined;
     // Its passes set aside (SMD-2679 PR 4b), left off when not of the shape.
     const aside = worker === "sleep" ? parseAside(v!.aside) : undefined;
+    // Its own re-embed key (SMD-2679 PR 4b-2), a model's own key or left off.
+    const reembedJob = worker === "sleep" && typeof v!.reembedJob === "string" && REEMBED_OWN_KEY.test(v!.reembedJob) ? v!.reembedJob : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -461,6 +561,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(held ? { held } : {}),
       ...(budget ? { budget } : {}),
       ...(aside ? { aside } : {}),
+      ...(reembedJob ? { reembedJob } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
       ...(worker === "sleep" && v!.resting === true && v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS) ? { resting: true as const } : {}),
     });

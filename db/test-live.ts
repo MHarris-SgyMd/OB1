@@ -16044,13 +16044,15 @@ if (want("38r")) {
         IF NEW.key = 'heartbeat:sleep' THEN INSERT INTO zz_sleep_beats VALUES (NEW.value); END IF; RETURN NEW; END $$;
       CREATE TRIGGER zz_sleep_beats AFTER INSERT OR UPDATE ON ob1_config FOR EACH ROW EXECUTE FUNCTION zz_sleep_beats()`);
     const waiting = follow({ poll: 3 });
-    let sawWait = false, wentOn = false, heldPending = false, downWord: unknown, outageOutcome: string | null | undefined, waitingCode = -9;
+    let sawWait = false, waitFailed = -1, wentOn = false, heldPending = false, downWord: unknown, outageOutcome: string | null | undefined, waitingCode = -9;
     try {
       await pollUntil(async () => (await reClaimed()) > 0, 15_000);
       sw.embedDown = true;
       sw.embedSlowMs = 0;
       wentOn = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — its provider is not answering/.test(l)) && (await exStatus(meanwhile)) === "succeeded", 20_000);
       sawWait = Number((await sql`SELECT count(*)::int AS c FROM zz_sleep_beats WHERE value::jsonb->'waitingMidPass' = '["reembed"]'::jsonb`)[0].c) > 0;
+      // The wait itself never reads failed: the word the follower stamps as it begins goes with it (SMD-2679 PR 4b-2).
+      waitFailed = Number((await sql`SELECT count(*)::int AS c FROM zz_sleep_beats WHERE value::jsonb->'waitingMidPass' = '["reembed"]'::jsonb AND value::jsonb->>'outcome' = 'failed'`)[0].c);
       const outageBeat = await sleepBeat();
       downWord = outageBeat?.aside;
       outageOutcome = outageBeat?.outcome;
@@ -16061,14 +16063,14 @@ if (want("38r")) {
       waitingCode = await waiting.stop();
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_sleep_beats ON ob1_config; DROP FUNCTION IF EXISTS zz_sleep_beats(); DROP TABLE IF EXISTS zz_sleep_beats`);
     }
-    assert(sawWait && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0,
-      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, then set down for the sleep, extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; exit ${waitingCode})`);
+    assert(sawWait && waitFailed === 0 && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0,
+      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, never failed, then set down for the sleep, extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; ${waitFailed} wait write(s) read failed; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; exit ${waitingCode})`);
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(waitOld, "TEXT")}::uuid[])`;
 
     // A model switch at the check: re-embed set aside, said by the dry run, the log and the row; extraction runs on.
     // Put right, the next sleep takes it up again.
     await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
-    let asideRow: unknown, dryAside = false, extracted = false, takenUp = false, takenUpAsleep = false, rowAfter: unknown = "unread", asideCode = -9, recordAfter = "unread", asideOutcome: string | null | undefined;
+    let asideJob: string | undefined, asideRow: unknown, dryAside = false, extracted = false, takenUp = false, takenUpAsleep = false, rowAfter: unknown = "unread", asideCode = -9, recordAfter = "unread", asideOutcome: string | null | undefined;
     let late = "";
     try {
       lines.length = 0;
@@ -16080,6 +16082,8 @@ if (want("38r")) {
         extracted = await pollUntil(async () => (await exStatus(asideNote)) === "succeeded", 15_000);
         const asideBeat = await sleepBeat();
         asideRow = asideBeat?.aside;
+        // The scheduler's own re-embed key on its row, which preflight reads whose key it is from (SMD-2679 PR 4b-2).
+        asideJob = (asideBeat as { reembedJob?: string } | null)?.reembedJob;
         asideOutcome = asideBeat?.outcome;
         // Put right by deleting the record: none recorded is no switch, read within the sleep it is aside in — no
         // wake, as a --switch-model run by hand wakes nothing (review pass 2) — and re-embed's first pool, at the
@@ -16098,8 +16102,8 @@ if (want("38r")) {
     } finally {
       await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     }
-    assert(dryAside && extracted && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)) && JSON.stringify(asideRow) === JSON.stringify({ reembed: { kind: "model-switch", recorded: "other-embed", configured: "stub-embed" } }) && asideOutcome === "failed" && asideCode === 0,
-      `a model switch at a sleep's start sets re-embed aside — the dry run and the log say it, the row carries it and reads failed, a switch the operator mends — and the scheduler runs on, extracting (dry run ${dryAside}; extracted ${extracted}; row ${JSON.stringify(asideRow)}, outcome ${asideOutcome}; exit ${asideCode})`);
+    assert(dryAside && extracted && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)) && JSON.stringify(asideRow) === JSON.stringify({ reembed: { kind: "model-switch", recorded: "other-embed", configured: "stub-embed" } }) && asideOutcome === "failed" && asideCode === 0 && asideJob === EMBED_JOB,
+      `a model switch at a sleep's start sets re-embed aside — the dry run and the log say it, the row carries it and reads failed, a switch the operator mends — and the scheduler runs on, extracting (dry run ${dryAside}; extracted ${extracted}; its key ${asideJob}; row ${JSON.stringify(asideRow)}, outcome ${asideOutcome}; exit ${asideCode})`);
     assert(takenUpAsleep && takenUp && rowAfter === undefined && recordAfter === "stub-embed", `…the record put right — deleted here — is read within the sleep, with no wake, and the next sleep re-embeds, its first pool recording this stack's model, the row's word gone (asleep ${takenUpAsleep}; re-embedded ${takenUp}; row ${JSON.stringify(rowAfter)}; record ${recordAfter})`);
 
     // Put right while the brain is awake, the record is read at the next sleep's start: re-embed runs in that sleep,
