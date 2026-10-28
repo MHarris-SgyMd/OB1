@@ -915,13 +915,16 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
   const mint = async (claims: Record<string, unknown>) => {
-    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, ...claims })}`;
+    // Every token the authorization server signs names its client (RFC 9068): a connector's, unless the claims say otherwise.
+    const nowS = Math.floor(Date.now() / 1000);
+    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: nowS, exp: nowS + 600, client_id: "connector", ...claims })}`;
     const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(head)));
     return `${head}.${Buffer.from(sig).toString("base64url")}`;
   };
   const claimsOf = (t: string) => JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()) as Record<string, unknown>;
   // The authorization server's token endpoint, as deploy/auth/server.ts's grant answers: the `mcp` client's secret, the
-  // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp"}`, the REST core's audience.
+  // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp", act: {sub: <the subject token's client>}}`
+  // (SMD-3064), the REST core's audience.
   let asMode: "ok" | "down" | "busy" | "limited" | "truncated" | "stalled" | "echo" | "echo-hex" | "slow" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
   // A bare 64-hex value, the shape of OB1_AUTH_SECRET_MCP and of a keygen key, starting with a letter.
   const HEX64 = `f${"0123456789abcdef".repeat(4).slice(1)}`;
@@ -950,8 +953,16 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     if (asMode === "echo") return Response.json({ error: `invalid_request ${form.get("subject_token")} ${req.headers.get("authorization")}` }, { status: 400 });
     if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
     const subject = claimsOf(form.get("subject_token") ?? "");
-    const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp" }, exp: subject.exp, client_id: "mcp" });
-    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
+    const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp", act: { sub: subject.client_id } }, exp: subject.exp, client_id: "mcp" });
+    // The token's lifetime as issued, not read off the wall clock: the
+    // exchanger below runs on `clock`, so a wall-clock answer read 599 when
+    // the mint and the trade fell either side of a second, and the "594 s on"
+    // row then asked at the entry's `until`, the first instant it is gone, and
+    // traded again (SMD-3470's review, once in ~14 runs beside the background
+    // suites). A real server answers the time left (deploy/auth/server.ts);
+    // the two agree when the mint and the trade fall in one wall-clock second,
+    // and the stub answers the lifetime so that a straddle can't move the entry.
+    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - (subject.iat as number), scope: subject.scope });
   };
   let clock = Date.now();
   let keysDown = false;
@@ -1001,7 +1012,7 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   identity = { status: "ok", agentId: "agent-o" };
 
   // A write connector: traded once, then from the cache; its calls carry the exchanged token, never the client's.
-  const write = await mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp` });
+  const write = await mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, client_id: "connector-w" });
   trades = 0;
   restCalls.length = 0;
   let r = await ask(write);
@@ -1015,7 +1026,7 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   answer = () => ok({ id: "t1", reader: false, tags: {}, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://x/v1" } });
   r = await ask(write, { method: "tools/call", params: { name: "capture_thought", arguments: { content: "a token's thought" } } });
   const p = calls.find((c) => c.name === "capture")?.principal as Principal | undefined;
-  assert(p?.name === "oauth:operator" && p.scope === "write" && same(p.act, { name: "oauth:mcp" }), `a capture runs at the REST core as oauth:operator, act the MCP service (${JSON.stringify(p && { name: p.name, scope: p.scope, act: p.act })})`);
+  assert(p?.name === "oauth:operator+connector-w" && p.scope === "write" && same(p.act, { name: "oauth:mcp" }), `a capture runs at the REST core as the operator through its connector, oauth:operator+connector-w, act the MCP service (${JSON.stringify(p && { name: p.name, scope: p.scope, act: p.act })})`);
   answer = () => ok({});
 
   // Verify: a read connector and a write connector of the same subject — the read one's calls never carry write.
@@ -1037,9 +1048,11 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   clock += (600 - 6) * 1000;
   await ask(fresh);
   assert(trades === 1, `594 s on: still from the cache (${trades})`);
-  clock += 2000;
+  // At the entry's `until` exactly, a known moment since the stub's lifetime
+  // is fixed: the first instant the entry is gone.
+  clock += 1000;
   await ask(fresh);
-  assert(trades === 2, `596 s on, inside the 5 s margin: traded again (${trades})`);
+  assert(trades === 2, `595 s on, at the 5 s margin: traded again (${trades})`);
   clock = Date.now();
 
   // Refused before any trade, on the claims: expired, another audience, another issuer, more audiences than /mcp, no expiry.

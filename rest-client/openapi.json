@@ -4138,7 +4138,7 @@
       "bearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>` (SMD-2286)."
+        "description": "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>+<client>`, the subject and the client it signed in through, or a service's `oauth:<sub>` alone (SMD-2286, SMD-3064)."
       },
       "forwarder": {
         "type": "apiKey",

@@ -14,7 +14,9 @@
  *   on), calls the REST core with it, and returns what the REST core saw.
  * - **REST core** (stable :8200, canary :8201). It accepts only a JWT this
  *   issuer signed for ITS resource, and reports the subject as `oauth:<sub>`
- *   and the actor from `act`, as SMD-2286 records them.
+ *   and the actor from `act`, as SMD-2286 recorded them. The real REST core
+ *   names the client as well, `oauth:<sub>+<client>` (SMD-3064); this
+ *   stand-in reports the claims it names it from.
  *
  * Both verify tokens against the server's JWKS, fetched across the mesh, and
  * answer a valid token that carries none of the brain's scopes with 403

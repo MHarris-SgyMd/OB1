@@ -23,9 +23,9 @@ import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./res
 import { openApiDocument } from "./rest/openapi.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { setSystemTime } from "bun:test";
-import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
+import { clientNameable as authClientNameable, keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
 import { OAUTH_SCOPES } from "./oauth-edge.ts";
-import { AUTH_JWKS_URL, cachedKeys, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
+import { AUTH_JWKS_URL, cachedKeys, checkerOver, clientNameable, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -370,7 +370,7 @@ console.log("\n[5c] A keyed /health answers the brain's record on the health sur
   answer = async () => ok({});
 }
 
-console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audience, ES256 at+jwt, scopes one to one, `oauth:<sub>`, act; unconfigured none; no keys a 503");
+console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audience, ES256 at+jwt, scopes one to one, `oauth:<sub>+<client>` (SMD-3064), act; unconfigured none; no keys a 503");
 {
   const ORIGIN = "https://brain.example.test";
   const settings = tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!;
@@ -393,7 +393,7 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   const other = await generateKeyPair("ES256");
   type Claims = Record<string, unknown>;
   const mint = (claims: Claims = {}, opt: { key?: CryptoKey; kid?: string; typ?: string; exp?: string | number } = {}) =>
-    new SignJWT({ scope: "brain:write", ...claims })
+    new SignJWT({ scope: "brain:write", client_id: "gui", ...claims })
       .setProtectedHeader({ alg: "ES256", typ: opt.typ ?? "at+jwt", kid: opt.kid ?? kid })
       .setIssuer(String(claims.iss ?? settings.issuer)).setAudience((claims.aud as string | string[]) ?? settings.audience)
       .setSubject(String(claims.sub ?? "operator")).setIssuedAt().setExpirationTime(opt.exp ?? "10m")
@@ -414,15 +414,18 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   answer = async () => ok({});
 
   let r = await json(await call("/v1/whoami", await mint()));
-  assert(r.status === 200 && r.body.name === "oauth:operator" && r.body.scope === "write" && r.body.agentId === "agent-o" && !("act" in r.body),
-    `a write token: the caller is oauth:operator, write scope, its agent id resolved (${JSON.stringify(r.body).slice(0, 120)})`);
+  assert(r.status === 200 && r.body.name === "oauth:operator+gui" && r.body.scope === "write" && r.body.agentId === "agent-o" && !("act" in r.body),
+    `a write token: the caller is the subject and its client, oauth:operator+gui, write scope, its agent id resolved (${JSON.stringify(r.body).slice(0, 120)})`);
   calls.length = 0;
   await call("/v1/stats", await mint());
   const p = calls[0]?.principal;
-  assert(p?.name === "oauth:operator" && p.keyHash === subjectHash(settings.issuer, "operator") && /^[0-9a-f]{64}$/.test(p.keyHash),
-    `the operation runs as oauth:operator, its keyHash the subject's fixed digest (64 hex, the registry's CHECK) (${p?.name} ${p?.keyHash})`);
-  assert(subjectHash(settings.issuer, "operator") !== subjectHash("https://other.example.test/auth", "operator") && subjectHash(settings.issuer, "operator") !== hashKey("operator"),
-    "…a digest of issuer and subject: not another issuer's, nor a key's");
+  assert(p?.name === "oauth:operator+gui" && p.keyHash === subjectHash(settings.issuer, "operator", "gui") && /^[0-9a-f]{64}$/.test(p.keyHash),
+    `the operation runs as oauth:operator+gui, its keyHash the principal's fixed digest (64 hex, the registry's CHECK) (${p?.name} ${p?.keyHash})`);
+  const digests = [
+    subjectHash(settings.issuer, "operator", "gui"), subjectHash(settings.issuer, "operator", "connector-a"), subjectHash(settings.issuer, "operator"),
+    subjectHash("https://other.example.test/auth", "operator", "gui"), hashKey("operator"), hashKey("operator+gui"),
+  ];
+  assert(new Set(digests).size === digests.length, "…a digest of issuer, subject and client: not another client's, the subject's alone, another issuer's, nor a key's");
 
   const read = await mint({ scope: "brain:read" });
   r = await json(await call("/v1/stats", read));
@@ -463,6 +466,18 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
     ["HS256", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "HS256", typ: "at+jwt", kid }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().setExpirationTime("10m").sign(new TextEncoder().encode("x".repeat(32)))],
     ["a subject holding a character a log or egress term cannot carry", mint({ sub: "oper ator" })],
     ["an act naming no actor", mint({ act: { client: "mcp" } })],
+    ["no client_id (SMD-3064: every token the server signs names one)", mint({ client_id: undefined })],
+    ["a client_id holding a space", mint({ client_id: "my client" })],
+    ["a client_id holding a comma, which an egress term list would split", mint({ client_id: "a,b" })],
+    ["a client_id holding a +, which would read as a second client", mint({ client_id: "a+b" })],
+    ["a metadata document URL with a query", mint({ client_id: "https://claude.ai/oauth/metadata?x=1" })],
+    ["a metadata document URL with credentials", mint({ client_id: "https://user@claude.ai/oauth/metadata" })],
+    ["a metadata document URL over http", mint({ client_id: "http://claude.ai/oauth/metadata" })],
+    ["a client past 180 characters", mint({ client_id: `https://claude.ai/${"a".repeat(170)}` })],
+    ["an exchanged token whose act nests no client", mint({ client_id: "mcp", act: { sub: "mcp" } })],
+    ["an exchanged token whose nested client is no string", mint({ client_id: "mcp", act: { sub: "mcp", act: { sub: 7 } } })],
+    ["an exchanged token whose nested client is a space's", mint({ client_id: "mcp", act: { sub: "mcp", act: { sub: "a b" } } })],
+    ["an act nested three deep", mint({ client_id: "mcp", act: { sub: "mcp", act: { sub: "connector-a", act: { sub: "x" } } } })],
     ["unsigned (alg none)", Promise.resolve(`${btoa(JSON.stringify({ alg: "none", typ: "at+jwt" })).replace(/=+$/, "")}.${btoa(JSON.stringify({ iss: settings.issuer, aud: settings.audience, sub: "operator", scope: "brain:write", exp: Math.floor(Date.now() / 1000) + 600 })).replace(/=+$/, "")}.`)],
   ];
   for (const [label, made] of refused) {
@@ -473,10 +488,38 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
       `refused, ${label}: 401 UNAUTHORIZED credential token, invalid_token (${res.status} ${JSON.stringify(body)} ${res.headers.get("www-authenticate")})`);
   }
 
-  // An exchanged token names the MCP service as act, signed; a forwarder slot beside it is checked and does not replace it.
-  const exchanged = await mint({ scope: "brain:read", act: { sub: "mcp" } });
+  // A client named by its metadata document (CIMD) is that URL, whole.
+  const cimd = "https://claude.ai/oauth/claude-code-client-metadata";
+  r = await json(await call("/v1/whoami", await mint({ client_id: cimd })));
+  assert(r.status === 200 && r.body.name === `oauth:operator+${cimd}`, `a metadata document's client: oauth:operator+<its URL> (${r.body.name})`);
+  const longest = `https://claude.ai/${"a".repeat(180 - "https://claude.ai/".length)}`;
+  r = await json(await call("/v1/whoami", await mint({ client_id: longest })));
+  assert(r.status === 200 && r.body.name === `oauth:operator+${longest}` && r.body.name.length <= 200, `…and the longest one taken, 180 characters, named whole within the 200-character actor filter (${r.status} ${String(r.body.name).length})`);
+  r = await json(await call("/v1/whoami", await mint({ sub: "a".repeat(128), client_id: longest })));
+  assert(r.status === 401 && r.body.credential === "token", `a caller name past 200 characters (a 128-character subject and that client) is refused, whatever its parts (${r.status})`);
+  // The authorization server refuses, as a client at all and at the exchange, exactly the clients this server cannot name (SMD-3064 review passes 1 and 2).
+  const clients = [
+    "gui", "mcp", "mcp-canary", "runner", "sVSJFn-GM1K_MdkSMjoqVTA29i8Q3PByRQHepaZBRb6", cimd, longest, `${longest}a`, "a".repeat(128), "a".repeat(129),
+    "https://cimd.test/client/run-1.json", "https://h.example:8443/c", "https://h.example/a%2Fb", "HTTPS://claude.ai/x", "https://claude.ai/x?y=1", "https://claude.ai/x#f",
+    "https://u@claude.ai/x", "https://claude.ai", "https://claude.ai/a+b", "https://claude.ai/a:b", "https://claude.ai/a,b", "http://claude.ai/x", "a b", "a+b", "", "operator",
+    `https://${"h".repeat(100)}/x`, `https://${"h".repeat(101)}/x`, "https://h.example:12345/x", "https://h.example:123456/x",
+  ];
+  const disagree = clients.filter((c) => clientNameable(c) !== authClientNameable(c));
+  assert(disagree.length === 0 && clients.filter((c) => clientNameable(c)).length === 14, `the REST core and the authorization server name the same ${clients.length} sample clients alike (${clients.filter((c) => clientNameable(c)).length} nameable)${disagree.length ? `, differ: ${disagree.join(" ")}` : ""}`);
+
+  // An exchanged token names the MCP service as act, and the connector the operator signed in through as the client
+  // (the act nested in it, SMD-3064), signed; a forwarder slot beside it is checked and does not replace it.
+  const exchanged = await mint({ scope: "brain:read", client_id: "mcp", act: { sub: "mcp", act: { sub: "connector-a" } } });
   r = await json(await call("/v1/whoami", exchanged));
-  assert(r.status === 200 && r.body.name === "oauth:operator" && same(r.body.act, { name: "oauth:mcp" }), `an exchanged token: the subject, act oauth:<the MCP client> (${JSON.stringify(r.body).slice(0, 120)})`);
+  assert(r.status === 200 && r.body.name === "oauth:operator+connector-a" && same(r.body.act, { name: "oauth:mcp" }), `an exchanged token: the subject and its connector, act oauth:<the MCP client> (${JSON.stringify(r.body).slice(0, 120)})`);
+  calls.length = 0;
+  await call("/v1/stats", exchanged);
+  await call("/v1/stats", await mint({ scope: "brain:read", client_id: "mcp", act: { sub: "mcp", act: { sub: "connector-b" } } }));
+  const [ca, cb] = calls.map((c) => c.principal);
+  r = await json(await call("/v1/whoami", await mint({ client_id: "mcp", act: { sub: "mcp", act: { sub: "operator" } } })));
+  assert(r.status === 200 && r.body.name === "oauth:operator+operator", `an exchanged token whose connector shares the subject's name is still a connector, never the subject alone (${r.body.name})`);
+  assert(ca?.name === "oauth:operator+connector-a" && cb?.name === "oauth:operator+connector-b" && ca.keyHash === subjectHash(settings.issuer, "operator", "connector-a") && ca.keyHash !== cb.keyHash && ca.keyHash !== p?.keyHash,
+    `two connectors through one MCP service: two principals, each its own digest, neither the GUI's (${ca?.name} ${cb?.name})`);
   r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "fwd-raw" } }));
   assert(r.status === 200 && same(r.body.act, { name: "oauth:mcp" }), `…beside a forwarder's key, the token's own act stands (${JSON.stringify(r.body.act)})`);
   r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "read-raw" } }));
@@ -484,13 +527,16 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   r = await json(await call("/v1/whoami", await mint(), { headers: { "x-brain-forwarder": "fwd-raw" } }));
   assert(r.status === 200 && same(r.body.act, { name: "f", agentId: "agent-f" }), `a token naming no act, carried by a forwarder: the forwarder is act, as for a key (${JSON.stringify(r.body.act)})`);
   // A service's client-credentials token: the authorization server's `sub` is the client id.
-  r = await json(await call("/v1/whoami", await mint({ sub: "runner", scope: "brain:capture" })));
-  assert(r.status === 200 && r.body.name === "oauth:runner", `a service's token: oauth:<its client id> (${r.body.name})`);
+  calls.length = 0;
+  r = await json(await call("/v1/whoami", await mint({ sub: "runner", client_id: "runner", scope: "brain:capture" })));
+  assert(r.status === 200 && r.body.name === "oauth:runner", `a service's token, its subject its own client: oauth:<its client id> alone (${r.body.name})`);
+  await call("/v1/thoughts", await mint({ sub: "runner", client_id: "runner", scope: "brain:capture" }), { method: "POST", body: JSON.stringify({ content: "x" }) });
+  assert(calls[0]?.principal.keyHash === subjectHash(settings.issuer, "runner"), `…its digest the subject's alone, as before SMD-3064 (${calls[0]?.principal.keyHash})`);
 
   // The registry's word holds for a token as for a key.
   identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-16T00:00:00Z", reason: null };
   r = await json(await call("/v1/stats", await mint()));
-  assert(r.status === 401 && r.body.code === "REVOKED", `a subject the registry revoked → 401 REVOKED (${r.status} ${r.body.code})`);
+  assert(r.status === 401 && r.body.code === "REVOKED", `a principal the registry revoked → 401 REVOKED (${r.status} ${r.body.code})`);
   identity = { status: "ok", agentId: "agent-o" };
 
   // A key beside a token is the caller: keys first, as before.

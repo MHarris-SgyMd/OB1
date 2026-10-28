@@ -251,7 +251,7 @@ export interface WorkerHeartbeat {
    * re-embed runs, and for the other workers.
    */
   aside?: SleepAside;
-  /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width forms no key (SMD-2679 PR 4b-2). */
+  /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width or model name forms no key a row carries (SMD-2679 PR 4b-2, SMD-3486). */
   reembedJob?: string;
 }
 
@@ -295,16 +295,39 @@ export type ReembedRunner =
 /** A heartbeat row neither stale nor ended. */
 export const freshBeat = (b: WorkerHeartbeat): boolean => !b.stale && !b.ended;
 /**
+ * A model name's alphabet, as a character class: every pattern here that
+ * reads a model name, a claim key or a heartbeat key is built from it, and
+ * sleep.ts's, so what the scheduler writes and what its readers take are one
+ * rule (SMD-3486). No space, quote or shell character: preflight prints these
+ * inside commands to paste.
+ */
+export const NAME_CHARS = "[A-Za-z0-9._:@/+-]";
+/**
  * A model name or claim key as a shell word: as it is in a model name's
  * alphabet, else single-quoted, so text read from the database prints as one
  * argument and nothing more in a command to paste — preflight's and the
  * scheduler's own log line alike (review passes 6 and 7).
  */
-export const shellWord = (m: string): string => (/^[A-Za-z0-9._:@/+-]+$/.test(m) ? m : `'${m.replace(/'/g, `'\\''`)}'`);
+export const shellWord = (m: string): string => (SHELL_PLAIN.test(m) ? m : `'${m.replace(/'/g, `'\\''`)}'`);
+const SHELL_PLAIN = new RegExp(`^${NAME_CHARS}+$`);
 /** The model a model's own re-embed key names (`reembed:<model>@<dim>`), or null. */
 export const reembedKeyModel = (key: string | undefined): string | null => (key === undefined ? null : REEMBED_OWN_KEY.exec(key)?.[1] ?? null);
 /** A model's own re-embed key, `reembed:<model>@<dim>`, nothing after: the model and the width. */
-const REEMBED_OWN_KEY = /^reembed:([A-Za-z0-9._:@/+-]{1,200})@([1-9][0-9]{0,8})$/;
+const REEMBED_OWN_KEY = new RegExp(`^reembed:(${NAME_CHARS}{1,200})@([1-9][0-9]{0,8})$`);
+/**
+ * Why a model and width form no re-embed key the heartbeat rows carry — the
+ * width, or the model's name — or null where they do. The sleep scheduler
+ * runs re-embed only under a key its row carries, so every reader credits
+ * what it runs: a name outside the alphabet ran, and was read as no re-embed
+ * at all (SMD-3486). A hand follower's row under that key,
+ * `heartbeat:reembed:<model>@<dim>`, is the shorter bound — `<model>@<dim>`
+ * at most 120 characters — so the scheduler sees, and refuses beside, any
+ * follower of the key it runs (review pass 1: 116 to 200 went unseen).
+ */
+export function reembedKeyUnfit(model: string, dim: number): "width" | "model" | null {
+  if (!(Number.isSafeInteger(dim) && dim > 0 && dim < 1e9)) return "width";
+  return REEMBED_OWN_KEY.test(`reembed:${model}@${dim}`) && HEARTBEAT_KEY.test(`heartbeat:reembed:${model}@${dim}`) ? null : "model";
+}
 /** The sleep scheduler's own row, if it has one, fresh or not. */
 export const sleepBeatOf = (beats: readonly WorkerHeartbeat[]): WorkerHeartbeat | undefined => beats.find((b) => b.worker === "sleep");
 /** The fresh re-embed followers run by hand: the scheduler refuses beside any of them. */
@@ -332,6 +355,8 @@ export function reembedRunner(beats: readonly WorkerHeartbeat[] | null | undefin
   // configured otherwise (review pass 5); stopped, this configuration's, which
   // its restart reads (review pass 6).
   const own = freshBeat(sleep) ? REEMBED_OWN_KEY.exec(sleep.reembedJob) : null;
+  // Stopped, under a configuration whose key no row carries: started again, it runs no re-embed (SMD-3486).
+  if (!own && !REEMBED_OWN_KEY.test(ownKey)) return { by: "nobody" };
   const schedKey = own ? sleep.reembedJob : ownKey;
   const schedModel = own ? own[1] : ownModel;
   if (key !== schedKey) return { by: "nobody" };
@@ -364,7 +389,8 @@ export function budgetWords(b: SleepBudget): string {
  * name's own alphabet — preflight prints it inside commands to paste, so no
  * space, quote or shell character (review pass 5: `$(…)` reached one).
  */
-const modelName = (m: unknown): m is string => typeof m === "string" && /^[A-Za-z0-9._:@/+-]{1,200}$/.test(m);
+const modelName = (m: unknown): m is string => typeof m === "string" && MODEL_NAME.test(m);
+const MODEL_NAME = new RegExp(`^${NAME_CHARS}{1,200}$`);
 
 /** The scheduler's passes set aside (WorkerHeartbeat.aside), left off when not of the shape. */
 function parseAside(a: unknown): SleepAside | undefined {
@@ -446,10 +472,12 @@ export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 /** A heartbeat older than this many of its own intervals is stale. */
 export const STALE_AFTER_INTERVALS = 3;
 
-const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate|sleep|reembed)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
+/** Whether a heartbeat row under this key is one the readers take: a follower writing another is seen by no one (SMD-3486 review pass 2). */
+export const heartbeatKeyCarried = (key: string): boolean => HEARTBEAT_KEY.test(key);
+const HEARTBEAT_KEY = new RegExp(`^heartbeat:(board-sync|extract|consolidate|sleep|reembed)(?::(${NAME_CHARS}{1,120}))?$`);
 // As long as a key's suffix with the worker's prefix on it, so every key
 // stampKey writes is one the reader takes (review pass 2: 121–128 were not).
-const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,132}$/;
+const JOB_TOKEN = new RegExp(`^${NAME_CHARS}{1,132}$`);
 /** A heartbeat stamped this far past the reader's now() is not one: a stamp's now() can trail the read's by its own transaction, never by a minute. */
 const FUTURE_SLACK_S = 60;
 const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
