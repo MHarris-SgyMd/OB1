@@ -5,6 +5,9 @@
  *
  *   bun smoke.ts --url http://127.0.0.1:8010/dashboard --key <write> --read-key <read> --capture-key <capture>
  *
+ * Each key may come from the environment instead (OB1_SMOKE_KEY,
+ * OB1_SMOKE_READ_KEY, OB1_SMOKE_CAPTURE_KEY), off the process list.
+ *
  * With one cookie jar, it asserts:
  *   - signed out, every page and the sign-out redirect to /signin, and
  *     /health answers; the pages' CSP, framing and Referrer-Policy headers;
@@ -48,10 +51,18 @@
  *     and pin are the GUI's 404 (pinning to a held thought only once the page
  *     is); unset, a Notes page the nav names is read but not pinned to.
  *     `--notes-only` runs that arm alone.
+ *   - the write verbs (SMD-3322), with `--writes`: a thought captured for the
+ *     arm over the proxy's /mcp under the write key is edited and deleted on
+ *     its own pages — the edit refused in words when its text is empty, and
+ *     when the time it was read is stale, which keeps that stale time in the
+ *     form; the delete confirmed, the list saying so, the thought then a 404 —
+ *     and a read key is offered neither (no links; the pages' 403; its posts
+ *     refused). It prints the thought's id, for CI to read its audit rows.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
- * brain, but for the click-through each thought page's `fetch` logs and, with
- * `--notes on` alone, the notes the arm pins to the example plugin's table.
+ * brain, but for the click-through each thought page's `fetch` logs, with
+ * `--notes on` alone the notes the arm pins to the example plugin's table, and
+ * with `--writes` alone the one thought that arm captures, edits and deletes.
  */
 
 import { pageLinks, readBrowse, TRAIL_MAX } from "./src/lib/browse.ts";
@@ -60,9 +71,10 @@ import { firstLine } from "./src/lib/format.ts";
 const args = process.argv.slice(2);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
 const BASE = flag("url")?.replace(/\/$/, "");
-const WRITE_KEY = flag("key");
-const READ_KEY = flag("read-key");
-const CAPTURE_KEY = flag("capture-key");
+// Each key from its flag, or from the environment CI's step exports, so a key need not ride a command line the process list shows.
+const WRITE_KEY = flag("key") ?? (process.env.OB1_SMOKE_KEY || undefined);
+const READ_KEY = flag("read-key") ?? (process.env.OB1_SMOKE_READ_KEY || undefined);
+const CAPTURE_KEY = flag("capture-key") ?? (process.env.OB1_SMOKE_CAPTURE_KEY || undefined);
 /** Fail, not skip, when the overview lists no thought: CI captures one first, so its thought page is always driven. */
 const REQUIRE_THOUGHT = args.includes("--require-thought");
 /** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
@@ -75,8 +87,10 @@ const REQUIRE_ROWS = args.includes("--require-rows");
 const NOTES = flag("notes");
 /** The Notes arm alone, after the pure checks: CI's plugin step, whose stack the full smoke has already driven. */
 const NOTES_ONLY = args.includes("--notes-only");
+/** The write verbs' arm (SMD-3322): captures one thought of its own over /mcp, then edits and deletes it through the GUI. Off unless asked, so the smoke writes nothing to a brain it is pointed at. */
+const WRITES = args.includes("--writes");
 if (!BASE || !WRITE_KEY || (NOTES !== undefined && NOTES !== "on" && NOTES !== "off")) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows] [--notes on|off] [--notes-only]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> (or OB1_SMOKE_KEY) [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows] [--notes on|off] [--notes-only] [--writes]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -678,5 +692,91 @@ if (READ_KEY) {
   console.log("  ·  no --read-key: the read-key arm skipped");
 }
 
+await writesArm();
 await notesArm();
 finish();
+
+/** A hidden field's value in a page's form, unescaped as a browser would post it. */
+function hidden(html: string, name: string): string | undefined {
+  const v = new RegExp(`<input[^>]*name="${name}"[^>]*value="([^"]*)"`).exec(html)?.[1] ?? new RegExp(`<input[^>]*value="([^"]*)"[^>]*name="${name}"`).exec(html)?.[1];
+  return v?.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+}
+
+/** A form post as a browser makes it, to a page's own action: its status, where it sends, and its page. */
+async function post(path: string, fields: Record<string, string>) {
+  const r = await fetch(`${BASE}${path}`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams(fields).toString() });
+  takeCookie(r);
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
+}
+
+/**
+ * The write verbs (SMD-3322). The thought is the arm's own, captured over the proxy's /mcp under the write key
+ * (as CI's step captures its thoughts), so the thoughts the other arms read stay as they were.
+ */
+async function writesArm() {
+  if (!WRITES) {
+    console.log("  ·  no --writes: the write verbs' arm skipped");
+    return;
+  }
+  const marker = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const captured = await fetch(`${ORIGIN}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": WRITE_KEY! },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: `The operator GUI smoke edits and deletes this thought (SMD-3322, ${marker}).` } } }),
+  });
+  const id = /id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(await captured.text())?.[1];
+  if (!id) return bad(`the write arm's capture over /mcp gave no thought id (${captured.status})`);
+  console.log(`  ·  the write arm's thought: ${id}`);
+
+  await signIn(WRITE_KEY!);
+  const page = await get(`/thoughts/${id}`);
+  assert(page.status === 200 && page.html.includes(`href="/dashboard/thoughts/${id}/edit"`) && page.html.includes(`href="/dashboard/thoughts/${id}/delete"`), `a thought's page offers the write key Edit and Delete (${page.status})`);
+
+  const edit = await get(`/thoughts/${id}/edit`);
+  const since = hidden(edit.html, "if_unchanged_since") ?? "";
+  assert(edit.status === 200 && edit.html.includes('data-testid="edit-form"') && edit.html.includes(marker) && since !== "", `its edit page holds the text and the time it was read (${edit.status}, ${since || "no time"})`);
+  assert(/<form[^>]*action="\?\/save"[^>]*data-testid="edit-form"/.test(edit.html), "…its form posting to its own save action");
+
+  const empty = await post(`/thoughts/${id}/edit?/save`, { content: "  \r\n ", if_unchanged_since: since });
+  assert(empty.status === 400 && /data-testid="edit-error"[^>]*>[^<]*cannot be left empty/.test(empty.html), `an empty text is refused in words (${empty.status})`);
+
+  const text = `The operator GUI smoke edited this thought (SMD-3322, ${marker}).\r\nIts second line.`;
+  const saved = await post(`/thoughts/${id}/edit?/save`, { content: text, if_unchanged_since: since });
+  assert(saved.status === 303 && saved.location === `/dashboard/thoughts/${id}`, `the write key saves an edit: 303 back to the thought (${saved.status} → ${saved.location})`);
+  const after = await get(`/thoughts/${id}`);
+  assert(after.status === 200 && after.html.includes(`edited this thought (SMD-3322, ${marker}).\nIts second line.`), "…which shows the new text, its CRLF break saved as one line break");
+
+  // The time first read is stale now: the second save is refused, and the form keeps that time, not the one the
+  // page reads afresh after the refusal, so saving again cannot overwrite the change it was just told of.
+  const stale = await post(`/thoughts/${id}/edit?/save`, { content: `${text} Again.`, if_unchanged_since: since });
+  assert(stale.status >= 400 && /data-testid="edit-error"[^>]*>[^<]*changed after this page read it/.test(stale.html), `an edit from a stale read is refused in words (${stale.status})`);
+  assert(hidden(stale.html, "if_unchanged_since") === since && stale.html.includes(" Again."), "…its form keeping the stale time it posted and the text typed");
+  assert(!(await get(`/thoughts/${id}`)).html.includes(" Again."), "…and the thought keeps the saved edit");
+
+  if (READ_KEY) {
+    const held = cookie;
+    cookie = "";
+    await signIn(READ_KEY);
+    const asRead = await get(`/thoughts/${id}`);
+    assert(asRead.status === 200 && !asRead.html.includes('data-testid="edit-link"') && !asRead.html.includes('data-testid="delete-link"'), `the read key's thought page offers no Edit and no Delete (${asRead.status})`);
+    const [editPage, deletePage] = [await get(`/thoughts/${id}/edit`), await get(`/thoughts/${id}/delete`)];
+    assert(editPage.status === 403 && deletePage.status === 403, `…and its edit and delete pages are 403s (${editPage.status}, ${deletePage.status})`);
+    const [readEdit, readDelete] = [await post(`/thoughts/${id}/edit?/save`, { content: "never saved", if_unchanged_since: since }), await post(`/thoughts/${id}/delete?/delete`, {})];
+    assert(readEdit.status === 403 && readDelete.status === 403, `…its posts to them refused (${readEdit.status}, ${readDelete.status})`);
+    await signOut();
+    cookie = held;
+    const still = await get(`/thoughts/${id}`);
+    assert(still.status === 200 && !still.html.includes("never saved"), "…and the thought is as the write key left it");
+  }
+
+  const confirm = await get(`/thoughts/${id}/delete`);
+  assert(confirm.status === 200 && confirm.html.includes('data-testid="delete-form"') && confirm.html.includes(marker), `its delete page asks first, naming the thought (${confirm.status})`);
+  const deleted = await post(`/thoughts/${id}/delete?/delete`, {});
+  assert(deleted.status === 303 && deleted.location === `/dashboard/thoughts?deleted=${id}`, `the write key deletes it: 303 to the list (${deleted.status} → ${deleted.location})`);
+  const list = await get(`/thoughts?deleted=${id}`);
+  assert(list.status === 200 && new RegExp(`data-testid="deleted"[^>]*>[^<]*<span[^>]*>${id}<`).test(list.html), "…which says what was deleted");
+  const gone = await get(`/thoughts/${id}`);
+  assert(gone.status === 404, `…and the thought is then a 404 (${gone.status})`);
+  await signOut();
+  cookie = "";
+}

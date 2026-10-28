@@ -1826,10 +1826,18 @@ jobs:
       # read key; each list's data holding the fields it shows alone; the key
       # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
-      # server. Here, not after the next step: that one configures the
-      # authorization server, and the GUI then offers no key sign-in (review
-      # pass 1). The smoke imports only dashboard/src/lib/browse.ts and
-      # format.ts, which import nothing, so nothing is installed.
+      # server. With --writes (SMD-3322), a thought of the smoke's own,
+      # captured over /mcp, is edited and deleted on its own pages — a stale
+      # edit refused, a read key offered neither — and its audit rows then
+      # read here, in order: the capture, carried by the MCP server (its
+      # forwarder as act), then the one edit saved and the delete, each a
+      # direct call to the REST core with no carrier, as the GUI makes them,
+      # all under the smoke key's name, as Verify asks. Its keys come from
+      # this job's environment, off the process list. Here, not after the
+      # next step: that one configures the authorization server, and the GUI
+      # then offers no key sign-in (review pass 1). The smoke imports only
+      # dashboard/src/lib/browse.ts and format.ts, which import nothing, so
+      # nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |
@@ -1848,7 +1856,12 @@ jobs:
           # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows --notes off
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
+          written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
+          [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
+          rows=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT string_agg(action || ' ' || origin || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
+          [ "$rows" = "capture open-brain-api true false, update open-brain-api true true, delete open-brain-api true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture carried by the MCP server, then one edit and one delete the GUI made directly, under the smoke key"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
@@ -1874,7 +1887,7 @@ jobs:
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --wait --wait-timeout 120 --force-recreate --no-deps app
-          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --notes on --notes-only)
+          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --notes on --notes-only)
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
 
