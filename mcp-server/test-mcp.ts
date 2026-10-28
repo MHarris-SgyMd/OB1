@@ -916,7 +916,8 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
   const mint = async (claims: Record<string, unknown>) => {
     // Every token the authorization server signs names its client (RFC 9068): a connector's, unless the claims say otherwise.
-    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, client_id: "connector", ...claims })}`;
+    const nowS = Math.floor(Date.now() / 1000);
+    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: nowS, exp: nowS + 600, client_id: "connector", ...claims })}`;
     const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(head)));
     return `${head}.${Buffer.from(sig).toString("base64url")}`;
   };
@@ -953,7 +954,15 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
     const subject = claimsOf(form.get("subject_token") ?? "");
     const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp", act: { sub: subject.client_id } }, exp: subject.exp, client_id: "mcp" });
-    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
+    // The token's lifetime as issued, not read off the wall clock: the
+    // exchanger below runs on `clock`, so a wall-clock answer read 599 when
+    // the mint and the trade fell either side of a second, and the "594 s on"
+    // row then asked at the entry's `until`, the first instant it is gone, and
+    // traded again (SMD-3470's review, once in ~14 runs beside the background
+    // suites). A real server answers the time left (deploy/auth/server.ts);
+    // the two agree when the mint and the trade fall in one wall-clock second,
+    // and the stub answers the lifetime so that a straddle can't move the entry.
+    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - (subject.iat as number), scope: subject.scope });
   };
   let clock = Date.now();
   let keysDown = false;
@@ -1039,9 +1048,11 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   clock += (600 - 6) * 1000;
   await ask(fresh);
   assert(trades === 1, `594 s on: still from the cache (${trades})`);
-  clock += 2000;
+  // At the entry's `until` exactly, a known moment since the stub's lifetime
+  // is fixed: the first instant the entry is gone.
+  clock += 1000;
   await ask(fresh);
-  assert(trades === 2, `596 s on, inside the 5 s margin: traded again (${trades})`);
+  assert(trades === 2, `595 s on, at the 5 s margin: traded again (${trades})`);
   clock = Date.now();
 
   // Refused before any trade, on the claims: expired, another audience, another issuer, more audiences than /mcp, no expiry.
