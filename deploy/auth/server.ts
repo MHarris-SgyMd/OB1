@@ -108,7 +108,7 @@ import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
-import { ACCESS_TOKEN_TYPE, chainRotates, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { ACCESS_TOKEN_TYPE, chainRotates, clientNameable, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { ADMIN_PORT, adminRoute, basicCredentials, isGuiClient } from "./admin.ts";
@@ -372,6 +372,10 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   if (claims.sub !== OPERATOR) throw new errors.InvalidGrant("subject_token names no known account");
   // The library writes client_id into every access token it signs (RFC 9068 §2.2); one without it was not signed here.
   if (typeof claims.client_id !== "string" || !claims.client_id) throw new errors.InvalidGrant("subject_token names no client");
+  // The sign-in refuses such a client (interaction, below); one whose grant
+  // let it through with no interaction is refused here, as the MCP server
+  // reads invalid_grant: sign in again, which then says why (SMD-3064).
+  if (!clientNameable(claims.client_id)) throw new errors.InvalidGrant("subject_token's client has an id the REST core cannot name");
 
   const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));
   const asked = params.scope ? params.scope.split(" ").filter(Boolean) : [...held];
@@ -449,6 +453,14 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   // layout.ts says what reaches the REST core that way.)
   if (noKeysScope(asking.scope.split(" ").filter(Boolean))) {
     return provider.interactionFinished(req, res, { error: "invalid_scope", error_description: "brain:read with brain:capture names no access key's scope: ask for brain:write, which reads and captures, or for one of them" }, { mergeWithLastSubmission: false });
+  }
+  // A client the REST core cannot name (layout.ts clientNameable: a metadata
+  // document URL that is not `https://`, in lower case, then a host and a plain
+  // path, or is over 180 characters) would sign in and be refused at every
+  // call: it is sent
+  // back before the sign-in (SMD-3064).
+  if (!clientNameable(asking.clientId)) {
+    return provider.interactionFinished(req, res, { error: "unauthorized_client", error_description: "the brain names each client it serves, and cannot name this client id: a metadata document URL must be https://, a host and a path of letters, digits and . _ ~ / % - alone, at most 180 characters" }, { mergeWithLastSubmission: false });
   }
   if (req.method === "GET" && !action) {
     if (prompt.name === "login") return send(res, 200, loginPage(asking, `${base}/login`));

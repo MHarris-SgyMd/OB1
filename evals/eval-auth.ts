@@ -72,7 +72,7 @@
  *     resource is refused before any page, and by POST from a signed-in,
  *     consented browser gets no code. Every token issued for a resource with
  *     no brain scope is refused where presented, with `insufficient_scope`.
- *   X (1, token exchange): through /mcp, the REST core sees `oauth:operator`
+ *   X (1, token exchange): through /mcp, the stand-in REST core sees `oauth:operator`
  *     with the MCP service as actor. Done directly, the exchange keeps the
  *     subject, adds `act`, narrows but never widens scope, and never outlives
  *     the subject token. It is refused across tiers, for a foreign target, to

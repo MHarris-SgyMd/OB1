@@ -29,7 +29,7 @@
  * in, allows the consent, takes the code for an `/mcp` token with that scope,
  * and exchanges it as the MCP service (`mcp`, its secret from the container's
  * environment) for a REST-core token, as the MCP server does at the hop. It
- * prints both as JSON `{ mcp, api, client }`, `client` the id it registered,
+ * prints them as JSON `{ mcp, api, client }`, `client` the id it registered,
  * for CI to present to the REST core, which names the caller by that client
  * (SMD-3064).
  *

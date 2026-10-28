@@ -23,9 +23,9 @@ import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./res
 import { openApiDocument } from "./rest/openapi.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { setSystemTime } from "bun:test";
-import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
+import { clientNameable as authClientNameable, keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
 import { OAUTH_SCOPES } from "./oauth-edge.ts";
-import { AUTH_JWKS_URL, cachedKeys, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
+import { AUTH_JWKS_URL, cachedKeys, checkerOver, clientNameable, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -494,7 +494,17 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   assert(r.status === 200 && r.body.name === `oauth:operator+${cimd}`, `a metadata document's client: oauth:operator+<its URL> (${r.body.name})`);
   const longest = `https://claude.ai/${"a".repeat(180 - "https://claude.ai/".length)}`;
   r = await json(await call("/v1/whoami", await mint({ client_id: longest })));
-  assert(r.status === 200 && typeof r.body.name === "string" && r.body.name.length <= 200, `…and the longest one taken, 180 characters, still fits the 200-character actor filter (${r.status} ${String(r.body.name).length})`);
+  assert(r.status === 200 && r.body.name === `oauth:operator+${longest}` && r.body.name.length <= 200, `…and the longest one taken, 180 characters, named whole within the 200-character actor filter (${r.status} ${String(r.body.name).length})`);
+  r = await json(await call("/v1/whoami", await mint({ sub: "a".repeat(128), client_id: longest })));
+  assert(r.status === 401 && r.body.credential === "token", `a caller name past 200 characters (a 128-character subject and that client) is refused, whatever its parts (${r.status})`);
+  // The authorization server refuses, before a sign-in and at the exchange, exactly the clients this server cannot name (SMD-3064 review pass 1).
+  const clients = [
+    "gui", "mcp", "mcp-canary", "runner", "sVSJFn-GM1K_MdkSMjoqVTA29i8Q3PByRQHepaZBRb6", cimd, longest, `${longest}a`, "a".repeat(128), "a".repeat(129),
+    "https://cimd.test/client/run-1.json", "https://h.example:8443/c", "https://h.example/a%2Fb", "HTTPS://claude.ai/x", "https://claude.ai/x?y=1", "https://claude.ai/x#f",
+    "https://u@claude.ai/x", "https://claude.ai", "https://claude.ai/a+b", "https://claude.ai/a:b", "https://claude.ai/a,b", "http://claude.ai/x", "a b", "a+b", "", "operator",
+  ];
+  const disagree = clients.filter((c) => clientNameable(c) !== authClientNameable(c));
+  assert(disagree.length === 0 && clients.filter((c) => clientNameable(c)).length === 12, `the REST core and the authorization server name the same ${clients.length} sample clients alike (${clients.filter((c) => clientNameable(c)).length} nameable)${disagree.length ? `, differ: ${disagree.join(" ")}` : ""}`);
 
   // An exchanged token names the MCP service as act, and the connector the operator signed in through as the client
   // (the act nested in it, SMD-3064), signed; a forwarder slot beside it is checked and does not replace it.
@@ -505,6 +515,8 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   await call("/v1/stats", exchanged);
   await call("/v1/stats", await mint({ scope: "brain:read", client_id: "mcp", act: { sub: "mcp", act: { sub: "connector-b" } } }));
   const [ca, cb] = calls.map((c) => c.principal);
+  r = await json(await call("/v1/whoami", await mint({ client_id: "mcp", act: { sub: "mcp", act: { sub: "operator" } } })));
+  assert(r.status === 200 && r.body.name === "oauth:operator+operator", `an exchanged token whose connector shares the subject's name is still a connector, never the subject alone (${r.body.name})`);
   assert(ca?.name === "oauth:operator+connector-a" && cb?.name === "oauth:operator+connector-b" && ca.keyHash === subjectHash(settings.issuer, "operator", "connector-a") && ca.keyHash !== cb.keyHash && ca.keyHash !== p?.keyHash,
     `two connectors through one MCP service: two principals, each its own digest, neither the GUI's (${ca?.name} ${cb?.name})`);
   r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "fwd-raw" } }));

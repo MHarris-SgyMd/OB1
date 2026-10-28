@@ -3627,8 +3627,8 @@ jobs:
           check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\" and .scope == \"write\" and .act == {\"name\": \"oauth:mcp\"}" "whoami with an exchanged write token"
           check "$(at_api /v1/whoami "$(jq -r .mcp <<<"$read_t")")" 401 '.code == "UNAUTHORIZED" and .credential == "token"' "whoami with the /mcp token"
           check "$(at_api /v1/thoughts "$(jq -r .api <<<"$read_t")" POST '{"content":"SMD-2286: a read token may not capture"}')" 403 '.code == "FORBIDDEN" and .needs == "capture"' "a capture with an exchanged read token"
-          for pair in "$write_t $who_w" "$write2_t $who_w2"; do
-            read -r t who <<<"$pair"
+          for t in "$write_t" "$write2_t"; do
+            who="oauth:operator+$(jq -r .client <<<"$t")"
             # Each connector's own text: a capture of text the brain holds answers with the thought it has, and its audit row.
             got=$(at_api /v1/thoughts "$(jq -r .api <<<"$t")" POST "{\"content\":\"SMD-2286: captured with $who's exchanged token\"}")
             check "$got" 201 '.id | type == "string"' "a capture with $who's exchanged write token"

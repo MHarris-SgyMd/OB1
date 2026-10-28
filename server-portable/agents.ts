@@ -196,8 +196,7 @@ export class AgentResolver {
    * per principal the authorization server signs for: its configured service
    * clients, and its one account once per client the operator signed in
    * through (SMD-3064). Each of those took the operator's password and
-   * consent, and registered clients are capped (OB1_AUTH_MAX_CLIENTS), so that
-   * space is the operator's to grow, not a caller's.
+   * consent, so that space is the operator's to grow, not a caller's.
    */
   private cache = new Map<string, Entry>();
 
