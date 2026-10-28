@@ -1185,13 +1185,13 @@ Deliberate. Recorded so nobody assumes they were missed.
 - **`claude-issue-triage.yml`** feeds untrusted issue bodies to an agent holding
   `issues: write`; **`discord-announce.yml`** declares no `permissions:` block.
   Neither is reachable in a fork that has those workflows disabled.
-- **Three overlapping dashboards** (`open-brain-dashboard`, `-next`, `-pro`).
-  All three sign in with one of the server's access keys sealed in a cookie
-  (SMD-1801 brought the SvelteKit one to the shape the Next two had), but the
-  first speaks MCP to the server and the other two speak to the `open-brain-rest`
-  gateway, and nothing says which is canonical. Pick one before depending on any.
-- **`sensitivity-tiers` does not exist.** Both Next dashboards, the
-  `weekly-digest` recipe and its code reference it as a primitive.
+- **Two overlapping dashboards** (the operator GUI at `dashboard/`, and the
+  SvelteKit `dashboards/open-brain-dashboard`). The GUI is the one the ADR
+  builds on (`docs/operator-surface-tiers.md`); the SvelteKit one retires with
+  SMD-3310. The two Next.js dashboards, which spoke to the retired
+  `open-brain-rest` gateway, retired with SMD-3309.
+- **`sensitivity-tiers` does not exist.** The `weekly-digest` recipe and its
+  code reference it as a primitive (both Next dashboards did, until SMD-3309).
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare

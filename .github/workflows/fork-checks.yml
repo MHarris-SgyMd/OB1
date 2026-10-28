@@ -1130,41 +1130,34 @@ jobs:
         with:
           persist-credentials: false
 
-      # For the three dashboards (SMD-1801): Bun installs and builds them, and
-      # drives the SvelteKit one against the stack at the end of this job.
+      # For the SvelteKit dashboard (SMD-1801): Bun installs and builds it, and
+      # drives it against the stack at the end of this job.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
 
-      # SMD-2251. The three dashboards need nothing from the stack, and built in
-      # series after it they added 35 s to this job. So they build here, in the
-      # background, one after another while the stack comes up (mostly waiting
-      # on health checks, not CPU), and "The three dashboards build" below
-      # waits for them and reports each. The two Next dashboards read their env
-      # at build time — the gateway URL and a session secret, any values. Each
-      # dashboard writes its log and exit code under $RUNNER_TEMP beside the
-      # one limit, which the wait step reads for its labels and cap; a hang
-      # ends as 124 and the next dashboard still builds. The subshell's output
-      # goes to files: otherwise this step would wait for the whole build.
-      - name: The three dashboards start building, in the background
+      # SMD-2251. The dashboard needs nothing from the stack (built in series
+      # after it, the three dashboards of the day added 35 s to this job), so
+      # it builds here, in the background while the stack comes up (mostly
+      # waiting on health checks, not CPU), and "The SvelteKit dashboard builds"
+      # below waits for it and reports. It writes its log and exit code under
+      # $RUNNER_TEMP beside its limit, which the wait step reads for its labels
+      # and cap; a hang ends as 124. The subshell's output goes to files:
+      # otherwise this step would wait for the whole build. The Next and Pro
+      # dashboards built here too until SMD-3309 retired them.
+      - name: The SvelteKit dashboard starts building, in the background
         id: dashboards
-        env:
-          NEXT_PUBLIC_API_URL: http://127.0.0.1:8787
-          SESSION_SECRET: build-time-only-0123456789abcdef0123456789
         run: |
           out="$RUNNER_TEMP/dashboards"
           mkdir -p "$out"
           limit_s=240
           echo "$limit_s" > "$out/limit"
           (
-            for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-              check=""
-              if [ "$d" = open-brain-dashboard ]; then check=" && bun run check"; fi
-              start=$SECONDS
-              rc=0
-              (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build$check") > "$out/$d.log" 2>&1 || rc=$?
-              echo "$rc $((SECONDS - start))" > "$out/$d.rc"
-            done
+            d=open-brain-dashboard
+            start=$SECONDS
+            rc=0
+            (cd "dashboards/$d" && exec timeout --kill-after=10s "${limit_s}s" sh -c "bun install --frozen-lockfile && bun run build && bun run check") > "$out/$d.log" 2>&1 || rc=$?
+            echo "$rc $((SECONDS - start))" > "$out/$d.rc"
             touch "$out/done"
           ) > "$out/runner.log" 2>&1 < /dev/null &
           echo "$!" > "$out/pid"
@@ -2197,32 +2190,31 @@ jobs:
           fi
           echo "No supabase binary in the running stack."
 
-      # SMD-1801. The three dashboards build from their pinned installs, with no
-      # Supabase package among them (check 22 holds the imports; this holds the
-      # builds). The two Next dashboards are built, not run: they speak to the
-      # open-brain-rest gateway, which SMD-1931 retired; they retire with
-      # SMD-2280's harvest. The SvelteKit one speaks MCP to
-      # the server this stack serves, so it is driven too, below.
-      # They build in the background from the job's start (SMD-2251); this step
-      # waits for that and reports it — each dashboard's log folded when it
-      # passed and open under an error when it failed, and a line per dashboard
-      # of exit code and seconds. It runs when a stack step failed too, so a
+      # SMD-1801. The SvelteKit dashboard builds from its pinned install, with
+      # no Supabase package in it (check 22 holds the imports; this holds the
+      # build). It speaks MCP to the server this stack serves, so it is driven
+      # too, below. (The Next and Pro dashboards were built here, not run, until
+      # SMD-3309 retired them.)
+      # It builds in the background from the job's start (SMD-2251); this step
+      # waits for that and reports it — the log folded when it passed and open
+      # under an error when it failed, and a line of exit code and seconds.
+      # It runs when a stack step failed too, so a
       # broken build is never hidden behind one. The wait ends when the
       # background shell writes its done mark or dies without it, or at a cap
-      # a minute past the three limits and their kill-after grace. A dead shell
+      # a minute past the limit and its kill-after grace. A dead shell
       # nothing has reaped yet is a zombie, which `kill -0` counts as alive, so
       # its state is read instead (review pass 1). timeout TERMs a build's
       # process group, and its child, the `sh -c` running the chain, dies on
       # it (dash does not exec the last command of an && list), so a hang is
       # 124 and a process that ignores TERM outlives the limit; a 137 is a KILL
       # from outside.
-      - name: The three dashboards build
+      - name: The SvelteKit dashboard builds
         if: ${{ !cancelled() && steps.dashboards.outcome == 'success' }}
         run: |
           out="$RUNNER_TEMP/dashboards"
           pid=$(cat "$out/pid")
           limit_s=$(cat "$out/limit")
-          cap=$((3 * (limit_s + 10) + 60))
+          cap=$((limit_s + 10 + 60))
           running() {
             local state
             state=$(cut -d' ' -f3 "/proc/$1/stat" 2> /dev/null) && [ -n "$state" ] && [ "$state" != Z ]
@@ -2230,34 +2222,29 @@ jobs:
           start=$SECONDS
           while [ ! -e "$out/done" ] && running "$pid" && [ $((SECONDS - start)) -lt "$cap" ]; do sleep 1; done
           echo "waited $((SECONDS - start)) s for the background build"
+          d=open-brain-dashboard
           if [ ! -e "$out/done" ]; then
-            echo "::error title=The three dashboards build::the background build did not finish (its shell died, or it ran past $cap s) — its logs follow"
-            for rc in "$out"/*.rc; do [ -e "$rc" ] && echo "finished: $(basename "$rc" .rc), exit and seconds $(cat "$rc")"; done
-            for log in "$out"/*.log; do echo "--- $log"; cat "$log"; done
+            echo "::error title=The SvelteKit dashboard builds::the background build did not finish (its shell died, or it ran past $cap s) — its log follows"
+            if [ -e "$out/$d.rc" ]; then echo "finished: exit and seconds $(cat "$out/$d.rc")"; fi
+            cat "$out/$d.log" 2> /dev/null || true
             exit 1
           fi
-          failed=0
-          summaries=""
-          for d in open-brain-dashboard open-brain-dashboard-next open-brain-dashboard-pro; do
-            read -r rc secs < "$out/$d.rc"
-            why=$rc
-            case $rc in
-              124) why="124, over the $limit_s s limit" ;;
-              137) why="137, killed from outside, most likely out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$d — built"
-              cat "$out/$d.log"
-              echo "::endgroup::"
-            else
-              echo "::error title=The three dashboards build::$d failed (exit $why) — its log follows"
-              cat "$out/$d.log"
-              failed=1
-            fi
-            summaries+="  $d: exit $rc in $secs s"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$failed" = 0 ]
+          read -r rc secs < "$out/$d.rc"
+          why=$rc
+          case $rc in
+            124) why="124, over the $limit_s s limit" ;;
+            137) why="137, killed from outside, most likely out of memory" ;;
+          esac
+          if [ "$rc" = 0 ]; then
+            echo "::group::$d — built"
+            cat "$out/$d.log"
+            echo "::endgroup::"
+          else
+            echo "::error title=The SvelteKit dashboard builds::$d failed (exit $why) — its log follows"
+            cat "$out/$d.log"
+          fi
+          printf '\n  %s: exit %s in %s s\n' "$d" "$rc" "$secs"
+          [ "$rc" = 0 ]
 
       # The SvelteKit dashboard as a browser uses it, against the stack that is
       # up: a wrong key refused at /signin, the write key signed in and the JSON

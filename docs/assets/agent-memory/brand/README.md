@@ -21,4 +21,4 @@ These assets are for the OB1 Agent Memory / Nate B. Jones launch surface.
 - Generated candidate: `gpt-image-2`, run `ob1-beanie-mark-gpt-image-2`
 - Product assets: transparent masks derived from the generated mark, with the source outline preserved as reference.
 
-The dashboard serves the product mark from `dashboards/open-brain-dashboard-next/public/brand`.
+The Next.js dashboard that served the product mark from its `public/brand` retired with SMD-3309.

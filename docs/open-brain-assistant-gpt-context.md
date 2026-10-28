@@ -55,7 +55,7 @@ The core user journey is:
 - `skills/`: Reusable AI client skills or prompt packs.
 - `schemas/`: Database extensions that add tables, columns, sidecars, and RPCs.
 - `integrations/`: MCP extensions, capture sources, the OpenClaw and Hermes plugins, and the agent memory API (the REST gateways retired with SMD-1931).
-- `dashboards/`: Frontend templates for browsing, searching, capturing, auditing, and reviewing memory.
+- `dashboards/`: Frontend templates for searching and capturing memory.
 - `primitives/`: Reusable concept guides such as remote MCP, RLS, shared MCP, deployment, and troubleshooting.
 - `docs/assets/agent-memory/`: Diagrams, screenshots, brand assets, and promotional material for Agent Memory.
 
@@ -180,9 +180,9 @@ If a recipe depends on a reusable behavior, the canonical copy should live in `s
 
 The brain's REST core is the one REST surface: every operation the MCP tools expose, as JSON (`POST /v1/thoughts`, `POST /v1/search`, `GET /v1/thoughts`, `GET /v1/whoami`, and the rest in its OpenAPI document at `/openapi.json`). It is internal to the stack, and public at `/api` only where the operator turns that on (`deploy/compose.api-public.yaml`). It takes keys in headers, never in the URL.
 
-The two REST gateways that came before it, `integrations/open-brain-rest` and `integrations/rest-api`, are retired (SMD-1931); `docs/vendored-disposition.md` gives each of their routes its fate. `dashboards/open-brain-dashboard-next` and `-pro` were written for `open-brain-rest` and retire with the operator GUI's harvest (SMD-2280); `dashboards/open-brain-dashboard` (SvelteKit) speaks MCP.
+The two REST gateways that came before it, `integrations/open-brain-rest` and `integrations/rest-api`, are retired (SMD-1931); `docs/vendored-disposition.md` gives each of their routes its fate. The Next.js dashboards written for `open-brain-rest` retired after the operator GUI's harvest (SMD-3309); `dashboards/open-brain-dashboard` (SvelteKit) speaks MCP.
 
-Agent Memory dashboard pages call `integrations/agent-memory-api` separately.
+The Agent Memory dashboard pages that called `integrations/agent-memory-api` were the Next.js dashboard's; agent-memory-api's own pages come as a plugin's (SMD-2690).
 
 The dashboard uses encrypted HTTP-only session cookies and asks users to enter their Open Brain API key at login. Do not advise storing that key in client-side JavaScript.
 
