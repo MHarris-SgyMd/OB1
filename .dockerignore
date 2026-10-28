@@ -4,7 +4,7 @@
 # releases.json.
 #
 # A root context means the whole repository is a candidate for upload, and this
-# repo is mostly recipes, dashboards and docs that neither image touches.
+# repo is mostly recipes, integrations and docs that neither image touches.
 # Without these rules the context is hundreds of megabytes of node_modules alone.
 # server-portable/.dockerignore no longer applies: Docker reads the file at the
 # context root, so its rules are folded in below.
@@ -15,7 +15,6 @@
 # Everything outside the directories the images actually need (db/, server-portable/, plugins/,
 # mcp-server/, rest-client/, dashboard/).
 recipes
-dashboards
 integrations
 extensions
 primitives

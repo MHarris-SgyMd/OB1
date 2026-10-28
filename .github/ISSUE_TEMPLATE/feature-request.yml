@@ -12,7 +12,7 @@ body:
     attributes:
       label: What area does this relate to?
       options:
-        - An existing contribution (recipe, schema, dashboard, integration, skill)
+        - An existing contribution (recipe, schema, integration, skill, plugin)
         - Repo structure or templates
         - CI/CD or automation
         - Documentation
