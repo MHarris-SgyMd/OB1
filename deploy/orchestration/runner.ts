@@ -1411,9 +1411,25 @@ async function selfCheck(): Promise<number> {
   const echo = createServer({ allowHalfOpen: true }, (s) => { s.on("data", (d) => s.write(d)); s.on("end", () => s.end("BYE")); s.on("error", () => {}); });
   await new Promise<void>((ok) => echo.listen(0, "127.0.0.1", ok));
   const echoPort = (echo.address() as { port: number }).port;
-  const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
-  const gonePort = closed.port!;
-  closed.stop(true);
+  // A port that refuses, for the 502 case: free when picked, and below the
+  // kernels' default ranges for port 0 (Linux 32768–60999, macOS 49152–65535),
+  // so none of the servers and proxies bound at port 0 below can be handed it
+  // once it is freed, nor a dial take it as its own source port (SMD-3475). Free
+  // on 127.0.0.1 and on 0.0.0.0, as the suites' quietPort checks it
+  // (server-portable/test-support.ts, SMD-3296): on macOS either bind can sit
+  // beside another process's listener on the other. Written here, not imported:
+  // the root .dockerignore keeps test-*.ts out of the runner image's build
+  // context.
+  const gonePort = (() => {
+    for (let tries = 0; tries < 100; tries++) {
+      const port = 20_000 + Math.floor(Math.random() * 10_000);
+      try {
+        for (const hostname of ["127.0.0.1", "0.0.0.0"]) Bun.serve({ port, hostname, fetch: () => new Response("") }).stop(true);
+        return port;
+      } catch {}
+    }
+    throw new Error("no free port between 20000 and 30000 in 100 tries");
+  })();
   const helloHex = (sni: string | null) => clientHello(sni).toString("hex");
 
   // Through the service: a networked pipeline's emitter reaches its named
