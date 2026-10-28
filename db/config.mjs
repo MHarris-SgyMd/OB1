@@ -2702,13 +2702,29 @@ export const ROLE_GRANTS = Object.freeze({
 export const GRANT_LOCK = "ob1:grants";
 /**
  * The session advisory lock (`pg_try_advisory_lock(hashtext(MIGRATE_LOCK))`) a
- * `migrate.ts` run holds while it applies anything — a pending file, a plugin's,
- * or `--reapply` — and never for `--dry-run`, `--grant` or a run with nothing to
- * apply. A second run meanwhile is refused by name, not left to meet the first's
- * row locks; the sleep scheduler reads it to stop its passes (SMD-3379). A
- * signal, not a barrier: migrate waits for nothing else to stop.
+ * `migrate.ts` run takes before it writes anything — a pending file, a plugin's
+ * file, role, schema, ledger or hand-back, 096's re-run, or `--reapply` — and
+ * holds until it returns; never for `--dry-run`, `--grant` or a run with nothing
+ * to write. A second run meanwhile is refused by name, where before it raced the
+ * first on the ledger's rows and the catalog's; the sleep scheduler reads it to
+ * stop its passes (SMD-3379). A signal, not a barrier: migrate waits for nothing
+ * else to stop.
  */
 export const MIGRATE_LOCK = "ob1:migrate";
+/**
+ * Who holds MIGRATE_LOCK in this database, read without taking it (a probe
+ * that took it would refuse a run arriving meanwhile): `pid` and
+ * `backend_start`, none when it is free. `$1` is MIGRATE_LOCK. A bigint key is
+ * pg_locks' `classid` (its high 32 bits, so 4294967295 where hashtext's int4
+ * is negative and sign-extends) and `objid` (its low 32), with `objsubid` 1.
+ */
+export const MIGRATE_LOCK_HOLDER_SQL = `
+  SELECT l.pid, a.backend_start
+    FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid,
+         (SELECT hashtext($1)::bigint AS k) key
+   WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+     AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+     AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 /**

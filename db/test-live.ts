@@ -233,9 +233,11 @@ if (want("1")) {
   const holder = new SQL({ url: URL_, max: 1 });
   try {
     await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+    const [{ pid: holderPid }] = (await holder`SELECT pg_backend_pid() AS pid`) as { pid: number }[];
     const blocked = await migrate();
-    assert(blocked.code === 2 && /Refused: another migrate\.ts run is applying to this database now — it holds the ob1:migrate advisory lock/.test(blocked.out) && /Nothing was changed\./.test(blocked.out),
-      `a run that would apply, while another holds the lock, is refused by name, exit 2 (exit ${blocked.code})`);
+    assert(blocked.code === 2 && new RegExp(`Refused: another migrate\\.ts run is applying to this database now — backend ${holderPid}, connected \\S+ holds the ob1:migrate advisory lock`).test(blocked.out)
+        && /Nothing was changed\./.test(blocked.out) && blocked.out.includes(`SELECT pg_terminate_backend(${holderPid});`),
+      `a run that would apply, while another holds the lock, is refused by name, exit 2, naming the holding backend and how to end it (exit ${blocked.code})`);
     const [untouched] = await sql`SELECT to_regclass('public.schema_migrations') IS NULL AS ledger, to_regclass('public.thoughts') IS NULL AS thoughts`;
     assert(untouched.ledger === true && untouched.thoughts === true, "…and writes nothing, not even the ledger: the lock is taken before the ledger is made");
     const dryHeld = await migrate("--dry-run");
@@ -316,7 +318,7 @@ if (want("1")) {
     const noop = await migrate();
     assert(noop.code === 0 && /applied 0, skipped \d+/.test(noop.out), `a run with nothing to apply takes no lock: it goes on beside a held one (exit ${noop.code})`);
     const reapplyHeld = await migrate("--reapply");
-    assert(reapplyHeld.code === 2 && /holds the ob1:migrate advisory lock/.test(reapplyHeld.out), `--reapply always takes the lock: refused beside a held one (exit ${reapplyHeld.code})`);
+    assert(reapplyHeld.code === 2 && / holds the ob1:migrate advisory lock/.test(reapplyHeld.out), `--reapply always takes the lock: refused beside a held one (exit ${reapplyHeld.code})`);
   } finally {
     await holder2.close();
   }

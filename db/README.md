@@ -60,14 +60,21 @@ bun migrate.ts --url postgres://user:pass@host:5432/dbname
 Each migration runs in its own transaction and is recorded in `schema_migrations`,
 so re-running is a no-op and a failure part-way resumes rather than restarting.
 
-A run that will apply anything (a pending file, a plugin's file or login role,
-or `--reapply`) first takes a session advisory lock, `ob1:migrate`
-(`MIGRATE_LOCK`, `config.mjs`), and holds it until it returns (SMD-3379). A
-second run meanwhile is refused by name, exit 2, writing nothing: wait for the
-first, then run again, and it applies only what that one left. `--dry-run`,
-`--grant` and a run with nothing to apply take no lock, so the no-op the
-compose stack's `migrate` service runs on every `up` goes on beside one. The
-lock is a signal, not a barrier: the run waits for nothing else to stop.
+A run takes a session advisory lock, `ob1:migrate` (`MIGRATE_LOCK`,
+`config.mjs`), before it writes anything, and holds it until it returns
+(SMD-3379): a pending file or `--reapply`, judged before the ledger is made,
+and a repair on a run with nothing else to apply (a plugin's ledger, login
+role, role, schema, grant, hand-back or file, or 096's re-run) where it writes.
+A second run meanwhile is refused by name, exit 2, writing nothing, and the
+refusal names the backend that holds it: wait for it, then run again, and the
+run applies only what that one left. A run that was killed keeps the lock
+until its statement ends on the server; the refusal gives the
+`pg_terminate_backend` that ends it now. `MIGRATE_LOCK_HOLDER_SQL` reads the
+holder without taking the lock. `--dry-run`, `--grant` and a run with nothing
+to write take none, so the no-op the compose stack's `migrate` service runs on
+every `up` goes on beside one. The lock is a signal, not a barrier: the run
+waits for nothing else to stop. Before it, two runs at once raced on the
+ledger's rows and the catalog's, and one failed at once on a duplicate key.
 
 ### 4. A schema with no ledger
 
@@ -5687,7 +5694,8 @@ lines go to the `Writer` it is given (`cli.ts`; the CLI passes the console),
 the migration files are read per call, and a client passed in is used in
 place of the URL and never closed. It must be one connection (the `max: 1`
 option), and it keeps the session state the run sets — lock_timeout, pgvector's
-schema on search_path when it is off the path, the `ob1.acl_*` settings — so
+schema on search_path when it is off the path, the `ob1.acl_*` settings, and
+`application_name` `ob1-migrate` once it takes its lock — so
 pass one dedicated to the run, not a pooled connection another caller gets
 next. The run's `ob1:migrate` lock is not kept: `run()` lets it go before it
 returns, on a client passed in too (SMD-3379). The CLI is a thin `if (import.meta.main)` over it. `test-engines.ts`

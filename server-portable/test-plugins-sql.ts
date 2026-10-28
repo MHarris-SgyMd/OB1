@@ -9,7 +9,8 @@
  * and are refused the core's tables), and the example plugin's operations
  * through both servers on one database — a note pinned to a captured thought
  * over REST and read back over MCP, behind each key's scope — and preflight's
- * row for the plugin's tables.
+ * row for the plugin's tables, and the migrator's lock over a plugin's
+ * pending file and its hand-back (SMD-3379).
  *
  *   ../db/with-postgres.sh bun test-plugins-sql.ts
  */
@@ -22,7 +23,7 @@ import { createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import type { PluginSql } from "./plugin-sdk.ts";
 import { migrationSha } from "../db/version.mjs";
-import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, MIGRATE_LOCK, pluginForeignOwned, pluginLoginUrl } from "../db/config.mjs";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
@@ -663,6 +664,60 @@ console.log("\n[10] A brain restored without the plugin's role: a run makes the 
     assert(landed.n === 1, `the next plugin's row lands in its own table, not the temp table the one before left (${landed.n})`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("\n[11] The migrator's lock (SMD-3379): a plugin file pending takes it, a hand-back with nothing pending takes it where it writes, and a run with nothing to write takes none; beside a held lock the first two are refused, naming the holder, and write nothing");
+{
+  const settled = await runMigrate({ plugins: "example" });
+  assert(settled.code === 0, `the example plugin is in place (exit ${settled.code}: ${settled.err.slice(0, 200)})`);
+  const holder = new SQL({ url: URL_, max: 1 });
+  const hold = () => holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+  const letGo = () => holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+  try {
+    const [{ pid }] = (await holder`SELECT pg_backend_pid() AS pid`) as { pid: number }[];
+    const refusedBy = (r: { code: number; err: string }) => r.code === 2 && r.err.includes(`backend ${pid}, connected `) && r.err.includes(` holds the ${MIGRATE_LOCK} advisory lock`) && r.err.includes(`SELECT pg_terminate_backend(${pid});`);
+    await hold();
+    const noop = await runMigrate({ plugins: "example" });
+    assert(noop.code === 0 && !noop.out.includes("handed back"), `a run with the plugin in place and nothing pending takes no lock: it goes on beside a held one (exit ${noop.code})`);
+    // A plugin file pending: taken before the core is read again, so the run writes nothing.
+    await sql`DELETE FROM public.plugin_migrations WHERE plugin = 'example' AND name = '002_deliveries.sql'`;
+    const pending = await runMigrate({ plugins: "example" });
+    const left = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM public.plugin_migrations WHERE plugin = 'example' AND name = '002_deliveries.sql'`);
+    assert(refusedBy(pending) && left.n === 0, `a plugin file pending beside a held lock: refused, exit 2, naming backend ${pid}, the file not recorded (exit ${pending.code}, ${left.n} row(s): ${pending.err.slice(0, 200)})`);
+    await letGo();
+    const caught = await runMigrate({ plugins: "example" });
+    assert(caught.code === 0 && caught.out.includes("  ✓  002_deliveries.sql  applied"), `…and once it is let go, the file applies (exit ${caught.code})`);
+    // A hand-back with nothing pending: the core and every file in place, the schema another's.
+    await sql`ALTER SCHEMA plugin_example OWNER TO CURRENT_USER`;
+    await hold();
+    const handBack = await runMigrate({ plugins: "example" });
+    const owner = await one<{ owner: string }>(sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = 'plugin_example'`);
+    assert(refusedBy(handBack) && owner.owner !== "ob1_plugin_example" && !handBack.out.includes("handed back"), `a hand-back with nothing pending, beside a held lock: refused where it would write, exit 2, the schema left as it was (exit ${handBack.code}, owner ${owner.owner})`);
+    await letGo();
+    const handed = await runMigrate({ plugins: "example" });
+    const after = await one<{ owner: string }>(sql`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = 'plugin_example'`);
+    assert(handed.code === 0 && handed.out.includes("handed back to ob1_plugin_example") && after.owner === "ob1_plugin_example", `…and once it is let go, the schema is handed back (exit ${handed.code}, owner ${after.owner})`);
+    // The login role's SET on the plugin's role taken away, as a restore without privileges does: the grant waits for the lock.
+    await sql`REVOKE ob1_plugin_example FROM ob1_plugins`;
+    const loginCan = async () => (await one<{ can: boolean }>(sql`SELECT pg_has_role('ob1_plugins', 'ob1_plugin_example', 'MEMBER') AS can`)).can;
+    await hold();
+    const regrant = await runMigrate({ plugins: "example" });
+    const stillNot = !(await loginCan());
+    await letGo();
+    const regranted = await runMigrate({ plugins: "example" });
+    assert(refusedBy(regrant) && stillNot && regranted.code === 0 && (await loginCan()), `the login role's grant, missing beside a held lock: refused, not granted; granted once it is let go (exit ${regrant.code}, then ${regranted.code})`);
+    // The plugin ledger gone: it is made only under the lock.
+    await sql`DROP TABLE public.plugin_migrations`;
+    await hold();
+    const noLedger = await runMigrate({ plugins: "example" });
+    const absent = (await one<{ absent: boolean }>(sql`SELECT to_regclass('public.plugin_migrations') IS NULL AS absent`)).absent;
+    await letGo();
+    const remade = await runMigrate({ plugins: "example" });
+    const rows = (await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM public.plugin_migrations WHERE plugin = 'example'`)).n;
+    assert(refusedBy(noLedger) && absent && remade.code === 0 && rows === 2, `the plugin ledger missing beside a held lock: refused, not made; made and both files recorded once it is let go (exit ${noLedger.code}, then ${remade.code}, ${rows} row(s))`);
+  } finally {
+    await holder.close();
   }
 }
 
