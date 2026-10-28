@@ -2358,7 +2358,7 @@ function checkBunNative() {
 // (the server scopes rows by DEFAULT_USER_ID; the policies were the same fact
 // in GoTrue's schema), their tables became `--grant`'s `extensions` and
 // `recipes` groups, and the walk widened to db/ and the seven category
-// directories, plugins/ the eighth (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
+// directories, plugins/ among them (SQL_RULE_DIRS — evals/ keeps its own SQL out of it) so the
 // next new recipe is held to the rule the day it lands.
 
 const SQL_RULE_DIRS = ["db", "extensions", "primitives", "recipes", "schemas", "integrations", "skills", "plugins"];

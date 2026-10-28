@@ -26,7 +26,7 @@
 
 import { isReviewPass, bulletsOf, readTag } from "./commit-grammar.ts";
 
-/** CLAUDE.md's eight PR categories, plus the fork's own `fork`, `docs`, `resources`. */
+/** CLAUDE.md's contribution categories less plugins, plus the fork's own `fork`, `docs`, `resources`. */
 const CATEGORIES = ["fork", "extensions", "primitives", "recipes", "schemas", "integrations", "skills", "docs", "resources"];
 
 export default {
