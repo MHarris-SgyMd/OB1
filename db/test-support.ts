@@ -1111,8 +1111,20 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const stdout = await new Response(p.stdout).text();
   const stderr = await new Response(p.stderr).text();
+  // A package the importing file's directory has not installed fails the import where auto-install is off
+  // (SMD-2978); the suite's assertions see only the exit code and what is missing from the output, so name it here,
+  // once. A bare name only: Bun says "Cannot find module" of a missing relative file too. Colour codes dropped first.
+  const m = /^error: Cannot find (?:package|module) '([^']+)' from '([^']+)'/m.exec(stderr.replaceAll(ANSI_SGR, ""));
+  if (m && !/^[./]/.test(m[1]) && !missingReported.has(m[0])) {
+    missingReported.add(m[0]);
+    console.error(`  !! ${basename(cmd.find((a) => /\.[mc]?[jt]s$/.test(a)) ?? cmd[0])}, run from ${opts.cwd}: ${m[0]} — run \`bun install\` in the nearest directory above that file with a package.json`);
+  }
   return { code: await p.exited, out: stdout + stderr, stdout, stderr };
 }
+/** The missing-package lines runScript has printed, so each is printed once a run. */
+const missingReported = new Set<string>();
+/** A terminal colour sequence, as Bun wraps `error` in under FORCE_COLOR. */
+const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
 /** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
 export function shellWithoutOb1(): Record<string, string> {

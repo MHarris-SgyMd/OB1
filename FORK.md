@@ -927,11 +927,11 @@ git rebase -X ignore-space-change upstream/main   # every vendored server's head
                                                   # edit to a server's Deno head or tail is a
                                                   # conflict to resolve as the fork's shape.
 
-cd server-portable
-bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
-bun run test:sql && bun run test:e2e            # needs podman or docker
-cd ../db && bun install --frozen-lockfile && bun test-schema.ts
-./with-postgres.sh bun test-live.ts               # needs podman or docker
+for d in rest-client mcp-server server-portable db; do (cd $d && bun install --frozen-lockfile); done
+cd server-portable && bun test-server.ts && bunx tsc --noEmit
+bun run test:sql && bun run test:e2e   # needs podman or docker
+cd ../db && bun test-schema.ts
+./with-postgres.sh bun test-live.ts    # needs podman or docker
 cd .. && bun scripts/check-fork-consistency.ts   # CI runs it too (change 58)
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \

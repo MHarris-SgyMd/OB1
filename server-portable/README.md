@@ -476,6 +476,12 @@ exists and moved.
 bun install
 ```
 
+Every suite that drives an MCP server (all but `test-rest.ts`, `test-thoughts.ts`,
+`test-jobs.ts`, `test-store-sql.ts` and `test-preflight.ts`) loads `../mcp-server/` and
+`../rest-client/` too, so run `bun install` in each of those as well. This directory's `bunfig.toml` turns Bun's
+auto-install off, so without them the import fails, naming the package, rather than
+Bun fetching it (SMD-2978).
+
 `hono` and `zod` are pinned to the exact versions `../extensions/package.json`
 installs for the vendored servers, and `extensions/test-auth.ts` fails if they
 drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
