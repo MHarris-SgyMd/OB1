@@ -9731,10 +9731,11 @@ checkSuitesRun();
  * server-portable/preflight.ts on a zod fetched at run time, since db-live installed db/ alone (SMD-2978). Each
  * directory a fork-checks.yml step may run a script from (check 34's reader: the step's working-directory and each
  * `cd` it names) that holds a package.json carries a bunfig.toml that sets it. A directory with no package.json is
- * not read: nothing resolves from an install there, and a file at the root would reach every command run from it,
- * recipes with installs of their own included (changes/291's Not taken).
+ * not read: it has no install of its own to hold to, and a file at the root would reach every command run from it,
+ * recipes with installs of their own included (changes/291's Not taken). So a script run from the root, deploy/ or
+ * deploy/orchestration/ still auto-installs; none imports a package today (changes/smd-2978.md's Not taken).
  */
-/** Why a bunfig.toml's text, null when the file is missing, leaves auto-install on; null when it turns it off. */
+/** Why a bunfig.toml leaves auto-install on, given its text (null for no file); null when the file turns it off. */
 function autoInstallLeftOn(text: string | null): string | null {
   if (text === null) return "has no bunfig.toml";
   let doc: unknown;
