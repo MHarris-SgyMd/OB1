@@ -33,7 +33,8 @@
 --     pools the thought again only when what its subject is read from moved:
 --     its text, or the ticket it is filed under (metadata.ticket, else
 --     metadata.issue, the metadata rule's fields), so a ticket filed after
---     the thought was asked is read; any other metadata edit pools nothing.
+--     the thought was asked is read; any other metadata edit pools nothing,
+--     and reads nothing as the caller, as 016's trigger reads nothing on one.
 --   * close_thought_subject(thought, facet, fingerprint) — closes the
 --     thought's standing subject only when it is still that facet and the
 --     thought's text is still the one read; otherwise it answers what it found
@@ -103,16 +104,18 @@ AS $$
 DECLARE
   v_key text;
 BEGIN
-  SELECT value INTO v_key FROM ob1_config WHERE key = 'subject_pool_key';
-  IF v_key IS NULL OR v_key = '' THEN
-    RETURN NULL;
-  END IF;
   -- What the subject is read from: the text, and the ticket it is filed under
-  -- (metadata.ticket, else metadata.issue: the metadata rule's fields).
+  -- (metadata.ticket, else metadata.issue: the metadata rule's fields). Asked
+  -- first, so an update that moves neither reads nothing as the caller: a role
+  -- that only enriches metadata needs no SELECT on ob1_config.
   IF TG_OP = 'UPDATE'
      AND NEW.content IS NOT DISTINCT FROM OLD.content
      AND (NEW.metadata->>'ticket') IS NOT DISTINCT FROM (OLD.metadata->>'ticket')
      AND (NEW.metadata->>'issue') IS NOT DISTINCT FROM (OLD.metadata->>'issue') THEN
+    RETURN NULL;
+  END IF;
+  SELECT value INTO v_key FROM ob1_config WHERE key = 'subject_pool_key';
+  IF v_key IS NULL OR v_key = '' THEN
     RETURN NULL;
   END IF;
   PERFORM requeue_thought_work(v_key, NEW.id);

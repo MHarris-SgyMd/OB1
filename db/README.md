@@ -2173,8 +2173,8 @@ trigger, `thoughts_subject_pool` (`AFTER INSERT OR UPDATE OF content, metadata`)
 puts each new or edited thought back in the pool `ob1_config.subject_pool_key`
 names, through 016's `requeue_thought_work`, as 016's trigger does for the
 extraction pass; with no pool named it does nothing, and a metadata edit moves
-nothing unless it files the thought under another ticket (`metadata.ticket`, else
-`metadata.issue`, the metadata rule's fields). The sweep claims from it as the extraction
+nothing, nor reads anything as the caller, unless it files the thought under
+another ticket (`metadata.ticket`, else `metadata.issue`, the metadata rule's fields). The sweep claims from it as the extraction
 pass claims from its own, so a claim finished is the record that a thought was
 asked at its text. `close_thought_subject(thought, facet, fingerprint)` closes
 the standing subject the model now names nothing for, under the door's advisory

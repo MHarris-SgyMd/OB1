@@ -7499,7 +7499,8 @@ if (want("10h")) {
       lentCode = await Promise.race([caught((writer) => sweepSubjects({ url: URL_!, sql: oneConn, env, model: false, switchKey: true, writer })).then((r) => r.code), Bun.sleep(60_000).then(() => -1)]);
       lockFree = await lockProbe.begin(async (tx: SQL) => ((await tx`SELECT pg_try_advisory_xact_lock(hashtextextended('ob1:subject-pool', 0)) AS free`)[0] as { free: boolean }).free);
     } finally {
-      await oneConn.close();
+      // Bounded: a run stuck on the pinned connection keeps a graceful close waiting.
+      await oneConn.close({ timeout: 5 });
       await lockProbe.close();
     }
     assert(lentCode === 0 && lockFree, `a caller's client of one connection: the run names, pools and ends, the pool's lock let go with the client still open (exit ${lentCode}, lock ${lockFree ? "free" : "held"})`);
