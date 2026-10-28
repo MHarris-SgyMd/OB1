@@ -1,41 +1,41 @@
 #!/usr/bin/env bun
 /**
- * supervise.ts — the compose services' follower, run again after it ends on its
- * own, so the service can be `restart: unless-stopped` without a crash loop
- * (SMD-3214).
+ * supervise.ts — one core pass, run again after it ends on its own, so the
+ * coordinator that runs it (db/coordinator.ts, SMD-3476) can be `restart:
+ * unless-stopped` without a crash loop (SMD-3214).
  *
- * Why. `sleep`, `extract`, `consolidate` and `board-sync` were `on-failure:3`:
- * a refusal exits 2, and an unconditional restart made board-sync's a crash
- * loop that filled the log — podman restarts at once, with no backoff, and
- * never resets the count. But neither runtime starts an `on-failure`
- * container at boot (podman-restart.service starts `always` and
+ * Why. `sleep`, `extract`, `consolidate` and `board-sync` were `on-failure:3`
+ * services: a refusal exits 2, and an unconditional restart made board-sync's
+ * a crash loop that filled the log — podman restarts at once, with no
+ * backoff, and never resets the count. But neither runtime starts an
+ * `on-failure` container at boot (podman-restart.service starts `always` and
  * `unless-stopped` alone, as Docker's daemon does), so every reboot, podman
  * update and Docker restart left a brain serving and not sleeping — on
  * 2026-10-22 both brains' `sleep` and stable's `board-sync` stayed down until
- * someone started them by hand. This process is the service's command
- * instead: the container does not exit when the follower does, so the
- * runtime has nothing to restart, and the follower is run again here, on a
- * clock of minutes.
+ * someone started them by hand. So the follower is a child that ends without
+ * its container ending: the runtime has nothing to restart, and the follower
+ * is run again here, on a clock of minutes. Since SMD-3476 one coordinator
+ * holds every such child, one supervise() each.
  *
- * The run. `--run` is the follower's command, as `sh -c` runs it — `exec bun
- * db/sleep.ts --follow …`, its settings expanded from the environment as the
- * compose file's `sh -c` did. It must `exec`, so the process this one signals
- * is the follower's own. A follower that ends on its own — a refusal (2), a
- * throw (1), anything but a stop asked for — is run again after RESTART_MS's
- * first wait, doubled at each end in a row to its cap: 1, 2, 4, 8, then every
- * 15 minutes. One that ran RESTART_MS.reset or longer before it ended starts
- * the count again. A refusal is the configuration's, which a restart at once
+ * The run. `cmd` is the follower's argv, run with no shell — its settings
+ * already read by the coordinator, so nothing in them is parsed again — as
+ * `uid`/`gid` when given (the coordinator runs each pass as its own user, so
+ * none reads another's environment) and its output said line by line under
+ * `label`. A follower that ends on its own — a refusal (2), a throw (1),
+ * anything but a stop asked for — is run again after RESTART_MS's first wait,
+ * doubled at each end in a row to its cap: 1, 2, 4, 8, then every 15
+ * minutes. One that ran RESTART_MS.reset or longer before it ended starts the
+ * count again. A refusal is the configuration's, which a restart at once
  * would not mend; a fix outside the environment — a model pulled, the
- * migrations applied, the workers profile stopped beside `sleep` — is met at
- * the next try, and one in deploy/.env needs the service recreated, which
- * `up -d` does when its environment changes, and which starts it at once.
+ * migrations applied, a follower run by hand stopped — is met at the next
+ * try, and one in deploy/.env needs the coordinator recreated, which `up -d`
+ * does when its environment changes, and which starts it at once.
  *
- * The guards. `--require-key` and `--digits` are the compose file's `sh -c`
- * guards, moved here: no OB1_WORKER_KEY, or a setting named by `--digits`
- * that is not decimal digits (a value starting with a dash would reach the
- * CLI as a flag — `--status` ran once and exited 0). Each is the
- * environment's, which nothing changes without a recreate, so either holds
- * until the service is stopped, the follower never started.
+ * The guards. `requireKey` and `digits`: no OB1_WORKER_KEY, or a setting
+ * named by `digits` that is not decimal digits (a value starting with a dash
+ * would reach the CLI as a flag — `--status` ran once and exited 0). Each is
+ * the environment's, which nothing changes without a recreate, so either
+ * holds until the stop, the follower never started.
  *
  * The row. When the follower ends, its heartbeat (db/pass-stamp.ts) is ended
  * with `restart` — `in_s`, the seconds from the row's own stamp to the next
@@ -47,21 +47,14 @@
  * follower is not one the sleep scheduler or preflight counts as running. A
  * follower that wrote no row of its own gets one here: `heartbeat:<worker>`,
  * the claim workers' under the job their configuration names — the same
- * extractionKey and consolidatePassKey a compose follower runs under, which
- * takes no --job. With no DATABASE_URL, or a database not answering within
+ * extractionKey and consolidatePassKey a coordinator's follower runs under,
+ * which takes no --job. With no database, or one not answering within
  * STAMP_TIMEOUT_MS, the row is left as it is and the log says so; the next
  * follower writes its own.
  *
- * Signals. Its handlers are installed before anything else, so as PID 1
- * without an init it hears the runtime's stop. Each SIGTERM or SIGINT goes on
- * to the follower, whose own rules apply (the first stops it after the work in
- * hand, the second hard); once it has ended, this exits 0. Waiting, it exits
- * 0 at once. The follower is not PID 1, so a signal before its own handlers
- * are in ends it then (143), where as PID 1 it ignored one until the grace
- * ran out (137).
- *
- * Exit codes: 0 once stopped; 2 for its own command line — the compose file's,
- * held to its shape by CI. It never exits on its follower's behalf.
+ * A stop. Each stop() goes on to the follower, whose own rules apply (the
+ * first SIGTERM stops it after the work in hand, the second hard); once it
+ * has ended, `done` settles with 0. Waiting or held, it settles at once.
  */
 
 import type { SQL } from "bun";
@@ -70,17 +63,15 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, STAMPING_WORKERS, type StampingWorker } from "./pass-stamp.ts";
-import { commandLine, consoleWriter, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
-
-const FLAGS = { worker: "one", run: "one", "require-key": "none", digits: "many" } as const;
-const HINTS = { worker: `<${STAMPING_WORKERS.join("|")}>`, run: "<the follower's command, as sh -c runs it, exec'd>", digits: "<SETTING …>" };
+import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
 /** The longest a heartbeat write may take before it is left: the database may be what is down. */
 export const STAMP_TIMEOUT_MS = 10_000;
+/** The longest a follower's last output is waited for once it has exited. */
+const DRAIN_MS = 2_000;
 
 /** The wait before the follower's next run, after `tries` ends in a row (1 for the first). */
 export function restartWait(tries: number, first: number = RESTART_MS.first, max: number = RESTART_MS.max): number {
@@ -94,7 +85,7 @@ export type RestartMark = { in_s: number | null; code: number; tries: number };
 export type GuardRefusal = { kind: "identity" | "usage"; line: string };
 
 /**
- * The compose file's guards, by its own words: the worker key first, then each
+ * The guards, in the words of the compose file before SMD-3476: the worker key first, then each
  * setting `--digits` names that is not decimal digits (empty is unset, and
  * the follower's default). Null when both hold. Pure.
  */
@@ -158,8 +149,13 @@ export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: stri
 
 export type SuperviseOptions = {
   worker: StampingWorker;
-  /** The follower's command, as `sh -c` runs it. */
-  run: string;
+  /** The follower's argv, run with no shell. */
+  cmd: readonly string[];
+  /** The user and group it runs as; unset, this process's own. */
+  uid?: number;
+  gid?: number;
+  /** Put before each line it writes, which then goes to the writer; unset, its output is this process's. */
+  label?: string;
   requireKey?: boolean;
   digits?: readonly string[];
   env?: Record<string, string | undefined>;
@@ -182,7 +178,7 @@ export type Supervisor = {
 export function supervise(opts: SuperviseOptions): Supervisor {
   const env = opts.env ?? process.env;
   const waits = opts.waits ?? RESTART_MS;
-  const { err } = opts.writer ?? consoleWriter;
+  const { out, err } = opts.writer ?? consoleWriter;
   const key = followerKey(opts.worker, env);
   const stopped = new AbortController();
   let child: ReturnType<typeof Bun.spawn> | null = null;
@@ -219,8 +215,18 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     let tries = 0;
     while (!stopped.signal.aborted) {
       const began = new Date();
-      child = Bun.spawn(["sh", "-c", opts.run], { env: env as Record<string, string>, stdio: ["inherit", "inherit", "inherit"] });
+      const piped = opts.label !== undefined;
+      child = Bun.spawn([...opts.cmd], {
+        env: env as Record<string, string>,
+        ...(opts.uid === undefined ? {} : { uid: opts.uid }),
+        ...(opts.gid === undefined ? {} : { gid: opts.gid }),
+        stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
+      });
+      const drained = piped
+        ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
+        : Promise.resolve();
       const code = await child.exited;
+      await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();
@@ -243,36 +249,22 @@ export function supervise(opts: SuperviseOptions): Supervisor {
   };
 }
 
+/** Each line of `stream` to `write`, after `label`: a last line with no newline too. */
+async function labelled(stream: ReadableStream<Uint8Array>, label: string, write: (line: string) => void): Promise<void> {
+  const decoder = new TextDecoder();
+  let held = "";
+  for await (const chunk of stream) {
+    held += decoder.decode(chunk, { stream: true });
+    for (let at = held.indexOf("\n"); at >= 0; at = held.indexOf("\n")) {
+      write(`${label}${held.slice(0, at)}`);
+      held = held.slice(at + 1);
+    }
+  }
+  held += decoder.decode();
+  if (held) write(`${label}${held}`);
+}
+
 function seconds(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 120 ? `${s} s` : `${Math.round(s / 60)} min`;
-}
-
-if (import.meta.main) {
-  // The handlers first: as PID 1 without an init, a stop before them is ignored until the grace runs out.
-  const heard: ("SIGTERM" | "SIGINT")[] = [];
-  let stop: (signal: "SIGTERM" | "SIGINT") => void = (signal) => void heard.push(signal);
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => stop(signal));
-  const cli = commandLine("supervise.ts", FLAGS, { hints: HINTS, note: "Runs --run as sh -c does, and again after it ends on its own (SMD-3214)." });
-  const worker = cli.value("worker");
-  const run = cli.value("run");
-  if (worker === undefined || !(STAMPING_WORKERS as readonly string[]).includes(worker) || run === undefined) {
-    console.error(`supervise.ts needs --worker (${STAMPING_WORKERS.join(", ")}) and --run`);
-    process.exit(2);
-  }
-  const url = databaseUrlIfAny();
-  const begin = (sql: SQL | null): Promise<number> => {
-    const s = supervise({ worker: worker as StampingWorker, run, requireKey: cli.has("require-key"), digits: cli.values("digits"), sql });
-    stop = s.stop;
-    for (const signal of heard) s.stop(signal);
-    return s.done;
-  };
-  if (url === null) {
-    console.error("supervise: no DATABASE_URL it can use, so the follower's heartbeat is left as the follower writes it");
-    process.exit(await begin(null));
-  }
-  const sql = openSql(url, { max: 1 });
-  await closeThenExit(sql, async () => {
-    return begin(sql);
-  });
 }

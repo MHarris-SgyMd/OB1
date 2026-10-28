@@ -222,6 +222,7 @@ main() {
   nodb db                 test-worker-bootstrap.ts
   nodb db                 test-board-findings.ts
   nodb db                 test-weekly-digest.ts
+  nodb db                 test-coordinator.ts
 
   typecheck scripts
   typecheck server-portable

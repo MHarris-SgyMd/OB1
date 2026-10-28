@@ -1,0 +1,184 @@
+#!/usr/bin/env bun
+/**
+ * test-coordinator.ts — the coordinator's first form (db/coordinator.ts,
+ * SMD-3476), hermetic: no Postgres, no model, no network.
+ *
+ * What OB1_PASSES runs (sleep winning over workers, a name that is no pass
+ * left out, none named none run); each child's settings (its own, the shared
+ * ones, never another's or the coordinator's); each child's command line, as
+ * its compose service ran it; and compose.yaml's coordinator handed every
+ * setting some child owns, with none it does not account for.
+ *
+ * As root — CI runs it in the coordinator's own container — the planted
+ * pair: two children run by coordinate() as their own users, one holding a
+ * secret in its environment, the other trying to read it through
+ * /proc/<pid>/environ. It must be refused, while the coordinator reads it
+ * (so the pid read is the right one). Run as anyone else, that part says it
+ * did not run, and `--require-root` makes that a failure.
+ */
+
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, type Child } from "./coordinator.ts";
+
+let pass = 0;
+let fail = 0;
+function ok(cond: boolean, msg: string): void {
+  if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); }
+}
+
+const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c.name).join(",");
+
+// ---------------------------------------------------------------------------
+// planPasses — what OB1_PASSES runs.
+// ---------------------------------------------------------------------------
+{
+  ok(names("sleep,board-sync") === "board-sync,sleep", `sleep and board-sync, board-sync first (${names("sleep,board-sync")})`);
+  ok(names("workers") === "extract,consolidate", `workers is the two followers (${names("workers")})`);
+  ok(names(" board-sync  workers ,") === "board-sync,extract,consolidate", "commas or spaces, either, around the names");
+  ok(names("sleep sleep") === "sleep", "a name twice runs once");
+  const both = planPasses("workers,sleep");
+  ok(both.children.map((c) => c.name).join(",") === "sleep" && both.lines.length === 1 && /names both sleep and workers, which never run together — sleep runs/.test(both.lines[0]),
+    `sleep and workers named together: sleep runs, the followers do not, and the log says so (${both.lines.join(" | ")})`);
+  const odd = planPasses("sleep,extract");
+  ok(odd.children.map((c) => c.name).join(",") === "sleep" && odd.lines.some((l) => /names 'extract', which is no pass \(sleep, workers, board-sync\) — it is left out, the rest run/.test(l)),
+    `a name that is no pass is left out and said, the rest run (${odd.lines.join(" | ")})`);
+  for (const raw of [undefined, "", " , "]) {
+    const none = planPasses(raw);
+    ok(none.children.length === 0 && none.lines.length === 1 && /names no pass, so none runs/.test(none.lines[0]), `nothing named (${JSON.stringify(raw)}): none runs, and the log says how to name them`);
+  }
+  ok(planPasses("sleep").lines.length === 0, "a list that holds only passes says nothing of it");
+  ok(JSON.stringify(PASSES) === JSON.stringify(["sleep", "workers", "board-sync"]), "the three passes");
+}
+
+// ---------------------------------------------------------------------------
+// childEnv — each child's own settings and the shared ones, never another's.
+// ---------------------------------------------------------------------------
+{
+  const env = {
+    PATH: "/usr/bin", DATABASE_URL: "postgres://x", OB1_LLM_BASE_URL: "http://m", OB1_EXTRACT_CHUNK_TOKENS: "900",
+    MCP_ACCESS_KEYS: "keys", OB1_WORKER_KEY: "wk", LINEAR_API_KEY: "lin", LINEAR_COMMENT_API_KEY: "linc", OB1_BOARD_SYNC_INTERVAL: "300",
+    OB1_SLEEP_QUIET: "60", OB1_SLEEP_DUMP_DIR: "/d", OB1_EXTRACT_FOLLOW: "30", OB1_CONSOLIDATE_WORKERS: "2",
+    OB1_PASSES: "sleep", PORT: "", UNSET: undefined,
+  };
+  const of = (name: keyof typeof CHILDREN) => childEnv(CHILDREN[name], env);
+  const board = of("board-sync");
+  ok(board.LINEAR_API_KEY === "lin" && board.LINEAR_COMMENT_API_KEY === "linc" && board.OB1_BOARD_SYNC_INTERVAL === "300"
+      && !("OB1_WORKER_KEY" in board) && !("MCP_ACCESS_KEYS" in board) && !("OB1_SLEEP_QUIET" in board) && !("OB1_EXTRACT_FOLLOW" in board),
+    `board-sync: its Linear keys, never the worker key, the key list or another pass's settings (${Object.keys(board).sort().join(",")})`);
+  const sleep = of("sleep");
+  ok(sleep.OB1_WORKER_KEY === "wk" && sleep.MCP_ACCESS_KEYS === "keys" && sleep.OB1_SLEEP_QUIET === "60" && sleep.OB1_SLEEP_DUMP_DIR === "/d"
+      && !("LINEAR_API_KEY" in sleep) && !("LINEAR_COMMENT_API_KEY" in sleep) && !("OB1_EXTRACT_FOLLOW" in sleep) && !("OB1_CONSOLIDATE_WORKERS" in sleep),
+    `sleep: the worker key, the key list and its own settings, never Linear's or the followers' (${Object.keys(sleep).sort().join(",")})`);
+  const extract = of("extract");
+  ok(extract.OB1_EXTRACT_FOLLOW === "30" && extract.OB1_WORKER_KEY === "wk" && !("OB1_CONSOLIDATE_WORKERS" in extract) && !("OB1_SLEEP_QUIET" in extract) && !("LINEAR_API_KEY" in extract),
+    "extract: its own two settings and the worker's, never consolidate's, sleep's or Linear's");
+  for (const name of Object.keys(CHILDREN) as (keyof typeof CHILDREN)[]) {
+    const e = of(name);
+    ok(e.PATH === "/usr/bin" && e.DATABASE_URL === "postgres://x" && e.OB1_LLM_BASE_URL === "http://m" && e.OB1_EXTRACT_CHUNK_TOKENS === "900",
+      `${name}: the shared settings, OB1_EXTRACT_CHUNK_TOKENS among them (the server's, though it starts like extract's own)`);
+    ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e), `${name}: never the coordinator's own settings, nor an unset one`);
+  }
+  ok(childEnv(CHILDREN.sleep, env, { HOME: "/tmp/ob1-sleep" }).HOME === "/tmp/ob1-sleep" && childHome(CHILDREN.sleep) === "/tmp/ob1-sleep", "a HOME of its own, given");
+  const uids = Object.values(CHILDREN).map((c) => c.uid);
+  ok(new Set(uids).size === uids.length && uids.every((u) => u > 1001 && u < 65534), `a uid each, none the CI runner's 1001 nor nobody's (${uids.join(",")})`);
+}
+
+// ---------------------------------------------------------------------------
+// The command lines — the ones the four services ran.
+// ---------------------------------------------------------------------------
+{
+  const args = (name: keyof typeof CHILDREN, env: Record<string, string> = {}) => CHILDREN[name].args(env).join(" ");
+  ok(args("board-sync") === "--loop", "board-sync: --loop, its interval its own to read");
+  ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
+    "extract: --follow with its seconds only when set, one worker unless set");
+  ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");
+  ok(args("sleep") === "--follow --quiet 300 --poll 5 --workers 1 --budget 60 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64",
+    `sleep: the service's defaults (${args("sleep")})`);
+  const dumped = CHILDREN.sleep.args({ OB1_SLEEP_DUMP_DIR: "/var/lib/ob1/no such dir", OB1_SLEEP_BUDGET: "0" });
+  ok(dumped.slice(-2).join("|") === "--dump-dir|/var/lib/ob1/no such dir" && dumped[dumped.indexOf("--budget") + 1] === "0",
+    "sleep: --dump-dir only when set, the path one argument with its space; a 0 kept, not the default");
+  ok(CHILDREN.sleep.requireKey && CHILDREN.extract.requireKey && CHILDREN.consolidate.requireKey && !CHILDREN["board-sync"].requireKey,
+    "the key guard on the three that name themselves by OB1_WORKER_KEY, not on board-sync");
+  ok(CHILDREN.sleep.digits.length === 7 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
+}
+
+// ---------------------------------------------------------------------------
+// compose.yaml's coordinator: every setting some child owns handed in, and
+// none it does not account for — the server's anchor, a child's, its own.
+// ---------------------------------------------------------------------------
+const composePath = join(import.meta.dir, "../deploy/compose.yaml");
+// In the coordinator's container only db/ and server-portable/ are mounted: there, --require-root runs the planted pair alone.
+if (!existsSync(composePath)) {
+  ok(process.argv.includes("--require-root"), `${composePath} is where a checkout has it`);
+} else {
+  const compose = Bun.YAML.parse(readFileSync(composePath, "utf8")) as {
+    services: Record<string, { environment?: Record<string, unknown>; command?: string[]; profiles?: string[]; "x-env"?: Record<string, unknown> }>;
+  };
+  const server = Object.keys(compose.services.api["x-env"] ?? {});
+  const coordinator = compose.services.coordinator;
+  const keys = Object.keys(coordinator?.environment ?? {});
+  const unaccounted = keys.filter((k) => !server.includes(k) && !OWNED.has(k) && !COORDINATOR_OWN.includes(k));
+  const missing = [...OWNED, "OB1_PASSES"].filter((k) => !keys.includes(k));
+  ok(server.length > 20 && keys.length > server.length, `the server's anchor read (${server.length} settings), the coordinator's environment holding it and more (${keys.length})`);
+  ok(unaccounted.length === 0, `every setting the coordinator is handed is the server's, a child's or its own (unaccounted: ${unaccounted.join(", ") || "none"})`);
+  ok(missing.length === 0, `every setting a child owns is handed to the coordinator (missing: ${missing.join(", ") || "none"})`);
+  ok(JSON.stringify(coordinator?.command) === JSON.stringify(["bun", "db/coordinator.ts"]) && coordinator?.profiles === undefined, "its command is the coordinator, and it is a default service");
+  ok(!["sleep", "extract", "consolidate", "board-sync"].some((s) => s in compose.services), "the four services it replaced are gone");
+}
+
+// ---------------------------------------------------------------------------
+// As root: the planted pair. One child holds a secret; the other, its own
+// user, cannot read it from /proc; the coordinator can.
+// ---------------------------------------------------------------------------
+const root = process.getuid?.() === 0;
+if (!root) {
+  console.log("  (the planted /proc check runs as root only — CI runs this file in the coordinator's container)");
+  ok(!process.argv.includes("--require-root"), "--require-root: the planted /proc check must run here, as root");
+} else {
+  /** The pair, run by coordinate(): the holder's pid, uid and HOME, and what the reader got from the holder's environ. */
+  const plant = async (asOwnUsers: boolean) => {
+    const dir = mkdtempSync(join(tmpdir(), "ob1-coordinator-"));
+    chmodSync(dir, 0o777);
+    const holder = join(dir, "holder.ts");
+    const reader = join(dir, "reader.ts");
+    const pidFile = join(dir, "holder.pid");
+    const outFile = join(dir, "reader.out");
+    writeFileSync(holder, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ pid: process.pid, uid: process.getuid(), home: process.env.HOME, secret: "LINEAR_API_KEY" in process.env }));\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
+    writeFileSync(reader, `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nwhile (!existsSync(${JSON.stringify(pidFile)})) await Bun.sleep(20);\nconst { pid } = JSON.parse(readFileSync(${JSON.stringify(pidFile)}, "utf8"));\nlet got;\ntry { got = readFileSync("/proc/" + pid + "/environ", "utf8").includes("LINEAR_API_KEY=planted-secret") ? "the secret" : "read, no secret"; } catch (e) { got = e.code; }\nwriteFileSync(${JSON.stringify(outFile)}, JSON.stringify({ got, uid: process.getuid(), secret: "LINEAR_API_KEY" in process.env }));\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
+    chmodSync(holder, 0o644);
+    chmodSync(reader, 0o644);
+    const planted: Child[] = [
+      { ...CHILDREN["board-sync"], script: holder, args: () => [] },
+      { ...CHILDREN.sleep, script: reader, args: () => [], requireKey: false, digits: [] },
+    ];
+    const said: string[] = [];
+    const c = coordinate({ env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_PASSES: "" }, sql: null, asOwnUsers, children: planted, writer: { out: (l) => said.push(l), err: (l) => said.push(l) } });
+    try {
+      for (let i = 0; i < 200 && !existsSync(outFile); i++) await Bun.sleep(50);
+      const h = existsSync(pidFile) ? JSON.parse(readFileSync(pidFile, "utf8")) : null;
+      const r = existsSync(outFile) ? JSON.parse(readFileSync(outFile, "utf8")) : null;
+      // World-readable: the holder's own uid as the kernel has it, so the pid is the right one.
+      const status = h ? readFileSync(`/proc/${h.pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1] : undefined;
+      return { h, r, said, status };
+    } finally {
+      c.stop("SIGTERM");
+      await Promise.race([c.done, Bun.sleep(5000)]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const own = await plant(true);
+  ok(own.h?.uid === CHILDREN["board-sync"].uid && own.status === String(CHILDREN["board-sync"].uid) && own.r?.uid === CHILDREN.sleep.uid,
+    `each child runs as its own user (holder ${own.h?.uid}, the kernel's ${own.status}; reader ${own.r?.uid})`);
+  ok(own.h?.home === "/tmp/ob1-board-sync" && own.h?.secret === true && own.r?.secret === false, "each its own HOME, the secret in the holder's settings and not the reader's");
+  ok(own.r?.got === "EACCES", `the reader cannot read the holder's /proc/<pid>/environ (got ${own.r?.got ?? "no answer"})`);
+  ok(own.said.some((l) => /^coordinator: runs board-sync \(uid 1101\) and sleep \(uid 1104\)$/.test(l)), `the log says who runs as whom (${own.said.find((l) => l.startsWith("coordinator: runs"))})`);
+  // The mechanism dropped — both as this process's user — and the same reader gets the secret: the refusal above is the users', not /proc's.
+  const shared = await plant(false);
+  ok(shared.h?.uid === 0 && shared.r?.uid === 0 && shared.r?.got === "the secret",
+    `without users of their own the reader reads the holder's secret, so the refusal is the users' doing (got ${shared.r?.got ?? "no answer"})`);
+}
+
+console.log(`\ntest-coordinator: ${pass} passed, ${fail} failed`);
+if (fail > 0) process.exit(1);
