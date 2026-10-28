@@ -206,10 +206,12 @@ const entries = sources.filter((f) => {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== "DATABASE_URL") env[k] = v;
   env.OB1_ENV_FILES = "off";
-  const run = (script: string, ...argv: string[]) => {
-    const child = Bun.spawnSync(["bun", "--no-env-file", script, ...argv], { cwd: HERE, env });
+  /** A script's run, with these variables over the environment. */
+  const runWith = (over: Record<string, string>, script: string, ...argv: string[]) => {
+    const child = Bun.spawnSync(["bun", "--no-env-file", script, ...argv], { cwd: HERE, env: { ...env, ...over } });
     return { code: child.exitCode, out: child.stdout.toString(), err: child.stderr.toString() };
   };
+  const run = (script: string, ...argv: string[]) => runWith({}, script, ...argv);
   /** A URL nothing listens on: numbers are read after the URL is resolved and before it is dialled. */
   const DEAD = "postgres://127.0.0.1:1/none";
   for (const f of entries) {
@@ -262,6 +264,13 @@ const entries = sources.filter((f) => {
   const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9");
   ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:metadata@r1, subject:first_line@r2), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
     `--subjects rules with --dry-run, --limit and --timeout passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
+  // The model sweep's limit a call (SMD-3306 PR 4, review pass 2): --timeout reaches it, and without the flag the CLI
+  // leaves it the sweep's own default, which follows the question's reasoning; the sweep says both before it dials.
+  const sweepEnv = { OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "", OB1_JUDGE_MODEL: "j", OB1_SUBJECT_REASONING: "" };
+  const timedSweep = runWith(sweepEnv, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run", "--timeout", "9");
+  const offSweep = runWith({ ...sweepEnv, OB1_SUBJECT_REASONING: "off" }, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run");
+  ok(timedSweep.code !== 2 && /, reasoning on, at most 9 s a call \(subject:j@p2r\)$/m.test(timedSweep.out) && offSweep.code !== 2 && /, reasoning off, at most 300 s a call \(subject:j@p2\)$/m.test(offSweep.out),
+    `--subjects passes --timeout to the sweep, and without it the sweep's own default, 300 s with reasoning off (exits ${timedSweep.code}, ${offSweep.code}: ${offSweep.out.split("\n")[0].slice(-60)})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
   for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
     const bare = run(script, ...argv);

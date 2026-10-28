@@ -2836,10 +2836,10 @@ OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorde
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
-bun extract-entities.ts --url … --subjects              # each thought's own subject where none is current — none at its text, or one an older rule or question found: the rules, then the judge model for the rest (SMD-3306)
+bun extract-entities.ts --url … --subjects              # each thought's own subject where none is current — none at its text, or one an older rule or question found, or a model with its reasoning off while it is on: the rules, then the judge model for the rest (SMD-3306)
 bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
-#   with --limit N and --timeout SECONDS (300, per model call) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once)
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3083,10 +3083,12 @@ migration 111's `record_thought_subject` at the text the claim read, under its
 rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
 no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
 each thought with no current subject — none at its text (extracted before 111,
-keyed by no rule, or edited since), or one found under an older rule or question
-— gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`), the door
-replacing the old one. The model is asked the subject's own question about the
-thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
+keyed by no rule, or edited since), or one found under an older rule or question,
+or by a model with its reasoning off while it is on — gets the rules' subject,
+else the judge model's (`OB1_JUDGE_MODEL`), the door replacing the old one. The
+model is asked the subject's own question about the thought alone
+(`server-portable/subject.ts`'s `OWN_RULES`, version 2), with its reasoning on
+unless `OB1_SUBJECT_REASONING` says off, and its
 answer is read into a key: the first ticket id in it, else the PR it is (an
 answer that is one PR: a PR among other numbers is none), else a release's
 version, else the answer as a lower-case phrase. A ticket or a release counts
@@ -3098,12 +3100,31 @@ any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken
 for sessions that did other work, a note's first-line ticket that was only
-context, and vague model phrases among the misses. The sweep takes one thought
+context, and vague model phrases among the misses. Version 2 met Verify item 1's
+bar, the raters' own agreement less 0.05, on a third fresh draw with the judge
+model reasoning (0.945 against 0.941), and
+missed it without, on that draw and the second (0.933 against 0.941, 0.918
+against 0.930), though what reasoning changed was not significant alone (8
+thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
+(`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
+about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
+summaries. A model's subject found with it off is taken again while it is on
+(`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
+off takes none again. An effort asked for (`low`, `high`; `none` is off) is keyed
+as on, though only the provider's default was measured. A brain that set
+`OB1_METADATA_REASONING` asked the question with that before PR 4: set
+`OB1_SUBJECT_REASONING` to the same value to go on asking that way (its subjects
+are asked once more, to take the `r`). The setting is what the question asks
+for: a judge model with no reasoning mode (the metadata model, `qwen2.5:7b` by
+default, when `OB1_JUDGE_MODEL` is unset) answers as before, and its subjects
+are asked again once for nothing. The default `--timeout` follows it: 900 s a
+call with reasoning on, where 2 of 200 such calls took over 300 s, else 300 s.
+The sweep takes one thought
 at a time without a lease, the door's lock and fingerprint check making a sweep
 beside the pass safe. An answer naming nothing records nothing, so the next
 sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
 its thought is asked again at every sweep, and counted in the summary, until
-SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` counts
+SMD-3306 PR 5 records "asked, got nothing" and closes it safely; `--limit` counts
 each thought taken, in id order from the first, so such a thought is taken first
 again, as is one a `--subjects rules` run leaves to the model. A run's summary
 counts the subjects it recorded in place of a standing one, and how many of those
@@ -3112,7 +3133,9 @@ JSON with a subject records nothing either, is said, and exits 1, as the pass
 fails a malformed answer. A changed judge model leaves its predecessor's
 subjects standing, current at the same question: nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today). On a brain upgraded
+been measured on the question (the stable brain's, today); its counts follow
+`OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
+out of date while it is on. On a brain upgraded
 from version 1 it finds every filed ticket again, unchanged, under the metadata
 rule's own key, and leaves every thought the model must answer under its old
 subject, out of date and counted, until a run with the model. There the
@@ -3125,7 +3148,7 @@ refuses the sweep before any; the rules alone send nothing. On a brain before
 says so once, its entities standing; the sweep refuses either by name before
 any question, exit 2. A dry run reads on through a signal, as the pass's does.
 Sleep does not run the sweep yet: each run reads every thought, its count and its
-pages, whatever is left to do, which SMD-3306 PR 4 bounds first.
+pages, whatever is left to do, which SMD-3306 PR 5 bounds first.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5561,11 +5584,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1736 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1745 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 327 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
