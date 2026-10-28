@@ -1,11 +1,11 @@
 # One coordinator per brain runs every task, and n8n defines the extensions' workflows (SMD-3215)
 
-An architecture decision record, **proposed** (a draft for the maintainer's review). **The direction was decided by the maintainer on 2026-10-27**, in two steps:
+An architecture decision record. **Accepted by the maintainer on 2026-10-28.** The direction was decided on 2026-10-27, in two steps:
 
 - **Two kinds of coordinator** (from SMD-3379's design). A dedicated coordinator for each brain runs that brain's own tasks. A coordinator for the federated case, shared by the brains on one host or in one federation, holds what no single brain can see, first of all SMD-3379's model-slot service.
 - **Every plugin and extension becomes an implementation the coordinator runs, interactive tools included.** n8n (the `orchestration` profile, `orchestration-tool.md`) is where each workflow is defined, and the integration point with services outside the brain.
 
-The decision table marks which rows are that direction, which the maintainer has decided since (the open questions were all answered on 2026-10-27 and 2026-10-28), and which are this record's proposals. A proposal the maintainer changes is rewritten here before anything is built.
+The decision table marks which rows are that direction, which the maintainer decided on their own (the open questions, answered on 2026-10-27 and 2026-10-28), and which were this record's proposals, accepted with it. Nothing here is built yet; "Order" lists the steps.
 
 ## Terms
 
@@ -41,16 +41,16 @@ The direction joins the two. One runtime runs every task a brain has, whether a 
 | 1 | **A coordinator per brain**, a service in that brain's stack, runs every task the brain has. | Direction (2026-10-27) | Each task as its own service with its own rules |
 | 2 | **A federated coordinator** on the host, on no brain's network, reached through the host alias as the model servers are. It holds SMD-3379's slot service. A brain's sleep reaches it through the brain's own coordinator. | Direction (2026-10-27) | A broker per brain; a proxy in front of the model server |
 | 3 | **Every plugin operation, interactive ones included, every plugin webhook and every plugin task is an implementation the coordinator runs.** n8n defines the workflow and is its one integration point with outside services. | Direction (2026-10-27) | Handlers in the REST core's process (SMD-2310 as built) |
-| 4 | **The plugin manifest stays the contract.** Operations (schemas, scopes, REST route, MCP tool), tables, GUI pages and hooks are declared as today. An operation names its implementation: a workflow, or a handler, which a port may ship first and swap for a workflow later. The tool, its schemas and its scope do not change with the implementation. A workflow operation may answer two refusals a handler never does (see "Failure and limits"). | Proposed; the interim handler decided (maintainer, 2026-10-27) | The workflow as the contract; a second MCP server for extension tools |
-| 5 | **n8n's engine runs the workflow; the coordinator never interprets it.** The coordinator admits a run, gives it a deadline, starts it through the workflow's Webhook trigger, waits for the last node's answer and records the run. | Proposed: follows from n8n's workflow JSON running only on n8n's engine | An OB1 engine for n8n's format |
-| 6 | **A run carries its caller, and n8n holds no caller's credential.** The REST core opens each run. n8n calls the brain with a standing `run` key, which grants nothing alone, plus the run's id. The REST core resolves the id to the run's caller, bounded by the caller's scope and the operation's, by the calls its declaration lists, and by the deadline, and refuses it once the caller is revoked. | Proposed | n8n's one standing key for every caller (`orchestration-tool.md` decision 7's objection); a bearer token per run passed through n8n as data |
-| 7 | **A plugin workflow reaches two things only:** the REST core, with the `run` key, and outside services through credentials pinned to their hosts. (n8n's own templates keep what they reach today: the REST core with a capture key, the import runner, and Linear for the act tool.) It never reaches Postgres or a model provider. A workflow's model call is a REST-core operation, so the egress gate and SMD-3379's slot hook see it. A lint holds this for plugin workflows (check 31); the network does not, since n8n shares `egress` with the model servers. | Proposed | n8n's own AI nodes on brain content |
-| 8 | **Extension data stays in plugin tables in the brain's Postgres**, behind data operations only a run of that plugin may call. | Proposed | Tables in n8n's store; n8n given a database connection |
+| 4 | **The plugin manifest stays the contract.** Operations (schemas, scopes, REST route, MCP tool), tables, GUI pages and hooks are declared as today. An operation names its implementation: a workflow, or a handler, which a port may ship first and swap for a workflow later. The tool, its schemas and its scope do not change with the implementation. A workflow operation may answer two refusals a handler never does (see "Failure and limits"). | Accepted (2026-10-28); the interim handler decided 2026-10-27 | The workflow as the contract; a second MCP server for extension tools |
+| 5 | **n8n's engine runs the workflow; the coordinator never interprets it.** The coordinator admits a run, gives it a deadline, starts it through the workflow's Webhook trigger, waits for the last node's answer and records the run. | Accepted (2026-10-28): follows from n8n's workflow JSON running only on n8n's engine | An OB1 engine for n8n's format |
+| 6 | **A run carries its caller, and n8n holds no caller's credential.** The REST core opens each run. n8n calls the brain with a standing `run` key, which grants nothing alone, plus the run's id. The REST core resolves the id to the run's caller, bounded by the caller's scope and the operation's, by the calls its declaration lists, and by the deadline, and refuses it once the caller is revoked. | Accepted (2026-10-28) | n8n's one standing key for every caller (`orchestration-tool.md` decision 7's objection); a bearer token per run passed through n8n as data |
+| 7 | **A plugin workflow reaches two things only:** the REST core, with the `run` key, and outside services through credentials pinned to their hosts. (n8n's own templates keep what they reach today: the REST core with a capture key, the import runner, and Linear for the act tool.) It never reaches Postgres or a model provider. A workflow's model call is a REST-core operation, so the egress gate and SMD-3379's slot hook see it. A lint holds this for plugin workflows (check 31); the network does not, since n8n shares `egress` with the model servers. | Accepted (2026-10-28) | n8n's own AI nodes on brain content |
+| 8 | **Extension data stays in plugin tables in the brain's Postgres**, behind data operations only a run of that plugin may call. | Accepted (2026-10-28) | Tables in n8n's store; n8n given a database connection |
 | 9 | **Core passes stay native engines on Postgres**: extract, consolidate, the re-derive sweep, board-sync, and the HNSW heal once built (SMD-2918). The coordinator runs them as child processes, as `db/supervise.ts` does today. | Decided (maintainer, 2026-10-27) | Core passes as n8n workflows |
-| 10 | **The coordinator is one process running each core pass as a child** (SMD-3215's option a), grown from `db/supervise.ts`. Each child runs as its own user with only its own settings. | Proposed | Option b, starting and stopping containers, which needs the container runtime's socket (root on the host); option c, growing `db/sleep.ts`; option d, a status view only |
+| 10 | **The coordinator is one process running each core pass as a child** (SMD-3215's option a), grown from `db/supervise.ts`. Each child runs as its own user with only its own settings. | Accepted (2026-10-28) | Option b, starting and stopping containers, which needs the container runtime's socket (root on the host); option c, growing `db/sleep.ts`; option d, a status view only |
 | 11 | **n8n is part of every brain**, as the coordinator is: both are default services of the compose stack, not a profile. | Decided (maintainer, 2026-10-28) | n8n only in a brain that enables a plugin with a workflow; n8n as the opt-in `orchestration` profile |
-| 12 | **The brain keeps the inbound endpoint for webhooks.** The plugin's hook handler verifies the sender at `/hooks/<plugin>/<name>` as today, then opens a run. n8n gets no public route. | Proposed | n8n's own Webhook triggers published through the proxy |
-| 13 | **One status surface for the brain's tasks:** the coordinator's view, built from the core passes' heartbeat rows and the runs' rows, read by preflight, `brain_info` and a GUI page. n8n's own templates keep their history in n8n. | Proposed | n8n's run history; a separate surface per task |
+| 12 | **The brain keeps the inbound endpoint for webhooks.** The plugin's hook handler verifies the sender at `/hooks/<plugin>/<name>` as today, then opens a run. n8n gets no public route. | Accepted (2026-10-28) | n8n's own Webhook triggers published through the proxy |
+| 13 | **One status surface for the brain's tasks:** the coordinator's view, built from the core passes' heartbeat rows and the runs' rows, read by preflight, `brain_info` and a GUI page. n8n's own templates keep their history in n8n. | Accepted (2026-10-28) | n8n's run history; a separate surface per task |
 | 14 | **No brain content is saved in n8n.** A plugin workflow saves neither its successful nor its failed runs. Content passes through n8n's memory for a run's life. | Decided (maintainer, 2026-10-28) | n8n's 24-hour window for plugin runs |
 
 ## The shape
@@ -246,7 +246,7 @@ Caveats: one machine, macOS with podman, a stub in place of the REST core and Po
 
 ## What this reverses or amends
 
-Applied once the maintainer accepts this record, each in its own text:
+Applied with this record on 2026-10-28, each in its own text (the tickets' in their own descriptions and comments):
 
 - **`orchestration-tool.md`:**
   - **Decision 2** (an opt-in sidecar, never run by a brain plus Claude Code) is reversed: n8n is a default service of every brain (row 11). Its footprint (369 MiB after the profile's runs, about 500 MB under the measured load) and its provisioning become every brain's.
@@ -268,7 +268,7 @@ Applied once the maintainer accepts this record, each in its own text:
 
 ## Order
 
-Each step is its own PR, after this record is accepted. The ports run in parallel with handlers (decided 2026-10-27), so the shim (SMD-3216) does not wait for any of this:
+Each step is its own PR. The ports run in parallel with handlers (decided 2026-10-27), so the shim (SMD-3216) does not wait for any of this:
 
 1. **The coordinator, first form.** `db/supervise.ts` grows into one `coordinator` service that runs the core passes the enabled profiles name (`sleep` or the `workers` pair, and `board-sync`), each as its own user with only its own settings, and adds a status row for the import runner. The exclusion holds by construction, and one status route reports each child. This closes the exclusion seam and starts the status surface.
 2. **Runs.**
@@ -297,7 +297,7 @@ The federated coordinator comes with SMD-3379's third PR, its slot service, and 
 3. **SMD-2756: answered 2026-10-28, one login per plugin**, its password derived from one master secret, before the first port that carries SQL (see "Data").
 4. **n8n: answered 2026-10-28, in every brain** (row 11), a default service rather than a profile.
 5. **The licence: answered 2026-10-27, accepted.** Extension features may depend on n8n's Sustainable Use License.
-6. **No run data in n8n: answered 2026-10-28, as recommended** (row 14). Neither successful nor failed plugin runs are saved, and diagnosing failures from the run's row in the brain, which records the error's code, and the failing node's name where n8n's answer gives it. The declined alternative kept failed runs for n8n's 24-hour window, with brain content in them.
+6. **No run data in n8n: answered 2026-10-28, as recommended** (row 14). Neither successful nor failed plugin runs are saved. A failure is diagnosed from the run's row in the brain, which records the error's code, and the failing node's name where n8n's answer gives it. The declined alternative kept failed runs for n8n's 24-hour window, with brain content in them.
 7. **The latency budget: answered 2026-10-28, as recommended.** Measured: about 36–46 ms per call at p50 and 46–64 ms at p95, plus 4–8 ms a step, one at a time. It is accepted for interactive tools, since an AI client's turn takes seconds, and CI holds the stack's own path (step 2) to a ceiling of 100 ms at p95 for a one-step workflow.
 8. **The import template's schedule: answered 2026-10-28, as recommended.** It moves from n8n's Schedule trigger to a coordinator trigger after step 4, so the brain has one clock.
 
