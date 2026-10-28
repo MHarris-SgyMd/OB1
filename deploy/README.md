@@ -2302,7 +2302,10 @@ new key — waits for the brain to go quiet. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
 so, and once it has, a sleep re-embeds whatever the switch left unfinished
-(SMD-2679).
+(SMD-2679) — unless the new name is one its heartbeat row cannot carry (ASCII
+letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
+which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
+(SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
 once, before its first quiet — not re-embed's, which each sleep with work
