@@ -963,8 +963,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // sleep scheduler, which would run beside it, nor preflight: refused, as the
   // scheduler keeps such a name out of sleep. A one-shot run writes no row
   // (SMD-3486 review pass 2). This refusal does not print the key: what makes
-  // it unfit may be a character a log should not carry either. Not through refused(): its
-  // onStart would end a row under that key, which no reader takes either.
+  // it unfit may be a character a log should not carry either. Not through
+  // refused(): its onStart would end a row under that key, which no reader
+  // takes either.
   if (FOLLOW && opts.stamper === undefined && !STATUS_ONLY && !DRY_RUN && !heartbeatKeyCarried(stampKey("reembed", JOB))) {
     err(
       `\n  Refusing to follow: this follower's heartbeat row would be one the sleep scheduler and preflight do not read — the model name or --job holds a character outside ASCII letters, digits and . _ : @ / + -, or is too long for the key (at most 120 characters after heartbeat:reembed:).\n` +
