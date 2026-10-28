@@ -3,9 +3,11 @@
 // a client sent for /mcp on to the REST core, so this server trades it
 // (RFC 8693) at the authorization server's token endpoint, as its `mcp`
 // client, for a token whose audience is the REST core (`<origin>/api`). The
-// result keeps the subject, carries `act: {sub: "mcp"}`, never a wider scope,
-// never a later expiry (deploy/auth/server.ts's grant). The REST core then
-// checks that token as its own (server-portable/oauth-token.ts).
+// result keeps the subject, carries `act: {sub: "mcp", act: {sub: <the
+// connector>}}`, never a wider scope, never a later expiry
+// (deploy/auth/server.ts's grant). The REST core then checks that token as
+// its own (server-portable/oauth-token.ts), and names its caller by the
+// connector, `oauth:operator+<client>` (SMD-3064).
 //
 // - Before the trade, the token's claims are read unverified and only to
 //   refuse: another issuer, any audience but exactly `<origin>/mcp`, or an

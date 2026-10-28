@@ -1032,11 +1032,14 @@ stripped (`X-Forwarded-Prefix`).
   with the `auth` profile and a sound `OB1_PUBLIC_ORIGIN`, an `Authorization:
   Bearer` JWT that no key matched is checked as a token issued for
   `<origin>/api`. Its `brain:` scopes act as a key's scope, and the caller is
-  `oauth:<sub>`. A token this server does not accept is a 401 `UNAUTHORIZED` with
+  `oauth:<sub>+<client>`, the subject and the client it signed in through (the
+  connector an exchanged token nests in its `act`), or a service's
+  `oauth:<sub>` alone: a principal per client, with its own registry row
+  (SMD-3064). A token this server does not accept is a 401 `UNAUTHORIZED` with
   `credential: "token"`. A valid one whose scopes name no key scope is a 403
   `FORBIDDEN` with `credential: "token"` (`insufficient_scope`). One it has no
   signing keys for is a 503 `BUSY` with `credential: "token"` and `Retry-After:
-  30`; one whose subject the registry revoked, a 401 `REVOKED` with
+  30`; one whose principal the registry revoked, a 401 `REVOKED` with
   `credential: "token"`. Elsewhere a token is an unknown key.
 - **Forwarded** (SMD-2284, the ADR's decision 7): beside a caller's key, the
   `x-brain-forwarder` header carries the key of whoever forwarded it — the MCP

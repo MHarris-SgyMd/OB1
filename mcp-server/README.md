@@ -51,7 +51,8 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   `auth` profile, it is traded (RFC 8693) at the authorization server's token endpoint
   on the mesh, as the `mcp` client (`OB1_AUTH_SECRET_MCP`), for a token whose audience
   is the REST core; that token rides `Authorization: Bearer` on every call, and the
-  REST core records the subject (`oauth:operator`) with this server as `act`
+  REST core records the operator and the connector it signed in through
+  (`oauth:operator+<client>`, SMD-3064) with this server as `act`
   (`oauth:mcp`). The keyed routes at the origin's `Host` (a scan's job links, the
   worker mirrors) trade it too; `/health`'s record stays a key's.
   - The claims are read first, only to refuse: another issuer, any audience but

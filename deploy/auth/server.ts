@@ -14,7 +14,10 @@
  *   server signed for that client's MCP resource (so never an exchanged one,
  *   whose audience is a REST core); the result is a token for the same tier's
  *   REST core with the same subject,
- *   no wider scope, no later expiry, and `act: { sub: <the MCP client> }`;
+ *   no wider scope, no later expiry, and `act: { sub: <the MCP client>, act:
+ *   { sub: <the subject token's client> } }` (RFC 8693 §4.1): the MCP service
+ *   that carried it, and the connector that signed in, which the REST core
+ *   makes a principal of its own (SMD-3064);
  * - `getResourceServerInfo`, which the library says MUST be replaced: a
  *   resource outside the layout, or outside the client's allowance, is
  *   `invalid_target`. A request that names no resource is refused before
@@ -193,6 +196,9 @@ function detailOf(error: unknown): { error_detail?: string } {
   return text ? { error_detail: text } : {};
 }
 
+/** The client each exchange's subject token was issued to, by the request that is saving the exchanged token: what extraTokenClaims nests in its `act`. */
+const exchangedFor = new WeakMap<object, string>();
+
 function resourceInfo(resource: string): ResourceServer {
   return { scope: SCOPES.join(" "), audience: resource, accessTokenTTL: ACCESS_TTL, accessTokenFormat: "jwt", jwt: { sign: { alg: "ES256" } } };
 }
@@ -288,10 +294,13 @@ const provider = new Provider(L.issuer, {
     clientIdMetadataDocument: { enabled: true, ack: "draft-02" },
   },
   fetch: guardedFetch(),
-  // The actor of an exchange is the client that authenticated to make it.
+  // The actor of an exchange is the client that authenticated to make it, and
+  // the actor before it the client the subject token was issued to (SMD-3064).
   async extraTokenClaims(ctx, token) {
     if ((token as { gty?: string }).gty !== "token_exchange" || ctx?.oidc.params?.grant_type !== TOKEN_EXCHANGE) return undefined;
-    return { act: { sub: ctx.oidc.client!.clientId } };
+    const connector = exchangedFor.get(ctx);
+    if (!connector) throw new Error("an exchanged token was saved with no subject token's client recorded");
+    return { act: { sub: ctx.oidc.client!.clientId, act: { sub: connector } } };
   },
   async renderError(ctx, out, error) {
     ctx.type = "json";
@@ -351,7 +360,7 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   if (params.audience) throw new errors.InvalidRequest("name the target with resource, not audience");
   if (params.resource !== policy.to) throw new errors.InvalidTarget(`this client exchanges for ${policy.to} only`);
 
-  let claims: { sub?: string; scope?: string; exp?: number; act?: unknown };
+  let claims: { sub?: string; scope?: string; exp?: number; act?: unknown; client_id?: unknown };
   try {
     ({ payload: claims } = await jwtVerify(params.subject_token, ownKeys, { issuer: L.issuer, audience: policy.from, algorithms: ["ES256"], typ: "at+jwt" }));
   } catch (cause) {
@@ -361,6 +370,8 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   }
   // No `act` check: an exchanged token's audience is a REST core, which the audience rule above already refuses.
   if (claims.sub !== OPERATOR) throw new errors.InvalidGrant("subject_token names no known account");
+  // The library writes client_id into every access token it signs (RFC 9068 §2.2); one without it was not signed here.
+  if (typeof claims.client_id !== "string" || !claims.client_id) throw new errors.InvalidGrant("subject_token names no client");
 
   const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));
   const asked = params.scope ? params.scope.split(" ").filter(Boolean) : [...held];
@@ -381,6 +392,7 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   const token = new provider.AccessToken(fields as typeof fields & { grantId: string });
   token.resourceServer = new provider.ResourceServer(policy.to, resourceInfo(policy.to));
   token.exp = exp;
+  exchangedFor.set(ctx, claims.client_id);
   ctx.oidc.entity("AccessToken", token);
   const value = await token.save();
   ctx.body = { access_token: value, issued_token_type: ACCESS_TOKEN_TYPE, token_type: "Bearer", expires_in: exp - now, scope: token.scope };

@@ -343,11 +343,11 @@ console.log("\n[11a] A forwarder key (SMD-2284) resolves with no scope recorded:
   await r.resolve(store, { name: "mcp-forwarder", scope: "forward", keyHash: H("f") });
   await r.resolve(store, { name: "session-hook", scope: "capture", keyHash: H("e") });
   assert(sent[0] === undefined && sent[1] === "capture", `a forwarder's scope is sent as none, a caller's as presented (${JSON.stringify(sent)})`);
-  // An authorization server's subject (SMD-2286) is one row whatever scope its tokens hold: none recorded, so tokens of
-  // two scopes from one subject never rewrite the row in turn.
+  // An authorization server's principal (SMD-2286, SMD-3064) is one row whatever scope its tokens hold: none recorded,
+  // so tokens of two scopes from one client never rewrite the row in turn.
   sent.length = 0;
-  for (const scope of ["write", "read", "capture"] as const) await r.resolve(store, { name: "oauth:operator", scope, keyHash: H("o") });
-  assert(sent.length === 3 && sent.every((s) => s === undefined), `an oauth: subject's scope is sent as none, whatever its token holds (${JSON.stringify(sent)})`);
+  for (const scope of ["write", "read", "capture"] as const) await r.resolve(store, { name: "oauth:operator+gui", scope, keyHash: H("o") });
+  assert(sent.length === 3 && sent.every((s) => s === undefined), `an oauth: principal's scope is sent as none, whatever its token holds (${JSON.stringify(sent)})`);
 
   // What the registry does with none, on the real schema (typed: an untyped NULL matches no form).
   const resolveTyped = async (hash: string, label: string, scope: string | null) =>

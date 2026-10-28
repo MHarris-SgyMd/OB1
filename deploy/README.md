@@ -3625,28 +3625,35 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   key, `brain:capture` as a capture key; the consent page words them so. A
   token holding none of them, or `brain:read` with `brain:capture` and no
   `brain:write`, is answered 403 `insufficient_scope`.
-- **The caller** is `oauth:operator` for a sign-in, `oauth:<id>` for a
-  service. That name is what egress terms (`actor:oauth:operator` in
-  `OB1_EGRESS_ALLOW` or `OB1_EGRESS_DENY`), the search tools' actor filter
-  and the audit row see; an exchanged token's audit row names the MCP
-  service as `act`. Every client signed in as the operator shares this one
-  name for now (SMD-3064).
-- **Classify it** as you would a key, or its writes carry no kind and a
-  `said_by` filter misses them:
-  `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator', 'agent')"`,
+- **The caller** is the operator and the client it signed in through,
+  one name per client (SMD-3064): `oauth:operator+gui` for the operator
+  GUI, `oauth:operator+<client>` for a connector reached through `/mcp`
+  (a registered client's id, or a metadata document's URL, such as
+  `oauth:operator+https://claude.ai/oauth/claude-code-client-metadata`),
+  and `oauth:<id>` alone for a service. That name is what egress terms
+  (`actor:oauth:operator+gui` in `OB1_EGRESS_ALLOW` or `OB1_EGRESS_DENY`),
+  the search tools' actor filter and the audit row see; an exchanged
+  token's audit row names the MCP service as `act`. The registry lists the
+  names it has seen: `SELECT label, kind FROM ob1_agents WHERE label LIKE
+  'oauth:%'`.
+- **Classify each** as you would a key, or its writes carry no kind and a
+  `said_by` filter misses them. The GUI is you; a connector is usually an
+  agent:
+  `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator+gui', 'operator'), set_agent_kind('oauth:operator+<client>', 'agent')"`,
   then `SELECT backfill_thought_actors()` so the thoughts it wrote before
   carry the kind `said_by` reads (and `SELECT backfill_thought_audit_events()`
-  for their audit rows).
-  `agent` is the cautious kind while every connector shares the name:
-  `operator` would give every connector the operator signs in the
-  operator's trust.
-- **Revoking it in the registry bans the subject for good.** Its digest is
-  fixed, so no new sign-in escapes it: every token of it is refused 401
-  `REVOKED` (`credential: "token"`), and there is no function to undo it. (The
-  digest is of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives the
-  subject a new one, and lifts the ban with it.) To ban one on purpose, by
-  its label: `SELECT revoke_agent_key(k.key_hash, 'why') FROM ob1_agent_keys k
-  JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
+  for their audit rows). A name can be classified before its first sign-in.
+  A client registered afresh is a new name, unclassified until you classify
+  it.
+- **Revoking one in the registry bans that client for good.** Its digest
+  is fixed, so no new sign-in through that client escapes it: every token
+  of it is refused 401 `REVOKED` (`credential: "token"`), and there is no
+  function to undo it. The GUI and the other clients go on. (The digest is
+  of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives each name a new
+  one, and lifts the ban with it.) To ban one on purpose, by its label:
+  `SELECT revoke_agent_key(k.key_hash, 'why') FROM ob1_agent_keys k JOIN
+  ob1_agents a USING (canonical_agent_id) WHERE a.label =
+  'oauth:operator+<client>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as

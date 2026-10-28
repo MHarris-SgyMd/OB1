@@ -19,7 +19,8 @@
  *     mid-sign-in leaves in place;
  *   - the password and the consent at the AS bring the browser back to the
  *     callback, which opens a session (a cookie scoped to /dashboard) and
- *     sends it home, where the who line names oauth:operator with write;
+ *     sends it home, where the who line names oauth:operator+gui (the
+ *     operator through the GUI's own client, SMD-3064) with write;
  *   - the views render under the token session: overview, status, browse,
  *     the change feed, the workers; the nav offers the page of grants, which
  *     lists this sign-in's own grant (SMD-3307 PR 3), and a revoke posted
@@ -184,7 +185,7 @@ assert(fromElsewhere.every((c) => c === 403) && jar.has(COOKIE), `a start or a s
 // Under the token session.
 const home = await go(jar, `${BASE}/`);
 const who = /data-testid="who">([^<]*)</.exec(home.html)?.[1] ?? "";
-assert(home.status === 200 && /oauth:operator/.test(who) && /write key/.test(who), `the overview renders under the token, the who line naming oauth:operator with write (${home.status}, "${who.trim()}")`);
+assert(home.status === 200 && /oauth:operator\+gui\b/.test(who) && /write key/.test(who), `the overview renders under the token, the who line naming oauth:operator+gui with write (${home.status}, "${who.trim()}")`);
 const views = await Promise.all(["/status", "/thoughts", "/changes", "/workers", "/query-log"].map(async (p) => [p, await go(jar, `${BASE}${p}`)] as const));
 assert(views.every(([, r]) => r.status === 200), `…and so do the status, browse, the change feed, the workers and the query log (${views.map(([p, r]) => `${p} ${r.status}`).join(", ")})`);
 
@@ -230,7 +231,7 @@ if (RENEWAL) {
   await Bun.sleep(620_000);
   const [a, b] = await Promise.all([go(jar, `${BASE}/status`), go(jar, `${BASE}/thoughts`)]);
   const again = await go(jar, `${BASE}/`);
-  assert(a.status === 200 && b.status === 200 && again.status === 200 && /oauth:operator/.test(again.html) && jar.has(COOKIE), `past the token's renewal, two pages at once and the overview still render, the session renewed unseen (${a.status}, ${b.status}, ${again.status})`);
+  assert(a.status === 200 && b.status === 200 && again.status === 200 && /oauth:operator\+gui\b/.test(again.html) && jar.has(COOKIE), `past the token's renewal, two pages at once and the overview still render, the session renewed unseen (${a.status}, ${b.status}, ${again.status})`);
   // Past the AS's 10 s grace for a reused refresh token: a renewer that renewed twice from one token forked the chain, which the AS ends here (review pass 4).
   await Bun.sleep(15_000);
   const later = await go(jar, `${BASE}/status`);

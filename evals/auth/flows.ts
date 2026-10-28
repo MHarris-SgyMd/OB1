@@ -110,7 +110,7 @@ export async function tokenRequest(endpoint: string, params: Record<string, stri
   return { status: r.status, body: ((await r.json().catch(() => null)) ?? {}) as Record<string, unknown> };
 }
 
-export type Claims = { iss?: string; sub?: string; iat?: number; aud?: string | string[]; exp?: number; scope?: string; client_id?: string; act?: { sub?: string } };
+export type Claims = { iss?: string; sub?: string; iat?: number; aud?: string | string[]; exp?: number; scope?: string; client_id?: string; act?: { sub?: string; act?: { sub?: string; act?: unknown } } };
 
 /** A JWT's payload, unverified. */
 export function claimsOf(jwt: unknown): Claims {
