@@ -81,7 +81,7 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
       `${name}: the shared settings, OB1_EXTRACT_CHUNK_TOKENS among them (the server's, though it starts like extract's own)`);
     ok(!("OB1_PASSES" in e) && !("PORT" in e) && !("UNSET" in e), `${name}: never the coordinator's own settings, nor an unset one`);
   }
-  ok(childEnv(CHILDREN.sleep, env, { HOME: "/tmp/ob1-sleep" }).HOME === "/tmp/ob1-sleep" && childHome(CHILDREN.sleep) === "/tmp/ob1-sleep", "a HOME of its own, given");
+  ok(childEnv(CHILDREN.sleep, env, { HOME: "/tmp/ob1-sleep-x" }).HOME === "/tmp/ob1-sleep-x" && childHome(CHILDREN.sleep) === "/tmp/ob1-sleep-", "a HOME of its own, given, beneath its prefix");
   const uids = Object.values(CHILDREN).map((c) => c.uid);
   ok(new Set(uids).size === uids.length && uids.every((u) => u > 1001 && u < 65534), `a uid each, none the CI runner's 1001 nor nobody's (${uids.join(",")})`);
 }
@@ -174,10 +174,13 @@ if (!existsSync(composePath)) {
     const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\//g, "(?:.*/)?").replace(/\*/g, "[^/]*")}$`);
     const kept = (file: string) => rules.reduce((keep, rule) => (rule.startsWith("!") ? (glob(rule.slice(1)).test(file) ? true : keep) : glob(rule).test(file) ? false : keep), true);
     const dockerfile = readFileSync(join(import.meta.dir, "../server-portable/Dockerfile"), "utf8");
-    const missing = dbFiles.filter((f) => f.split("/").length !== 2 || !kept(f));
+    // Every db/ file a COPY into /app/db/ names, continuation lines joined.
+    const copied = new Set(dockerfile.replace(/\\\n\s*/g, " ").split("\n").filter((l) => /^COPY .* \/app\/db\/$/.test(l)).flatMap((l) => l.split(/\s+/).slice(1, -1)));
+    const missing = dbFiles.filter((f) => f.split("/").length !== 2 || !kept(f) || !copied.has(f));
+    const extra = [...copied].filter((f) => f.endsWith(".ts") && !dbFiles.includes(f));
     ok(built.exitCode === 0 && dbFiles.length >= 15 && dbFiles.includes("db/sleep.ts") && dbFiles.includes("db/supervise.ts"), `the passes' import graph read (${dbFiles.length} db/ modules${built.exitCode === 0 ? "" : `; bun build: ${built.stderr.toString().slice(0, 200)}`})`);
-    ok(missing.length === 0, `every db/ module the passes import reaches the server image: .dockerignore lets it in (missing: ${missing.join(", ") || "none"})`);
-    ok(/^COPY db\/\*\.ts db\/\*\.mjs db\/\*\.d\.mts \/app\/db\/$/m.test(dockerfile), "the server image's Dockerfile copies db/'s top-level modules");
+    ok(missing.length === 0, `every db/ module the passes import reaches the server image: .dockerignore lets it in and the Dockerfile copies it (missing: ${missing.join(", ") || "none"})`);
+    ok(extra.length === 0 && copied.has("db/config.mjs"), `…and the image copies no db/ script the passes do not import, beside the contract the server reads (extra: ${extra.join(", ") || "none"})`);
     ok(!kept("db/test-coordinator.ts") && !kept("db/test-live.ts"), "…and the suites stay out of it (the guard's teeth: the rules do exclude)");
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -232,10 +235,17 @@ if (!root) {
       rmSync(dir, { recursive: true, force: true });
     }
   };
+  // A directory at the path a HOME once had, made ahead by another user, open to all: never a pass's HOME.
+  const planted = "/tmp/ob1-board-sync";
+  mkdirSync(planted, { recursive: true });
+  chmodSync(planted, 0o777);
   const own = await plant(true);
   ok(own.h?.uid === CHILDREN["board-sync"].uid && own.status === String(CHILDREN["board-sync"].uid) && own.r?.uid === CHILDREN.sleep.uid,
     `each child runs as its own user (holder ${own.h?.uid}, the kernel's ${own.status}; reader ${own.r?.uid})`);
-  ok(own.h?.home === "/tmp/ob1-board-sync" && own.h?.secret === true && own.r?.secret === false, "each its own HOME, the secret in the holder's settings and not the reader's");
+  const homeAt = own.h?.home ? statSync(own.h.home) : null;
+  ok(/^\/tmp\/ob1-board-sync-\w{6}$/.test(own.h?.home ?? "") && homeAt?.uid === CHILDREN["board-sync"].uid && (homeAt.mode & 0o777) === 0o700 && own.h?.secret === true && own.r?.secret === false,
+    `each its own HOME, made afresh — its uid's, 0700, never the directory planted at ${planted} — the secret in the holder's settings and not the reader's (${own.h?.home}, ${homeAt?.uid}, ${homeAt ? (homeAt.mode & 0o777).toString(8) : "none"})`);
+  rmSync(planted, { recursive: true, force: true });
   ok(own.h?.groups === "", `no supplementary group kept from root (Groups: '${own.h?.groups}')`);
   ok(statSync(dumps).uid === CHILDREN.sleep.uid && statSync(join(dumps, "a.jsonl")).uid === CHILDREN.sleep.uid && statSync(target).uid === 0,
     `the dump directory and its dump are sleep's, and a link in it is not followed — its target stays root's (dir ${statSync(dumps).uid}, dump ${statSync(join(dumps, "a.jsonl")).uid}, target ${statSync(target).uid})`);
@@ -250,7 +260,7 @@ if (!root) {
   const onceCode = await runOnce({ ...CHILDREN.extract, script: probe }, ["--status"], { env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_WORKER_KEY: "given-for-this-run" } });
   const seen = existsSync(join(probeDir, "seen.json")) ? JSON.parse(readFileSync(join(probeDir, "seen.json"), "utf8")) : null;
   rmSync(probeDir, { recursive: true, force: true });
-  ok(onceCode === 3 && seen?.uid === CHILDREN.extract.uid && JSON.stringify(seen?.args) === JSON.stringify(["--status"]) && seen?.linear === false && seen?.worker === "given-for-this-run" && seen?.home === "/tmp/ob1-extract",
+  ok(onceCode === 3 && seen?.uid === CHILDREN.extract.uid && JSON.stringify(seen?.args) === JSON.stringify(["--status"]) && seen?.linear === false && seen?.worker === "given-for-this-run" && /^\/tmp\/ob1-extract-\w{6}$/.test(seen?.home ?? ""),
     `a one-off runs as the pass's user, with its args and its settings alone — the worker key given it, no Linear key — and exits with its code (${onceCode}, ${JSON.stringify(seen)})`);
 
   // The mechanism dropped — both as this process's user — and the same reader gets the secret: the refusal above is the users', not /proc's.

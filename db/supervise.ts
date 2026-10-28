@@ -105,7 +105,7 @@ export function guardRefusal(worker: string, env: Record<string, string | undefi
 }
 
 /**
- * The heartbeat key a follower of `worker` stamps when compose runs it: the
+ * The heartbeat key a follower of `worker` stamps when the coordinator runs it: the
  * scheduler's and board-sync's own, the claim workers' under the job their
  * configuration names (they take no --job there). Null when the configuration
  * does not resolve — the follower then refuses in its own words.
@@ -208,7 +208,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     const guard = guardRefusal(opts.worker, env, opts);
     if (guard) {
       err(guard.line);
-      err(`supervise: ${opts.worker} is held, not started — that is deploy/.env's to mend, and the service's recreate (up -d) to read; it does not exit, so the runtime does not restart it in a loop (SMD-3214)`);
+      err(`supervise: ${opts.worker} is held, not started — that is deploy/.env's to mend, and the coordinator's recreate (up -d coordinator) to read; it does not exit, so the runtime does not restart it in a loop (SMD-3214)`);
       // Its last word kept — the scheduler's last sleep, its held thoughts — and the guard's kind on it.
       await stamp(new Date(0), { in_s: null, code: 2, tries: 0 }, guard.kind);
       if (!stopped.signal.aborted) await new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -245,7 +245,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);
-      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the service recreated (up -d), which starts it at once (SMD-3214).`);
+      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }
@@ -273,18 +273,18 @@ async function labelled(stream: ReadableStream<Uint8Array>, label: string, write
   let held = "";
   try {
     for await (const chunk of stream) {
-      held += decoder.decode(chunk, { stream: true });
-      for (let at = held.search(/[\n\r]/); at >= 0; at = held.search(/[\n\r]/)) {
-        if (at > 0) write(`${label}${held.slice(0, at)}`);
-        held = held.slice(at + 1);
-      }
-      while (held.length > LINE_CAP) {
-        write(`${label}${held.slice(0, LINE_CAP)}`);
-        held = held.slice(LINE_CAP);
-      }
+      // Split once per chunk: the last piece is the partial line held for the next, a
+      // closing carriage return with it, whose newline may open the next chunk.
+      let text = held + decoder.decode(chunk, { stream: true });
+      const cr = text.endsWith("\r") ? "\r" : "";
+      if (cr) text = text.slice(0, -1);
+      const lines = text.split(/\n|\r(?!\n)/);
+      held = (lines.pop() ?? "") + cr;
+      for (const line of lines) write(`${label}${line.endsWith("\r") ? line.slice(0, -1) : line}`);
+      for (; held.length > LINE_CAP; held = held.slice(LINE_CAP)) write(`${label}${held.slice(0, LINE_CAP)}`);
     }
     held += decoder.decode();
-    if (held) write(`${label}${held}`);
+    if (held) write(`${label}${held.endsWith("\r") ? held.slice(0, -1) : held}`);
   } catch (e) {
     try { write(`${label}(its output could not be read on: ${(e as Error).message})`); } catch { /* the writer itself failed */ }
   }

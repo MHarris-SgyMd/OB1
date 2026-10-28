@@ -1813,8 +1813,8 @@ fi
 # only with a key of the canary's own (BOARD_KEY, read above, after step 2
 # cleared stable's), since a canary upgraded in place has no other way to keep
 # its board current, and with LINEAR_COMMENT_API_KEY held empty, so it never
-# posts. Recreated, running before this run or not, so it runs this
-# checkout's db/ (it bind-mounts it) with the file as it is now; every
+# posts. Recreated, running before this run or not, so it runs the server
+# image step 4 built from this checkout, with the file as it is now; every
 # coordinator container of the canary's project goes first (one compose did
 # not make, by hand, would collide with the name). A start that then fails
 # says so itself, since an earlier advice silences the trap.
