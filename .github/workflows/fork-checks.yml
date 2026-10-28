@@ -187,7 +187,7 @@ jobs:
       # Two suites that spend most of their time waiting on a real clock,
       # started here and run in the background while the job's other steps run
       # (SMD-3470), as the data layer runs its pair (SMD-3195). One after
-      # another they were ~50 s and ~33 s of a job whose median was ~215 s.
+      # another they were ~50 s and ~33 s of a job whose median was ~215–220 s.
       # - test-server.ts, the real server's suite (SMD-2287 PR 4b and 4c): its
       #   request lines, its refusals, its mirrors, its stop's count of tool
       #   calls, and its spans, one trace per tool call. Most of its time is

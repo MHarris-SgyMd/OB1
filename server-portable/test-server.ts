@@ -3281,7 +3281,9 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // before, is the stall's own time, on the clock sse.ts reads. At 20 ms and
   // 200 ms with a floor of four frames, a stall of ~140 ms at the start failed
   // it, and the job's other suites beside this one caused one (SMD-3470); a
-  // stall of up to ~450 ms passes now.
+  // stall under ~450 ms passes now. How often it pings is the frames' arrival
+  // gaps, their median: a stall at the start takes frames off the front and
+  // one later widens a single gap, so neither moves the median.
   let stalls = 0;
   let stalledAfterMs = 0;
   const capped = Bun.serve({
@@ -3306,16 +3308,42 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const call = (id: number, query: string, init: RequestInit = {}) =>
     read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
   const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  // read(), with the time each frame arrived (frames that arrive together share one).
+  const readFrames = async (url: string): Promise<Read & { at: number[] }> => {
+    const t0 = performance.now();
+    const at: number[] = [];
+    try {
+      const r = await fetch(url);
+      const reader = r.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        for (let n = frames(text) - at.length; n > 0; n--) at.push(performance.now());
+      }
+      return { ok: true, text, error: "", ms: performance.now() - t0, at };
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return { ok: false, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0, at };
+    }
+  };
+  const medianGap = (at: number[]): number => {
+    const gaps = at.slice(1).map((t, i) => t - at[i]).sort((a, b) => a - b);
+    const mid = gaps.length >> 1;
+    return gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+  };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
+  let bareRun: Read, keptRun: Read, cappedRun: Read & { at: number[] }, slow: Read, gone: Read;
   try {
     [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
       read(`http://127.0.0.1:${bare.port}/`),
       read(`http://127.0.0.1:${kept.port}/`),
-      read(`http://127.0.0.1:${capped.port}/`),
+      readFrames(`http://127.0.0.1:${capped.port}/`),
       call(50, "a query whose embedding outlives the idle timeout"),
       // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
       call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
@@ -3338,6 +3366,8 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 1250 ms at 50 ms with a 500 ms ceiling)`);
   assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
   assert(stalledAfterMs >= 500, `…at the ceiling, not before it (${Math.round(stalledAfterMs)} ms after the stream began, its ceiling 500 ms)`);
+  assert(cappedRun.at.length < 3 || medianGap(cappedRun.at) <= 75,
+    `…a frame each 50 ms while it pings (median gap ${cappedRun.at.length < 2 ? "?" : Math.round(medianGap(cappedRun.at))} ms over ${cappedRun.at.length} frames, at most 75)`);
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
   assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
