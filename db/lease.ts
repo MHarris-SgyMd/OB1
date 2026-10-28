@@ -303,16 +303,20 @@ export const MAX_TIMER_MS = 2147483647;
 /**
  * A claim worker's admit gate (SMD-3379 PR 1b), an engine option: awaited,
  * with the pass's stop signal, wherever the pass would start new work —
- * before each claim, at the start of each pass (its pool and counts), before
- * each window of a long thought and before each pair of a thought's
- * consolidation. Resolved, the work goes on; pending, the worker waits, its
- * claim and lease kept mid-thought and none held between thoughts; rejected
- * once the signal has aborted, the worker stops as a stop finds it there. The
- * engine's signal also aborts when the pass ends for a reason of its own —
+ * before each claim, at the start of each pass (its pool and counts;
+ * re-embed's start before its drain), before each window of a long thought
+ * and before each pair of a thought's consolidation. Resolved, the work goes
+ * on; pending, the worker waits, its claim and lease kept mid-thought and none
+ * held between thoughts; rejected once the signal has aborted, the worker
+ * stops as a stop finds it there. An open gate resolves whatever its signal
+ * says, so a gate that never closes runs as none; one a worker waits at must
+ * reject, never resolve, once its signal aborts, and must take its listener
+ * off the signal when it resolves — the engine's signal lives the whole pass.
+ * The engine's signal also aborts when the pass ends for a reason of its own —
  * another worker's outage, the provider's refusal, a worker's throw — and a
- * rejection before it aborts ends the pass with the caller's error.
- * The sleep scheduler closes it while its brain is live (SMD-3379 PR 1c). An
- * engine given none runs as before.
+ * rejection before it aborts ends the pass with the caller's error. The sleep
+ * scheduler is to close it while its brain is live (SMD-3379 PR 1c). An engine
+ * given none runs as before.
  */
 export type Admit = (signal: AbortSignal) => Promise<void>;
 
@@ -325,6 +329,38 @@ export class AdmitThrow extends Error {
   constructor(readonly error: unknown) {
     super(`the admit gate rejected: ${error instanceof Error ? error.message : String(error)}`);
     this.name = "AdmitThrow";
+  }
+}
+
+/**
+ * A wait at the admit gate the clock sees: an open gate answers in well under
+ * a millisecond, a closed one holds the worker for seconds. Past it, a worker
+ * mid-thought reads its claim again before it sends more (claimAfterWait).
+ */
+export const ADMIT_WAITED_MS = 50;
+
+/**
+ * Whether the claim on the thought in hand is still this worker's, read after
+ * a wait at the admit gate mid-thought (SMD-3379 PR 1b-1, review pass 3): a
+ * live write is what closes the gate, so a delete or an edit of that thought
+ * lands while its worker waits, and its text must not go to the provider
+ * after. "ours"; "deleted", the thought gone; "gone", the claim the pool's or
+ * another's again — an edit's requeue, a reap.
+ */
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null): Promise<"ours" | "deleted" | "gone"> {
+  const [r] = (await sql`
+    SELECT (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid) AS fingerprint,
+           EXISTS (SELECT 1 FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job} AND status = 'claimed' AND worker_id = ${workerId}) AS ours`) as { fingerprint: string | null; ours: boolean }[];
+  if (r.fingerprint === null) return "deleted";
+  // An edit under a key 016 does not requeue leaves the claim this worker's: the text moved is read here.
+  return r.ours && (fingerprint === null || r.fingerprint === fingerprint) ? "ours" : "gone";
+}
+
+/** The claim on the thought in hand found not this worker's after a wait at the admit gate (claimAfterWait): nothing more of it is sent. */
+export class ClaimGoneAtGate extends Error {
+  constructor(readonly claim: "deleted" | "gone") {
+    super(`the thought was ${claim === "deleted" ? "deleted" : "edited, requeued or reaped"} while its worker waited at the admit gate`);
+    this.name = "ClaimGoneAtGate";
   }
 }
 

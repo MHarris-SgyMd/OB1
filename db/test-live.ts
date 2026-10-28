@@ -6189,6 +6189,44 @@ if (want("10")) {
   assert(brokenOutcome === "the gate broke" && brokenStatus === "pending",
          `…a gate that rejects with no stop before a window rejects run() with its error, the thought not recorded failed (${brokenOutcome}; ${brokenStatus})`);
   await sql`SELECT delete_thought(${brokenNote}::uuid, NULL::jsonb)`;
+  // A long note deleted while its worker waits at the gate between windows:
+  // the live write that closes the gate, so nothing more of it is sent once
+  // the gate opens (review pass 3).
+  const goneNote = await seed(Array.from({ length: 6 }, (_, p) => `The deleted ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita deleted point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atGone = heldGate(3);
+  const goneFrom = calls;
+  const goneRun = runExtract({ url: URL_!, env, workers: 1, admit: atGone.admit, writer: { out: () => {}, err: () => {} } });
+  const goneWaiting = await pollUntil(async () => atGone.waiting === 1, 10_000);
+  await sql`SELECT delete_thought(${goneNote}::uuid, NULL::jsonb)`;
+  await Bun.sleep(200);
+  atGone.open();
+  const goneCode = await goneRun;
+  assert(goneWaiting && calls - goneFrom === 1 && goneCode <= 1,
+         `…a long note deleted while its worker waits before its second window has nothing more sent once the gate opens (${calls - goneFrom} call(s), exit ${goneCode})`);
+  // A pause moves the thought's time held on (N17): a hard stop while the
+  // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
+  // and stalls nothing (review pass 3).
+  const movedNote = await seed(Array.from({ length: 6 }, (_, p) => `The moved ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita moved point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atMoved = heldGate(2);
+  const movedStop = new AbortController();
+  let movedHard: PassStop | undefined;
+  const movedRun = runExtract({ url: URL_!, env, workers: 1, admit: atMoved.admit, signal: movedStop.signal, stallFloorMs: 1000, onPass: (st) => { movedHard = st; }, writer: { out: () => {}, err: () => {} } });
+  const movedWaiting = await pollUntil(async () => atMoved.waiting === 1, 10_000);
+  await Bun.sleep(1500);
+  slowMs = 3000;
+  const movedFrom = calls;
+  atMoved.open();
+  let movedInHand = false;
+  for (let i = 0; i < 250 && !movedInHand; i++) { movedInHand = calls > movedFrom; if (!movedInHand) await Bun.sleep(20); }
+  await Bun.sleep(100);
+  movedStop.abort();
+  await movedHard?.();
+  const movedCode = await movedRun;
+  slowMs = 0;
+  const [movedRow] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${movedNote}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number }[];
+  assert(movedWaiting && movedInHand && movedCode === 130 && movedRow?.stops === 1 && movedRow.stalled === 0,
+         `…a hard stop while the window after a 1,500 ms wait is in hand counts the thought's time from the wait's end, so a 1,000 ms floor stalls nothing (exit ${movedCode}; ${JSON.stringify(movedRow)})`);
+  await sql`SELECT delete_thought(${movedNote}::uuid, NULL::jsonb)`;
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -9524,6 +9562,19 @@ if (want("16")) {
   const claimCodeC = await claimRunC;
   assert(claimWaitingC && claimHeldC === "pending" && claimCallsC === 0 && claimCodeC <= 1 && (await gatedStatus()) === "succeeded" && calls - claimFromC === 2,
          `…closed at the claim, it waits holding none, and judges both pairs once the gate opens (${claimHeldC} while closed, ${claimCallsC} call(s); exit ${claimCodeC}, ${await gatedStatus()}, ${calls - claimFromC} call(s))`);
+  // The newer side deleted while its worker waits before its second pair:
+  // nothing more of it goes to the judge once the gate opens (review pass 3).
+  const goneNewer = await seed("[16g] The gatehouse opens at noon now.", 30, 0, ["gatehouse"]);
+  const atGoneC = heldGate(3);
+  const goneFromC = calls;
+  const goneRunC = gatedRun(atGoneC, new AbortController().signal);
+  const goneWaitingC = await pollUntil(async () => atGoneC.waiting === 1, 10_000);
+  await sql`SELECT delete_thought(${goneNewer}::uuid, NULL::jsonb)`;
+  await Bun.sleep(200);
+  atGoneC.open();
+  const goneCodeC = await goneRunC;
+  assert(goneWaitingC && calls - goneFromC === 1 && goneCodeC <= 1,
+         `…a thought deleted while its worker waits before its second pair has nothing more judged once the gate opens (${calls - goneFromC} call(s), exit ${goneCodeC})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
 
   judge.stop(true);

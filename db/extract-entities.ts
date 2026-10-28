@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, ADMIT_WAITED_MS, AdmitThrow, admitted, claimAfterWait, ClaimGoneAtGate, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -341,8 +341,10 @@ export interface ExtractOptions {
    * worker there, as does the pass ending for a reason of its own (another
    * worker's outage, the provider's refusal, a worker's throw): between
    * windows as a first stop ends a thought there, its windows answered so far
-   * kept (or, with no kept windows, its claim back in the pool). Unused by
-   * --status and --dry-run.
+   * kept (or, with no kept windows, its claim back in the pool). After a wait
+   * the claim is read again before a window is sent: a thought deleted or no
+   * longer this worker's has nothing more sent. Unused by --status and
+   * --dry-run.
    */
   admit?: Admit;
 }
@@ -1162,7 +1164,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * The thought each worker has in hand, for the hard stop's count (noteStop):
    * set while processRow runs, with when it was taken up — moved on past a
    * provider pause, which is the provider's time and not the window's
-   * (review pass 3) — which says whether the stop was long.
+   * (review pass 3) — which says whether the stop was long. A wait at the
+   * admit gate moves it on too, and `pausedAt` marks one in progress, so a
+   * hard stop during it counts up to the wait (SMD-3379 PR 1b-1).
    */
   const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
@@ -1313,6 +1317,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
       }
       if (!through) throw new StoppedBetweenWindows();
+      // After a wait the claim is read again: the live write that closed the
+      // gate may be a delete or an edit of this thought, whose text must not go
+      // to the provider after it (review pass 3). A read that fails goes on, as before.
+      if (Date.now() - at >= ADMIT_WAITED_MS) {
+        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint).catch(() => "ours" as const);
+        if (claim !== "ours") throw new ClaimGoneAtGate(claim);
+      }
     } : undefined;
     let extraction: Extraction;
     try {
@@ -1531,6 +1542,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // goes back to the pool with the leases the finally returns, its
                 // attempt refunded, no stop counted (review pass 5).
                 if (e instanceof StoppedBetweenWindows) return;
+                // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
+                if (e instanceof ClaimGoneAtGate) {
+                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : { outcome: "superseded" };
+                  continue;
+                }
                 // The database went away under the write: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).

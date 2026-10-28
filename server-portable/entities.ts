@@ -1380,7 +1380,7 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
         parts.push({ ...kept, index: w.index, resumed: true });
         continue;
       }
-      // The worker's gate, closed while its brain is live: it waits here, between windows.
+      // The worker's admit gate (db/lease.ts's Admit): it waits here, between windows.
       if (admit) await admit();
       // A first stop ends it here, between windows, those answered kept — one
       // that came while the gate held it too.
