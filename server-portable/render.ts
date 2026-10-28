@@ -803,8 +803,8 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     );
     // SMD-2995: the next page's cursor, last, when more follow — what a caller passes as `after`.
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
-    // Newest first keeps main's header, which the old dashboard's parser reads; oldest first says its order, since a
-    // page deep in the walk is not the oldest (review pass 3).
+    // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
+    // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
     return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"

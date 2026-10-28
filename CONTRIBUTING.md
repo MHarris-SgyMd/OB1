@@ -28,7 +28,6 @@ This is a first-class path, not a workaround. Some of the best contributions com
 | `primitives/` | Reusable concept guides referenced by multiple extensions | Row Level Security, Shared MCP Server | **Curated** — must be used by 2+ extensions |
 | `recipes/` | Step-by-step builds that add a new capability | Email import, ChatGPT import, daily digest, new capture workflows | Open |
 | `schemas/` | Database table extensions and metadata schemas | CRM contacts table, taste tracker, reading list schema | Open |
-| `dashboards/` | Frontend templates for Vercel/Netlify hosting | Knowledge dashboard, weekly review, mobile capture UI | Open |
 | `integrations/` | Webhooks, capture sources and clients of the brain (a new surface on the brain is a plugin) | Discord bot, email handler, browser extension, calendar sync | Open |
 | `skills/` | Reusable AI client skills and prompt packs | Meeting triage assistant, code review protocol, transcript processor | Open |
 | `plugins/` | Operations, tables and GUI pages (declared; the operator GUI renders them, SMD-2280) added to the brain itself, served by its REST core and MCP server behind its own keys | The example plugin (a note pinned to a thought) | **Curated** — a plugin runs in the brain's process with its privileges |
@@ -387,13 +386,13 @@ Non-code contributions count at every level. Testing recipes, mentoring non-tech
 
 Every PR is checked against these rules. All must pass before human review.
 
-1. **Folder structure** — Contribution is in the correct category directory (`recipes/`, `schemas/`, `dashboards/`, `integrations/`, `skills/`, `primitives/`, `extensions/`)
+1. **Folder structure** — Contribution is in the correct category directory (`recipes/`, `schemas/`, `integrations/`, `skills/`, `primitives/`, `extensions/`)
 2. **Required files** — Both `README.md` and `metadata.json` exist in the contribution folder
 3. **Metadata valid** — `metadata.json` parses as valid JSON and passes the repo JSON Schema
 4. **No credentials** — No API keys, tokens, passwords, or secrets in any file
 5. **SQL safety** — A `.sql` file must never destroy existing rows: no `DROP TABLE`, `DROP DATABASE`/`DROP SCHEMA`/`DROP OWNED`, `TRUNCATE`, or `DELETE FROM` without a `WHERE` of its own. `check-fork-consistency` check 21 reads every `.sql` for these as statements — a `--` comment quoting one is not a hit, a trigger that refuses one (`BEFORE TRUNCATE ON …`) is the rule applied, a `DELETE` with its `WHERE` on the next line is qualified — and names the file and line. No modifications to core `thoughts` table columns (adding columns is fine, altering/dropping existing ones is not; check 5)
-6. **Category-specific artifacts** — `recipes/` have code or detailed instructions, `schemas/` have SQL files, `dashboards/` have frontend code or `package.json`, `integrations/` have code files, `skills/` have at least one plain-text skill file, `primitives/` have substantial READMEs (200+ words), `extensions/` have both SQL and code files
-7. **PR format** — Title starts with `[recipes]`, `[schemas]`, `[dashboards]`, `[integrations]`, `[skills]`, `[primitives]`, or `[extensions]`
+6. **Category-specific artifacts** — `recipes/` have code or detailed instructions, `schemas/` have SQL files, `integrations/` have code files, `skills/` have at least one plain-text skill file, `primitives/` have substantial READMEs (200+ words), `extensions/` have both SQL and code files
+7. **PR format** — Title starts with `[recipes]`, `[schemas]`, `[integrations]`, `[skills]`, `[primitives]`, or `[extensions]`
 8. **No binary blobs** — No files over 1MB, no `.exe`, `.dmg`, `.zip`, `.tar.gz`
 9. **README completeness** — Contribution README includes Prerequisites, step-by-step instructions, and expected outcome sections
 10. **Contribution dependencies** — If a contribution declares `requires_primitives` or `requires_skills`, those folders must exist in the repo and be linked in the README

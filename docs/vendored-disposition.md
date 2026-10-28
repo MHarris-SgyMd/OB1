@@ -101,7 +101,7 @@ exactly one disposition.
   ~~`work-operating-model-activation`~~ (the three retired, SMD-2920 and SMD-2923), ~~`x-twitter-import`~~ (holds no client since
   SMD-2493; `local-brain-no-mcp`, also listed here, was retired by SMD-1800 instead).
 - **adjacent follow-up filed:** SMD-1929 (purge inherited NBJ brand/funnel assets under
-  `dashboards/` + `docs/`, outside this triage's four directories).
+  `dashboards/` + `docs/`, outside this triage's four directories; the `dashboards/` half retired with that category, SMD-3310).
 
 **Guard follow-ups (SMD-1924 verify item — "a newly vendored file redefining a core object
 fails CI"):**
@@ -122,8 +122,8 @@ fails CI"):**
    retired (SMD-2103); `git grep smart-ingest-tables` finds only this note and `changes/`.
 2. **`recipes/content-fingerprint-dedup` stale paths** — `recipes/email-history-import`'s
    `pull-gmail.ts` pointed at `primitives/content-fingerprint-dedup`; **fixed** to `recipes/…`
-   here. The `dashboards/ob1-canonical-landing` upstream GitHub URL is an SMD-1929 item
-   (upstream branding/links), left for it.
+   here. The `dashboards/ob1-canonical-landing` upstream GitHub URL was an SMD-1929 item
+   (upstream branding/links); the landing retired with the `dashboards/` category (SMD-3310).
 3. **`schemas/workflow-status`** — **no fix needed.** `migration.sql` already uses
    `ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS …` on both columns (idempotent, re-runnable);
    the earlier "bare `ADD COLUMN` collision" note was a misread of the README example. The

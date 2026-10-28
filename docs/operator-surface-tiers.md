@@ -263,7 +263,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 | `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931). **Met and retired** (SMD-1931 PR 3). |
 | server-portable's MCP registration | The MCP server passes parity and the stable tier's `/mcp` routes to it (SMD-2287) |
 | The Cloudflare Workers target and the PostgREST store it selects | **Retired** ahead of SMD-2287's cutover, since no brain ran them (SMD-3152, SMD-2288's step 1) |
-| `dashboards/open-brain-dashboard` (current SvelteKit) | The REST core and MCP server are stable (decision 2) |
+| `dashboards/open-brain-dashboard` (current SvelteKit) | The REST core and MCP server are stable (decision 2). **Retired** with the `dashboards/` category (SMD-3310); the clause was dropped 2026-10-27, since no compose service ever ran it. |
 
 ## What this reverses or amends
 
@@ -275,7 +275,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 - **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
 - **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retired, with SMD-1931 recording the disposition and SMD-2288 the removal (PR 1). SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281, held for that, fall away with it.
 
-- **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
+- **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them; the `dashboards/` rows went with that category, SMD-3310). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
 
 ## Not decided here
 
