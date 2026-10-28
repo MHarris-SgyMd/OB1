@@ -1,4 +1,4 @@
-import { error, redirect, type Handle } from '@sveltejs/kit';
+import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { env } from '$env/dynamic/private';
 import { breakGlassPort, onBreakGlass, originAllowed, originRefusal, sessionCookieName } from '$lib/server/listener';
@@ -42,10 +42,16 @@ export const handle: Handle = async ({ event, resolve }) => {
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);
 	// The body limit is an edit's 1 MB (serve.ts); every other request — a sign-in, signed out, among them — is held to
-	// 64 kB, as the GUI held them all before (SMD-3322 review pass 2). By its declared length: one sent without a length
-	// is still cut at serve.ts's limit.
-	const length = Number(event.request.headers.get('content-length') ?? 0);
-	if (length > SMALL_BODY_BYTES && !(session && EDIT_PATH.test(event.url.pathname))) error(413, 'That is more than this page takes.');
+	// 64 kB, as the GUI held them all before (SMD-3322 review pass 2), by the length it declares. A body that declares
+	// none (sent chunked) is refused there too, since it could be read to serve.ts's limit; a browser declares a form
+	// post's length (review pass 3). Answered here, with this answer's headers, not thrown: SvelteKit's page for an
+	// error thrown from `handle` carries none of them (review pass 3).
+	if (!(session && EDIT_PATH.test(event.url.pathname))) {
+		const declared = event.request.headers.get('content-length');
+		if (declared === null ? event.request.body !== null : Number(declared) > SMALL_BODY_BYTES) {
+			return guarded(new Response('That is more than this page takes.', { status: declared === null ? 411 : 413, headers: { 'content-type': 'text/plain; charset=utf-8' } }));
+		}
+	}
 	return guarded(await resolve(event));
 };
 

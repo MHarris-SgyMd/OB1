@@ -62,7 +62,10 @@
  *     anywhere but an edit's post, a sign-in's signed out among them, and a
  *     thought whose text would post past the edit page's 1,000,000 bytes (its
  *     line breaks sent as CRLF) is offered no form. It prints the thought's
- *     id, for CI to read its audit rows.
+ *     id, for CI to read its audit rows. Each run leaves five changes in the
+ *     feed (its thoughts' captures, the edit and the deletes), so a second run
+ *     on one brain pushes the driven thought's capture further down: run it on
+ *     a fresh brain, as CI does.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs, with
@@ -744,6 +747,10 @@ async function writesArm() {
   // Only an edit's post may carry more than 64 kB (hooks.server.ts, review pass 2): signed out, a sign-in's is refused.
   const bigSignin = await post("/signin", { key: "k".repeat(70_000) });
   assert(bigSignin.status === 413 && cookie === "", `signed out, a sign-in past 64 kB is refused before it is read (${bigSignin.status})`);
+  // …and one sent chunked, declaring no length, which could otherwise be read to the 1 MB limit (review pass 3).
+  const chunkBody = new TextEncoder().encode(new URLSearchParams({ key: "k".repeat(70_000) }).toString());
+  const chunked = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: FORM, body: new ReadableStream({ start(c) { c.enqueue(chunkBody); c.close(); } }) });
+  assert(chunked.status === 411 && !(chunked.headers.getSetCookie?.() ?? []).length && chunked.headers.get("x-frame-options") === "DENY", `…and so is a sign-in that declares no length (sent chunked), with the pages' headers (${chunked.status})`);
 
   await signIn(WRITE_KEY!);
   const bigDelete = await post(`/thoughts/${id}/delete?/delete`, { pad: "p".repeat(70_000) });

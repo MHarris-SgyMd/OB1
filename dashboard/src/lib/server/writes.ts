@@ -11,10 +11,14 @@ import { base } from '$app/paths';
  */
 export const EDIT_MAX_BYTES = 1_000_000;
 
-/** A text's size as a browser posts it from a field: its UTF-8 bytes, each LF sent as CRLF, one byte more (review pass 2: measured as stored, a text of many short lines passed the check and its Save failed). */
-export const postedBytes = (text: string) => Buffer.byteLength(text, 'utf8') + (text.match(/\n/g)?.length ?? 0);
+/**
+ * A text's size as a browser posts it from a field: its UTF-8 bytes, each line break — LF, CRLF or a lone CR,
+ * which the page's field reads as LF — sent as CRLF (review pass 2: measured as stored, a text of many short lines
+ * passed the check and its Save failed; review pass 3: a lone CR counted as one byte, not two).
+ */
+export const postedBytes = (text: string) => Buffer.byteLength(text.replace(/\r\n|\r|\n/g, '\r\n'), 'utf8');
 
-/** The body every request but an edit's is held to: serve.ts's limit is the edit's 1 MB, and a sign-in or any other form is far smaller (review pass 2). */
+/** The body every request but an edit's is held to, by its declared length, a body declaring none refused: serve.ts's limit is the edit's 1 MB, and a sign-in or any other form is far smaller (review passes 2 and 3). */
 export const SMALL_BODY_BYTES = 64 * 1024;
 
 /** The edit page's path, whose posts alone, from a live session, may carry the larger body. */
