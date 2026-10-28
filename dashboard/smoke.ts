@@ -51,15 +51,17 @@
  *     and pin are the GUI's 404 (pinning to a held thought only once the page
  *     is); unset, a Notes page the nav names is read but not pinned to.
  *     `--notes-only` runs that arm alone.
- *   - the write verbs (SMD-3322), with `--writes`: a thought captured for the
- *     arm over the proxy's /mcp under the write key is edited and deleted on
- *     its own pages — the edit posted as the page's multipart form does, a
+ *   - the write verbs (SMD-3322), with `--writes`: a thought captured on the
+ *     capture page (named in the write key's nav alone; an empty text refused;
+ *     the thought's page saying it was captured, its source `dashboard`, and
+ *     a second capture of its text saying it already was) is edited and
+ *     deleted on its own pages — the edit posted as the page's multipart form does, a
  *     160 kB text of it saved, refused in words when its text is empty, its
  *     time altered, or stale (keeping that stale time in the form); the delete
  *     confirmed, the list saying so once from its flash cookie and never from
  *     a link, the thought then a 404 — and a read key is offered neither (no
- *     links; the pages' 403; its posts refused). A body past 64 kB is refused
- *     anywhere but an edit's post, a sign-in's signed out among them, and a
+ *     links, no Capture; the pages' 403; its posts refused). A body past 64 kB is refused
+ *     anywhere but an edit's or a capture's post, a sign-in's signed out among them, and a
  *     thought whose text would post past the edit page's 1,000,000 bytes (its
  *     line breaks sent as CRLF) is offered no form. It prints the thought's
  *     id, for CI to read its audit rows. Each run leaves five changes in the
@@ -721,8 +723,9 @@ async function post(path: string, fields: Record<string, string>, multipart = fa
   const { "content-type": _, ...noType } = FORM;
   const r = await fetch(`${BASE}${path}`, { method: "POST", redirect: "manual", headers: headers(multipart ? noType : FORM), body });
   takeCookie(r);
-  const flash = (r.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]).find((c) => c.startsWith(`${FLASH}=`)) ?? "";
-  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), flash };
+  const setCookies = (r.headers.getSetCookie?.() ?? []).map((c) => c.split(";")[0]);
+  const flash = setCookies.find((c) => c.startsWith(`${FLASH}=`)) ?? "";
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), flash, setCookies };
 }
 
 /**
@@ -735,16 +738,8 @@ async function writesArm() {
     return;
   }
   const marker = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const captured = await fetch(`${ORIGIN}/mcp`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": WRITE_KEY! },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: `The operator GUI smoke edits and deletes this thought (SMD-3322, ${marker}).` } } }),
-  });
-  const id = /id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(await captured.text())?.[1];
-  if (!id) return bad(`the write arm's capture over /mcp gave no thought id (${captured.status})`);
-  console.log(`  ·  the write arm's thought: ${id}`);
 
-  // Only an edit's post may carry more than 64 kB (hooks.server.ts, review pass 2): signed out, a sign-in's is refused.
+  // Only an edit's or a capture's post may carry more than 64 kB (hooks.server.ts, review pass 2): signed out, a sign-in's is refused.
   const bigSignin = await post("/signin", { key: "k".repeat(70_000) });
   assert(bigSignin.status === 413 && cookie === "", `signed out, a sign-in past 64 kB is refused before it is read (${bigSignin.status})`);
   // …and one sent chunked, declaring no length, which could otherwise be read to the 1 MB limit (review pass 3).
@@ -753,6 +748,31 @@ async function writesArm() {
   assert(chunked.status === 411 && !(chunked.headers.getSetCookie?.() ?? []).length && chunked.headers.get("x-frame-options") === "DENY", `…and so is a sign-in that declares no length (sent chunked), with the pages' headers (${chunked.status})`);
 
   await signIn(WRITE_KEY!);
+  // The capture page (PR 2), named in the write key's nav, captures the arm's thought under the GUI's own source.
+  const home = await get("/");
+  const capturePage = await get("/capture");
+  assert(home.html.includes('href="/dashboard/capture"') && capturePage.status === 200 && /<form[^>]*action="\?\/capture"[^>]*enctype="multipart\/form-data"[^>]*data-testid="capture-form"/.test(capturePage.html), `the write key's nav names Capture, and its page posts its form as multipart (${capturePage.status})`);
+  const blank = await post("/capture?/capture", { content: " \r\n " }, true);
+  assert(blank.status === 400 && /data-testid="capture-error"[^>]*>[^<]*Write the thought first/.test(blank.html), `an empty capture is refused in words (${blank.status})`);
+  const content = `The operator GUI smoke captures, edits and deletes this thought (SMD-3322, ${marker}).`;
+  const captured = await post("/capture?/capture", { content }, true);
+  const id = /^\/dashboard\/thoughts\/([0-9a-f-]{36})$/.exec(captured.location)?.[1];
+  if (captured.status !== 303 || !id) return bad(`the write key's capture: 303 to the new thought's page (${captured.status} → ${captured.location})`);
+  console.log(`  ·  the write arm's thought: ${id}`);
+  const capturedFlash = captured.setCookies.find((c) => c.startsWith(`${COOKIE}_captured=`)) ?? "";
+  assert(new RegExp(`^${COOKIE}_captured=${id}\\.new(\\.novector)?$`).test(capturedFlash), `the write key's capture: 303 to the new thought's page, with a flash cookie naming it new (${capturedFlash.replace(/=.*/, "=…")})`);
+  const withCaptured = async (flash: string) => {
+    const r = await fetch(`${BASE}/thoughts/${id}`, { redirect: "manual", headers: { cookie: `${cookie}; ${flash}` } });
+    return { status: r.status, html: await r.text(), cleared: (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${COOKIE}_captured=;`) && /Max-Age=0/i.test(c) && attributesHold(c)) };
+  };
+  const shown = await withCaptured(capturedFlash);
+  assert(shown.status === 200 && /data-testid="captured"[^>]*>\s*Captured\./.test(shown.html) && shown.cleared, "…whose page says it was captured, and clears the cookie as it does");
+  assert(/<dt[^>]*>source<\/dt>\s*<dd[^>]*>dashboard</.test(shown.html), "…its source recorded as dashboard, the GUI's own label, not mcp");
+  const again = await post("/capture?/capture", { content }, true);
+  const againFlash = again.setCookies.find((c) => c.startsWith(`${COOKIE}_captured=`)) ?? "";
+  const againShown = await withCaptured(againFlash);
+  assert(again.status === 303 && again.location === `/dashboard/thoughts/${id}` && /data-testid="captured"[^>]*>\s*That text was already a thought/.test(againShown.html), `capturing the same text again leads to that thought, its page saying it already was one (${again.status})`);
+
   const bigDelete = await post(`/thoughts/${id}/delete?/delete`, { pad: "p".repeat(70_000) });
   assert(bigDelete.status === 413 && (await get(`/thoughts/${id}`)).status === 200, `signed in, a post past 64 kB to any page but an edit is refused, the thought kept (${bigDelete.status})`);
   const page = await get(`/thoughts/${id}`);
@@ -791,7 +811,9 @@ async function writesArm() {
     cookie = "";
     await signIn(READ_KEY);
     const asRead = await get(`/thoughts/${id}`);
-    assert(asRead.status === 200 && !asRead.html.includes('data-testid="edit-link"') && !asRead.html.includes('data-testid="delete-link"'), `the read key's thought page offers no Edit and no Delete (${asRead.status})`);
+    assert(asRead.status === 200 && !asRead.html.includes('data-testid="edit-link"') && !asRead.html.includes('data-testid="delete-link"') && !asRead.html.includes('href="/dashboard/capture"'), `the read key's thought page offers no Edit and no Delete, and its nav no Capture (${asRead.status})`);
+    const [readCapturePage, readCapture] = [await get("/capture"), await post("/capture?/capture", { content: "never captured" }, true)];
+    assert(readCapturePage.status === 403 && readCapture.status === 403, `…its capture page is a 403, and its capture refused (${readCapturePage.status}, ${readCapture.status})`);
     const [editPage, deletePage] = [await get(`/thoughts/${id}/edit`), await get(`/thoughts/${id}/delete`)];
     assert(editPage.status === 403 && deletePage.status === 403, `…and its edit and delete pages are 403s (${editPage.status}, ${deletePage.status})`);
     // Refused either way: the actions' own gates spare the core a call it would refuse, and the load that runs after a

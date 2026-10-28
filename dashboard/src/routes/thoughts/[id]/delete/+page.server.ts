@@ -4,7 +4,7 @@ import { base } from '$app/paths';
 import { firstLine } from '$lib/format';
 import { codeOf, may, read, write } from '$lib/server/rest';
 import { cookieOptions } from '$lib/server/session';
-import { deletedCookie, DELETED_MAX_AGE, notYours } from '$lib/server/writes';
+import { deletedCookie, FLASH_MAX_AGE, notYours } from '$lib/server/writes';
 import type { FetchedThought } from '$lib/types';
 
 // A thought deleted (SMD-3322): delete_thought under the visitor's credential,
@@ -36,7 +36,7 @@ export const actions: Actions = {
 		// To the list, which says what was deleted, from a flash cookie it reads once (review pass 1: from the address, a
 		// link could make it say so of a thought that stands). Not back here: this page's load would find no thought.
 		if (answer.ok) {
-			event.cookies.set(deletedCookie(event.locals.sessionCookie), id, { ...cookieOptions(event.url, event.locals.breakglass), maxAge: DELETED_MAX_AGE });
+			event.cookies.set(deletedCookie(event.locals.sessionCookie), id, { ...cookieOptions(event.url, event.locals.breakglass), maxAge: FLASH_MAX_AGE });
 			redirect(303, `${base}/thoughts`);
 		}
 		const code = codeOf(answer.body);

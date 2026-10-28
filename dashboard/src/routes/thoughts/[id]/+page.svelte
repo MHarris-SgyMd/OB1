@@ -34,6 +34,12 @@
 		{/if}
 	</header>
 
+	{#if data.captured}
+		<p class="text-sm" role="status" data-testid="captured">
+			{data.captured.existed ? 'That text was already a thought: this is it.' : 'Captured.'}
+			{#if data.captured.noVector}{' '}It was saved without an embedding, so a search by meaning will not find it until it is re-embedded; a search by exact text will.{/if}
+		</p>
+	{/if}
 	{#if notice}
 		<p class="text-sm text-amber-300" role="note" data-testid="notice">{notice}</p>
 	{/if}

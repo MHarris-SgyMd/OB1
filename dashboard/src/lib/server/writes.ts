@@ -3,7 +3,7 @@
 import { base } from '$app/paths';
 
 /**
- * The most text the edit page saves, in the bytes a browser posts it as —
+ * The most text the edit and capture pages save, in the bytes a browser posts it as —
  * its UTF-8, each line break sent as CRLF (postedBytes) — under serve.ts's
  * 1 MB body limit with room for the multipart form's boundaries and its other
  * field. The page says so of a thought past it, rather than offer a Save the
@@ -18,11 +18,17 @@ export const EDIT_MAX_BYTES = 1_000_000;
  */
 export const postedBytes = (text: string) => Buffer.byteLength(text.replace(/\r\n|\r|\n/g, '\r\n'), 'utf8');
 
-/** The body every request but an edit's is held to, by its declared length, a body declaring none refused: serve.ts's limit is the edit's 1 MB, and a sign-in or any other form is far smaller (review passes 2 and 3). */
+/** The body every request but an edit's or a capture's is held to, by its declared length, a body declaring none refused: serve.ts's limit is theirs, 1 MB, and a sign-in or any other form is far smaller (review passes 2 and 3). */
 export const SMALL_BODY_BYTES = 64 * 1024;
 
-/** The edit page's path, whose posts alone, from a live session, may carry the larger body. */
-export const EDIT_PATH = new RegExp(`^${base}/thoughts/[^/]+/edit$`);
+/** The edit and capture pages' paths, whose posts alone, from a live session, may carry the larger body. */
+export const LARGE_BODY_PATH = new RegExp(`^${base}/(?:capture|thoughts/[^/]+/edit)$`);
+
+/**
+ * The source a capture from the GUI names (SMD-3322, SMD-3208): a direct REST capture that names none is labelled
+ * `mcp`, the conversational label egress `source:` terms and per-source weights key on.
+ */
+export const CAPTURE_SOURCE = 'dashboard';
 
 /** A thought id's shape, as the core names one (and as a client_key is), for a value the GUI says back. */
 export const THOUGHT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -36,8 +42,15 @@ export const THOUGHT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
  * redirect's time and more.
  */
 export const deletedCookie = (sessionCookie: string) => `${sessionCookie}_deleted`;
-export const DELETED_MAX_AGE = 60;
+export const FLASH_MAX_AGE = 60;
+
+/**
+ * The flash cookie the capture page sets for the thought's page to say what the capture did: `<id>.new`, or
+ * `<id>.existed` for a text already a thought; `.novector` after either when no embedding was written with it. Read
+ * and cleared by that thought's page alone, as the delete's is by the list.
+ */
+export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captured`;
 
 /** What a session that may not write is told: by key or by the operator's sign-in, it is the session that may not. */
-export const notYours = (verb: 'edit' | 'delete') =>
-	`This session cannot ${verb} thoughts: ${verb === 'edit' ? 'editing' : 'deleting'} is a write key’s, or the operator’s through the authorization server.`;
+export const notYours = (verb: 'edit' | 'delete' | 'capture') =>
+	`This session cannot ${verb} thoughts: ${{ edit: 'editing', delete: 'deleting', capture: 'capturing' }[verb]} is a write key’s, or the operator’s through the authorization server.`;
