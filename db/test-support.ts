@@ -863,13 +863,16 @@ export function answersHealth(port: number, body: string, init: RequestInit = {}
  * nothing; Linux answers 127.0.0.2 on its loopback, macOS answers neither
  * without IPv6 — 127.0.0.2 times out there, a second's wait. The probe's
  * answer is its own token, so another app holding the probe's port on that
- * address does not read as it; one that accepts and never answers reads as
- * nothing there.
+ * address does not read as it; and at [::1] neither that app's answer nor a
+ * connection it accepts and holds silent or resets reads as no listener: each
+ * tries 127.0.0.2, then a fresh port, three probes at most.
  */
 export async function secondLoopback(): Promise<string | null> {
   const token = crypto.randomUUID();
   // Up to three probes, each on a port of its own, the next only after another listener answered in the probe's place:
   // a port picked for every address can sit beside another process's listener on [::1] alone (PR 2a review passes 2–3).
+  // At [::1] one that accepts and never answers, or resets, is another listener too: a port no one holds there refuses
+  // at once, where macOS's 127.0.0.2 times out for no listener at all (PR 2b review passes 2–3).
   for (let attempt = 0; attempt < 3; attempt++) {
     const probe = Bun.serve({ port: 0, fetch: () => new Response(token) });
     let foreign = false;
@@ -877,7 +880,7 @@ export async function secondLoopback(): Promise<string | null> {
       // IPv6 loopback as connect.ts spells a URL's host: its LOOPBACK_HOSTS is the one spelling of the loopback names.
       for (const host of [[...LOOPBACK_HOSTS].find((h) => h.startsWith("[")), "127.0.0.2"]) {
         if (host === undefined) continue;
-        const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text(), () => null);
+        const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text()).catch((e: Error & { code?: string }) => (host.startsWith("[") && (e.name === "TimeoutError" || e.code === "ECONNRESET") ? "" : null));
         if (got === token) return host;
         if (got !== null) foreign = true;
       }
@@ -1108,8 +1111,20 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const stdout = await new Response(p.stdout).text();
   const stderr = await new Response(p.stderr).text();
+  // A package the importing file's directory has not installed fails the import where auto-install is off
+  // (SMD-2978); the suite's assertions see only the exit code and what is missing from the output, so name it here,
+  // once. A bare name only: Bun says "Cannot find module" of a missing relative file too. Colour codes dropped first.
+  const m = /^error: Cannot find (?:package|module) '([^']+)' from '([^']+)'/m.exec(stderr.replaceAll(ANSI_SGR, ""));
+  if (m && !/^[./]/.test(m[1]) && !missingReported.has(m[0])) {
+    missingReported.add(m[0]);
+    console.error(`  !! ${basename(cmd.find((a) => /\.[mc]?[jt]s$/.test(a)) ?? cmd[0])}, run from ${opts.cwd}: ${m[0]} — run \`bun install\` in the nearest directory above that file with a package.json`);
+  }
   return { code: await p.exited, out: stdout + stderr, stdout, stderr };
 }
+/** The missing-package lines runScript has printed, so each is printed once a run. */
+const missingReported = new Set<string>();
+/** A terminal colour sequence, as Bun wraps `error` in under FORCE_COLOR. */
+const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 
 /** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
 export function shellWithoutOb1(): Record<string, string> {

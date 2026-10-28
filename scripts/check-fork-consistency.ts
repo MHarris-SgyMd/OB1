@@ -529,9 +529,17 @@
  *      the runner's process list shows it; pass it by name (`-e NAME`) from
  *      the shell's environment (SMD-3351). It reads that flag alone, not a
  *      curl header or a URL. Its probe pins what it refuses and passes
+ *  44. each directory a fork-checks.yml step may run a script from (check
+ *      34's reader) that holds a package.json has a bunfig.toml setting
+ *      `[install] auto = "disable"`, so an import its job's installs do not
+ *      resolve fails instead of Bun fetching it from npm; Bun reads the
+ *      working directory's file alone (SMD-2978: db-live ran
+ *      server-portable/preflight.ts on a zod fetched at run time). Its probes
+ *      pin which files turn it off
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
+ * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
  */
 
@@ -7303,8 +7311,8 @@ checkStarReads();
  * address, by its file and a fragment that names it and no other, with why; a fragment that names none, several, or
  * one already held is reported, as is an entry whose file the walk no longer reads (walkProblems, with the walk's
  * own floor). Its probe pins each of these. PR 1 held test-rest.ts, test-server.ts and db/test-support.ts; PR 2a
- * every suite and smoke script. Without git the walk cannot list them, and the check is skipped with a word, as
- * check 41 is.
+ * every suite and smoke script; PR 2b the vendored servers extensions/test-auth.ts starts, so its exception went.
+ * Without git the walk cannot list them, and the check is skipped with a word, as check 41 is.
  */
 /**
  * The files check 42 reads: every `test-*` or `smoke*` JavaScript or TypeScript file git tracks or would track,
@@ -7330,7 +7338,6 @@ const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
   ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
   ["server-portable/test-support.ts", "Bun.serve({ port, hostname, fetch: () => new Response(null) })", "quietPort: a port is quiet only where both 127.0.0.1 and every address bind, so it binds each in turn and frees it (SMD-3296)"],
   ["db/test-connect.ts", "Bun.listen({ hostname: lan,", "the counted refusals' listener: on this machine's own non-loopback address, remote to the database rule and reachable, so a connection opened before the guard is seen"],
-  ["extensions/test-auth.ts", 'PORT: "0", ...live.env', "the vendored servers, which read no OB1_LISTEN_HOST until the ticket's PR 2b"],
 ];
 
 /**
@@ -9714,6 +9721,59 @@ function checkSuitesRun() {
   for (const [where, detail] of suiteProblems(suites, run, SUITES_NOT_RUN)) fail(where, `${detail} (check 34, SMD-2895)`);
 }
 checkSuitesRun();
+
+// ── 44: a directory CI runs a script from does not auto-install (SMD-2978) ──
+/**
+ * 44: Bun fetches a package an import cannot resolve, from its cache or from npm, unless the bunfig.toml in the
+ * directory it runs from sets `[install] auto = "disable"`. It reads that directory's file alone, not a parent's. So
+ * a step whose job lacked an install passed on whatever npm served: test-live's [9] and test-search-path ran
+ * server-portable/preflight.ts on a zod fetched at run time, since db-live installed db/ alone (SMD-2978). Each
+ * directory a fork-checks.yml step may run a script from (check 34's reader: the step's working-directory and each
+ * `cd` it names) that holds a package.json carries a bunfig.toml that sets it. A directory with no package.json is
+ * not read: it has no install of its own to hold to, and a file at the root would reach every command run from it,
+ * recipes with installs of their own included (changes/291's Not taken). So a script run from the root, deploy/ or
+ * deploy/orchestration/ still auto-installs; none imports a package today (changes/smd-2978.md's Not taken).
+ */
+/** Why a bunfig.toml leaves auto-install on, given its text (null for no file); null when the file turns it off. */
+function autoInstallLeftOn(text: string | null): string | null {
+  if (text === null) return "has no bunfig.toml";
+  let doc: unknown;
+  try { doc = Bun.TOML.parse(text); } catch (e) { return `has a bunfig.toml that does not parse (${(e as Error).message})`; }
+  const auto = isMapping(doc) && isMapping(doc.install) ? doc.install.auto : undefined;
+  return auto === "disable" ? null : `has a bunfig.toml whose [install] auto is ${auto === undefined ? "unset" : JSON.stringify(auto)}`;
+}
+function checkNoAutoInstall() {
+  if (typeof Bun === "undefined" || typeof Bun.TOML?.parse !== "function" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 44 parses bunfig.toml with Bun.TOML and the workflow with Bun.YAML, and this runtime lacks one — run \`bun ${SELF}\`, as CI does (SMD-2978)`);
+    return;
+  }
+  const cases: [string, string | null, boolean][] = [
+    ["off", '[install]\nauto = "disable"\n', true],
+    ["off, single-quoted, under a comment", "# why\n[install]\nauto = 'disable'\n", true],
+    ["another mode", '[install]\nauto = "fallback"\n', false],
+    ["commented out", '[install]\n# auto = "disable"\n', false],
+    ["outside [install]", 'auto = "disable"\n[install]\n', false],
+    ["under another table", '[run]\nauto = "disable"\n', false],
+    ["a file that does not parse", '[install\nauto = "disable"\n', false],
+    ["no file", null, false],
+  ];
+  const wrong = cases.filter(([, text, off]) => (autoInstallLeftOn(text) === null) !== off).map(([what]) => what);
+  if (wrong.length) fail(SELF, `check 44 no longer reads its probes as written (${JSON.stringify(wrong)}): only \`auto = "disable"\` under [install] turns auto-install off (SMD-2978)`);
+  let runs: ScriptRun[] = [];
+  try { runs = scriptRunsIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8"))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 44 cannot read where its steps run: ${(e as Error).message}`); return; }
+  const dirs = [...new Set(runs.flatMap((r) => r.dirs))].filter((d) => existsSync(join(ROOT, d, "package.json"))).sort();
+  // Three directories many steps run from: were any missed, the reading is broken. A cd's directory is check 34's
+  // probe's to hold ("a cd in a subshell, behind a timeout"); no package directory is reached by a cd alone today.
+  for (const known of ["db", "server-portable", "extensions"]) {
+    if (!dirs.includes(known)) fail(SELF, `check 44 does not read ${known}/ as a directory fork-checks.yml runs a script from — the reading is broken, not the tree clean`);
+  }
+  for (const d of dirs) {
+    const p = join(ROOT, d, "bunfig.toml");
+    const why = autoInstallLeftOn(existsSync(p) ? readFileSync(p, "utf8") : null);
+    if (why) fail(`${d}/bunfig.toml`, `${d}/ ${why}, but a ${SUITE_WORKFLOW} step runs a script from it, so an import its job's installs do not resolve is fetched from npm instead of failing — give it a bunfig.toml with \`[install]\` and \`auto = "disable"\`, as extensions/ has (check 44, SMD-2978)`);
+  }
+}
+checkNoAutoInstall();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //

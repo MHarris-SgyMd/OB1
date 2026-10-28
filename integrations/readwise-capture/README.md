@@ -73,7 +73,7 @@ bun integrations/readwise-capture/index.ts
 
 `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its capture against Postgres.
 
-Readwise calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). That URL is your **Capture URL**; save it in the tracker for Step 3.
+Readwise calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command above, so the server listens on the loopback alone. That URL is your **Capture URL**; save it in the tracker for Step 3.
 
 The webhook secret, `READWISE_WEBHOOK_SECRET`, is set in Step 4 after Readwise generates it — until then the server rejects every real webhook with 401. Readwise's "Test Webhook" button — which sends an empty body — will still pass, because the empty-body check short-circuits before the secret check.
 

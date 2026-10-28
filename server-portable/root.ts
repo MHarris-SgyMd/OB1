@@ -180,9 +180,15 @@ export type Env = {
    * Whether a thinking model reasons before extracting. Unset, off/false/0: no
    * reasoning pass (`reasoning_effort: none`); on/true/1: the model's default
    * effort; any other word (low, medium, high) is sent as the effort. See
-   * embed.ts metadataReasoning.
+   * embed.ts reasoningFields.
    */
   OB1_METADATA_REASONING?: string;
+  /**
+   * The same for the subject question alone (`--subjects`, SMD-3306), but on
+   * when unset: off/false/0 (or none) asks it with no reasoning pass. Turning
+   * it on asks again about every subject a model found with it off.
+   */
+  OB1_SUBJECT_REASONING?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. Embeddings, and chat unless OB1_CHAT_BASE_URL says otherwise. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
