@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -341,6 +341,16 @@ export interface ConsolidateOptions {
    * beside `sql`, a caller's client, which it would not reach.
    */
   session?: SessionSettings;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
+   * claim, at the start of each pass — before its pool, the stale re-pool and
+   * its counts — and before each pair of a thought. A worker waiting between
+   * thoughts holds no claim; one waiting between pairs keeps its claim and
+   * lease. A stop while it waits ends the worker there: between pairs the
+   * thought goes back to the pool unrecorded, the proposals written so far
+   * standing. Unused by --status, --dry-run and a decision.
+   */
+  admit?: Admit;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -596,6 +606,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const say: Writer["out"] = opts.banner === false ? () => {} : out;
   /** The end-of-run summary's queries, which a pass the scheduler drives leaves out (SMD-2752). */
   const SUMMARY = opts.summary !== false;
+  const ADMIT = opts.admit;
   /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
   const refused = (kind: StartRefusal, line: string): number => {
     err(line);
@@ -1599,6 +1610,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   class WriterThrow {
     constructor(readonly error: unknown) {}
   }
+  /**
+   * A stop that reached a worker waiting at the admit gate between a thought's
+   * pairs (SMD-3379 PR 1b): the thought goes back to the pool unrecorded, as a
+   * provider outage sends it, its proposals written so far standing.
+   */
+  class StoppedBetweenPairs extends Error {
+    constructor() {
+      super("stopped between pairs at the admit gate: the thought goes back to the pool unrecorded");
+      this.name = "StoppedBetweenPairs";
+    }
+  }
   const errInRow = (line: string): void => {
     try {
       err(line);
@@ -1682,6 +1704,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
     for (const c of candidates) {
+      if (hardStopped) return { outcome: "abandoned" };
+      // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
+      // here, its claim and lease kept.
+      if (ADMIT && !(await admitted(ADMIT, onStop.signal))) throw new StoppedBetweenPairs();
       if (hardStopped) return { outcome: "abandoned" };
       const older = byId.get(c.older_id);
       if (!older) continue; // deleted between the candidate query and the read
@@ -1973,6 +1999,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     });
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
+        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
+        // here holding no claim, and a stop while it waits ends it.
+        if (ADMIT) {
+          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (stopping || outage.reason !== null || limitReached()) return;
+        }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -2030,6 +2062,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 outcome = await processRow(row);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
+                // A stop at the gate between pairs: back to the pool with the leases the finally returns.
+                if (e instanceof StoppedBetweenPairs) return;
                 // The database went away under the pairs: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -2289,6 +2323,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    // The admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
+    // 1b). A stop while it waits ends the run with no pass: the summary's
+    // counts are read only for a summary.
+    if (ADMIT && !(await admitted(ADMIT, onStop.signal))) {
+      return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, failed: 0, unpooled: 0, thoughts: 0, proposals: 0 };
+    }
     for (const w of unreturned) {
       await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
       unreturned.delete(w);

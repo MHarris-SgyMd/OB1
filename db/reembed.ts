@@ -484,7 +484,7 @@ import { blanketGate, databaseUnavailable, egressDescription, egressRefusal, fol
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
@@ -598,6 +598,16 @@ export interface ReembedOptions {
   onStart?: (r: StartResult) => void;
   /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's budget. Refused beside `sql`. */
   session?: SessionSettings;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
+   * claim, before the start's drain and before each follower poll's pool. A
+   * worker waits holding no claim, and a stop while it waits ends it there.
+   * A claim takes one thought under it unless `batch` says otherwise, so a
+   * closed gate holds a worker after the thought in hand, not after eight.
+   * The start's own pool is made before the pass's stop exists, and is not
+   * gated. Unused by --status and --dry-run.
+   */
+  admit?: Admit;
 }
 
 /**
@@ -735,7 +745,8 @@ function readOption(flag: string, v: number | null | undefined, absent: number, 
 function numbers(opts: ReembedOptions): { workers: number; batch: number; follow: number } | string {
   const workers = readOption("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
-  const batch = readOption("--batch", opts.batch, 8, { min: 1, max: MAX_BATCH });
+  // One thought a claim under the admit gate (SMD-3379 PR 1b), else the CLI's eight.
+  const batch = readOption("--batch", opts.batch, opts.admit ? 1 : 8, { min: 1, max: MAX_BATCH });
   if (typeof batch === "string") return batch;
   // 0 when absent: no following (extract-entities.ts's rule).
   const follow = readOption("--follow", opts.follow, 0);
@@ -869,6 +880,7 @@ export async function run(opts: ReembedOptions): Promise<number> {
 /** The run once its options are settled: the script's body as it was, printing through the Writer and returning where it exited. */
 async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: number; batch: number; follow: number }, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
   const { workers: WORKERS, batch: BATCH, follow: FOLLOW } = settled;
+  const ADMIT = opts.admit;
   /** The start alone, for the sleep scheduler's check: run() refused it without follow. */
   const CHECK = opts.check === true;
   /** The start's banner, which a pass the scheduler drives leaves to its check. */
@@ -2157,6 +2169,12 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     });
     try {
       while (!stopping && !haltedByProvider && configError === null && outage.reason === null) {
+        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
+        // here holding no claim, and a stop while it waits ends it.
+        if (ADMIT) {
+          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (stopping || haltedByProvider || configError !== null || outage.reason !== null) return;
+        }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -2481,7 +2499,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     })();
     await (stamper ? stamper.during(waited) : waited);
   };
-  if (total > 0) await stamped(drain());
+  // The admit gate before the start's drain (SMD-3379 PR 1b); a stop while it waits ends the run there.
+  if (total > 0 && (!ADMIT || await admitted(ADMIT, onStop.signal))) await stamped(drain());
   // A record moved under the first drain ends the follower now, as under a poll's.
   if (FOLLOW && switchedTo === null) {
     await waitForProvider();
@@ -2492,6 +2511,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
       pollNow = false;
       if (stopping) break;
+      // The admit gate before the poll's pool (SMD-3379 PR 1b).
+      if (ADMIT && !(await admitted(ADMIT, onStop.signal))) break;
       let polled: Start | null;
       try {
         // Leases a worker could not return as it ended, returned first (extract-entities.ts's).

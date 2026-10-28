@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -330,6 +330,18 @@ export interface ExtractOptions {
    * beside `sql`, a caller's client, which it would not reach.
    */
   session?: SessionSettings;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
+   * claim, at the start of each pass — before its pool and its counts — and
+   * before each window of a windowed thought that is sent. A worker waiting
+   * between thoughts holds no claim; one waiting between windows keeps its
+   * claim and lease, and the wait moves the thought's time held on, as a
+   * provider pause does, and is not counted as the model's. A stop while it
+   * waits ends the worker there: between windows as a first stop ends a
+   * thought there, its windows answered so far kept (or, with no kept
+   * windows, its claim back in the pool). Unused by --status and --dry-run.
+   */
+  admit?: Admit;
 }
 
 /**
@@ -560,6 +572,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const say: Writer["out"] = opts.banner === false ? () => {} : out;
   /** The end-of-run summary's queries, which a pass the scheduler drives leaves out (SMD-2752). */
   const SUMMARY = opts.summary !== false;
+  const ADMIT = opts.admit;
   /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
   const refused = (kind: StartRefusal, line: string): number => {
     err(line);
@@ -1264,15 +1277,28 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const t0 = Date.now();
+    // The admit gate between windows (SMD-3379 PR 1b): its wait is neither
+    // the model's time nor the thought's held, and a stop while it waits ends
+    // the thought there as a first stop does, its windows kept.
+    let paused = 0;
+    const admitWindow = ADMIT ? async (): Promise<void> => {
+      const at = Date.now();
+      const through = await admitted(ADMIT, onStop.signal);
+      const waited = Date.now() - at;
+      paused += waited;
+      const held = inHand.get(workerId);
+      if (held) held.since += waited;
+      if (!through) throw new StoppedBetweenWindows();
+    } : undefined;
     let extraction: Extraction;
     try {
       const progress = await progressFor(row, workerId);
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
       // call — per window of a long thought (SMD-1879).
-      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress);
+      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress, admitWindow);
     } finally {
-      llmMs += Date.now() - t0;
+      llmMs += Date.now() - t0 - paused;
     }
     // Every call the thought cost: one per window, and one more per window
     // that was retried (first review pass: the retries went uncounted) — a
@@ -1411,6 +1437,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     });
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
+        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
+        // here holding no claim, and a stop while it waits ends it.
+        if (ADMIT) {
+          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (stopping || outage.reason !== null || limitReached()) return;
+        }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -1834,6 +1866,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    // The admit gate before the pass's pool and counts (SMD-3379 PR 1b). A
+    // stop while it waits ends the run with no pass: the summary's counts are
+    // read only for a summary.
+    if (ADMIT && !(await admitted(ADMIT, onStop.signal))) {
+      return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, partial: 0, leftOut: 0, leftOutOver: 0, failed: 0, unpooled: 0, thoughts: 0 };
+    }
     for (const w of unreturned) {
       await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
       unreturned.delete(w);

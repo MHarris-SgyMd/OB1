@@ -5627,11 +5627,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1753 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1760 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1025 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 341 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5773,6 +5773,23 @@ aborted signal as a run does; the hard stop abandons the row in hand and
 aborts its embedding call (`embed.ts`'s `embedCapture` takes the caller's
 signal, SMD-2679), so run() returns at once, as extract's does — a database
 statement waiting on a lock has no bound, and a vector already sent lands.
+
+The three claim workers take `admit` (`lease.ts`'s `Admit`, SMD-3379 PR 1b),
+a gate awaited with the pass's first-stop signal wherever the pass would start
+new work: before each claim; at the start of each pass, before its pool and
+counts (re-embed's before the start's drain and each poll's pool, its start's
+own pool being made before the pass's stop exists); before each window of a
+windowed thought that extraction sends; and before each pair consolidation
+judges. A worker waiting between thoughts holds no claim. One waiting
+mid-thought keeps its claim and lease, and extraction moves the thought's time
+held on by the wait and counts none of it as the model's. A stop while it
+waits ends the worker there: between windows as a first stop does, the windows
+answered kept (with none kept, the claim back in the pool); between pairs with
+the thought back in the pool unrecorded, its proposals written so far
+standing. Re-embed claims one thought at a time under it unless `batch` says
+otherwise, so a closed gate holds a worker after the thought in hand. A run
+given none runs as before. The sleep scheduler is to close it while its brain
+is live (SMD-3379 PR 1c).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

@@ -40,7 +40,7 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
@@ -4651,6 +4651,38 @@ if (want("9f")) {
     } finally {
       await relay.close();
     }
+
+    // The admit gate (SMD-3379 PR 1b): a follower given one claims a thought
+    // at a time, waits at it before each claim and before each poll's pool,
+    // and a stop while it waits ends it there. The start's pool is made
+    // before the pass's stop exists, and is not gated.
+    const gatedA = await newThought("a thought the gate holds back, the first");
+    const gatedB = await newThought("a thought the gate holds back, the second");
+    const atClaimR = heldGate(1);
+    const heldR = liveFollower({ batch: undefined, admit: atClaimR.admit });
+    const claimWaitingR = await pollUntil(async () => atClaimR.waiting === 1, 15_000);
+    await Bun.sleep(300);
+    const heldClaimsR = [(await claimOf(gatedA))?.status, (await claimOf(gatedB))?.status];
+    const perClaim = heldR.lines.find((l) => /per claim/.test(l)) ?? "";
+    const heldAt = Date.now();
+    const heldExitR = await heldR.stop();
+    const heldMs = Date.now() - heldAt;
+    assert(claimWaitingR && /\b1 per claim/.test(perClaim) && heldClaimsR.every((st) => st === "pending") && heldExitR === "exit 0" && heldMs < 1500 && !(await atModel(gatedA)) && (await claimOf(gatedA))?.status === "pending",
+      `a re-embed follower given a gate claims one thought at a time, waits before its claim holding none, the start's pool written, and a stop while it waits ends it at once (${perClaim.trim()}; ${heldClaimsR.join(", ")} while closed; ${heldExitR} in ${heldMs} ms)`);
+    // Open through its drain, then closed: it waits before its next poll's pool.
+    const atPoll = heldGate(Number.POSITIVE_INFINITY);
+    const polled = liveFollower({ admit: atPoll.admit });
+    const drained = (await polled.idle()) && (await atModel(gatedA)) && (await atModel(gatedB));
+    atPoll.close();
+    const pollWaiting = await pollUntil(async () => atPoll.waiting === 1, 15_000);
+    const gatedC = await newThought("a thought a closed poll does not pool");
+    await Bun.sleep(1500);
+    const unpooledC = (await claimOf(gatedC)) === undefined && !(await atModel(gatedC));
+    atPoll.open();
+    const pooledC = await pollUntil(() => atModel(gatedC), 15_000);
+    const pollExit = await polled.stop();
+    assert(drained && pollWaiting && unpooledC && pooledC && pollExit === "exit 0",
+      `…closed before a poll, it waits before the pool — a new thought not pooled while it waits — and pools and re-embeds it once the gate opens (drained ${drained}, waiting ${pollWaiting}, unpooled ${unpooledC}, re-embedded ${pooledC}; ${pollExit})`);
   } finally {
     restoreOutage();
     providerDown503 = false;
@@ -6048,6 +6080,67 @@ if (want("10")) {
   const limitedBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
   assert(JSON.parse(limitedBeat?.value ?? "{}").malformed?.alarm === true, `a follower stopped at its --limit carries the final judgement's block on its row (${limitedBeat?.value})`);
   proseKeys.delete("reference-list page");
+
+  // The admit gate (SMD-3379 PR 1b): a run given one waits at it before the
+  // pass's pool and counts, before each claim and before each window sent,
+  // and a stop while it waits ends the run there. Its lines are read as it
+  // writes them.
+  const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => {
+    const lines: string[] = [];
+    const done = runExtract({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    return { lines, done };
+  };
+  const statusOf = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  const othersPending = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
+  const gatedNote = await seed("Kenji tuned the gated cache warmers.");
+  // Closed from the first ask: the pass waits before its pool and counts.
+  const atPass = heldGate(0);
+  const passStop = new AbortController();
+  const passFrom = calls;
+  const passRun = gatedRun(atPass, passStop.signal);
+  const passWaiting = await pollUntil(async () => atPass.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const passAt = Date.now();
+  passStop.abort();
+  const passCode = await passRun.done;
+  const passMs = Date.now() - passAt;
+  const passLines = passRun.lines.join("\n");
+  assert(passWaiting && atPass.asked === 1 && !passLines.includes("pool:") && calls === passFrom && passCode === 130 && passMs < 1500 && (await statusOf(gatedNote)) !== "claimed",
+         `a run whose gate is closed from the start waits before the pass's pool and counts, and a stop while it waits ends the run at once, 130, nothing pooled or claimed (asked ${atPass.asked}, exit ${passCode} in ${passMs} ms, ${calls - passFrom} call(s), ${othersPending} other row(s) waiting)`);
+  // Open for the pass, closed at the claim: the pool is written and counted,
+  // and the worker waits holding no claim; opened, it extracts the note.
+  const atClaim = heldGate(1);
+  const claimFrom = calls;
+  const claimRun = gatedRun(atClaim, new AbortController().signal);
+  const claimWaiting = await pollUntil(async () => atClaim.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const heldLines = claimRun.lines.join("\n");
+  const heldStatus = await statusOf(gatedNote);
+  const heldCalls = calls - claimFrom;
+  atClaim.open();
+  const claimCode = await claimRun.done;
+  assert(claimWaiting && heldLines.includes("pool:") && heldStatus === "pending" && heldCalls === 0 && claimCode <= 1 && (await statusOf(gatedNote)) === "succeeded" && calls - claimFrom === 1,
+         `…open for the pass and closed at the claim, it writes the pool and waits holding no claim, then extracts the note once the gate opens (${heldStatus} while closed, ${heldCalls} call(s); exit ${claimCode}, ${await statusOf(gatedNote)}, ${calls - claimFrom} call(s))`);
+  // Open for the pass, the claim and the first window, closed before the
+  // second: the worker waits between windows, its claim kept, and a stop
+  // while it waits ends the thought there — its first window kept, no stop
+  // counted, the claim back in the pool.
+  const windowNote = await seed(Array.from({ length: 6 }, (_, p) => `The gated ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita gated point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atWindow = heldGate(3);
+  const windowStop = new AbortController();
+  const windowFrom = calls;
+  const windowRun = gatedRun(atWindow, windowStop.signal);
+  const windowWaiting = await pollUntil(async () => atWindow.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const windowHeld = await statusOf(windowNote);
+  const windowCalls = calls - windowFrom;
+  const windowAt = Date.now();
+  windowStop.abort();
+  const windowCode = await windowRun.done;
+  const windowMs = Date.now() - windowAt;
+  const [windowAfter] = (await sql`SELECT c.status, p.stops, p.parts FROM thought_work_claims c LEFT JOIN extraction_progress p USING (thought_id, work_type) WHERE c.thought_id = ${windowNote}::uuid AND c.work_type = ${KEY}`) as { status: string; stops: number | null; parts: Record<string, unknown> | null }[];
+  assert(windowWaiting && windowHeld === "claimed" && windowCalls === 1 && windowCode === 130 && windowMs < 1500 && windowAfter?.status === "pending" && windowAfter.stops === 0 && Object.keys(windowAfter.parts ?? {}).length === 1,
+         `…closed before a long thought's second window, it waits there with the claim kept, and a stop while it waits ends the thought at once: its first window kept, no stop counted, the claim back in the pool (${windowHeld} while closed after ${windowCalls} call(s); exit ${windowCode} in ${windowMs} ms; ${JSON.stringify(windowAfter)})`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -9344,6 +9437,46 @@ if (want("16")) {
     await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid, ${pc}::uuid)`;
     await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
   }
+
+  // The admit gate (SMD-3379 PR 1b): consolidation waits at it before each
+  // claim and before each pair of a thought, and a stop while it waits
+  // between pairs sends the thought back to the pool unrecorded. Two older
+  // thoughts settled first, so the newer one is the pool's only work and has
+  // two pairs.
+  await seed("[16g] The gatehouse opens at nine.", 30, 3, ["gatehouse"]);
+  await seed("[16g] The gatehouse opens at ten.", 30, 2, ["gatehouse"]);
+  await consolidateInProcess({ workers: 1 });
+  const gatedNewer = await seed("[16g] The gatehouse opens at eleven now.", 30, 0, ["gatehouse"]);
+  const gatedStatus = async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${gatedNewer}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => runConsolidate({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: () => {}, err: () => {} } });
+  // Open for the pass, the claim and the first pair; closed before the second.
+  const atPair = heldGate(3);
+  const pairStop = new AbortController();
+  const pairFrom = calls;
+  const pairRun = gatedRun(atPair, pairStop.signal);
+  const pairWaiting = await pollUntil(async () => atPair.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const pairHeld = await gatedStatus();
+  const pairCalls = calls - pairFrom;
+  const pairAt = Date.now();
+  pairStop.abort();
+  const pairCode = await pairRun;
+  const pairMs = Date.now() - pairAt;
+  assert(pairWaiting && pairHeld === "claimed" && pairCalls === 1 && pairCode === 130 && pairMs < 1500 && (await gatedStatus()) === "pending" && calls - pairFrom === 1,
+         `a consolidation gate closed before a thought's second pair waits there with the claim kept, and a stop while it waits ends the run at once, the thought back in the pool unrecorded (${pairHeld} while closed after ${pairCalls} call(s); exit ${pairCode} in ${pairMs} ms; ${await gatedStatus()})`);
+  // Open for the pass, closed at the claim: the pool written, no claim held; opened, both pairs judged.
+  const atClaimC = heldGate(1);
+  const claimFromC = calls;
+  const claimRunC = gatedRun(atClaimC, new AbortController().signal);
+  const claimWaitingC = await pollUntil(async () => atClaimC.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const claimHeldC = await gatedStatus();
+  const claimCallsC = calls - claimFromC;
+  atClaimC.open();
+  const claimCodeC = await claimRunC;
+  assert(claimWaitingC && claimHeldC === "pending" && claimCallsC === 0 && claimCodeC <= 1 && (await gatedStatus()) === "succeeded" && calls - claimFromC === 2,
+         `…closed at the claim, it waits holding none, and judges both pairs once the gate opens (${claimHeldC} while closed, ${claimCallsC} call(s); exit ${claimCodeC}, ${await gatedStatus()}, ${calls - claimFromC} call(s))`);
+  await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
 
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }

@@ -1328,8 +1328,12 @@ export function partialCaveat(c: Coverage, w: Pick<ExtractWindowing, "windowToke
  * has parsed and hands back those an earlier claim kept, which are not sent
  * again (SMD-2694): the windows are walked in order either way, so the merge
  * — whose ties keep the first reading — is an unbroken run's.
+ * `admit`, the worker's admit gate (db/lease.ts's Admit, SMD-3379 PR 1b), is
+ * awaited before each window of a windowed thought that is sent, and its
+ * rejection rejects the extraction, the windows answered so far kept as each
+ * parsed; a thought sent in one call waits at the worker's claim alone.
  */
-export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg), stop?: AbortSignal, progress?: ExtractProgress): Promise<Extraction> {
+export async function extractEntities(content: string, cfg: EmbedConfig, timeoutMs: number | undefined, subject: EgressSubject, windowing: ExtractWindowing = windowingFor(cfg), stop?: AbortSignal, progress?: ExtractProgress, admit?: () => Promise<void>): Promise<Extraction> {
   const gate = mayLeaveBox({ ...subject, content }, cfg.chat, cfg.egress);
   if (!gate.allowed) throw refuseEgress("Extraction", cfg.chat.base, gate);
   // A call always has a deadline: with Bun's idle cut disabled, an undefined
@@ -1376,7 +1380,10 @@ export async function extractEntities(content: string, cfg: EmbedConfig, timeout
         parts.push({ ...kept, index: w.index, resumed: true });
         continue;
       }
-      // A first stop ends it here, between windows, those answered kept.
+      // The worker's gate, closed while its brain is live: it waits here, between windows.
+      if (admit) await admit();
+      // A first stop ends it here, between windows, those answered kept — one
+      // that came while the gate held it too.
       if (progress?.between?.aborted) throw new StoppedBetweenWindows();
       const t0 = Date.now();
       const ex = await extractCall(w.content, cfg, deadline, part, windowing, onCall, stop);

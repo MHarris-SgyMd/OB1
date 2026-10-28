@@ -301,6 +301,34 @@ export function sleepUnless(ms: number, wake: AbortSignal): Promise<void> {
 export const MAX_TIMER_MS = 2147483647;
 
 /**
+ * A claim worker's admit gate (SMD-3379 PR 1b), an engine option: awaited,
+ * with the pass's first-stop signal, wherever the pass would start new work —
+ * before each claim, at the start of each pass (its pool and counts), before
+ * each window of a long thought and before each pair of a thought's
+ * consolidation. Resolved, the work goes on; pending, the worker waits, its
+ * claim and lease kept mid-thought and none held between thoughts; rejected
+ * once the signal has aborted, the worker stops as a stop finds it there.
+ * The sleep scheduler closes it while its brain is live (SMD-3379 PR 1c). An
+ * engine given none runs as before.
+ */
+export type Admit = (signal: AbortSignal) => Promise<void>;
+
+/**
+ * Wait at the admit gate: true when it let the work through, false when it
+ * rejected after `signal` aborted — a stop reaching a waiting worker. Any
+ * other rejection is the caller's, and is thrown.
+ */
+export async function admitted(admit: Admit, signal: AbortSignal): Promise<boolean> {
+  try {
+    await admit(signal);
+    return true;
+  } catch (e) {
+    if (signal.aborted) return false;
+    throw e;
+  }
+}
+
+/**
  * A pass's stop, as a claim worker's engine hands it to its caller when the
  * pass begins (SMD-2304). The first call asks every worker to stop after the
  * thought in hand, their unfinished claims going back to the pool, and returns
