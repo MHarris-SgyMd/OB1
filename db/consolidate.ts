@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, type Admit, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -346,9 +346,12 @@ export interface ConsolidateOptions {
    * claim, at the start of each pass — before its pool, the stale re-pool and
    * its counts — and before each pair of a thought. A worker waiting between
    * thoughts holds no claim; one waiting between pairs keeps its claim and
-   * lease. A stop while it waits ends the worker there: between pairs the
-   * thought goes back to the pool unrecorded, the proposals written so far
-   * standing. Unused by --status, --dry-run and a decision.
+   * lease. A stop while it waits ends the worker there, as does the pass
+   * ending for a reason of its own (another worker's outage, the provider's
+   * refusal, a worker's throw): between pairs the thought goes back to the
+   * pool unrecorded, the proposals written so far standing and its other pairs
+   * judged again at its next claim. Unused by --status, --dry-run and a
+   * decision.
    */
   admit?: Admit;
 }
@@ -1547,6 +1550,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pass after the thought in hand (SMD-2599).
    */
   let halt = new AbortController();
+  /**
+   * Aborted when the pass ends for a reason of its own — the provider's
+   * refusal, a worker's throw — so a worker waiting at the admit gate wakes to
+   * it, as one pausing on a provider error wakes on `halt`. `gate`, the signal
+   * the gate waits on, is the first stop, `halt` and this, made new with each
+   * pass (SMD-3379 PR 1b-1, review pass 1).
+   */
+  let passEnds = new AbortController();
+  let gate: AbortSignal = onStop.signal;
   let done = 0;
   let failed = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
@@ -1707,7 +1719,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
       // here, its claim and lease kept.
-      if (ADMIT && !(await admitted(ADMIT, onStop.signal))) throw new StoppedBetweenPairs();
+      if (ADMIT) {
+        let through: boolean;
+        try {
+          through = await admitted(ADMIT, gate);
+        } catch (e) {
+          throw new AdmitThrow(e);
+        }
+        if (!through) throw new StoppedBetweenPairs();
+      }
       if (hardStopped) return { outcome: "abandoned" };
       const older = byId.get(c.older_id);
       if (!older) continue; // deleted between the candidate query and the read
@@ -2002,7 +2022,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
-          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (!(await admitted(ADMIT, gate))) return;
           if (stopping || outage.reason !== null || limitReached()) return;
         }
         let batch: { thought_id: string; attempt: number }[];
@@ -2062,6 +2082,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 outcome = await processRow(row);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
+                // The admit gate's own error, not the thought's: the pass ends with it.
+                if (e instanceof AdmitThrow) throw e.error;
                 // A stop at the gate between pairs: back to the pool with the leases the finally returns.
                 if (e instanceof StoppedBetweenPairs) return;
                 // The database went away under the pairs: not the thought's, so
@@ -2100,6 +2122,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 } else if (kind === "fatal") {
                   configError = msg;
                   stopping = true;
+                  passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
                 } else if (stopping || outage.reason !== null) {
@@ -2323,10 +2346,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    if (ADMIT) {
+      passEnds = new AbortController();
+      gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+    }
     // The admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
     // 1b). A stop while it waits ends the run with no pass: the summary's
     // counts are read only for a summary.
-    if (ADMIT && !(await admitted(ADMIT, onStop.signal))) {
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
       return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, failed: 0, unpooled: 0, thoughts: 0, proposals: 0 };
     }
     for (const w of unreturned) {
@@ -2358,6 +2385,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // still hold rows and the client.
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
+      passEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");

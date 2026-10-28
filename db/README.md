@@ -5627,11 +5627,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1760 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1763 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1025 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 341 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 344 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5782,11 +5782,15 @@ own pool being made before the pass's stop exists); before each window of a
 windowed thought that extraction sends; and before each pair consolidation
 judges. A worker waiting between thoughts holds no claim. One waiting
 mid-thought keeps its claim and lease, and extraction moves the thought's time
-held on by the wait and counts none of it as the model's. A stop while it
-waits ends the worker there: between windows as a first stop does, the windows
-answered kept (with none kept, the claim back in the pool); between pairs with
-the thought back in the pool unrecorded, its proposals written so far
-standing. Re-embed claims one thought at a time under it unless `batch` says
+held on by the wait and counts none of it as the model's, a hard stop counting
+the thought's time up to the wait. A stop while it waits ends the worker
+there, as does the pass ending for a reason of its own — another worker's
+provider outage or the provider's refusal, a worker's throw: between windows
+as a first stop does, the windows answered kept (with none kept, the claim
+back in the pool); between pairs with the thought back in the pool
+unrecorded, its proposals written so far standing and its other pairs judged
+again at its next claim. A rejection that is no stop ends the pass with the
+caller's error, never recorded as the thought's. Re-embed claims one thought at a time under it unless `batch` says
 otherwise, so a closed gate holds a worker after the thought in hand. A run
 given none runs as before. The sleep scheduler is to close it while its brain
 is live (SMD-3379 PR 1c).

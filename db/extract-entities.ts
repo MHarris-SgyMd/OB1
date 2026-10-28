@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -336,10 +336,13 @@ export interface ExtractOptions {
    * before each window of a windowed thought that is sent. A worker waiting
    * between thoughts holds no claim; one waiting between windows keeps its
    * claim and lease, and the wait moves the thought's time held on, as a
-   * provider pause does, and is not counted as the model's. A stop while it
-   * waits ends the worker there: between windows as a first stop ends a
-   * thought there, its windows answered so far kept (or, with no kept
-   * windows, its claim back in the pool). Unused by --status and --dry-run.
+   * provider pause does, and is not counted as the model's (a hard stop
+   * counts the thought's time up to the wait). A stop while it waits ends the
+   * worker there, as does the pass ending for a reason of its own (another
+   * worker's outage, the provider's refusal, a worker's throw): between
+   * windows as a first stop ends a thought there, its windows answered so far
+   * kept (or, with no kept windows, its claim back in the pool). Unused by
+   * --status and --dry-run.
    */
   admit?: Admit;
 }
@@ -1047,6 +1050,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * pass after the thought in hand (SMD-2599).
    */
   let halt = new AbortController();
+  /**
+   * Aborted when the pass ends for a reason of its own — the provider's
+   * refusal, a worker's throw — so a worker waiting at the admit gate wakes to
+   * it, as one pausing on a provider error wakes on `halt`. `gate`, the signal
+   * the gate waits on, is the first stop, `halt` and this, made new with each
+   * pass (SMD-3379 PR 1b-1, review pass 1).
+   */
+  let passEnds = new AbortController();
+  let gate: AbortSignal = onStop.signal;
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -1152,7 +1164,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * provider pause, which is the provider's time and not the window's
    * (review pass 3) — which says whether the stop was long.
    */
-  const inHand = new Map<string, { id: string; fingerprint: string; since: number }>();
+  const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
   /**
    * The hard stop's count for each worker, which the worker's own release
@@ -1212,7 +1224,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // Long: held at least the floor. Not the thought's slowest window, which
     // took a kept 280 s window's document out of the stall for good (review
     // pass 3).
-    const long = Date.now() - t.since >= STALL_FLOOR;
+    // Up to a wait at the admit gate it is in, which is not the thought's time
+    // held: the hard stop reads it before the wait has ended (review pass 1).
+    const long = (t.pausedAt ?? Date.now()) - t.since >= STALL_FLOOR;
     try {
       await sql`SELECT note_extraction_stop(${t.id}::uuid, ${JOB}, ${workerId}, ${t.fingerprint}, ${WINDOWING_SIG}, ${long})`;
     } catch (e) {
@@ -1283,11 +1297,21 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     let paused = 0;
     const admitWindow = ADMIT ? async (): Promise<void> => {
       const at = Date.now();
-      const through = await admitted(ADMIT, onStop.signal);
-      const waited = Date.now() - at;
-      paused += waited;
       const held = inHand.get(workerId);
-      if (held) held.since += waited;
+      if (held) held.pausedAt = at;
+      let through = false;
+      try {
+        through = await admitted(ADMIT, gate);
+      } catch (e) {
+        throw new AdmitThrow(e);
+      } finally {
+        const waited = Date.now() - at;
+        paused += waited;
+        if (held) {
+          held.since += waited;
+          held.pausedAt = undefined;
+        }
+      }
       if (!through) throw new StoppedBetweenWindows();
     } : undefined;
     let extraction: Extraction;
@@ -1440,7 +1464,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
-          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (!(await admitted(ADMIT, gate))) return;
           if (stopping || outage.reason !== null || limitReached()) return;
         }
         let batch: { thought_id: string; attempt: number }[];
@@ -1499,6 +1523,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
+                // The admit gate's own error, not the thought's: the pass ends with it.
+                if (e instanceof AdmitThrow) throw e.error;
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
                 // A first stop ended it between windows, those answered kept: it
@@ -1551,6 +1577,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // leases the finally returns.
                   configError = msg;
                   stopping = true;
+                  passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
                 } else if (stopping || outage.reason !== null) {
@@ -1866,10 +1893,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    if (ADMIT) {
+      passEnds = new AbortController();
+      gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+    }
     // The admit gate before the pass's pool and counts (SMD-3379 PR 1b). A
     // stop while it waits ends the run with no pass: the summary's counts are
     // read only for a summary.
-    if (ADMIT && !(await admitted(ADMIT, onStop.signal))) {
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
       return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, partial: 0, leftOut: 0, leftOutOver: 0, failed: 0, unpooled: 0, thoughts: 0 };
     }
     for (const w of unreturned) {
@@ -1908,6 +1939,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // still hold rows and the client (review pass 1).
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
+      passEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");

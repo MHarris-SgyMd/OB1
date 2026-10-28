@@ -1987,6 +1987,15 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let hardRelease: Promise<unknown> | null = null;
   /** Aborted by any stop: wakes a follower's sleep between polls (extract-entities.ts's onStop). */
   const onStop = new AbortController();
+  /**
+   * Aborted when a drain ends for a reason of its own — the provider's outage
+   * or refusal, a halt on its first answer, a worker's throw — so a worker
+   * waiting at the admit gate before its claim wakes to it. `gate`, the signal
+   * that wait reads, is the first stop and this, made new with each drain
+   * (SMD-3379 PR 1b-1, review pass 1).
+   */
+  let drainEnds = new AbortController();
+  let gate: AbortSignal = onStop.signal;
   /** Workers whose leases could not be returned as they ended — the database not answering — returned at the next poll (extract-entities.ts's unreturned). */
   const unreturned = new Set<string>();
   let done = 0;
@@ -2172,7 +2181,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
         // here holding no claim, and a stop while it waits ends it.
         if (ADMIT) {
-          if (!(await admitted(ADMIT, onStop.signal))) return;
+          if (!(await admitted(ADMIT, gate))) return;
           if (stopping || haltedByProvider || configError !== null || outage.reason !== null) return;
         }
         let batch: { thought_id: string; attempt: number }[];
@@ -2239,6 +2248,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 /** The thought back to the pool unrecorded, and the follower waits for the provider: an outage begun or joined, the thought a suspect or not. */
                 const sendBack = (why: string, suspect: boolean): "outage" | "thought" => {
                   if (outage.begin(why, suspect ? b.thought_id : undefined) === "thought") return "thought";
+                  drainEnds.abort();
                   outageSubject ??= rowSubject;
                   const state = verdict === "backpressure" ? "is holding calls back" : "is not answering";
                   err(`  ${workerId}: the embedding provider ${state} (${why.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
@@ -2275,6 +2285,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                     outcome = { outcome: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
                   } else {
                     configError = msg;
+                    drainEnds.abort();
                     err(`  ${workerId}: the embedding provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                     return;
                   }
@@ -2288,6 +2299,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 if (!probed && configShaped(e)) {
                   err(`  ${workerId}: the first row failed before any succeeded — ${msg} — read as the provider's answer, not the row's; halting so the pool is not marked failed row by row (this row is recorded failed, --retry-failed revisits it; the rest stay pending for the re-run)`);
                   haltedByProvider = true;
+                  drainEnds.abort();
                 }
               }
             }
@@ -2430,8 +2442,13 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * error once they have stopped, not while they still hold rows and the client.
    */
   const drain = async (): Promise<void> => {
+    if (ADMIT) {
+      drainEnds = new AbortController();
+      gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
+    }
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
+      drainEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
@@ -2499,8 +2516,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     })();
     await (stamper ? stamper.during(waited) : waited);
   };
-  // The admit gate before the start's drain (SMD-3379 PR 1b); a stop while it waits ends the run there.
-  if (total > 0 && (!ADMIT || await admitted(ADMIT, onStop.signal))) await stamped(drain());
+  // The admit gate before the start's drain (SMD-3379 PR 1b), under the follower's stamp, so a long wait does not
+  // read as a stale row (review pass 1); a stop while it waits ends the run there.
+  if (total > 0) await stamped((async () => { if (!ADMIT || await admitted(ADMIT, onStop.signal)) await drain(); })());
   // A record moved under the first drain ends the follower now, as under a poll's.
   if (FOLLOW && switchedTo === null) {
     await waitForProvider();
@@ -2511,8 +2529,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
       pollNow = false;
       if (stopping) break;
-      // The admit gate before the poll's pool (SMD-3379 PR 1b).
-      if (ADMIT && !(await admitted(ADMIT, onStop.signal))) break;
+      // The admit gate before the poll's pool (SMD-3379 PR 1b), under the follower's stamp (review pass 1).
+      let through = true;
+      if (ADMIT) await stamped((async () => { through = await admitted(ADMIT, onStop.signal); })());
+      if (!through) break;
       let polled: Start | null;
       try {
         // Leases a worker could not return as it ended, returned first (extract-entities.ts's).

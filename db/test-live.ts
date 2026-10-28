@@ -6141,6 +6141,54 @@ if (want("10")) {
   const [windowAfter] = (await sql`SELECT c.status, p.stops, p.parts FROM thought_work_claims c LEFT JOIN extraction_progress p USING (thought_id, work_type) WHERE c.thought_id = ${windowNote}::uuid AND c.work_type = ${KEY}`) as { status: string; stops: number | null; parts: Record<string, unknown> | null }[];
   assert(windowWaiting && windowHeld === "claimed" && windowCalls === 1 && windowCode === 130 && windowMs < 1500 && windowAfter?.status === "pending" && windowAfter.stops === 0 && Object.keys(windowAfter.parts ?? {}).length === 1,
          `…closed before a long thought's second window, it waits there with the claim kept, and a stop while it waits ends the thought at once: its first window kept, no stop counted, the claim back in the pool (${windowHeld} while closed after ${windowCalls} call(s); exit ${windowCode} in ${windowMs} ms; ${JSON.stringify(windowAfter)})`);
+  // A hard stop at the window gate — a wake's: the first stop and the second
+  // call in one tick — counts the stop up to the wait, not through it, so a
+  // pause past the floor stalls nothing (review pass 1). A fresh long note,
+  // the only one pending: the gate closed before its first window.
+  await sql`SELECT delete_thought(${windowNote}::uuid, NULL::jsonb)`;
+  const pausedNote = await seed(Array.from({ length: 6 }, (_, p) => `The paused ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita paused point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atPause = heldGate(2);
+  const gateStop = new AbortController();
+  let gateHard: PassStop | undefined;
+  const gateRun = runExtract({ url: URL_!, env, workers: 1, admit: atPause.admit, signal: gateStop.signal, stallFloorMs: 300, onPass: (st) => { gateHard = st; }, writer: { out: () => {}, err: () => {} } });
+  const gateWaiting = await pollUntil(async () => atPause.waiting === 1, 10_000);
+  await Bun.sleep(900);
+  gateStop.abort();
+  const gateRelease = gateHard?.();
+  await gateRelease;
+  const gateCode = await gateRun;
+  const [gateRow] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${pausedNote}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number }[];
+  assert(gateWaiting && gateRelease instanceof Promise && gateCode === 130 && gateRow?.stops === 1 && gateRow.stalled === 0 && (await statusOf(pausedNote)) === "pending",
+         `…and a hard stop there after a 900 ms wait, past a 300 ms floor, counts its stop short — the wait is not the thought's time held — so nothing is stalled (exit ${gateCode}; ${JSON.stringify(gateRow)}; ${await statusOf(pausedNote)})`);
+  // Another worker's end of the pass reaches a worker waiting at the gate:
+  // two workers, the gate open for the pass and one claim, the provider
+  // refusing that claim's call — the run ends 2 at once, the gate never
+  // opened (review pass 1). A one-call note alone in the pool, so the open
+  // worker asks the gate nothing more.
+  await sql`SELECT delete_thought(${pausedNote}::uuid, NULL::jsonb)`;
+  const refusalNote = await seed("Kenji's warmer note, which the provider refuses.");
+  const atRefusal = heldGate(2);
+  refuseCalls = 1;
+  const refusedBefore = refused;
+  const refusalAt = Date.now();
+  const refusalRun = runExtract({ url: URL_!, env, workers: 2, admit: atRefusal.admit, writer: { out: () => {}, err: () => {} } });
+  const refusalCode = await Promise.race([refusalRun, Bun.sleep(10_000).then(() => "still waiting" as const)]);
+  const refusalMs = Date.now() - refusalAt;
+  refuseCalls = 0;
+  if (refusalCode === "still waiting") { atRefusal.open(); await refusalRun; }
+  assert(refusalCode === 2 && refused === refusedBefore + 1 && refusalMs < 5000,
+         `…a worker waiting at the gate wakes when another worker's call meets the provider's refusal: the run ends 2 at once, the gate never opened (${refusalCode} after ${refusalMs} ms, ${refused - refusedBefore} refused)`);
+  await sql`SELECT delete_thought(${refusalNote}::uuid, NULL::jsonb)`;
+  // A gate that rejects with no stop, mid-thought, is the caller's error: run()
+  // rejects with it, and the thought is not recorded failed (review pass 1).
+  const brokenNote = await seed(Array.from({ length: 6 }, (_, p) => `The broken-gate ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita broke point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  let brokenAsks = 0;
+  const brokenOutcome = await runExtract({ url: URL_!, env, workers: 1, admit: () => (++brokenAsks === 3 ? Promise.reject(new Error("the gate broke")) : Promise.resolve()), writer: { out: () => {}, err: () => {} } })
+    .then((c) => `exit ${c}`, (e: Error) => e.message);
+  const brokenStatus = await statusOf(brokenNote);
+  assert(brokenOutcome === "the gate broke" && brokenStatus === "pending",
+         `…a gate that rejects with no stop before a window rejects run() with its error, the thought not recorded failed (${brokenOutcome}; ${brokenStatus})`);
+  await sql`SELECT delete_thought(${brokenNote}::uuid, NULL::jsonb)`;
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;

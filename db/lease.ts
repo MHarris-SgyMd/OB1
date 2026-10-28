@@ -307,16 +307,32 @@ export const MAX_TIMER_MS = 2147483647;
  * each window of a long thought and before each pair of a thought's
  * consolidation. Resolved, the work goes on; pending, the worker waits, its
  * claim and lease kept mid-thought and none held between thoughts; rejected
- * once the signal has aborted, the worker stops as a stop finds it there.
+ * once the signal has aborted, the worker stops as a stop finds it there. The
+ * engine's signal also aborts when the pass ends for a reason of its own —
+ * another worker's outage, the provider's refusal, a worker's throw — and a
+ * rejection before it aborts ends the pass with the caller's error.
  * The sleep scheduler closes it while its brain is live (SMD-3379 PR 1c). An
  * engine given none runs as before.
  */
 export type Admit = (signal: AbortSignal) => Promise<void>;
 
 /**
+ * A rejection of the admit gate that was no stop, carried out of a thought in
+ * hand so the worker ends the pass with the caller's error, not record the
+ * thought failed with it (SMD-3379 PR 1b-1, review pass 1).
+ */
+export class AdmitThrow extends Error {
+  constructor(readonly error: unknown) {
+    super(`the admit gate rejected: ${error instanceof Error ? error.message : String(error)}`);
+    this.name = "AdmitThrow";
+  }
+}
+
+/**
  * Wait at the admit gate: true when it let the work through, false when it
- * rejected after `signal` aborted — a stop reaching a waiting worker. Any
- * other rejection is the caller's, and is thrown.
+ * rejected after `signal` aborted — a stop reaching a waiting worker, or the
+ * pass ending for a reason of its own. Any other rejection is the caller's,
+ * and is thrown.
  */
 export async function admitted(admit: Admit, signal: AbortSignal): Promise<boolean> {
   try {
