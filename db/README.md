@@ -3435,7 +3435,7 @@ or no vector yet when the newer side is judged:
   two or more, the earlier can still be held.
 - **A backlog.** A first run or a `--switch-key` pools every thought at one
   instant, claimed in no order, so drain it before consolidating (the
-  `workers` compose profile, `deploy/README.md`, SMD-2424).
+  coordinator's `workers` pass, `deploy/README.md`, SMD-2424, SMD-3476).
 - **A failed extraction.** `--retry-failed` extracts it, but the newer
   thoughts already judged are not judged again.
 - **A failed embedding.** A candidate needs a vector; the servers' vector

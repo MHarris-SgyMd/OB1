@@ -485,10 +485,11 @@ export function malformedAlarm(answers, malformed) {
 /**
  * The coordinator recreated with `pass` named, as restartCommand gives it: the
  * parenthesis left open for what follows. Recreated, not `up -d` alone, which
- * leaves a running coordinator — and its passes — as they are.
+ * leaves a running coordinator — and its passes — as they are; with no deps,
+ * as the follower's own restart was, so the migrator is not run again.
  */
 function coordinatorUp(pass) {
-  return `podman compose -f deploy/compose.yaml up -d --force-recreate coordinator, with ${pass} in deploy/.env's OB1_PASSES and the -f files and -p the stack was started with (docker compose alike`;
+  return `podman compose -f deploy/compose.yaml up -d --no-deps --force-recreate coordinator, with ${pass} in deploy/.env's OB1_PASSES and the -f files and -p the stack was started with (docker compose alike`;
 }
 
 /**

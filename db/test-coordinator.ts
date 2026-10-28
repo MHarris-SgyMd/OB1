@@ -17,10 +17,11 @@
  * did not run, and `--require-root` makes that a failure.
  */
 
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, type Child } from "./coordinator.ts";
+import { supervise } from "./supervise.ts";
 
 let pass = 0;
 let fail = 0;
@@ -105,6 +106,25 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
 }
 
 // ---------------------------------------------------------------------------
+// A child that cannot be started — a path that is not there, as a uid the
+// runtime does not map would be — is said and tried again on the clock; the
+// supervisor never throws, so the coordinator never exits into a crash loop.
+// ---------------------------------------------------------------------------
+{
+  const said: string[] = [];
+  const s = supervise({ worker: "board-sync", cmd: ["/nonexistent/ob1-no-such-binary"], sql: null, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer: { out: (l) => said.push(l), err: (l) => said.push(l) } });
+  for (let i = 0; i < 50 && !said.some((l) => /exited 127/.test(l)); i++) await Bun.sleep(20);
+  let settled: number | string = "pending";
+  void s.done.then((c) => { settled = c; }, (e) => { settled = `threw: ${(e as Error).message}`; });
+  await Bun.sleep(50);
+  const pending = settled;
+  s.stop("SIGTERM");
+  const code = await Promise.race([s.done.catch((e) => `threw: ${(e as Error).message}`), Bun.sleep(1000).then(() => "hung")]);
+  ok(said.some((l) => /^supervise: board-sync could not be started \(/.test(l)) && said.some((l) => /^supervise: board-sync exited 127 after \d+ s; it runs again at /.test(l)) && pending === "pending" && code === 0,
+    `a child that cannot be started is said, held for its next try, and a stop ends it with 0 — never a throw (${said.join(" | ").slice(0, 200)}; then ${String(pending)}, ${String(code)})`);
+}
+
+// ---------------------------------------------------------------------------
 // compose.yaml's coordinator: every setting some child owns handed in, and
 // none it does not account for — the server's anchor, a child's, its own.
 // ---------------------------------------------------------------------------
@@ -138,6 +158,13 @@ if (!root) {
   ok(!process.argv.includes("--require-root"), "--require-root: the planted /proc check must run here, as root");
 } else {
   /** The pair, run by coordinate(): the holder's pid, uid and HOME, and what the reader got from the holder's environ. */
+  // A dump directory beneath /var/lib/ob1/ holding a dump and a link to a root-owned file, as a compromised sleep could plant.
+  const dumps = `/var/lib/ob1/test-coordinator-${process.pid}`;
+  const target = join(tmpdir(), `ob1-coordinator-target-${process.pid}`);
+  mkdirSync(dumps, { recursive: true });
+  writeFileSync(join(dumps, "a.jsonl"), "{}\n");
+  writeFileSync(target, "root's\n");
+  symlinkSync(target, join(dumps, "link"));
   const plant = async (asOwnUsers: boolean) => {
     const dir = mkdtempSync(join(tmpdir(), "ob1-coordinator-"));
     chmodSync(dir, 0o777);
@@ -145,7 +172,7 @@ if (!root) {
     const reader = join(dir, "reader.ts");
     const pidFile = join(dir, "holder.pid");
     const outFile = join(dir, "reader.out");
-    writeFileSync(holder, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ pid: process.pid, uid: process.getuid(), home: process.env.HOME, secret: "LINEAR_API_KEY" in process.env }));\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
+    writeFileSync(holder, `import { readFileSync, writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ pid: process.pid, uid: process.getuid(), home: process.env.HOME, secret: "LINEAR_API_KEY" in process.env, groups: readFileSync("/proc/self/status", "utf8").match(/^Groups:(.*)$/m)?.[1].trim() ?? null }));\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
     writeFileSync(reader, `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nwhile (!existsSync(${JSON.stringify(pidFile)})) await Bun.sleep(20);\nconst { pid } = JSON.parse(readFileSync(${JSON.stringify(pidFile)}, "utf8"));\nlet got;\ntry { got = readFileSync("/proc/" + pid + "/environ", "utf8").includes("LINEAR_API_KEY=planted-secret") ? "the secret" : "read, no secret"; } catch (e) { got = e.code; }\nwriteFileSync(${JSON.stringify(outFile)}, JSON.stringify({ got, uid: process.getuid(), secret: "LINEAR_API_KEY" in process.env }));\nsetInterval(() => {}, 1000);\nprocess.on("SIGTERM", () => process.exit(0));\n`);
     chmodSync(holder, 0o644);
     chmodSync(reader, 0o644);
@@ -154,7 +181,7 @@ if (!root) {
       { ...CHILDREN.sleep, script: reader, args: () => [], requireKey: false, digits: [] },
     ];
     const said: string[] = [];
-    const c = coordinate({ env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_PASSES: "" }, sql: null, asOwnUsers, children: planted, writer: { out: (l) => said.push(l), err: (l) => said.push(l) } });
+    const c = coordinate({ env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_PASSES: "", OB1_SLEEP_DUMP_DIR: dumps }, sql: null, asOwnUsers, children: planted, writer: { out: (l) => said.push(l), err: (l) => said.push(l) } });
     try {
       for (let i = 0; i < 200 && !existsSync(outFile); i++) await Bun.sleep(50);
       const h = existsSync(pidFile) ? JSON.parse(readFileSync(pidFile, "utf8")) : null;
@@ -172,10 +199,17 @@ if (!root) {
   ok(own.h?.uid === CHILDREN["board-sync"].uid && own.status === String(CHILDREN["board-sync"].uid) && own.r?.uid === CHILDREN.sleep.uid,
     `each child runs as its own user (holder ${own.h?.uid}, the kernel's ${own.status}; reader ${own.r?.uid})`);
   ok(own.h?.home === "/tmp/ob1-board-sync" && own.h?.secret === true && own.r?.secret === false, "each its own HOME, the secret in the holder's settings and not the reader's");
+  ok(own.h?.groups === "", `no supplementary group kept from root (Groups: '${own.h?.groups}')`);
+  ok(statSync(dumps).uid === CHILDREN.sleep.uid && statSync(join(dumps, "a.jsonl")).uid === CHILDREN.sleep.uid && statSync(target).uid === 0,
+    `the dump directory and its dump are sleep's, and a link in it is not followed — its target stays root's (dir ${statSync(dumps).uid}, dump ${statSync(join(dumps, "a.jsonl")).uid}, target ${statSync(target).uid})`);
   ok(own.r?.got === "EACCES", `the reader cannot read the holder's /proc/<pid>/environ (got ${own.r?.got ?? "no answer"})`);
   ok(own.said.some((l) => /^coordinator: runs board-sync \(uid 1101\) and sleep \(uid 1104\)$/.test(l)), `the log says who runs as whom (${own.said.find((l) => l.startsWith("coordinator: runs"))})`);
   // The mechanism dropped — both as this process's user — and the same reader gets the secret: the refusal above is the users', not /proc's.
   const shared = await plant(false);
+  // Root here may not delete in a directory it handed away (no CAP_DAC_OVERRIDE): taken back first.
+  lchownSync(dumps, 0, 0);
+  rmSync(dumps, { recursive: true, force: true });
+  rmSync(target, { force: true });
   ok(shared.h?.uid === 0 && shared.r?.uid === 0 && shared.r?.got === "the secret",
     `without users of their own the reader reads the holder's secret, so the refusal is the users' doing (got ${shared.r?.got ?? "no answer"})`);
 }

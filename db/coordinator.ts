@@ -37,12 +37,21 @@
  * Signals. Its handlers are installed before anything else. Each SIGTERM or
  * SIGINT goes on to every child, whose own rules apply (the first stops it
  * after the work in hand, the second hard); once all have ended, it exits 0.
+ * Each child is in a process group of its own, so a terminal's Ctrl-C is one
+ * signal to it, not two.
  *
- * Exit codes: 0 once stopped. It never exits on a child's behalf.
+ * Exit codes: 0 once stopped. It never exits on a child's behalf: a child it
+ * cannot start (a uid the runtime does not map, say) is said and tried again
+ * on supervise's clock.
+ *
+ * The checkout. Each child reads db/ and server-portable/ as its own user, so
+ * both must be readable by any user (a checkout made under umask 077 is not);
+ * the coordinator, root with no capability to read past a file's mode, needs
+ * the same.
  */
 
 import type { SQL } from "bun";
-import { chownSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { lchownSync, lstatSync, mkdirSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { join, resolve } from "node:path";
 import type { StampingWorker } from "./pass-stamp.ts";
 import { supervise, type Supervisor } from "./supervise.ts";
@@ -174,16 +183,47 @@ export function childHome(child: Child): string {
 /** The dump volume's root: OB1_SLEEP_DUMP_DIR is handed to sleep's user only beneath it. */
 const DUMP_ROOT = "/var/lib/ob1/";
 
-/** Hand a directory, and what it holds, to `uid`: OB1_SLEEP_DUMP_DIR, beneath DUMP_ROOT only. Said, never thrown. */
+/** What is at `path`, its own kind and not a link's target's; null when nothing is. */
+function kindAt(path: string): Stats | null {
+  try { return lstatSync(path); } catch { return null; }
+}
+
+/**
+ * Hand a directory, and the regular files in it, to `uid`: OB1_SLEEP_DUMP_DIR,
+ * beneath DUMP_ROOT only. Never through a link: root following one a child
+ * planted there would hand that child any file in the container. Said, never
+ * thrown.
+ */
 function handDumpDir(dir: string | undefined, uid: number, err: (line: string) => void): void {
   if (!dir) return;
   const path = resolve(dir);
-  if (!path.startsWith(DUMP_ROOT) || !existsSync(path) || !statSync(path).isDirectory()) return;
+  const at = kindAt(path);
+  if (!path.startsWith(DUMP_ROOT) || at === null || !at.isDirectory()) return;
   try {
-    chownSync(path, uid, uid);
-    for (const entry of readdirSync(path)) chownSync(join(path, entry), uid, uid);
+    lchownSync(path, uid, uid);
+    for (const entry of readdirSync(path)) {
+      const file = join(path, entry);
+      if (kindAt(file)?.isFile()) lchownSync(file, uid, uid);
+    }
   } catch (e) {
     err(`coordinator: could not hand ${path} to sleep's user ${uid} (${(e as Error).message}) — the scheduler says if it cannot write there`);
+  }
+}
+
+/**
+ * Make `home` a directory of `uid`'s own, mode 0700: anything else there — a
+ * file, a link — removed first, never followed. False, said, when it cannot.
+ */
+function makeHome(home: string, uid: number, err: (line: string) => void): boolean {
+  try {
+    const at = kindAt(home);
+    if (at !== null && !at.isDirectory()) rmSync(home, { force: true });
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    lchownSync(home, uid, uid);
+    return true;
+  } catch (e) {
+    err(`coordinator: could not make ${home} uid ${uid}'s own (${(e as Error).message}) — the pass runs with HOME=/tmp`);
+    return false;
   }
 }
 
@@ -212,9 +252,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     const extra: Record<string, string> = {};
     if (own) {
       const home = childHome(child);
-      mkdirSync(home, { recursive: true, mode: 0o700 });
-      chownSync(home, child.uid, child.uid);
-      extra.HOME = home;
+      extra.HOME = makeHome(home, child.uid, writer.err) ? home : "/tmp";
       if (child.name === "sleep") handDumpDir(env.OB1_SLEEP_DUMP_DIR, child.uid, writer.err);
     }
     const cenv = childEnv(child, env, extra);

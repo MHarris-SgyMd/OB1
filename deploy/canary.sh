@@ -1537,10 +1537,11 @@ fi
 # stopped, is stopped within the longest grace and removed, said, as the
 # retired `server` is above; which ones were running is kept for OB1_PASSES.
 RETIRED_RAN=""
+RETIRED_IDLE=""
 for retired_svc in sleep board-sync extract consolidate; do
   retired_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$retired_svc")"
   [ -n "$retired_cts" ] || continue
-  [ -z "$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$retired_svc")" ] || RETIRED_RAN="$RETIRED_RAN $retired_svc"
+  if [ -n "$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$retired_svc")" ]; then RETIRED_RAN="$RETIRED_RAN $retired_svc"; else RETIRED_IDLE="$RETIRED_IDLE $retired_svc"; fi
   printf '%s\n' "$retired_cts" | xargs "$RUNTIME" stop -t 120 >/dev/null 2>&1 || true
   printf '%s\n' "$retired_cts" | xargs "$RUNTIME" rm -f >/dev/null
   say "the canary's $retired_svc container, retired in SMD-3476 (the coordinator runs its pass), removed"
@@ -1548,9 +1549,17 @@ done
 # Once, for a canary from before the coordinator: the passes its retired
 # containers were running, written to its env file where it names none, so
 # the coordinator runs them on (deploy/env-file.ts, the value on stdin).
+# A stopped one is not carried — it may be stopped on purpose — but said, so its pass is not lost unseen.
+[ -z "$RETIRED_IDLE" ] || say "note: the canary's${RETIRED_IDLE} container(s) were stopped, so their passes are not carried into OB1_PASSES: name them in $CANARY_ENV's OB1_PASSES to run them"
 if [ -n "$RETIRED_RAN" ]; then
   COORD_PENDING=1
-  if [ -z "$(env_file value "$CANARY_ENV" OB1_PASSES | tr -d '[:space:]')" ]; then
+  # Read first, a failed read stopping the run: in the test's own substitution it would read as none and overwrite the line.
+  passes_now=""
+  if ! passes_now="$(env_file value "$CANARY_ENV" OB1_PASSES)"; then
+    echo "could not read OB1_PASSES from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
+    exit 1
+  fi
+  if [ -z "$(printf '%s' "$passes_now" | tr -d '[:space:]')" ]; then
     carried=""
     case " $RETIRED_RAN " in *" sleep "*) carried="sleep" ;; *" extract "*|*" consolidate "*) carried="workers" ;; esac
     case " $RETIRED_RAN " in *" board-sync "*) carried="${carried:+$carried,}board-sync" ;; esac
@@ -1837,7 +1846,15 @@ case ",$CANARY_PASSES," in
   *,sleep,*) HELD_PASS="sleep" ;;
   *,workers,*) HELD_PASS="workers" ;;
 esac
-if [ -n "$HELD_PASS" ] && [ -n "$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)" ]; then HELD_PASS=""; fi
+if [ -n "$HELD_PASS" ]; then
+  worker_key=""
+  if ! worker_key="$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)"; then
+    echo "could not read OB1_WORKER_KEY from $CANARY_ENV through compose, so whether the coordinator holds $HELD_PASS is unknown: fix the file, then re-run $RERUN." >&2
+    exit 1
+  fi
+  [ -z "$worker_key" ] || HELD_PASS=""
+  worker_key=""
+fi
 if [ -n "$HELD_PASS" ]; then
   ADVISED=1
   say "canary $HELD_PASS held by the coordinator, running nothing: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then re-run $RERUN"

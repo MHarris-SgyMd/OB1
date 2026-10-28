@@ -73,7 +73,7 @@
  *  - a failed extraction or embedding (a candidate needs a vector), or an
  *    import dated older than thoughts already judged, which miss their
  *    pairs with thoughts judged before they were repaired, however this runs.
- * (The `workers` compose profile, SMD-2424, deploy/README.md.) A thought's
+ * (The coordinator's `workers` pass, SMD-2424, SMD-3476, deploy/README.md.) A thought's
  * claim row is terminal once its pairs are judged, so an EDIT does not
  * re-judge it (016's trigger does re-extract it); clear the key's rows to
  * start over, and a pair already proposed is skipped either way.

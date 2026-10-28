@@ -216,17 +216,26 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     while (!stopped.signal.aborted) {
       const began = new Date();
       const piped = opts.label !== undefined;
-      child = Bun.spawn([...opts.cmd], {
-        env: env as Record<string, string>,
-        ...(opts.uid === undefined ? {} : { uid: opts.uid }),
-        ...(opts.gid === undefined ? {} : { gid: opts.gid }),
-        stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
-      });
-      const drained = piped
-        ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
-        : Promise.resolve();
-      const code = await child.exited;
-      await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
+      let code: number | null;
+      try {
+        // Its own process group: a terminal's Ctrl-C reaches this process alone, which passes one signal on, not a second.
+        child = Bun.spawn([...opts.cmd], {
+          env: env as Record<string, string>,
+          ...(opts.uid === undefined ? {} : { uid: opts.uid }),
+          ...(opts.gid === undefined ? {} : { gid: opts.gid }),
+          stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
+          detached: true,
+        });
+        const drained = piped
+          ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
+          : Promise.resolve();
+        code = await child.exited;
+        await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
+      } catch (e) {
+        // Never this process's exit: under `unless-stopped` that is the crash loop again (SMD-3214). An end of the child, run again on the clock.
+        err(`supervise: ${opts.worker} could not be started (${(e as Error).message})${opts.uid === undefined ? "" : ` as uid ${opts.uid}`}`);
+        code = 127;
+      }
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();

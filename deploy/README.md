@@ -1909,8 +1909,8 @@ or its supervisor holds it — a refusal, which it tries again on its own, the
 row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
 board, an interval or findings cap it does not take, an endpoint the egress
 policy refuses wholesale, each with its remedy (SMD-3214) — and once the
-heartbeat is older than three intervals: the coordinator stopped or removed. It names `up -d --force-recreate
-coordinator`, with the `-f` files and `-p` the stack was started with. Just after `up`, the server's
+heartbeat is older than three intervals: the coordinator stopped or removed. It names `up -d --no-deps
+--force-recreate coordinator`, with the `-f` files and `-p` the stack was started with. Just after `up`, the server's
 preflight can read the row a `down` left before board-sync's first pass stamps
 it; such a warning in the start-up log clears on the next `bun preflight.ts`.
 `db/README.md`, "Long-running workers report their liveness", has the row's
@@ -2630,13 +2630,17 @@ accepted: it keeps, as a plain `up` does, and is refused on a canary with no
 database to keep (no volume, changing nothing; or one whose database holds
 no relations), where a plain `up` would stand one up. Either form
 builds its images while the canary serves, then stops its writers before its
-Postgres is touched, its servers, a running `sleep` worker and a running
-board-sync, and brings the worker back on the new build once the smoke has
-passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
-`up` says how to start it, and exits 1), and board-sync as step 5 below says.
-A run that fails after the stop says what it left stopped and how to go on.
-A running writer of another profile (the workers, the import runner) is
-refused before anything changes: stop it first.
+Postgres is touched, its servers and its coordinator, and removes any
+container of the services the coordinator replaced (SMD-3476). Once the smoke
+has passed it recreates the coordinator on the new build, running the passes
+its env file's `OB1_PASSES` names (the canary's own, never stable's), board-sync
+as step 5 below says; a `sleep` or `workers` pass with no `OB1_WORKER_KEY` in
+the file is held, and `up` says so and exits 1. The first `up` after the
+coordinator came writes into the file the passes its old running containers
+ran, where it names none. A run that fails after the stop says what it left
+stopped and how to go on. A running writer of another profile (the import
+runner, the database monitor) is refused before anything changes: stop it
+first.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
 `open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
@@ -2813,11 +2817,11 @@ open-brain-canary`), and `down` leaves it alone. That same `up` takes
 stable's keys out of the file and mints the canary's own (SMD-2874 PR 2): a
 key of the canary's own in `MCP_ACCESS_KEYS` is kept, as is an
 `OB1_WORKER_KEY` whose hash is the canary's (one of stable's is cleared), so a
-canary sleep worker keeps its key; `--connect` registers the connector with
+canary's sleep pass keeps its key; `--connect` registers the connector with
 the new key, and an `up` without it says the connector holds one the canary
 no longer takes. `COMPOSE_PROFILES` becomes `""`: a profile's service the
-canary runs (its sleep scheduler, say) is started by naming the profile on
-the command line, as it always was beside canary.sh's empty one.
+canary runs is started by naming the profile on the command line, as it
+always was beside canary.sh's empty one; its passes are its `OB1_PASSES`.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
@@ -2915,13 +2919,13 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke.
-5. It (re)starts the canary's board-sync on the new build whenever the
-   canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
+5. Its coordinator runs board-sync on the new build when the canary's env
+   file's `OB1_PASSES` names it and the file holds a `LINEAR_API_KEY` of its
+   own (SMD-3312, SMD-3476). A canary
    upgraded in place (a plain `up`) is never refreshed, and a refresh was
    what brought it stable's ticket rows, so without its own board-sync its
-   copy of the board stays as it was at its last refresh. A running
-   board-sync stops with the other writers before the canary's Postgres is
-   touched (3), as the sleep worker does.
+   copy of the board stays as it was at its last refresh. The coordinator
+   stops with the other writers before the canary's Postgres is touched (3).
    - **The key is the canary's alone:** a Linear personal API key made for it
      with Read access alone, one line in its env file (`.env.canary.local`
      beside stable's for open-brain-canary):
@@ -2932,8 +2936,8 @@ stable is redeployed:
 
      Never stable's: a personal key can write unless it was made read-only,
      and board-sync runs the checkout's `db/` (an unreleased build's, on the
-     canary; keep the tree `up` ran from while the canary runs it, as the
-     sleep worker's). **Making the key read-only is what keeps the canary off
+     canary; keep the tree `up` ran from while the canary runs it, as for
+     every pass). **Making the key read-only is what keeps the canary off
      the board's writes**; canary.sh cannot tell a key's access, and what it
      checks guards against accidents, not against a write key it has never
      seen:
@@ -2953,21 +2957,21 @@ stable is redeployed:
      makes besides.
    - **Turning it on** in a canary that holds rows of its own: set the file's
      `LINEAR_API_KEY` line (one line; a clearing leaves it as
-     `LINEAR_API_KEY=`, to fill in), then `up` (`up --refresh` would replace
+     `LINEAR_API_KEY=`, to fill in) and name `board-sync` in its
+     `OB1_PASSES`, then `up` (`up --refresh` would replace
      those rows with stable's). **Checking it syncs:** the
      canary's `brain_info` shows a `heartbeat:board-sync` alive and a
      board-sync watermark that keeps up with stable's.
-   - **Turning it off:** empty the line (or take it out) and re-run
-     `up`: every board-sync container of the canary's is removed,
-     said. With no key and none standing, the run says the canary runs no
-     board-sync.
+   - **Turning it off:** take `board-sync` out of `OB1_PASSES`, or empty
+     the key's line, and re-run `up`: the coordinator comes back without it,
+     said, and the run says the canary runs no board-sync.
 6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
 
-`down` removes the canary's containers, its sleep worker and board-sync
-among them, and its own networks. It
+`down` removes the canary's containers, its coordinator among them, and its
+own networks. It
 deregisters the connector only when `claude` has it at user scope and at a
 URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 `localhost`), with any path and any `?key=`. A connector at stable's own
