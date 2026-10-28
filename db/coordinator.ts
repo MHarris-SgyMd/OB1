@@ -36,7 +36,8 @@
  *
  * Signals. Its handlers are installed before anything else. Each SIGTERM or
  * SIGINT goes on to every child, whose own rules apply (the first stops it
- * after the work in hand, the second hard); once all have ended, it exits 0.
+ * after the work in hand, the second hard), and a SIGHUP (a checkout run's
+ * terminal closed) goes on as a SIGTERM; once all have ended, it exits 0.
  * Each child is in a process group of its own, so a terminal's Ctrl-C is one
  * signal to it, not two.
  *
@@ -44,10 +45,17 @@
  * cannot start (a uid the runtime does not map, say) is said and tried again
  * on supervise's clock.
  *
- * The checkout. Each child reads db/ and server-portable/ as its own user, so
- * both must be readable by any user (a checkout made under umask 077 is not);
- * the coordinator, root with no capability to read past a file's mode, needs
- * the same.
+ * The code. In the stack it runs from the server image (deploy/compose.yaml,
+ * .dockerignore's allow-list), so the passes are the release's own and no
+ * checkout is mounted; from a checkout, the checkout's.
+ *
+ * A one-off. `coordinator.ts run <extract|consolidate|sleep|board-sync>
+ * [args…]` runs that pass's script once with `args` in place of the pass's
+ * own, as its user with only its settings, as the coordinator would — a
+ * `--status`, a `--switch-key`, a backlog, a `--accept` — and exits with its
+ * code (`compose run --rm --no-deps coordinator db/coordinator.ts run extract
+ * --status`). A key given to that one run (`-e OB1_WORKER_KEY`) is the one it
+ * names itself by.
  */
 
 import type { SQL } from "bun";
@@ -258,7 +266,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     const cenv = childEnv(child, env, extra);
     return supervise({
       worker: child.worker,
-      cmd: [process.execPath, "--no-env-file", resolve(HERE, child.script), ...child.args(cenv)],
+      cmd: [process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...child.args(cenv)],
       ...(own ? { uid: child.uid, gid: child.uid } : {}),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
@@ -281,13 +289,41 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   };
 }
 
+const USAGE = `coordinator.ts takes no arguments — OB1_PASSES names the passes it runs (${PASSES.join(", ")}) — or \`run <${Object.keys(CHILDREN).join("|")}> [args…]\`, one run of that pass's script as its user`;
+
+/** One run of a pass's script, `args` in place of its own, as its user with its settings; settles with its exit code. */
+export async function runOnce(child: Child, args: string[], opts: { env?: Record<string, string | undefined>; onSignal?: (stop: (signal: "SIGTERM" | "SIGINT") => void) => void } = {}): Promise<number> {
+  const own = process.getuid?.() === 0;
+  const extra: Record<string, string> = own ? { HOME: makeHome(childHome(child), child.uid, (l) => console.error(l)) ? childHome(child) : "/tmp" } : {};
+  const p = Bun.spawn([process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...args], {
+    env: childEnv(child, opts.env ?? process.env, extra),
+    ...(own ? { uid: child.uid, gid: child.uid } : {}),
+    stdio: ["inherit", "inherit", "inherit"],
+    // Its own process group, as a coordinator's child: a terminal's Ctrl-C is the one signal passed on.
+    detached: true,
+  });
+  opts.onSignal?.((signal) => { if (p.exitCode === null && p.signalCode === null) p.kill(signal); });
+  return (await p.exited) ?? 1;
+}
+
 if (import.meta.main) {
   // The handlers first: as a container's first process, a stop before them is ignored until the grace runs out.
   const heard: ("SIGTERM" | "SIGINT")[] = [];
   let stop: (signal: "SIGTERM" | "SIGINT") => void = (signal) => void heard.push(signal);
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => stop(signal));
-  if (process.argv.length > 2) {
-    console.error("coordinator.ts takes no arguments: OB1_PASSES names the passes it runs (sleep, workers, board-sync)");
+  // A checkout run's terminal closed: its children, in groups of their own, would not hear the hangup.
+  process.on("SIGHUP", () => stop("SIGTERM"));
+  const [verb, name, ...rest] = process.argv.slice(2);
+  if (verb === "run") {
+    const child = name !== undefined && Object.hasOwn(CHILDREN, name) ? CHILDREN[name as ChildName] : undefined;
+    if (child === undefined) {
+      console.error(USAGE);
+      process.exit(2);
+    }
+    process.exit(await runOnce(child, rest, { onSignal: (s) => { stop = s; for (const signal of heard) s(signal); } }));
+  }
+  if (verb !== undefined) {
+    console.error(USAGE);
     process.exit(2);
   }
   const begin = (sql: SQL | null): Promise<number> => {

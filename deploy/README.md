@@ -1980,18 +1980,19 @@ extraction runs alone first, a one-off that does the backlog and exits, and
 `workers` is named once the backlog is done ("Extraction alone on a
 backlog", below). Mint the worker key, append the line keygen prints to
 `MCP_ACCESS_KEYS` (comma-separated), set the raw key as `OB1_WORKER_KEY` in
-`deploy/.env`, and run extraction, detached, in the coordinator's image and
-environment:
+`deploy/.env`, and run extraction, detached, as a one-off of the
+coordinator's — the extract pass's script, as its user with its settings
+(`db/coordinator.ts run <pass> [args…]`):
 
 ```bash
 (cd server-portable && bun keygen.ts --name workers --scope capture)
-podman compose -f deploy/compose.yaml run -d --rm --no-deps coordinator bun db/extract-entities.ts --workers 1
+podman compose -f deploy/compose.yaml run -d --rm --no-deps coordinator db/coordinator.ts run extract --workers 1
 ```
 
 Then read where it stands, as often as you like:
 
 ```bash
-podman compose -f deploy/compose.yaml run --rm --no-deps coordinator bun db/extract-entities.ts --status
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --status
 ```
 
 Its `status:` line counts the pool. The backlog is done when it reads `0 in
@@ -2002,7 +2003,7 @@ those now, while no newer thought has been judged without them, and wait for
 the line again:
 
 ```bash
-podman compose -f deploy/compose.yaml run --rm --no-deps coordinator bun db/extract-entities.ts --retry-failed --workers 1
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --retry-failed --workers 1
 ```
 
 Then name `workers` in `OB1_PASSES` in `deploy/.env` and recreate the
@@ -2032,14 +2033,11 @@ them with the rest: the coordinator is one of the stack's default services.
   or `--workers`. Everything else is the server's environment: the model, the
   endpoints, the egress policy, the extraction window and the escalation
   model.
-- **Code.** The coordinator runs this checkout's `db/` and `server-portable/`,
-  mounted read-only; neither release image carries the passes (SMD-2601).
-  So the passes need a checkout, and the checkout should
-  be at the release the stack runs: a newer one runs newer worker code
-  against an older schema, and the workers do not check the schema's version.
-  The mount is the checkout compose was run from, so run it from one that
-  stays (not a worktree you will remove). A changed checkout reaches a
-  follower when it is restarted — any restart, its supervisor's included.
+- **Code.** The coordinator runs the server image, which carries `db/`'s
+  passes since SMD-3476, so they are the release's own and a stack with no
+  checkout runs them too. A changed `db/` reaches them when the image is
+  rebuilt and the coordinator recreated (`up -d --build`), as the servers'
+  code does.
 - **Stopping.** `stop coordinator` lets each worker finish the thought it
   holds: the coordinator passes the signal on to every pass. Its grace period
   is 120 s (a thought's extraction took 121 s at p90 on the stable brain).
@@ -2086,7 +2084,7 @@ as the first start does:
 ```bash
 podman compose -f deploy/compose.yaml stop coordinator
 # now edit deploy/.env, or move the checkout
-podman compose -f deploy/compose.yaml run --rm --no-deps coordinator bun db/extract-entities.ts --switch-key --workers 1
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --switch-key --workers 1
 ```
 
 Check that it exited 0, read `--status` until the done line, and retry any
@@ -2153,7 +2151,7 @@ postgres psql -U postgres openbrain -c "…"` (`db/README.md`, "Consolidation:
 proposing which thoughts supersede which").
 
 ```bash
-podman compose -f deploy/compose.yaml run --rm --no-deps coordinator bun db/consolidate.ts --list
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run consolidate --list
 ```
 
 An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
@@ -2164,7 +2162,7 @@ bare `-e` passes it into the container without putting it on the command
 line:
 
 ```bash
-OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml run --rm --no-deps -e OB1_WORKER_KEY coordinator bun db/consolidate.ts --accept <id> --note "…"
+OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml run --rm --no-deps -e OB1_WORKER_KEY coordinator db/coordinator.ts run consolidate --accept <id> --note "…"
 ```
 
 The run prints `agent: <name>` first; check it names your key. Do not
@@ -2935,9 +2933,8 @@ stable is redeployed:
      ```
 
      Never stable's: a personal key can write unless it was made read-only,
-     and board-sync runs the checkout's `db/` (an unreleased build's, on the
-     canary; keep the tree `up` ran from while the canary runs it, as for
-     every pass). **Making the key read-only is what keeps the canary off
+     and board-sync runs an unreleased build's `db/` on the canary (the
+     canary's server image, built from the tree `up` ran from). **Making the key read-only is what keeps the canary off
      the board's writes**; canary.sh cannot tell a key's access, and what it
      checks guards against accidents, not against a write key it has never
      seen:

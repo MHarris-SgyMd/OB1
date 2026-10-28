@@ -20,7 +20,7 @@
 import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, type Child } from "./coordinator.ts";
+import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, runOnce, type Child } from "./coordinator.ts";
 import { supervise } from "./supervise.ts";
 
 let pass = 0;
@@ -125,6 +125,21 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
 }
 
 // ---------------------------------------------------------------------------
+// The CLI: no argument but `run <pass> [args…]`, which runs that pass's script
+// once with those args and exits with its code; anything else is usage (2).
+// ---------------------------------------------------------------------------
+{
+  const cli = (...args: string[]) => Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "coordinator.ts"), ...args], { env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+  const usage = cli("--passes", "sleep");
+  const unknown = cli("run", "reembed");
+  const help = cli("run", "sleep", "--help");
+  ok(usage.exitCode === 2 && /takes no arguments — OB1_PASSES names the passes it runs/.test(usage.stderr.toString()) && unknown.exitCode === 2,
+    `an argument other than run, or run of no pass, is usage (2) (${usage.exitCode}, ${unknown.exitCode})`);
+  ok(help.exitCode === 0 && /^usage: bun db\/sleep\.ts/m.test(help.stdout.toString() + help.stderr.toString()),
+    `run sleep --help runs the scheduler's own script with those args, and exits with its code (${help.exitCode})`);
+}
+
+// ---------------------------------------------------------------------------
 // compose.yaml's coordinator: every setting some child owns handed in, and
 // none it does not account for — the server's anchor, a child's, its own.
 // ---------------------------------------------------------------------------
@@ -144,7 +159,29 @@ if (!existsSync(composePath)) {
   ok(server.length > 20 && keys.length > server.length, `the server's anchor read (${server.length} settings), the coordinator's environment holding it and more (${keys.length})`);
   ok(unaccounted.length === 0, `every setting the coordinator is handed is the server's, a child's or its own (unaccounted: ${unaccounted.join(", ") || "none"})`);
   ok(missing.length === 0, `every setting a child owns is handed to the coordinator (missing: ${missing.join(", ") || "none"})`);
-  ok(JSON.stringify(coordinator?.command) === JSON.stringify(["bun", "db/coordinator.ts"]) && coordinator?.profiles === undefined, "its command is the coordinator, and it is a default service");
+  ok(JSON.stringify(coordinator?.command) === JSON.stringify(["db/coordinator.ts"]) && coordinator?.profiles === undefined, "its command is the coordinator, and it is a default service");
+
+  // The image carries what the passes import: every db/ module in their graph is
+  // a top-level file .dockerignore lets into the server image's context, which
+  // its Dockerfile copies whole (db/*.ts, db/*.mjs, db/*.d.mts).
+  const out = mkdtempSync(join(tmpdir(), "ob1-coordinator-graph-"));
+  try {
+    const entries = ["coordinator.ts", ...new Set(Object.values(CHILDREN).map((c) => c.script))].map((f) => join(import.meta.dir, f));
+    const built = Bun.spawnSync([process.execPath, "build", ...entries, "--target", "bun", "--packages", "external", "--outdir", out, `--metafile=${join(out, "meta.json")}`], { cwd: join(import.meta.dir, ".."), stdout: "ignore", stderr: "pipe" });
+    const inputs = built.exitCode === 0 ? Object.keys(JSON.parse(readFileSync(join(out, "meta.json"), "utf8")).inputs as Record<string, unknown>) : [];
+    const dbFiles = inputs.filter((f) => f.startsWith("db/"));
+    const rules = readFileSync(join(import.meta.dir, "../.dockerignore"), "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\//g, "(?:.*/)?").replace(/\*/g, "[^/]*")}$`);
+    const kept = (file: string) => rules.reduce((keep, rule) => (rule.startsWith("!") ? (glob(rule.slice(1)).test(file) ? true : keep) : glob(rule).test(file) ? false : keep), true);
+    const dockerfile = readFileSync(join(import.meta.dir, "../server-portable/Dockerfile"), "utf8");
+    const missing = dbFiles.filter((f) => f.split("/").length !== 2 || !kept(f));
+    ok(built.exitCode === 0 && dbFiles.length >= 15 && dbFiles.includes("db/sleep.ts") && dbFiles.includes("db/supervise.ts"), `the passes' import graph read (${dbFiles.length} db/ modules${built.exitCode === 0 ? "" : `; bun build: ${built.stderr.toString().slice(0, 200)}`})`);
+    ok(missing.length === 0, `every db/ module the passes import reaches the server image: .dockerignore lets it in (missing: ${missing.join(", ") || "none"})`);
+    ok(/^COPY db\/\*\.ts db\/\*\.mjs db\/\*\.d\.mts \/app\/db\/$/m.test(dockerfile), "the server image's Dockerfile copies db/'s top-level modules");
+    ok(!kept("db/test-coordinator.ts") && !kept("db/test-live.ts"), "…and the suites stay out of it (the guard's teeth: the rules do exclude)");
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
   ok(!["sleep", "extract", "consolidate", "board-sync"].some((s) => s in compose.services), "the four services it replaced are gone");
 }
 
@@ -204,6 +241,18 @@ if (!root) {
     `the dump directory and its dump are sleep's, and a link in it is not followed — its target stays root's (dir ${statSync(dumps).uid}, dump ${statSync(join(dumps, "a.jsonl")).uid}, target ${statSync(target).uid})`);
   ok(own.r?.got === "EACCES", `the reader cannot read the holder's /proc/<pid>/environ (got ${own.r?.got ?? "no answer"})`);
   ok(own.said.some((l) => /^coordinator: runs board-sync \(uid 1101\) and sleep \(uid 1104\)$/.test(l)), `the log says who runs as whom (${own.said.find((l) => l.startsWith("coordinator: runs"))})`);
+  // A one-off as root runs as the pass's own user, with its settings alone.
+  const probeDir = mkdtempSync(join(tmpdir(), "ob1-coordinator-once-"));
+  chmodSync(probeDir, 0o777);
+  const probe = join(probeDir, "probe.ts");
+  writeFileSync(probe, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(probeDir, "seen.json"))}, JSON.stringify({ uid: process.getuid(), args: process.argv.slice(2), linear: "LINEAR_API_KEY" in process.env, worker: process.env.OB1_WORKER_KEY ?? null, home: process.env.HOME }));\nprocess.exit(3);\n`);
+  chmodSync(probe, 0o644);
+  const onceCode = await runOnce({ ...CHILDREN.extract, script: probe }, ["--status"], { env: { ...process.env, LINEAR_API_KEY: "planted-secret", OB1_WORKER_KEY: "given-for-this-run" } });
+  const seen = existsSync(join(probeDir, "seen.json")) ? JSON.parse(readFileSync(join(probeDir, "seen.json"), "utf8")) : null;
+  rmSync(probeDir, { recursive: true, force: true });
+  ok(onceCode === 3 && seen?.uid === CHILDREN.extract.uid && JSON.stringify(seen?.args) === JSON.stringify(["--status"]) && seen?.linear === false && seen?.worker === "given-for-this-run" && seen?.home === "/tmp/ob1-extract",
+    `a one-off runs as the pass's user, with its args and its settings alone — the worker key given it, no Linear key — and exits with its code (${onceCode}, ${JSON.stringify(seen)})`);
+
   // The mechanism dropped — both as this process's user — and the same reader gets the secret: the refusal above is the users', not /proc's.
   const shared = await plant(false);
   // Root here may not delete in a directory it handed away (no CAP_DAC_OVERRIDE): taken back first.

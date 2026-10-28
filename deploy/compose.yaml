@@ -1402,20 +1402,25 @@ services:
   # own is run again after 1, 2, 4, 8, then every 15 minutes, its heartbeat
   # ended with when, so preflight says it is held, not stopped.
   #
-  # Code. Mounted read-only: db/ and server-portable/, the passes' whole
-  # import surface — NOT the checkout, whose deploy/.env and evals/.env
-  # would otherwise sit on the tools' own `.env` search path inside the
-  # container. Neither release image carries the passes (SMD-2601), so this
-  # runs the checkout's code, which should be at the release the stack runs.
-  # Like the migrator it needs no `bun install`.
+  # Code. The server image, which since SMD-3476 carries db/coordinator.ts
+  # and the passes' import graph (.dockerignore's allow-list, held by
+  # db/test-coordinator.ts): one build with the servers, so the passes are the
+  # release's own — pinned by the release overlay as the servers are — and a
+  # stack needs no checkout to run them (SMD-2601). A changed db/ reaches them
+  # with the image's rebuild and the coordinator's recreate (`up -d --build`).
+  # It mounts no checkout, so no deploy/.env sits on a tool's `.env` path.
   #
   # The model knobs are the server's, by anchor; the egress gate applies to
   # every pass's calls as to a capture's: with the provider on the host,
   # deploy/.env carries OB1_LLM_LOCAL=1.
   coordinator:
-    image: oven/bun:1.4.3-alpine
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    entrypoint: ["bun", "--no-install"]
+    command: ["db/coordinator.ts"]
     working_dir: /app
-    # As root, so it can run each child as its own user — and with no other
+    # As root (the image's user is bun), so it can run each child as its own
+    # user — and with no other
     # capability: to become each, signal each, and hand each its HOME and
     # sleep the dump volume. No child keeps one. bun is not PID 1 (SMD-2666),
     # and the init reaps.
@@ -1423,9 +1428,8 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]
+    user: "0:0"
     volumes:
-      - ../db:/app/db:ro
-      - ../server-portable:/app/server-portable:ro
       - sleep-dumps:/var/lib/ob1/sleep-dumps
     environment:
       <<: *server-env
@@ -1451,13 +1455,17 @@ services:
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
       OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
-    command: ["bun", "db/coordinator.ts"]
     # The server's host alias (SMD-1875): the passes dial OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
     # Postgres on `data`; the model provider and Linear's API on `egress`
     # (SMD-2583).
     networks: [data, egress]
+    # The server image's HEALTHCHECK asks :8000/health, which this serves
+    # not: off, or Docker would mark it unhealthy and fail every `up --wait`
+    # (podman's OCI builds drop the instruction, so it went unseen there).
+    healthcheck:
+      disable: true
     # A stop goes on to every child: the first SIGTERM stops each after the
     # work in hand. Extraction's p90 on the stable brain is 121 s
     # (2026-10-05), and a thought still in hand at the kill is not lost: its
@@ -1468,6 +1476,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # The REST core builds the image it runs, as the MCP server's and the
+      # GUI's wait on it.
+      api:
+        condition: service_started
     # `unless-stopped`, so a reboot brings it back with every child it runs
     # (SMD-3214): neither runtime starts an `on-failure` container at boot,
     # and it never exits on a child's behalf, so the restart cannot loop.

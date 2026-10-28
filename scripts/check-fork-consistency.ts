@@ -403,7 +403,7 @@
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
  *      their database); and no service runs a db/ follower but as a child
- *      of the coordinator, whose command is `bun db/coordinator.ts` (SMD-3214:
+ *      of the coordinator, whose command is `db/coordinator.ts` (SMD-3214:
  *      as `on-failure:3` the followers stayed down after every reboot;
  *      SMD-3476)
  *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
@@ -8233,10 +8233,10 @@ const CONFINEMENT: Record<string, Mapping> = {
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
 /** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. The coordinator's `sleep-dumps` is a named volume of the engine's own, written only when OB1_SLEEP_DUMP_DIR hands the scheduler --dump-dir (SMD-3203). */
 const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null, "lgtm-data": null, "sleep-dumps": null };
-const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  coordinator: [...CHECKOUT_MODULES, "sleep-dumps:/var/lib/ob1/sleep-dumps"],
+  // The coordinator runs the server image (SMD-3476): the dump volume alone, no checkout.
+  coordinator: ["sleep-dumps:/var/lib/ob1/sleep-dumps"],
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],
@@ -9221,8 +9221,8 @@ function restartGapsIn(text: string, held: Record<string, string>): [service: st
   return gaps;
 }
 const FOLLOWER_SCRIPT = /\bdb\/(sleep|extract-entities|consolidate|sync-linear)\.ts\b/;
-/** The coordinator's command, exactly: OB1_PASSES, not its argv, says what it runs. */
-const COORDINATOR_COMMAND = ["bun", "db/coordinator.ts"];
+/** The coordinator's command, exactly, under the server image's `bun --no-install`: OB1_PASSES, not its argv, says what it runs. */
+const COORDINATOR_COMMAND = ["db/coordinator.ts"];
 /**
  * Where a compose file runs a db/ follower other than as the coordinator's
  * child (SMD-3214, SMD-3476): no command names one, and the `coordinator`
@@ -9243,7 +9243,7 @@ function supervisorGapsIn(text: string): [service: string | null, detail: string
   }
   return gaps;
 }
-const SUPERVISED = `services:\n  coordinator:\n    command: ["bun", "db/coordinator.ts"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
+const SUPERVISED = `services:\n  coordinator:\n    command: ["db/coordinator.ts"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
 /** [what, text, the services (null = the file) the rule reports]. */
 const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
   ["the coordinator, beside a service that runs no follower", SUPERVISED, []],
@@ -9251,8 +9251,8 @@ const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
   ["a follower as the whole command", `${SUPERVISED}  board-sync:\n    command: ["bun", "db/sync-linear.ts", "--loop"]\n`, ["board-sync"]],
   ["a follower in a string command", `${SUPERVISED}  consolidate:\n    command: bun db/consolidate.ts --follow\n`, ["consolidate"]],
   ["a supervisor of before SMD-3476, a service of its own", `${SUPERVISED}  extract:\n    command: ["bun", "db/supervise.ts", "--worker", "extract", "--run", "exec bun db/extract-entities.ts --follow"]\n`, ["extract"]],
-  ["the coordinator handed arguments", SUPERVISED.replace(`["bun", "db/coordinator.ts"]`, `["bun", "db/coordinator.ts", "--passes", "sleep"]`), ["coordinator"]],
-  ["the coordinator with no command", SUPERVISED.replace(`    command: ["bun", "db/coordinator.ts"]\n`, "    image: x\n"), ["coordinator"]],
+  ["the coordinator handed arguments", SUPERVISED.replace(`["db/coordinator.ts"]`, `["db/coordinator.ts", "--passes", "sleep"]`), ["coordinator"]],
+  ["the coordinator with no command", SUPERVISED.replace(`    command: ["db/coordinator.ts"]\n`, "    image: x\n"), ["coordinator"]],
 ];
 const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
 const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };

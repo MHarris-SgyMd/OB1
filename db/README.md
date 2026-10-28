@@ -3881,7 +3881,7 @@ move from the `workers` pass and the dump's volume):
 podman compose -f deploy/compose.yaml up -d coordinator
 ```
 
-The coordinator mounts the checkout and hands the scheduler the server's
+The coordinator runs it from the server image and hands it the server's
 model settings, `MCP_ACCESS_KEYS`, the owner's `DATABASE_URL` and
 `OB1_WORKER_KEY`, and holds it, never started, without the key. Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
@@ -4312,8 +4312,8 @@ Captures are real writes:
   its own traffic (SMD-3034). Stop the other brain's sleep for the run
   (`podman compose -p <project> stop coordinator`, and start it after).
   Or check that its pools are empty with a one-off container of the coordinator's:
-  `podman compose <its -f files and --env-file> -p <project> run --rm --no-deps coordinator bun db/extract-entities.ts --status`,
-  and the same with `db/consolidate.ts`. Afterwards, read Ollama's
+  `podman compose <its -f files and --env-file> -p <project> run --rm --no-deps coordinator db/coordinator.ts run extract --status`,
+  and the same with `run consolidate`. Afterwards, read Ollama's
   log (`/private/tmp/ollama-serve.log` on this Mac, where `ollama serve` writes
   it). Every request in it comes from 127.0.0.1, the harness's direct calls and
   both brains' servers alike, so requests are told apart only by count, prompt

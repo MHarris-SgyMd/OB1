@@ -255,7 +255,7 @@ cleanup() {
       [ -z "$COORD_PENDING" ] || which="servers and coordinator"
       echo "up stopped (exit $rc) with the canary's $which stopped: fix the cause above and re-run ${RERUN:-up}.$board_more" >&2
     elif [ -n "$COORD_PENDING" ]; then
-      echo "up stopped (exit $rc) with the canary's coordinator stopped: fix the cause above and re-run ${RERUN:-up}, or start it with ${COORD_START:-its compose up -d --no-deps coordinator}.$board_more" >&2
+      echo "up stopped (exit $rc) with the canary's coordinator stopped: fix the cause above and re-run ${RERUN:-up}, which starts it again with the canary's own passes and keys (a compose command of your own would read the shell's settings, stable's among them, over the canary's file).$board_more" >&2
     fi
   fi
   return 0
@@ -1551,6 +1551,9 @@ done
 # the coordinator runs them on (deploy/env-file.ts, the value on stdin).
 # A stopped one is not carried — it may be stopped on purpose — but said, so its pass is not lost unseen.
 [ -z "$RETIRED_IDLE" ] || say "note: the canary's${RETIRED_IDLE} container(s) were stopped, so their passes are not carried into OB1_PASSES: name them in $CANARY_ENV's OB1_PASSES to run them"
+# The file's OB1_PASSES, read once: here when the carry-over needs it, below otherwise.
+PASSES_RAW=""
+PASSES_READ=""
 if [ -n "$RETIRED_RAN" ]; then
   COORD_PENDING=1
   # Read first, a failed read stopping the run: in the test's own substitution it would read as none and overwrite the line.
@@ -1559,6 +1562,8 @@ if [ -n "$RETIRED_RAN" ]; then
     echo "could not read OB1_PASSES from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
     exit 1
   fi
+  PASSES_RAW="$passes_now"
+  PASSES_READ=1
   if [ -z "$(printf '%s' "$passes_now" | tr -d '[:space:]')" ]; then
     carried=""
     case " $RETIRED_RAN " in *" sleep "*) carried="sleep" ;; *" extract "*|*" consolidate "*) carried="workers" ;; esac
@@ -1567,15 +1572,14 @@ if [ -n "$RETIRED_RAN" ]; then
       printf '{"OB1_PASSES": "%s"}' "$carried" | bun --no-env-file "$HERE/env-file.ts" set "$CANARY_ENV" >/dev/null \
         || { echo "could not write OB1_PASSES=$carried to $CANARY_ENV: set it there yourself and re-run $RERUN." >&2; exit 1; }
       say "wrote to the canary's env file, $CANARY_ENV: OB1_PASSES=\"$carried\" (the passes its retired containers were running, which the coordinator runs now)"
+      PASSES_RAW="$carried"
     fi
   fi
 fi
 [ -z "$COORD_PENDING" ] || COORD_SAID=" The coordinator is stopped too: the next run that passes starts it again."
-COORD_START="$RUNTIME compose -p $CANARY --env-file $CANARY_ENV -f $HERE/compose.yaml up -d --no-deps coordinator"
 # The canary's passes as its file now holds them, board-sync's among them
 # read here, the file final now, for the advice of a run that fails.
-PASSES_RAW=""
-if ! PASSES_RAW="$(env_file value "$CANARY_ENV" OB1_PASSES)"; then
+if [ -z "$PASSES_READ" ] && ! PASSES_RAW="$(env_file value "$CANARY_ENV" OB1_PASSES)"; then
   echo "could not read OB1_PASSES from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
   exit 1
 fi
@@ -1821,7 +1825,7 @@ for pass in ${named_passes[@]+"${named_passes[@]}"}; do
   CANARY_PASSES="${CANARY_PASSES:+$CANARY_PASSES,}$pass"
 done
 coord_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=coordinator")"
-say "canary coordinator, on the new build (OB1_PASSES: ${CANARY_PASSES:-none}; it runs $REPO/db, so keep that tree while the canary runs it)"
+say "canary coordinator, on the new build (OB1_PASSES: ${CANARY_PASSES:-none}; the passes run from the canary's server image)"
 [ -z "$coord_cts" ] || printf '%s\n' "$coord_cts" | xargs "$RUNTIME" rm -f >/dev/null
 if ! canary_compose up -d --no-deps --force-recreate coordinator; then
   ADVISED=1

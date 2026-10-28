@@ -1307,7 +1307,8 @@ jobs:
           # root with its confinement — each child its own user, one unable to
           # read another's /proc/<pid>/environ, which it reads with the users
           # dropped.
-          docker compose -f compose.yaml run --rm --no-deps -T coordinator bun db/test-coordinator.ts --require-root
+          # The suite is no file of the image's: mounted for this run alone.
+          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
 
       # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
       # the same way. Its supervisor holds the scheduler without a worker key
@@ -1488,7 +1489,9 @@ jobs:
           # the worker key and every pass's settings (db/test-coordinator.ts
           # holds which child gets which); takes no plugin knob — the plugin
           # login role's password is the two servers' and the migrator's
-          # (SMD-2310); mounts the checkout read-only and the dump volume;
+          # (SMD-2310); runs the server image as root, with bun's auto-install
+          # off, waiting on the REST core that builds it, and mounts the dump
+          # volume alone, no checkout;
           # reaches a host model by the host alias, waits for the schema,
           # keeps the longest grace (120 s, extraction's), runs under an init
           # (bun as PID 1 ignores SIGTERM until its handlers are in, SMD-2666)
@@ -1497,10 +1500,10 @@ jobs:
           # command takes no argument: OB1_PASSES says what it runs. The holds
           # themselves are run, by the steps above.
           docker compose -f compose.yaml config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.coordinator | (has("ports") | not) and (has("profiles") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_PASSES") and has("OB1_WORKER_KEY") and has("LINEAR_API_KEY") and has("OB1_EXTRACT_FOLLOW") and has("OB1_CONSOLIDATE_WORKERS") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 3) and ([.volumes[] | select(.type == "bind")] | length == 2 and all(.read_only == true)) and ([.volumes[] | select(.type == "volume") | "\(.source):\(.target)"] == ["sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .cap_drop == ["ALL"] and (.cap_add | sort) == ["CHOWN", "KILL", "SETGID", "SETUID"] and .security_opt == ["no-new-privileges:true"] and .command == ["bun", "db/coordinator.ts"])'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.coordinator | (has("ports") | not) and (has("profiles") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_PASSES") and has("OB1_WORKER_KEY") and has("LINEAR_API_KEY") and has("OB1_EXTRACT_FOLLOW") and has("OB1_CONSOLIDATE_WORKERS") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and ([.volumes[] | "\(.type) \(.source):\(.target)"] == ["volume sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .user == "0:0" and .entrypoint == ["bun", "--no-install"] and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .cap_drop == ["ALL"] and (.cap_add | sort) == ["CHOWN", "KILL", "SETGID", "SETUID"] and .security_opt == ["no-new-privileges:true"] and .command == ["db/coordinator.ts"] and .depends_on.api.condition == "service_started" and .healthcheck.disable == true)'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app coordinator forwarder mcp migrate postgres proxy " ]
           docker compose -f compose.yaml config --format json \
-            | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
+            | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app, .services.coordinator; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
           # image unbuilt, bun with auto-install off, holding none of the
           # server's secrets: no database URL, no key list, no provider key,

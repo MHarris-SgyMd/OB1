@@ -91,7 +91,10 @@ COPY plugins /app/plugins
 # version the brain names" warning reads the release ranges as they stood at
 # this build's commit (SMD-1860 — before, the image carried none, and in a
 # container that warning could never fire).
-COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts /app/db/
+# db/'s modules the context keeps (.dockerignore's allow-list): the embedding
+# contract the server reads, and since SMD-3476 the coordinator and the core
+# passes it runs, run from this image as root (deploy/compose.yaml).
+COPY db/*.ts db/*.mjs db/*.d.mts /app/db/
 COPY releases.json /app/releases.json
 
 # The commit this image was built from, reported by brain_info and the keyed

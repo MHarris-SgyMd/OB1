@@ -72,6 +72,8 @@ export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as con
 export const STAMP_TIMEOUT_MS = 10_000;
 /** The longest a follower's last output is waited for once it has exited. */
 const DRAIN_MS = 2_000;
+/** The longest partial line held before it is written anyway: a pass that never ends a line holds no memory past it. */
+const LINE_CAP = 64 * 1024;
 
 /** The wait before the follower's next run, after `tries` ends in a row (1 for the first). */
 export function restartWait(tries: number, first: number = RESTART_MS.first, max: number = RESTART_MS.max): number {
@@ -230,6 +232,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
           ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
           : Promise.resolve();
         code = await child.exited;
+        // The pumps never reject (labelled), so a drain cut short by the timer leaves nothing unhandled.
         await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
       } catch (e) {
         // Never this process's exit: under `unless-stopped` that is the crash loop again (SMD-3214). An end of the child, run again on the clock.
@@ -258,22 +261,47 @@ export function supervise(opts: SuperviseOptions): Supervisor {
   };
 }
 
-/** Each line of `stream` to `write`, after `label`: a last line with no newline too. */
+/**
+ * Each line of `stream` to `write`, after `label`: a line ends at a newline or
+ * a carriage return (a progress line rewritten in place), a partial line past
+ * LINE_CAP is written as it is, and a last line with no end too. It never
+ * rejects: a stream or a writer that fails ends the pump, said once, and the
+ * child is still waited for on its own.
+ */
 async function labelled(stream: ReadableStream<Uint8Array>, label: string, write: (line: string) => void): Promise<void> {
   const decoder = new TextDecoder();
   let held = "";
-  for await (const chunk of stream) {
-    held += decoder.decode(chunk, { stream: true });
-    for (let at = held.indexOf("\n"); at >= 0; at = held.indexOf("\n")) {
-      write(`${label}${held.slice(0, at)}`);
-      held = held.slice(at + 1);
+  try {
+    for await (const chunk of stream) {
+      held += decoder.decode(chunk, { stream: true });
+      for (let at = held.search(/[\n\r]/); at >= 0; at = held.search(/[\n\r]/)) {
+        if (at > 0) write(`${label}${held.slice(0, at)}`);
+        held = held.slice(at + 1);
+      }
+      while (held.length > LINE_CAP) {
+        write(`${label}${held.slice(0, LINE_CAP)}`);
+        held = held.slice(LINE_CAP);
+      }
     }
+    held += decoder.decode();
+    if (held) write(`${label}${held}`);
+  } catch (e) {
+    try { write(`${label}(its output could not be read on: ${(e as Error).message})`); } catch { /* the writer itself failed */ }
   }
-  held += decoder.decode();
-  if (held) write(`${label}${held}`);
 }
 
 function seconds(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 120 ? `${s} s` : `${Math.round(s / 60)} min`;
+}
+
+if (import.meta.main) {
+  // A container from before SMD-3476 runs `bun db/supervise.ts --worker … --run …`
+  // from a checkout it mounts. Exiting would have `unless-stopped` restart it
+  // in a loop (SMD-3214), so it says why it runs nothing and holds until its stop.
+  console.error("supervise.ts: retired as a command (SMD-3476) — the coordinator runs every pass now; remove this container: compose up -d --remove-orphans, with the -f files and -p the stack was started with");
+  await new Promise<void>((resolve) => {
+    for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => resolve());
+  });
+  process.exit(0);
 }
