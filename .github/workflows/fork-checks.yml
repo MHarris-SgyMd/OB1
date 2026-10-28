@@ -3151,10 +3151,10 @@ jobs:
           # guard is asked once it is started, after the writers stop: exit 1,
           # and the next up brings them back. Board-sync is stopped with it,
           # and first, since it depends on Postgres. Left running over a stopped
-          # database soon after its pass, as the up above leaves it, it
-          # took ~30 s to stop, its loop's last heartbeat waiting out Bun's
-          # connect timeout (SMD-3464), and that wait was most of this step's
-          # added time, not the guard (SMD-3465).
+          # database soon after its pass (the --port 8012 up above starts it
+          # ~5 s before this), it took ~30 s to stop, its loop's last heartbeat
+          # waiting out Bun's connect timeout (SMD-3464): most of the ~40 s
+          # SMD-3155 added to this step, and none of it the guard (SMD-3465).
           cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
           docker compose -p open-brain-canary -f compose.yaml --profile board-sync stop board-sync postgres
           rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
