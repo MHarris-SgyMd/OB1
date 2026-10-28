@@ -957,8 +957,9 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     // the mint and the trade fell either side of a second, and the "594 s on"
     // row then asked at the entry's last instant and traded again (SMD-3470's
     // review, once in ~14 runs beside the background suites). A real server
-    // answers the time left (deploy/auth/server.ts); the two agree for every
-    // trade a row asserts on, each within a second of its token's mint.
+    // answers the time left (deploy/auth/server.ts); the two agree when the
+    // mint and the trade fall in one wall-clock second, and the stub answers
+    // the lifetime so that a straddle can't move the entry.
     return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - (subject.iat as number), scope: subject.scope });
   };
   let clock = Date.now();
@@ -1045,8 +1046,8 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   clock += (600 - 6) * 1000;
   await ask(fresh);
   assert(trades === 1, `594 s on: still from the cache (${trades})`);
-  // At the entry's last instant exactly, which the stub's fixed lifetime makes
-  // a known moment: the entry is gone at its `until`, not after it.
+  // At the entry's `until` exactly, a known moment since the stub's lifetime
+  // is fixed: the first instant the entry is gone.
   clock += 1000;
   await ask(fresh);
   assert(trades === 2, `595 s on, at the 5 s margin: traded again (${trades})`);
