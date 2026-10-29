@@ -2,8 +2,8 @@
 # The full-stack jobs' stack, brought up on a GitHub Actions runner (SMD-3051):
 # four scoped keys minted, their raw values handed to the job's later steps
 # through $GITHUB_ENV; a provider stub on the runner's port 11434; deploy/.env
-# written; and compose.yaml built and up. The step body this replaces, moved
-# verbatim; it runs from deploy/ whatever the caller's directory is.
+# written; and compose.yaml built and up. SMD-3051 moved the jobs' step body
+# here; it runs from deploy/ whatever the caller's directory is.
 #
 #   - name: Bring up the compose stack
 #     run: .github/ci/full-stack-up.sh
@@ -116,4 +116,18 @@ SERVER_PORT=8010
 OB1_GIT_SHA=$GITHUB_SHA
 OB1_FORWARDER_KEY=$FORWARD_KEY
 EOF
-docker compose -f compose.yaml up -d --build --wait --wait-timeout 240
+# The pull beside the build (SMD-3466), where `up --build` pulled its images
+# and only then built. The pull skips the default services compose.yaml marks
+# `pull_policy: never` (api and migrate, and mcp and app, which run api's
+# image), so it fetches what up fetched; one without that line is asked of
+# the registry, refused, and fails the step. --quiet keeps its progress out of
+# the build's log (each service's Pulling and Pulled lines and any error still
+# show). A failed pull fails the step at its wait, after the build; a failed
+# build takes the pull down with it.
+docker compose -f compose.yaml pull --quiet &
+pull_pid=$!
+trap 'kill "$pull_pid" 2> /dev/null || true' EXIT
+docker compose -f compose.yaml build
+trap - EXIT
+wait "$pull_pid"
+docker compose -f compose.yaml up -d --no-build --wait --wait-timeout 240
