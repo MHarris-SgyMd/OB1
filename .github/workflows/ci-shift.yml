@@ -7,14 +7,17 @@
 # before them plus max(30 s, 20%), as a warning on this run and a table in its
 # summary: the job or step, before and after, and the pull requests merged
 # where it landed. scripts/ci-step-times.ts --shift is the reader; its header
-# has the rule. It blocks nothing: no check waits on it, and main's runs are
-# done when it starts.
+# has the rule. It blocks nothing: no check waits on it, and the run it reads
+# through is done when it starts. It fails only when it could not tell: a run
+# in the window GitHub would not give it, whose gap could move a shift off the
+# run that makes it.
 #
 # workflow_run reads this file from the default branch, so it runs from main's
 # copy, never a pull request's, and it is asked of main's push runs alone (a
-# fork's pull request from a branch named main triggers it too). The token
-# reads the runs and the commits, nothing more. workflow_dispatch runs it by
-# hand, through a run named or the newest.
+# fork's pull request from a branch named main triggers it too). It runs again
+# for each re-run of a main run, through that run, so a warning made there can
+# show again. The token reads the runs and the commits, nothing more.
+# workflow_dispatch runs it by hand, through a run named or the newest.
 name: CI shift
 
 on:

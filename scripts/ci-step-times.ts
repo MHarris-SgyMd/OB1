@@ -6,7 +6,7 @@
  * reads those runs through `gh` and prints, per run, the job's wall time and each step's that matches; then, over
  * the runs where the job succeeded, each one's median, p90, min and max. A failed or cancelled job is listed, marked,
  * and left out of the figures: its steps stop early. A skipped step is left out too: it starts and ends at once, and
- * would read 0 s. A run `gh` cannot read is retried once, then said and passed over.
+ * would read 0 s. A run `gh` cannot read is tried three times, then said and passed over (with --shift, the run fails).
  *
  *   bun scripts/ci-step-times.ts --job "Portable server"
  *   bun scripts/ci-step-times.ts --job "Portable server" --step "REST core" --days 14
@@ -16,12 +16,16 @@
  *
  * --shift reads every job and step of main's push runs instead, each a series over the runs where its job succeeded,
  * and names a shift: all of a series' last 3 runs over its line, the median of the 10 before them plus max(30 s,
- * 20%). A step under 5 s cannot get there without taking 30 s more, so every step is read. A shift is named once,
- * at the run that makes it, and again only after a run of 3 back under the line. It says where it landed: from the
- * run before the first of those 13 runs over the line to the first of the 3, and the pull requests merged there,
- * since a step that slows only some of the time leaves runs under the line after its cause. Each shift made at the
- * newest run read (or --through's) is a `::warning`, and a table in $GITHUB_STEP_SUMMARY when that is set; the
- * earlier ones in the window are listed. .github/workflows/ci-shift.yml runs it after each Fork Checks run on main.
+ * 20%). A step under 5 s cannot get there without taking 30 s more, so every step is read. A series is armed by 3
+ * runs under its line, and starts so only if 3 in a row of its first 10 are: so a shift is named once, at the run
+ * that makes it, and not again until the series has been back under for 3 runs, and a window opening on a step slow
+ * every other run names nothing for it. It
+ * says where it landed: from the run before the first of the 10 over the line with at least half the runs from it on
+ * over it too, to the first of the 3, and the pull requests merged there; a step that slows only some of the time
+ * leaves runs under the line after its cause, and a lone spike among the 10 does not stretch it. Each shift made at
+ * the newest run read (or --through's) is a `::warning` (past GitHub's 10 a step, nine and one counting the rest),
+ * and a table in $GITHUB_STEP_SUMMARY when that is set; the earlier ones in the window are listed.
+ * .github/workflows/ci-shift.yml runs it after each Fork Checks run on main.
  *
  * Options:
  *   --job <name>          the job, by its exact name (required unless --shift or --self-check)
@@ -36,14 +40,16 @@
  *   --runs <id,id,…>      these runs instead of a window (with --branch, --days, --last, --workflow or --through
  *                         refused: they would be ignored)
  *   --shift               the shifts, above (with --job or --step refused: it reads them all); push runs only, so a
- *                         fork's pull request from a branch named main is not read as main
+ *                         fork's pull request from a branch named main is not read as main (with --runs, the runs
+ *                         named, whatever their event)
  *   --through <run id>    with --shift, the window ends at this run, and its shifts are the warnings
  *   --repo <owner/name>   default gh's own (the repository of the current directory)
  *
  * Exits 0 with the report, warnings or none; 1 when `gh` is missing or cannot list the runs, there are none, none can
  * be read, --through's run is not among them, or no run read has the job (the job names the runs do have are
- * listed); 2 for a refused option. A re-run shows its latest attempt, marked. Needs `gh` signed in. Reads only;
- * writes nothing but the step summary.
+ * listed), and with --shift when fewer than 13 runs are left to read or any run could not be read (the report still
+ * printed); 2 for a refused option. The report reads a re-run's latest attempt, and marks it. Needs `gh` signed in.
+ * Reads only; writes nothing but the step summary.
  */
 
 import { appendFileSync } from "node:fs";
@@ -159,27 +165,79 @@ export function seriesOf(runs: { id: string; jobs: Job[]; headSha: string }[]): 
 
 /**
  * Index `fired` is the run whose series' last 3 all went over the line, the median of the 10 before them plus
- * max(30 s, 20%); `from` the run before the first of those 13 over the line (-1 when that is the first run read) and
- * `to` the first of the 3, so the commits after `from` up to `to` hold what slowed it.
+ * max(30 s, 20%); `to` the first of the 3, and `from` the run before where it landed (see landedFrom; -1 when the
+ * series starts there), so the commits after `from` up to `to` hold what slowed it.
  */
 export type Shift = { fired: number; before: number; line: number; after: number[]; from: number; to: number };
 
-/** A series' shifts, oldest first: each named once, and again only after its last 3 runs were all back under its line. */
+/**
+ * Where a shift landed, as the run before it: the first of the 10 runs before the 3 that is over the line with at
+ * least half the runs from it up to the 3 over it too. So the range reaches back past runs under the line after a
+ * cause that slows a step only some of the time, and not to a lone spike among the 10.
+ */
+function landedFrom(points: Point[], start: number, to: number, line: number): number {
+  for (let j = start; j < to; j++) {
+    if (points[j].s <= line) continue;
+    const span = points.slice(j, to);
+    if (span.filter((p) => p.s > line).length * 2 >= span.length) return j - 1;
+  }
+  return to - 1;
+}
+
+/**
+ * A series' shifts, oldest first. A series is armed by 3 runs all under its line, and a shift disarms it: so each is
+ * named once, and again only after 3 runs back under. It starts armed only if 3 runs in a row among its first 10 are
+ * under the line its first check draws: a window can open on a step slow only some of the time, which never comes
+ * back under for 3 runs, and is not to be named for it; while a new job slowed at its first check (the sleep cell,
+ * split out on 10-21 and slowed by SMD-2679 PR 2 its eleventh run) is.
+ */
 export function findShifts(points: Point[]): Shift[] {
   const out: Shift[] = [];
   const k = SHIFT.after, n = SHIFT.before;
-  let armed = true;
+  let armed = false;
+  if (points.length >= n + k) {
+    const first = stats(points.slice(0, n).map((p) => p.s))!.median;
+    const line = first + Math.max(SHIFT.floor, SHIFT.share * first);
+    for (let j = 0; j + k <= n && !armed; j++) armed = points.slice(j, j + k).every((p) => p.s <= line);
+  }
   for (let i = n + k - 1; i < points.length; i++) {
     const start = i + 1 - k - n, to = i + 1 - k;
     const before = stats(points.slice(start, to).map((p) => p.s))!.median;
     const line = before + Math.max(SHIFT.floor, SHIFT.share * before);
     const after = points.slice(to, i + 1).map((p) => p.s);
     if (after.every((s) => s > line)) {
-      if (armed) out.push({ fired: i, before, line, after, from: points.findIndex((p, j) => j >= start && p.s > line) - 1, to });
+      if (armed) out.push({ fired: i, before, line, after, from: landedFrom(points, start, to, line), to });
       armed = false;
     } else if (after.every((s) => s <= line)) armed = true;
   }
   return out;
+}
+
+/** The window's runs, oldest first: cut at `through` when it is named (undefined when it is not among them), then the newest `last`. */
+export function windowOf(ids: string[], through?: string, last?: number): string[] | undefined {
+  let out = ids;
+  if (through !== undefined) {
+    const at = out.indexOf(through);
+    if (at < 0) return undefined;
+    out = out.slice(0, at + 1);
+  }
+  return last === undefined ? out : out.slice(-last);
+}
+
+/** A shift found in a window: its series, the run that made it and the commits it landed between. */
+export type Found = { name: string; sh: Shift; run: string; from?: string; to: string };
+
+/** The runs read, oldest first by creation, their series, and every shift over them, by the run that made it and then name. */
+export function collectShifts(runs: { id: string; run: Run }[]): { ordered: { id: string; run: Run }[]; series: Map<string, Point[]>; found: Found[] } {
+  const ordered = [...runs].sort((a, b) => a.run.createdAt.localeCompare(b.run.createdAt) || Number(a.id) - Number(b.id));
+  const series = seriesOf(ordered.map(({ id, run }) => ({ id, jobs: run.jobs, headSha: run.headSha })));
+  const order = new Map(ordered.map(({ id }, i) => [id, i]));
+  const found: Found[] = [];
+  for (const [name, points] of series) {
+    for (const sh of findShifts(points)) found.push({ name, sh, run: points[sh.fired].run, from: sh.from >= 0 ? points[sh.from].sha : undefined, to: points[sh.to].sha });
+  }
+  found.sort((a, b) => order.get(a.run)! - order.get(b.run)! || a.name.localeCompare(b.name));
+  return { ordered, series, found };
 }
 
 /** The pull requests a range's commits merged, `#n branch`, from GitHub's merge commits' subjects. */
@@ -206,10 +264,14 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-/** One `gh` call's JSON, tried twice; the error's text when both fail. A missing `gh` is refused. */
+/**
+ * One `gh` call's JSON, tried three times 3 s apart (GitHub answers a 502 now and then: twice in ~400 calls in the
+ * SMD-3467 review); the error's text when all fail. A missing `gh` is refused.
+ */
 async function gh(args: string[]): Promise<{ ok: true; json: unknown } | { ok: false; error: string }> {
   let error = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await Bun.sleep(3000);
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -246,37 +308,34 @@ async function pooled<T, R>(items: T[], width: number, f: (item: T) => Promise<R
 /** Seconds to a tenth, for a median that can fall between two runs. */
 const sec = (s: number) => `${Math.round(s * 10) / 10} s`;
 
+/** GitHub keeps 10 warning annotations a step; past that, 9 and one that counts the rest. */
+const ANNOTATIONS = 10;
+
 /**
- * The shifts over the runs read, oldest first: each one in the window listed, and those made at `through` (the
- * newest run read when not named) given as `::warning`s and, where the runner sets $GITHUB_STEP_SUMMARY, a table.
+ * The shifts over the runs read: each one in the window listed, and those made at `through` (the newest run read
+ * when not named) given as `::warning`s and, where the runner sets $GITHUB_STEP_SUMMARY, a table.
  */
 async function shiftReport(runs: { id: string; run: Run }[], through: string | undefined, repo: string[], unread: number): Promise<void> {
-  const ordered = [...runs].sort((a, b) => a.run.createdAt.localeCompare(b.run.createdAt) || Number(a.id) - Number(b.id));
+  const { ordered, series, found: shifts } = collectShifts(runs);
   const at = through ?? ordered[ordered.length - 1].id;
-  const series = seriesOf(ordered.map(({ id, run }) => ({ id, jobs: run.jobs, headSha: run.headSha })));
   const created = new Map(ordered.map(({ id, run }) => [id, run.createdAt]));
   let repoName = repo[1];
   if (!repoName) {
     const got = await gh(["repo", "view", "--json", "nameWithOwner"]);
     repoName = got.ok ? (got.json as { nameWithOwner: string }).nameWithOwner : "";
   }
-  const found: { name: string; sh: Shift; run: string; from?: string; to: string; prs: string }[] = [];
-  for (const [name, points] of series) {
-    for (const sh of findShifts(points)) {
-      const from = sh.from >= 0 ? points[sh.from].sha : undefined, to = points[sh.to].sha;
-      found.push({ name, sh, run: points[sh.fired].run, from, to, prs: "" });
-    }
-  }
-  found.sort((a, b) => created.get(a.run)!.localeCompare(created.get(b.run)!) || a.name.localeCompare(b.name));
+  const found = shifts.map((f) => ({ ...f, prs: "" }));
   // The pull requests in each range, one compare a range; a range gh cannot read is said, not fatal.
   await pooled(found, 6, async (f) => {
-    if (!f.from) return void (f.prs = "the runs before it are outside the window");
+    if (!f.from) return void (f.prs = "the series starts there: a new or renamed job or step, or the window's first run");
     if (!repoName) return void (f.prs = "the repository could not be named, so its pull requests were not read");
     const got = await gh(["api", `repos/${repoName}/compare/${f.from}...${f.to}`]);
     if (!got.ok) return void (f.prs = `its pull requests could not be read: ${got.error.split("\n")[0].slice(0, 120)}`);
-    const commits = (got.json as { commits?: { commit: { message: string } }[] }).commits ?? [];
+    const { commits = [], total_commits: total } = got.json as { commits?: { commit: { message: string } }[]; total_commits?: number };
     const prs = mergedIn(commits.map((c) => c.commit.message.split("\n")[0]));
-    f.prs = prs.length ? prs.join(", ") : `${commits.length} commit${commits.length === 1 ? "" : "s"}, no pull request merged`;
+    // GitHub's compare lists at most 250 commits.
+    const cut = total !== undefined && total > commits.length ? `; of its ${total} commits, the first ${commits.length} read` : "";
+    f.prs = (prs.length ? prs.join(", ") : `${commits.length} commit${commits.length === 1 ? "" : "s"}, no pull request merged`) + cut;
   });
   const text = (f: (typeof found)[number]) =>
     `${f.name}: ${sec(f.sh.before)} → ${f.sh.after.join(", ")} s over the last ${SHIFT.after} runs, its line ${sec(f.sh.line)}; landed in ${f.from ? `${f.from.slice(0, 8)}..` : "..."}${f.to.slice(0, 8)} (${f.prs})`;
@@ -285,7 +344,9 @@ async function shiftReport(runs: { id: string; run: Run }[], through: string | u
   for (const f of found) console.log(`  ${created.get(f.run)!.slice(0, 16)} run ${f.run}  ${text(f)}`);
   const now = found.filter((f) => f.run === at);
   console.log(now.length ? `\n${now.length} made at run ${at}:` : `\nNone made at run ${at}.`);
-  for (const f of now) console.log(`::warning title=Slower on main::${escapeCommand(text(f))}`);
+  const shown = now.length > ANNOTATIONS ? now.slice(0, ANNOTATIONS - 1) : now;
+  for (const f of shown) console.log(`::warning title=Slower on main::${escapeCommand(text(f))}`);
+  if (shown.length < now.length) console.log(`::warning title=Slower on main::${now.length - shown.length} more jobs and steps got slower at run ${at}: the step summary lists them all, and this log`);
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (!summary) return;
   const cell = (s: string) => s.replace(/\|/g, "\\|");
@@ -296,10 +357,15 @@ async function shiftReport(runs: { id: string; run: Run }[], through: string | u
       `### A job or step on main got slower at run ${at}`, "",
       `| Job or step | Before | Last ${SHIFT.after} runs | Line | Landed in |`, "|---|---|---|---|---|",
       ...now.map((f) => `| ${cell(f.name)} | ${sec(f.sh.before)} | ${f.sh.after.join(", ")} s | ${sec(f.sh.line)} | ${range(f)}: ${cell(f.prs)} |`), "",
-      `Before: the median of the ${SHIFT.before} runs before the last ${SHIFT.after}; the line, that plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%). Landed in: from the run before the first of those runs over the line to the first of the last ${SHIFT.after}.`,
+      `Before: the median of the ${SHIFT.before} runs before the last ${SHIFT.after}; the line, that plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%). Landed in: from the run before the first of the ${SHIFT.before} over the line with at least half the runs from it on over it too, to the first of the last ${SHIFT.after}.`,
     ]
     : [`No job or step on main got slower at run ${at} (${series.size} series over ${ordered.length} runs, ${found.length} earlier shift${found.length === 1 ? "" : "s"} in the window).`];
-  appendFileSync(summary, md.join("\n") + "\n");
+  // The summary is the warnings again, in a table: one that cannot be written is said, and the run stands.
+  try {
+    appendFileSync(summary, md.join("\n") + "\n");
+  } catch (e) {
+    console.error(`the step summary ${summary} could not be written: ${(e as Error).message}`);
+  }
 }
 
 function selfCheck(): number {
@@ -348,27 +414,53 @@ function selfCheck(): number {
   ok(sMore.length === 0 && sleep[s1?.fired]?.sha === "f3267523" && sleep[s1.to].sha === "2b46a488" && sleep[s1.from].sha === "8a0f40e7" && s1.before === 195.5 && s1.after.join() === "268,269,280",
     "SMD-2679 PR 4b's sleep cell: named once, at the third run over, landed in 8a0f40e7..2b46a488, the merge itself");
   // SMD-3155 (330f9ad5) left board-sync's stop slow only some of the time: two runs back under the line after it.
-  const canary = points("6c1a7c7e 88,1c112152 124,5e718231 114,60605f3f 120,7a2feeaa 111,fb9a270e 113,df9968fe 113,5863647c 114,8a0f40e7 100,2b46a488 117,"
+  const canary = points("eed85bb3 117,0fc12274 121,67614742 91,e05d4578 115,cb733385 96,7c80fa87 114,4cd99dfd 114,4bf23b45 102,ea4f9300 114,bbb4356d 112,"
+    + "b74f5653 115,90721887 119,6c1a7c7e 88,1c112152 124,5e718231 114,60605f3f 120,7a2feeaa 111,fb9a270e 113,df9968fe 113,5863647c 114,8a0f40e7 100,2b46a488 117,"
     + "bcc60003 103,f3267523 101,330f9ad5 155,cf3fa56d 121,08df80e9 150,b3f50fdd 123,b7e784c7 153,32424f81 155,211aaa6f 164,4cff34d3 152,ef5c5151 145");
   const [c1, ...cMore] = findShifts(canary);
   ok(cMore.length === 0 && canary[c1?.fired]?.sha === "211aaa6f" && canary[c1.to].sha === "b7e784c7" && canary[c1.from].sha === "f3267523" && c1.before === 115.5,
     "SMD-3155's canary step: named at 211aaa6f, its range f3267523..b7e784c7 reaching back past the runs under the line to 330f9ad5");
   ok(findShifts(flat([100, 13], [200, 1], [100, 3])).length === 0 && findShifts(flat([100, 13], [200, 2], [100, 2])).length === 0,
     "a one-run spike, and a two-run one, are no shift");
-  ok(findShifts(flat([10, 13], [39, 3])).length === 0 && findShifts(flat([10, 13], [41, 3])).length === 1 && findShifts(flat([200, 13], [241, 3])).length === 1 && findShifts(flat([200, 13], [240, 3])).length === 0,
+  ok(findShifts(flat([10, 13], [40, 3])).length === 0 && findShifts(flat([10, 13], [41, 3])).length === 1 && findShifts(flat([200, 13], [241, 3])).length === 1 && findShifts(flat([200, 13], [240, 3])).length === 0,
     "the line is max(30 s, 20%) over the median, and a run on it is not over it: 10 s → 40 s, 200 s → 240 s");
   const twice = findShifts(flat([100, 13], [200, 10], [300, 3]));
   ok(twice.length === 2 && twice[0].fired === 15 && twice[1].fired === 25 && findShifts(flat([100, 9], [200, 3])).length === 0,
     "a series back under its line for 3 runs can shift again; fewer than 13 runs, none");
+  ok(findShifts(flat([100, 13], [200, 3], [100, 1], [200, 3])).length === 1 && findShifts(flat([100, 13], [200, 3], [100, 2], [200, 3])).length === 1,
+    "one or two runs back under the line do not re-arm it: the same slowdown is not named again");
+  ok(findShifts(points(Array.from({ length: 40 }, (_, i) => `x ${i % 2 ? 100 : 400}`).concat(["x 500", "x 500", "x 500"]).join(","))).length === 0,
+    "a series never 3 runs under its line in the window is never armed: a window opening on a step slow every other run names nothing");
+  // The sleep cell as a new job: split out on 10-21, slowed by SMD-2679 PR 2 (fbedb39c) at its eleventh run.
+  const newJob = points("a6ce641c 126,9ce3fd81 126,b0f8b2c7 130,efd8941a 129,c4a3577f 132,7b983289 131,ef5e43dc 128,66bd73f3 129,3c2575c7 129,b40c4d12 131,"
+    + "fbedb39c 161,6115b1d8 160,a7bc2867 167");
+  const [n1] = findShifts(newJob);
+  ok(newJob[n1?.fired]?.sha === "a7bc2867" && newJob[n1.to].sha === "fbedb39c" && newJob[n1.from].sha === "b40c4d12",
+    "a new job slowed at its first check is named there: its first 10 runs, under the line, arm it");
+  const spikeFar = findShifts(flat([100, 1], [400, 1], [100, 13], [200, 3]))[0], spikeNear = findShifts(flat([100, 3], [400, 1], [100, 9], [200, 3]))[0];
+  const longAgo = findShifts(flat([300, 13], [100, 13], [200, 3]))[0];
+  ok(spikeFar?.from === 14 && spikeNear?.from === 12 && spikeNear.to === 13 && longAgo?.from === 25,
+    "a lone spike among the 10, or anything before the 13, does not stretch where the shift landed");
   const sRuns = seriesOf([
     { id: "1", headSha: "a", jobs: [goodRun, failedRun, { ...goodRun, name: "k", steps: [{ name: "Sometimes", conclusion: "skipped", startedAt: at(0), completedAt: at(0) }] }] },
     { id: "2", headSha: "b", jobs: [goodRun] },
   ]);
   ok([...sRuns.keys()].join(";") === "j;j › Build;k" && sRuns.get("j › Build")!.map((p) => `${p.run}${p.sha}${p.s}`).join() === "1a5,2b5",
     "a series a job, and a step as `job › step`, over the runs where the job succeeded, a skipped step left out");
-  ok(mergedIn(["Merge pull request #546 from MHarris-SgyMd/michaelharris/smd-3155-canary-up-in-place", "[fork] Merge origin/main (6c6e7d39) into SMD-3466", "Fix"]).join() === "#546 michaelharris/smd-3155-canary-up-in-place",
-    "a range's pull requests from GitHub's merge subjects, a branch's own merges of main left out");
+  ok(mergedIn(["Merge pull request #546 from MHarris-SgyMd/michaelharris/smd-3155-canary-up-in-place", "[fork] Merge origin/main (6c6e7d39) into SMD-3466", "Revert \"Merge pull request #9 from a/b\"", "Fix"]).join() === "#546 michaelharris/smd-3155-canary-up-in-place",
+    "a range's pull requests from GitHub's merge subjects, a branch's own merges of main and a revert left out");
   ok(escapeCommand("50% of\r\nit") === "50%25 of%0D%0Ait", "a warning's %, CR and LF escaped");
+  const five = ["1", "2", "3", "4", "5"];
+  ok(windowOf(five, "3", 2)?.join() === "2,3" && windowOf(five, "9", 2) === undefined && windowOf(five, undefined, 2)?.join() === "4,5" && windowOf(five)?.join() === "1,2,3,4,5",
+    "the window: cut at --through, then its newest --last; a --through not listed, none");
+  // collectShifts over runs given out of order, as --runs takes them: 13 at 100 s and 3 at 200 s, by creation time.
+  const runOf = (i: number, s: number, conclusion = "success"): { id: string; run: Run } =>
+    ({ id: String(500 - i), run: { headSha: `c${i}`, createdAt: at(i * 3600), jobs: [{ name: "j", conclusion, startedAt: at(0), completedAt: at(s), steps: [] }] } });
+  const shuffled = Array.from({ length: 16 }, (_, i) => runOf(i, i < 13 ? 100 : 200)).reverse();
+  shuffled.push(runOf(16, 999, "failure"));
+  const got = collectShifts(shuffled);
+  ok(got.ordered[0].id === "500" && got.found.length === 1 && got.found[0].run === "485" && got.found[0].to === "c13" && got.found[0].from === "c12" && got.series.get("j")!.length === 16,
+    "the runs ordered by creation, not as given, and the shift named at the run that made it; a failed job's run not counted");
   console.log(failed ? `${failed} failed` : "all passed");
   return failed ? 1 : 0;
 }
@@ -385,11 +477,13 @@ if (import.meta.main) {
     if (typeof jobName !== "string") refuse("--job <name> is required (the job's exact name, e.g. \"Portable server\")");
     if (opts["--through"] !== undefined) refuse("--through goes with --shift: it names the run whose shifts are the warnings");
   }
-  const days = Number(opts["--days"] ?? 7);
+  // A whole number in digits alone: Number() would take 0x10, 1e1 and " 20".
+  const whole = (v: string | true | undefined) => (typeof v === "string" && /^\d+$/.test(v) ? Number(v) : NaN);
+  const days = opts["--days"] === undefined ? 7 : whole(opts["--days"]);
   if (!Number.isInteger(days) || days < 1 || days > 400) refuse(`--days takes a whole number from 1 to 400 (GitHub keeps a run 400 days), got ${opts["--days"]}`);
   if (opts["--days"] !== undefined && opts["--last"] !== undefined) refuse("--days and --last are two windows: give one or the other");
   const lastFloor = shift ? SHIFT.before + SHIFT.after : 1;
-  const last = opts["--last"] !== undefined ? Number(opts["--last"]) : shift && opts["--days"] === undefined ? 40 : undefined;
+  const last = opts["--last"] !== undefined ? whole(opts["--last"]) : shift && opts["--days"] === undefined ? 40 : undefined;
   if (last !== undefined && (!Number.isInteger(last) || last < lastFloor || last > LIST_LIMIT)) {
     refuse(`--last takes a whole number from ${lastFloor} to ${LIST_LIMIT}${shift ? ` (a shift reads ${lastFloor} runs of a series)` : ""}, got ${opts["--last"]}`);
   }
@@ -413,10 +507,15 @@ if (import.meta.main) {
     if (ids.length === 0 || !ids.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${JSON.stringify(opts["--runs"])}`);
     console.log(`${ids.length} runs named`);
   } else if (last !== undefined) {
-    // --through may name a run behind the newest: then the list reaches back as far as gh lists, and is cut at it.
-    const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--status", "completed", "--limit", String(through ? LIST_LIMIT : last), "--json", "databaseId"]);
-    if (!listed.ok) fail(`gh run list failed: ${listed.error}`);
-    ids = (listed.json as { databaseId: number }[]).map((r) => String(r.databaseId)).reverse();
+    const list = async (limit: number) => {
+      const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--status", "completed", "--limit", String(limit), "--json", "databaseId"]);
+      if (!listed.ok) fail(`gh run list failed: ${listed.error}`);
+      return (listed.json as { databaseId: number }[]).map((r) => String(r.databaseId)).reverse();
+    };
+    // --through names the newest run or near it, as the workflow does; one further back, with fewer than `last` runs
+    // up to it in the short list, takes the whole list (~30 s).
+    ids = await list(through ? last + 10 : last);
+    if (through !== undefined && ids.indexOf(through) + 1 < last) ids = await list(LIST_LIMIT);
     if (ids.length === 0) fail(`no completed ${where} run: is the branch or workflow named right?`);
   } else {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
@@ -432,15 +531,15 @@ if (import.meta.main) {
     console.log(`${where} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${ids.length} completed runs`);
     if (ids.length === 0) fail(`no completed ${where} run in the last ${days} days: is the branch or workflow named right?`);
   }
-  if (through !== undefined) {
-    const at = ids.indexOf(through);
-    if (at < 0) fail(`run ${through} is not among the ${ids.length} completed runs of ${where} listed`);
-    ids = ids.slice(0, at + 1);
+  if (typeof opts["--runs"] !== "string") {
+    const listed = ids.length;
+    const cut = windowOf(ids, through, last);
+    if (!cut) fail(`run ${through} is not among the ${listed} completed runs of ${where} listed`);
+    ids = cut;
+    if (last !== undefined || through !== undefined) console.log(`${ids.length} completed run${ids.length === 1 ? "" : "s"} of ${where}${through ? ` through ${through}` : ""}`);
   }
-  if (last !== undefined && typeof opts["--runs"] !== "string") {
-    ids = ids.slice(-last);
-    console.log(`the newest ${ids.length} completed runs of ${where}${through ? ` through ${through}` : ""}`);
-  }
+  // Fewer runs than a shift reads can make none: say so rather than "None made".
+  if (shift && ids.length < SHIFT.before + SHIFT.after) fail(`${ids.length} run${ids.length === 1 ? "" : "s"} in the window: a shift reads ${SHIFT.before + SHIFT.after} runs of a series, so none could be named`);
   // Six runs read at once: one `gh run view` a run takes about 2 s.
   const viewed = await pooled(ids, 6, async (id) => ({ id, got: await gh(["run", "view", id, ...repo, "--json", "jobs,headSha,createdAt,attempt"]) }));
   const read: { id: string; run: Run; job?: Job; row?: ReturnType<typeof jobRow> }[] = [];
@@ -461,6 +560,12 @@ if (import.meta.main) {
   if (shift) {
     if (through !== undefined && !read.some((r) => r.id === through)) fail(`run ${through} could not be read, so no shift made there can be named`);
     await shiftReport(read, through, repo, unread);
+    // A run not read takes a point out of its series and can move a shift off the run that makes it, so a warning
+    // could be lost: the job fails, and says why, rather than pass as though it had read them all.
+    if (unread) {
+      console.log(`::error title=CI shift incomplete::${unread} of the window's ${ids.length} runs could not be read: a shift may be missing, or named at another run`);
+      process.exit(1);
+    }
     process.exit(0);
   }
   if (read.length > 0 && read.every((r) => !r.job)) {
