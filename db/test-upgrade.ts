@@ -1902,9 +1902,14 @@ console.log("\n[20b] Migration 046 onto a populated 044 — the audit row gains 
   // B must actually be waiting on A's lock before A commits, or the arm proves
   // nothing about the re-evaluated WHERE (third review pass: a sleep alone
   // passed the same assertions when B simply ran after A). Watched from A's
-  // own connection, which can read pg_stat_activity inside its transaction.
+  // own connection, the section's only other connection being B's. Each poll
+  // clears A's view first: inside an open transaction Postgres keeps the
+  // sessions and their query text as first read, only the wait columns live.
+  // B's session is in A's view already, so this poll sees B's wait either
+  // way; the clear keeps it from depending on that (SMD-2742).
   let waited = false;
   for (let i = 0; i < 100 && !waited; i++) {
+    await passA`SELECT pg_stat_clear_snapshot()`;
     const [w] = await passA`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${bPid}`;
     waited = w?.t === "Lock";
     if (!waited) await new Promise((r) => setTimeout(r, 50));
@@ -2044,6 +2049,7 @@ console.log("\n[20e] Migration 050 onto a populated 046 — every thought gains 
   const pendingA = sql`SELECT backfill_thought_actors() AS r`.execute();
   let waitedOnB = false;
   for (let i = 0; i < 100 && !waitedOnB; i++) {
+    await passB`SELECT pg_stat_clear_snapshot()`;  // as [20b]'s poll: the polled session (aPid, sql's one connection) is in the view already (SMD-2742)
     const [w] = await passB`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
     waitedOnB = w?.t === "Lock";
     if (!waitedOnB) await new Promise((r) => setTimeout(r, 50));
@@ -2065,6 +2071,7 @@ console.log("\n[20e] Migration 050 onto a populated 046 — every thought gains 
   const pendingD = sql`SELECT backfill_thought_actors() AS r`.execute();
   let waitedOnC = false;
   for (let i = 0; i < 100 && !waitedOnC; i++) {
+    await passC`SELECT pg_stat_clear_snapshot()`;  // as [20b]'s poll: the polled session (aPid, sql's one connection) is in the view already (SMD-2742)
     const [w] = await passC`SELECT wait_event_type AS t FROM pg_stat_activity WHERE pid = ${aPid}`;
     waitedOnC = w?.t === "Lock";
     if (!waitedOnC) await new Promise((r) => setTimeout(r, 50));

@@ -12252,8 +12252,12 @@ if (want("25")) {
   let waited = false;
   // Under the pass's 10 s lock_timeout: a poll that outlasted it would see
   // the waiting pass raise 55P03 in place of the `waited` assertion (sixth
-  // review pass).
+  // review pass). Each poll clears `held`'s view first: inside an open
+  // transaction Postgres keeps the sessions and their query text as first
+  // read, only the wait columns live, so a first poll before the second pass
+  // started its query never matched it after (SMD-2742).
   for (let i = 0; i < 100 && !waited; i++) {
+    await held`SELECT pg_stat_clear_snapshot()`;
     const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
     waited = Number(w.n) > 0;
     if (!waited) await new Promise((r) => setTimeout(r, 50));
@@ -13207,6 +13211,7 @@ if (want("30")) {
     let waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB is in cA's view already and the wait columns are live; cleared as [25]'s (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
@@ -13337,6 +13342,7 @@ if (want("31")) {
     let waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB first connects with its blocked call, possibly after cA's first read, which would keep the session list without it (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
@@ -13354,6 +13360,7 @@ if (want("31")) {
     waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB is in cA's view already and the wait columns are live; cleared as [25]'s (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
