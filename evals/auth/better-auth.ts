@@ -27,7 +27,8 @@
  * - the token-exchange grant, through `extendOAuthProvider` (Better Auth has
  *   none built in). The rules are the winner's: only an `exchange` client from
  *   policy.ts, a subject token this server signed for that client's MCP
- *   resource, the same subject, no wider scope, `act: { sub: <client> }`. The
+ *   resource, the same subject, no wider scope, `act: { sub: <client>, act:
+ *   { sub: <the subject token's client> } }` (SMD-3064). The
  *   library strips `exp` from contributed claims, so an exchanged token cannot
  *   be cut to its subject's expiry per issuance. Instead the REST cores'
  *   tokens live EXCHANGED_TTL seconds, and a subject token with less time left
@@ -131,7 +132,7 @@ const tokenExchange = () => ({
           if (b.audience) refuse("invalid_request", "name the target with resource, not audience");
           if (b.resource !== policy.to) refuse("invalid_target", `this client exchanges for ${policy.to} only`);
 
-          let claims: { sub?: string; scope?: string; exp?: number };
+          let claims: { sub?: string; scope?: string; exp?: number; client_id?: unknown };
           try {
             ({ payload: claims } = await jwtVerify(b.subject_token!, ownKeys, { issuer: L.issuer, audience: policy.from, algorithms: ["ES256"], typ: "at+jwt" }));
           } catch (cause) {
@@ -139,6 +140,8 @@ const tokenExchange = () => ({
             refuse("invalid_grant", "grant request is invalid", `subject_token is not a valid access token for this client's resource (${code ?? "invalid"}${claim ? ` ${claim}` : ""})`);
           }
           if (claims.sub !== OPERATOR) refuse("invalid_grant", "grant request is invalid", "subject_token names no known account");
+          const connector = claims.client_id;
+          if (typeof connector !== "string" || !connector) refuse("invalid_grant", "grant request is invalid", "subject_token names no client");
           const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));
           const asked = b.scope ? b.scope.split(" ").filter(Boolean) : [...held];
           const wider = asked.filter((s) => !held.has(s));
@@ -151,7 +154,7 @@ const tokenExchange = () => ({
             user,
             scopes: asked,
             resources: [policy.to],
-            accessTokenClaims: { act: { sub: client.clientId } },
+            accessTokenClaims: { act: { sub: client.clientId, act: { sub: connector } } },
             tokenResponse: { issued_token_type: ACCESS_TOKEN_TYPE },
           });
         }) satisfies OAuthExtensionGrantHandler,

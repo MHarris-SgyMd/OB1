@@ -29,7 +29,9 @@
  * in, allows the consent, takes the code for an `/mcp` token with that scope,
  * and exchanges it as the MCP service (`mcp`, its secret from the container's
  * environment) for a REST-core token, as the MCP server does at the hop. It
- * prints both as JSON `{ mcp, api }`, for CI to present to the REST core.
+ * prints them as JSON `{ mcp, api, client }`, `client` the id it registered,
+ * for CI to present to the REST core, which names the caller by that client
+ * (SMD-3064).
  *
  *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
  *
@@ -221,7 +223,7 @@ if (process.argv.includes("--register")) {
     `mcp:${mcpSecret}`,
   );
   if (api.status !== 200 || !api.body.access_token) fail(`the exchange answered ${api.status} ${api.body.error ?? ""}`);
-  console.log(JSON.stringify({ mcp: mcp.body.access_token, api: api.body.access_token }));
+  console.log(JSON.stringify({ mcp: mcp.body.access_token, api: api.body.access_token, client: client_id }));
 } else if (process.argv.includes("--gui-refresh")) {
   const password = process.env.OB1_AUTH_OPERATOR_PASSWORD ?? "";
   const origin = process.env.OB1_PUBLIC_ORIGIN ?? "";

@@ -24,6 +24,9 @@
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Browse</h1>
+	{#if data.deleted}
+		<p class="text-sm" role="status" data-testid="deleted">Deleted the thought <span class="font-mono">{data.deleted}</span>. The audit trail keeps its text.</p>
+	{/if}
 
 	<!-- A GET form: its fields are the address, and a new filter starts at the first page (no cursor rides it).
 	     Focus and scroll stay where they were: a keyboard user applying a filter keeps their place (review pass 1). -->

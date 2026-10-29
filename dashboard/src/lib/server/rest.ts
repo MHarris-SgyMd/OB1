@@ -48,6 +48,20 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 }
 
 /**
+ * One write under the signed-in visitor's credential (SMD-3322): its answer for
+ * the form action to read, so a refusal is said beside the form, not as the
+ * page's error. A credential the REST core no longer takes ends the session, as
+ * a read's does; a core that does not answer is the page's 502.
+ */
+export async function write<K extends CallableOperation>(event: RequestEvent, session: Session, name: K, input: InputOf<K>): Promise<Answer> {
+	const credential = await credentialOf(event, session);
+	return answered(event, name, () => rest().call(name, input, { ...credential, signal: event.request.signal }));
+}
+
+/** Whether the session's whoami named this operation at sign-in: what a page offers a write by (SMD-3322). The REST core still decides the call. */
+export const may = (session: Session | null, name: CallableOperation): boolean => session?.operations.includes(name) === true;
+
+/**
  * A plugin operation's read (SMD-2280 PR 3), by its tool and its route as its
  * manifest names them (`GET /v1/plugins/<name>/…`), under the visitor's key:
  * read's answer, read's refusals.

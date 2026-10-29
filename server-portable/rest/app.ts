@@ -437,7 +437,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
     // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
     const named = carrier ? { name: principal.name } : {};
-    // A token's subject revoked in the registry says so as a token's refusal: no sign-in clears it, since the subject's digest is fixed (oauth-token.ts).
+    // A token's principal revoked in the registry says so as a token's refusal: no sign-in clears it, since its digest is fixed (oauth-token.ts).
     if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named, ...(byToken ? { credential: "token" } : {}) }, { "WWW-Authenticate": "Bearer" });
     if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);
     principal.agentId = identity.agentId;

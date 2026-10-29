@@ -22,8 +22,8 @@ export const SESSION_MAX_AGE = 60 * 60 * 24;
 /** The most sessions held at once: the oldest goes when a sign-in would pass it, so a flood of sign-ins holds at most this many keys in memory. */
 export const MAX_SESSIONS = 1000;
 /**
- * The most one key holds — or one subject the authorization server signed in,
- * `oauth:<sub>` — a sign-in past it ends that holder's oldest session, not
+ * The most one key holds — or one principal the authorization server signed in,
+ * `oauth:<sub>+<client>` — a sign-in past it ends that holder's oldest session, not
  * another's, so one key signed in over and over cannot push every other
  * visitor out of MAX_SESSIONS (review pass 1). Only sessions under fifty or more
  * keys reach the global cap. Two sign-ins posted at once over one cookie each
@@ -39,11 +39,13 @@ export type Session = {
 	/** The session's id, the cookie's value: what a renewal writes the new tokens back under. */
 	id: string;
 	credential: Credential;
-	/** The holder's name and scope, as the REST core's whoami said at sign-in (`oauth:<sub>` for a token). */
+	/** The holder's name and scope, as the REST core's whoami said at sign-in (`oauth:operator+gui` for a token, SMD-3064). */
 	name: string;
 	scope: string;
 	/** Whether whoami named capture_thought among the holder's operations — false for a read key. */
 	canCapture: boolean;
+	/** The operations whoami named at sign-in: a page offers a write only where they list it (SMD-3322); the REST core still decides each call. */
+	operations: readonly string[];
 	/** Whether it was signed in on the break-glass listener (SMD-3307): it opens pages there alone (hooks.server.ts). */
 	breakglass: boolean;
 };
@@ -129,7 +131,7 @@ export function readSession(id: string | undefined): Session | null {
 	if (!held) return null;
 	// An expired session is left for the caller to close (hooks.server.ts), which revokes its tokens (review pass 2).
 	if (held.exp <= Date.now()) return null;
-	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture, breakglass: held.breakglass };
+	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture, operations: held.operations, breakglass: held.breakglass };
 }
 
 /** A renewal's new tokens, written back to the session that holds them; false, and the tokens revoked, when the session has ended meanwhile. */

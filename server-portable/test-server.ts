@@ -1395,9 +1395,29 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       // Names outside the alphabet, judged by the record against the scheduler's model: unmade, aside; made since, cleared (review pass 7).
       [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "my embed model"), "aside"],
       [run([withAside(sleepFresh, { reembed: { kind: "model-switch", recorded: "my embed model", configured: "new-embed" } })], OWN, "new-embed"), "scheduler:-:poll:0"],
+      // Stopped, under a configuration whose key no row carries: started again it runs no re-embed (SMD-3486).
+      [reembedRunner([sleepEnded], "reembed:my embed@1024", "reembed:my embed@1024", "my embed", "my embed").by, "nobody"],
+      [reembedRunner([sleepStale], "reembed:new-embed@NaN", "reembed:new-embed@NaN", undefined, "new-embed").by, "nobody"],
     ];
     const wrong = cells.map(([got, want], i) => (got === want ? null : `cell ${i}: ${got}, not ${want}`)).filter((x) => x !== null);
     assert(wrong.length === 0, `reembedRunner answers each cell — follower, scheduler (set down, a switch made since, its conflicts), aside, stopped, nobody (${wrong.join("; ") || "all"})`);
+    // What the scheduler runs re-embed under is what the rows carry (SMD-3486): reembedKeyUnfit null exactly where
+    // the parse keeps its row's `reembedJob` and a hand follower's row under that key — `<model>@<dim>` at most 120
+    // (review pass 1) — so a name outside the alphabet, one too long, or a width past nine digits, runs none.
+    const { reembedKeyUnfit } = await import("./brain-info.ts");
+    const pairs: [string, number, ReturnType<typeof reembedKeyUnfit>][] = [
+      ["new-embed", 1024, null], ["org/model:tag", 768, null], ["hf.co/a/b:Q4_K_M", 1, null], ["new-embed", 999_999_999, null],
+      ["x".repeat(115), 1024, null], ["x".repeat(116), 1024, "model"], ["x".repeat(110), 999_999_999, null], ["x".repeat(111), 999_999_999, "model"], ["x".repeat(200), 1024, "model"],
+      ["my embed", 1024, "model"], ["x".repeat(201), 1024, "model"], ["x $(echo SHELL-TEXT)", 1024, "model"], ["", 1024, "model"], ["modèle", 1024, "model"],
+      ["new-embed", 0, "width"], ["new-embed", -8, "width"], ["new-embed", 1.5, "width"], ["new-embed", NaN, "width"], ["new-embed", 1e9, "width"],
+    ];
+    const unfitWrong = pairs.map(([m, d, want]) => {
+      const got = reembedKeyUnfit(m, d);
+      const key = `reembed:${m}@${d}`;
+      const carried = markOf("heartbeat:sleep", { reembedJob: key })?.reembedJob !== undefined && markOf(`heartbeat:${key}`, { job: key }) !== undefined;
+      return got === want && carried === (want === null) ? null : `${JSON.stringify(m.slice(0, 20))}(${m.length})@${d}: ${got}, carried ${carried}`;
+    }).filter((x) => x !== null);
+    assert(unfitWrong.length === 0, `reembedKeyUnfit says a model and width form a key exactly where the sleep row and a hand follower's row carry it (${unfitWrong.join("; ") || "all"})`);
     const now = [switchNow({ recorded: "a", configured: "b" }, "b"), switchNow({ recorded: "a", configured: "b" }, "c"), switchNow({ recorded: "a", configured: "b" }, undefined), switchNow({ recorded: "a", configured: "b" }, "")];
     assert(JSON.stringify(now) === JSON.stringify([{ made: true, holds: "b" }, { made: false, holds: "c" }, { made: true, holds: "a" }, { made: true, holds: "a" }]),
       `switchNow reads a switch against the record as it stands (${JSON.stringify(now)})`);
@@ -3272,12 +3292,32 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // timed out a request after 10 seconds` after the suite's report: expected.
   const bare = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => silentSse() });
   const kept = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
-  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
-  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
-  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
-  // loaded runner's timer drift room on both sides.
+  // The ceiling, at a small scale: a stream silent for 1250 ms with a 50 ms
+  // frame and a 500 ms ceiling pings until the ceiling, stops there and says so
+  // once. Nominally nine frames, about twenty-four uncapped. A stall of the
+  // event loop at the stream's start takes frames off the front (a first tick
+  // past the ceiling sends none), so the frames' count holds only that it
+  // pinged and that it stopped (at most ten); that it stopped at the ceiling,
+  // not before, is held by when onStall ran, on the clock sse.ts reads. At
+  // 20 ms and 200 ms with a floor of four frames, a stall of ~140 ms at the
+  // start failed it, and the job's other suites beside this one caused one
+  // (SMD-3470); a stall under ~450 ms passes now. How often it pings is the
+  // gaps between the frames' arrivals and the tick that stops it (onStall's
+  // moment, on the same clock in this process), judged by their lower median: a
+  // stall at the start takes frames off the front and one later widens a gap,
+  // and neither moves it, where a frame slowed at any multiple widens every gap
+  // (a series that ended at the last frame let a few slow frames pass unjudged,
+  // and a plain median of two gaps moved with one: review pass 3).
   let stalls = 0;
-  const capped = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+  let stalledAfterMs = 0;
+  let stoppedAt = 0;
+  const capped = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    fetch: (req) => {
+      const began = performance.now();
+      return withSseKeepalive(silentSse(1250), { intervalMs: 50, maxMs: 500, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; stoppedAt = performance.now(); stalledAfterMs = stoppedAt - began; } });
+    },
+  });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -3293,16 +3333,44 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const call = (id: number, query: string, init: RequestInit = {}) =>
     read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
   const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  // read(), with the time each frame arrived (frames that arrive together share one).
+  const readFrames = async (url: string): Promise<Read & { at: number[] }> => {
+    const t0 = performance.now();
+    const at: number[] = [];
+    try {
+      const r = await fetch(url);
+      const reader = r.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        for (let n = frames(text) - at.length; n > 0; n--) at.push(performance.now());
+      }
+      text += decoder.decode();
+      return { ok: true, text, error: "", ms: performance.now() - t0, at };
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return { ok: false, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0, at };
+    }
+  };
+  // The lower median of a series' gaps (NaN for fewer than two points): with
+  // two gaps it is the smaller, so one widened gap never decides it.
+  const lowerMedianGap = (series: number[]): number => {
+    const gaps = series.slice(1).map((t, i) => t - series[i]).sort((a, b) => a - b);
+    return gaps.length ? gaps[(gaps.length - 1) >> 1] : NaN;
+  };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
+  let bareRun: Read, keptRun: Read, cappedRun: Read & { at: number[] }, slow: Read, gone: Read;
   try {
     [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
       read(`http://127.0.0.1:${bare.port}/`),
       read(`http://127.0.0.1:${kept.port}/`),
-      read(`http://127.0.0.1:${capped.port}/`),
+      readFrames(`http://127.0.0.1:${capped.port}/`),
       call(50, "a query whose embedding outlives the idle timeout"),
       // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
       call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
@@ -3321,9 +3389,13 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
   assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
   assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
-  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
-    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
+  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 1 && frames(cappedRun.text) <= 10,
+    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 1250 ms at 50 ms with a 500 ms ceiling)`);
   assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
+  assert(stalledAfterMs >= 500, `…at the ceiling, not before it (${Math.round(stalledAfterMs)} ms after the stream began, its ceiling 500 ms)`);
+  const pace = lowerMedianGap([...cappedRun.at, stoppedAt]);
+  assert(cappedRun.at.length >= 1 && stoppedAt > 0 && pace <= 75,
+    `…a frame each 50 ms while it pings, to the tick that stops it (lower median gap ${Number.isNaN(pace) ? "none" : Math.round(pace)} ms over ${cappedRun.at.length} frames and the stop, at most 75)`);
   const stalled = warned.filter((w) => /request still running/.test(w));
   const sm = /after (\d+) s/.exec(stalled[0] ?? "");
   assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
@@ -3339,7 +3411,11 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
   assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
-  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  // The server times the request from its arrival and the client's 1.5 s from
+  // its send, in one process, so a stall between the two reads short: the
+  // floor tells the abort's moment from an at-once line, not to the 100 ms
+  // (a 200 ms stall read 1.3 s, SMD-3470).
+  assert(m !== null && Number(m[1]) >= 1 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(
     requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
