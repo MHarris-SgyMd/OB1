@@ -7359,6 +7359,33 @@ if (want("10h")) {
         } finally {
           await sql.unsafe("GRANT EXECUTE ON FUNCTION close_thought_subject(uuid, uuid, text) TO PUBLIC");
         }
+        // A naming's write that fails otherwise — the role's statement_timeout, past which the server cancels it — ends
+        // the run in words, exit 1, the pool as it was, not read as a stop (review pass 9: it escaped as a trace; a
+        // cancel read as the caller's whoever sent it lived).
+        const timedWas = (await sql`SELECT key, value FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`) as { key: string; value: string }[];
+        await sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r0'), ('subject_pool_filled', 'subjects:r0')
+                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+        await sql.unsafe(`ALTER ROLE ${SROLE} SET statement_timeout = '1500ms'`);
+        const timedHolder = new SQL({ url: URL_!, max: 1 });
+        let timedOut = null as Awaited<ReturnType<typeof sweep>> | null;
+        try {
+          const h = { q: await timedHolder.reserve() };
+          await h.q`BEGIN`;
+          await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
+          const safety = setTimeout(() => void h.q`COMMIT`.catch(() => {}), 10_000);
+          timedOut = await sweep({ model: false, switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` })).finally(() => clearTimeout(safety));
+          await h.q`COMMIT`;
+          h.q.release();
+        } finally {
+          await sql.unsafe(`ALTER ROLE ${SROLE} RESET statement_timeout`);
+          await timedHolder.close({ timeout: 5 });
+        }
+        const [{ timedKept }] = (await sql`SELECT value AS "timedKept" FROM ob1_config WHERE key = 'subject_pool_key'`) as { timedKept: string }[];
+        await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+        for (const k of timedWas) await sql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
+        assert(timedOut?.code === 1 && /Naming pool subjects:r1\.2 broke off \(canceling statement due to statement timeout\): pool subjects:r0 is named as it was; run it again\./.test(timedOut.stderr)
+            && !/stopped before/.test(timedOut.stderr) && timedKept === "subjects:r0",
+          `a naming's write the role's statement_timeout cancels ends the run in words, exit 1, the pool as it was (exit ${timedOut?.code}: ${timedOut?.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         // A pooling the role is refused partway is the role's to fix, refused as such, exit 2, not a pooling broken off
         // (review pass 2): here requeue_thought_work's EXECUTE, taken from PUBLIC while no thought is captured.
         await sql.unsafe("REVOKE EXECUTE ON FUNCTION requeue_thought_work(text, uuid) FROM PUBLIC");
@@ -7524,14 +7551,16 @@ if (want("10h")) {
       `a failed claim the edit pooled again is said as no longer the run's, and no failure of it, exit 0 (exit ${lostRun.code}: ${tally(lostRun)})`);
     // …and a finished claim pooled again while it was asked, its text as it was, beside a failed one kept: the run's
     // failure is the kept one, exit 1 (review pass 5, mutant: every claim lost counted as a failed one lost, exit 0).
-    // Pooled again, not edited: an edit is read under the door's lock now, edited mid-sweep (review pass 8).
-    const lostOk = await seed("A plain note the model names nothing for, pooled again while it is asked about.");
+    // Its subject recorded and its claim released by the run's loop, where the lost are counted; pooled again, not
+    // edited, which is read under the door's lock now (review pass 9, cold read: one the model named nothing for ends
+    // its own claim since pass 7, and the mutant lived).
+    const lostOk = await seed("Reviewed and merged pull request 727 for the importer, pooled again while it is asked about.");
     await sql`SELECT requeue_thought_work(${POOL}, ${garbled}::uuid)`;
     let lostOkAsks = 0;
     onOwn = (t) => (t.includes("pooled again while it is asked about") && ++lostOkAsks === 1 ? sql`SELECT requeue_thought_work(${POOL}, ${lostOk}::uuid)` : undefined);
     const lostMix = await sweep().finally(() => { onOwn = null; });
     assert(lostMix.code === 1 && /1 claim\(s\) no longer this run's when released/.test(tally(lostMix)) && /^ {2}1 claim\(s\) failed: /m.test(lostMix.stderr)
-        && (await claimOf(garbled))?.status === "failed" && (await claimOf(lostOk))?.status === "succeeded",
+        && (await claimOf(garbled))?.status === "failed" && (await claimOf(lostOk))?.status === "succeeded" && (await standingOf(lostOk))?.key === "pr:727",
       `a finished claim pooled again while it was asked, beside a failed one kept: one failure, exit 1 (exit ${lostMix.code}: ${tally(lostMix)})`);
     // A thought deleted while the model answered, naming nothing for its out-of-date subject: the close finds it gone,
     // counted as deleted mid-sweep, not as named nothing (review pass 2).
@@ -7875,7 +7904,7 @@ if (want("10h")) {
     }
     const [{ stillNamed }] = (await sql`SELECT value AS "stillNamed" FROM ob1_config WHERE key = 'subject_pool_key'`) as { stillNamed: string }[];
     assert(lockStopped?.code === 130 && lockMs < 2000 && /^ {2}waiting for another run holding the subject pool's lock/m.test(lockStopped.stdout)
-        && /stopped waiting for the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed/.test(lockStopped.stderr) && stillNamed === "subjects:r0",
+        && /stopped at the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed/.test(lockStopped.stderr) && stillNamed === "subjects:r0",
       `a stop while another run holds the pool's lock ends the run there, 130, nothing named (exit ${lockStopped?.code} after ${lockMs} ms; named ${stillNamed})`);
     // An edit since the naming, of a thought the pooling requeues, open: its trigger's claim holds the row the pooling
     // writes. The pooling, watched, says the pid the server says holds it up, and pools once it ends, in the same run
@@ -7888,7 +7917,7 @@ if (want("10h")) {
     let editPid = -1;
     let lockWaited = null as Awaited<ReturnType<typeof sweep>> | null;
     try {
-      Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50 });
+      Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50, sayMs: 400 });
       const idle = await openTx(idleHolder);
       await idle.q`LOCK TABLE thought_work_claims IN ROW EXCLUSIVE MODE`;
       const first = await openTx(firstHolder);
@@ -7915,6 +7944,7 @@ if (want("10h")) {
       await idleHolder.close({ timeout: 5 });
     }
     assert(lockWaited?.code === 0 && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the pooling waits on \\(pid ${editPid}\\); a stop leaves the pooling to the next run$`, "m").test(lockWaited.stdout)
+        && new RegExp(`^ {2}still waiting, after \\d+ s, for 1 transaction\\(s\\) the pooling waits on \\(pid ${editPid}\\)`, "m").test(lockWaited.stdout)
         && (await filledKey()) === "subjects:r1.2" && (await standingOf(editedT))?.key === "ticket:SMD-87",
       `a pooling held up by an edit's open claim waits for it, says its pid, and pools and reads the thought once it ends (exit ${lockWaited?.code}: ${lockWaited === null ? "no run" : lockWaited.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     // A reader's transaction open across a naming, one holding an xid, is not waited for: it writes no thought a
@@ -7988,9 +8018,12 @@ if (want("10h")) {
     // SHARE: watched, it names that write's pid, and a stop cancels it, nothing named (review pass 8, cold read: it
     // waited without a word or the stop, the pool's lock held).
     await setNamed("subjects:r0");
+    /** This database's client connections other than the case's own: a run leaves none of its own behind. */
+    const clientConns = async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()`)[0] as { n: number }).n;
+    const connsBefore = await clientConns();
     const shareHolder = new SQL({ url: URL_!, max: 1 });
     const shareStop = new AbortController();
-    let sharePid = -1, shareMs = -1;
+    let sharePid = -1, shareMs = -1, connsAfter = -1;
     let shared = null as Awaited<ReturnType<typeof sweep>> | null;
     try {
       Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50 });
@@ -8015,11 +8048,110 @@ if (want("10h")) {
       Object.assign(NAMING_WAIT, savedWaits);
       await shareHolder.close({ timeout: 5 });
     }
+    // The run's connections gone, its watcher's among them, once its client closes (review pass 9, run-it: a watcher
+    // never closed lived).
+    for (let i = 0; i < 80 && (connsAfter = await clientConns()) !== connsBefore; i++) await Bun.sleep(25);
     const [{ keptName }] = (await sql`SELECT value AS "keptName" FROM ob1_config WHERE key = 'subject_pool_key'`) as { keptName: string }[];
+    const keptFilled = await filledKey();
+    // One stop, said once, nothing pooled (review pass 9, run-it: a run that went on past the naming's stop lived).
     assert(shared?.code === 130 && shareMs < 2000
-        && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the naming of pool subjects:r1\\.2 waits on \\(pid ${sharePid}\\): writes in flight under the pool named lock its name; a stop leaves it named as it was$`, "m").test(shared.stdout)
-        && /stopped before pool subjects:r1\.2 was named: the caller's signal was aborted; nothing was named, pooled or claimed/.test(shared.stderr) && keptName === "subjects:r0",
-      `the naming's write waits for a write in flight under the pool named, names it, and a stop cancels it, nothing named (exit ${shared?.code} after ${shareMs} ms; named ${keptName})`);
+        && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) the naming of pool subjects:r1\\.2 waits on \\(pid ${sharePid}\\): writes in flight under the pool named lock its name, as may a transaction editing ob1_config; a stop leaves it named as it was$`, "m").test(shared.stdout)
+        && /stopped before pool subjects:r1\.2 was named: the caller's signal was aborted; nothing was named, pooled or claimed/.test(shared.stderr) && !/was pooled|stopped after/.test(shared.stderr)
+        && keptName === "subjects:r0" && keptFilled === "subjects:r0" && connsAfter === connsBefore,
+      `the naming's write waits for a write in flight under the pool named, names it, and a stop cancels it, nothing named and no connection left (exit ${shared?.code} after ${shareMs} ms; named ${keptName}, filled ${keptFilled}; ${connsAfter} connection(s) after, ${connsBefore} before)`);
+    // …and one held up for less than NAMING_WAIT.quietMs says nothing (review pass 9, run-it: the quiet check lived).
+    await setNamed("subjects:r0");
+    const briefHolder = new SQL({ url: URL_!, max: 1 });
+    let brief = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      Object.assign(NAMING_WAIT, { quietMs: 2000, pollMs: 50 });
+      const h = await openTx(briefHolder);
+      await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
+      const run = sweep({ model: false, switchKey: true });
+      await Bun.sleep(700);
+      await h.q`COMMIT`;
+      h.q.release();
+      brief = await run;
+    } finally {
+      Object.assign(NAMING_WAIT, savedWaits);
+      await briefHolder.close({ timeout: 5 });
+    }
+    assert(brief?.code === 0 && !/the naming of pool/.test(brief.stdout) && (await filledKey()) === "subjects:r1.2",
+      `a naming's write held up for less than the quiet time says nothing (exit ${brief?.code}: ${brief?.stdout.split("\n").find((l) => /waiting/.test(l))?.trim().slice(0, 90) ?? "nothing said"})`);
+    // …and through the CLI: a signal ends the process at once, and the server ends the write it left waiting within a
+    // second, so no rename lands once the write in flight ends (review pass 9, cold read and run-it: the write ran on,
+    // holding the pool's lock, and renamed the pool once that ended).
+    await setNamed("subjects:r0");
+    const cliHolder = new SQL({ url: URL_!, max: 1 });
+    let orphans = -1;
+    try {
+      const h = await openTx(cliHolder);
+      await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
+      const cli = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules", "--switch-key"], { env: env as Record<string, string>, cwd: HERE, stdout: "ignore", stderr: "ignore" });
+      for (let i = 0; i < 400; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"INSERT INTO ob1_config%"}`) as { n: number }[];
+        if (n > 0) break;
+        await Bun.sleep(25);
+      }
+      cli.kill("SIGINT");
+      await Promise.race([cli.exited, Bun.sleep(30_000).then(() => cli.kill("SIGKILL"))]);
+      // Two of the server's checks, a second apart.
+      for (let i = 0; i < 40; i++) {
+        [{ orphans }] = (await sql`SELECT count(*)::int AS orphans FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"INSERT INTO ob1_config%"} AND state = 'active'`) as { orphans: number }[];
+        if (orphans === 0) break;
+        await Bun.sleep(100);
+      }
+      await h.q`COMMIT`;
+      h.q.release();
+    } finally {
+      await cliHolder.close({ timeout: 5 });
+    }
+    await Bun.sleep(300);
+    const [{ afterCli }] = (await sql`SELECT value AS "afterCli" FROM ob1_config WHERE key = 'subject_pool_key'`) as { afterCli: string }[];
+    assert(orphans === 0 && afterCli === "subjects:r0",
+      `a CLI a signal ended leaves no write of the name running on, to rename the pool later (${orphans} left running; named ${afterCli})`);
+    // A run whose second connection cannot be opened says its waits go unwatched, and hears a stop between its
+    // statements: here before the pooling, once the naming's write ends (review pass 9, cold read and run-it: at the
+    // role's limit the watcher read each failed poll as "not held up", and the run named and pooled through the stop).
+    await setNamed("subjects:r0");
+    const deafClient = new SQL({ url: URL_!, max: 2 }), deafHolder = new SQL({ url: URL_!, max: 1 });
+    const deafStop = new AbortController();
+    let deafRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const h = await openTx(deafHolder);
+      await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
+      // A port nothing listens on: the watcher's connection is refused.
+      const nowhere = new URL(URL_!);
+      nowhere.port = "1";
+      const run = caught((writer) => sweepSubjects({ sql: deafClient, url: nowhere.toString(), env: { ...env, OB1_WORKER_KEY: "" }, model: false, switchKey: true, signal: deafStop.signal, writer }));
+      for (let i = 0; i < 400; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"INSERT INTO ob1_config%"}`) as { n: number }[];
+        if (n > 0) break;
+        await Bun.sleep(25);
+      }
+      deafStop.abort();
+      await Bun.sleep(500);
+      await h.q`COMMIT`;
+      h.q.release();
+      deafRun = await run;
+    } finally {
+      await deafClient.close({ timeout: 5 });
+      await deafHolder.close({ timeout: 5 });
+    }
+    assert(deafRun?.code === 130 && /^ {2}the naming's waits go unwatched: a second connection could not be opened \(/m.test(deafRun.stdout)
+        && /stopped before pool subjects:r1\.2 was pooled/.test(deafRun.stderr) && (await filledKey()) === "",
+      `a run that cannot open its watching connection says so, and hears a stop before the pooling (exit ${deafRun?.code}: ${deafRun === null ? "no run" : `${deafRun.stdout.split("\n").find((l) => /unwatched/.test(l))?.trim().slice(0, 80) ?? "nothing said"}; ${deafRun.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 80)}`})`);
+    // …and one lent a client and no url says its waits go unwatched.
+    await setNamed("subjects:r0");
+    const lentAlone = new SQL({ url: URL_!, max: 2 });
+    let alone = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      alone = await caught((writer) => sweepSubjects({ sql: lentAlone, env: { ...env, OB1_WORKER_KEY: "" }, model: false, switchKey: true, writer }));
+    } finally {
+      await lentAlone.close({ timeout: 5 });
+    }
+    assert(alone?.code === 0 && /^ {2}the naming's waits go unwatched: the run was lent a client and no url;/m.test(alone.stdout),
+      `a run lent a client and no url says its waits go unwatched (exit ${alone?.code})`);
     // A capture whose xid follows the naming's, its trigger reading the pool before the naming committed: waited for by
     // its write lock on thoughts, and pooled (review pass 6, run-it: the xids pg_snapshot_xip lists, those below the
     // snapshot's xmax, left it out, and it was never pooled). The naming's window is held open by a lock on the
