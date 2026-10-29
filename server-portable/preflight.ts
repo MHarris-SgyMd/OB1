@@ -276,6 +276,8 @@ const followersBeside = (beats: readonly WorkerHeartbeat[], scheduler: WorkerHea
 const besideWords = (beside: readonly WorkerHeartbeat[]) => (beside.length ? ", once the follower(s) beside it stop" : "");
 const besideFix = (beside: readonly WorkerHeartbeat[]) =>
   beside.length ? `Stop the follower(s) beside it first (${beside.map((b) => b.job ?? b.key).join(", ")}), or the scheduler ends at its next poll.` : "";
+/** A fix of several sentences, in order, the empty ones left out: one space between, none at the ends. */
+const fixOf = (...parts: string[]) => parts.map((p) => p.trim()).filter((p) => p !== "").join(" ");
 /**
  * What mends a follower db/supervise.ts holds (SMD-3214), null for a row it
  * did not end: the cause first — "start it again" is wrong for a service
@@ -4304,8 +4306,8 @@ if (configFailed) {
               // re-embed first in each sleep with work, and between its
               // sleeps holds no lease (SMD-2679 PR 4b). Set aside, the key falls
               // to the record's own words below, as its sleep row says. A dead
-              // worker's expired leases are its work too — its next sleep with
-              // work reclaims them — so they add a clause and the reclaim, not
+              // worker's expired leases are its work too — it reclaims them when
+              // it next works the key — so they add a clause and the reclaim, not
               // "finish it" beside it (SMD-3485). The scheduler's key is its
               // row's (`reembedJob`, review pass 5); a row without one runs no
               // re-embed (review pass 6).
@@ -4331,7 +4333,6 @@ if (configFailed) {
                 const until = runner.down ? `, once re-embed runs again${beside.length ? " and the follower(s) beside it stop" : ""}` : besideWords(beside);
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${until}` : "";
                 const diedFix = l.expired ? reclaim(key).trim() : "";
-                const fixOf = (...parts: string[]) => parts.map((p) => p.trim()).filter((p) => p !== "").join(" ");
                 if (runner.down) {
                   add("re-embed pass", "warn", `${words}; re-embed set down for ${sleeping.running ? "this" : "its last"} sleep (${runner.down})${failedWords}${conflict}${died}`,
                       fixOf(`${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. The next sleep with work tries it again, with no second worker.`, c.failed ? failedFix("its next sleep") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
@@ -4508,44 +4509,44 @@ if (configFailed) {
                 add("consolidate pass", r.status, r.detail, r.fix);
                 continue;
               }
-              // No lease live, no follower: the sleep scheduler works the key
-              // between its sleeps — its followers stamp through heartbeat:sleep,
-              // and awake it holds no lease. The row is its, with no remedy that
-              // starts a worker beside it, where it would read stopped (an old
-              // workers-profile row included). A dead worker's expired leases
-              // are its work too — it reclaims them when it next works the key —
-              // so they add a clause and the reclaim, not "finish it" beside it
-              // (SMD-3485; SMD-1794's review pass 2 had left them their words below).
-              // Only the key it runs now. One from an earlier prompt or decide
-              // version of this judge, which ownKey also matches, no worker runs
-              // any more — consolidate.ts has no --job, and runs the current key
-              // as the scheduler does — whether a scheduler runs here or not: said
-              // so, with nothing to finish or retry, its expired claims and failed
-              // rows included (review passes 1 to 3: it read as the scheduler's,
-              // and "Finish it" ran the current key, beside it where it ran).
+              // An earlier prompt or decide version of this judge's key, which
+              // ownKey also matches: no worker runs it any more — consolidate.ts
+              // has no --job, and runs the current key as the scheduler does —
+              // whether a scheduler runs here or not. Said so, with nothing to
+              // finish or retry, its expired claims and failed rows included
+              // (SMD-3485 review passes 1 to 3: it read as the scheduler's, and
+              // "Finish it" ran the current key, beside it where it ran).
               if (ownKey && !currentKey) {
                 add("consolidate pass", "ok", `${key}: ${counts} — an earlier prompt or decide version's pool, which no worker runs any more: consolidate.ts and the sleep scheduler judge these thoughts under ${consolidatePassKey(resolvedEmbed)}, nothing here to finish or retry${l.expired ? `; ${l.expired} claim(s) left by a worker that died, which nothing takes up` : ""}`);
                 continue;
               }
-              const sleeper = sleeping;
-              if (sleeper) {
-                const beside = followersBeside(facts.workers?.heartbeats ?? [], sleeper);
+              // No lease live, no follower: the sleep scheduler works the key it
+              // runs now between its sleeps — its followers stamp through
+              // heartbeat:sleep, and awake it holds no lease. The row is its, with
+              // no remedy that starts a worker beside it, where it would read
+              // stopped (an old workers-profile row included). A dead worker's
+              // expired leases are its work too — it reclaims them when it next
+              // works the key — so they add a clause and the reclaim, not "finish
+              // it" beside it (SMD-3485; SMD-1794's review pass 2 had left them
+              // their words below).
+              if (sleeping) {
+                const beside = followersBeside(facts.workers?.heartbeats ?? [], sleeping);
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${besideWords(beside)}` : "";
-                const diedFix = l.expired ? [besideFix(beside), reclaim(key).trim()].filter((p) => p !== "").join(" ") : "";
+                const diedFix = l.expired ? fixOf(besideFix(beside), reclaim(key)) : "";
                 // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2),
                 // nor do those waiting mid-pass for one that stopped answering (SMD-2905).
-                const waitingFor = sleeper.waiting?.length || sleeper.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeper.waiting ?? null, sleeper.waitingMidPass ?? null)}` : null;
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
-                if (sleeper.outcome === "failed") {
+                const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
+                if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
                   add("consolidate pass", "warn", `${words}, and its last pass failed${died}`,
-                      (sleeper.running && sleeper.waitingMidPass?.length
+                      fixOf(sleeping.running && sleeping.waitingMidPass?.length
                         ? `The provider stopped answering mid-pass — check it, and the model provider rows here (--deep probes chat); the scheduler's pass goes on by itself once it answers, with no second worker.${failedRows}`
-                        : `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`) + (diedFix ? ` ${diedFix}` : ""));
+                        : `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`, diedFix));
                 } else {
                   const r = runningRow(key, c, words, died);
-                  if (l.expired) add("consolidate pass", "warn", r.detail, `${r.fix ?? ""} ${diedFix}`.trim());
+                  if (l.expired) add("consolidate pass", "warn", r.detail, fixOf(r.fix ?? "", diedFix));
                   else add("consolidate pass", r.status, r.detail, r.fix);
                 }
                 continue;

@@ -1530,7 +1530,7 @@ else {
   assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
       && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
          `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
-  // A dead worker's expired lease on the scheduler's key is its work, which its next sleep with work reclaims: named,
+  // A dead worker's expired lease on the scheduler's key is its work, which it reclaims when it next works the key: named,
   // with the reclaim, no "finish it" beside it (SMD-3485). A record unlike this configuration keeps the record's words.
   await claims`SELECT claim_thoughts(${KEY}, 'preflight-dead-beside-sleep', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${KEY} AND status = 'claimed'`;
