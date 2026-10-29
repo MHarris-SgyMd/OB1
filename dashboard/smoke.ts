@@ -785,6 +785,9 @@ async function writesArm() {
   if (!otherId) bad(`the write arm's capture under another source gave no thought id (${mcpReply.status})`);
   else {
     const merged = await post("/capture?/capture", { content: elsewhere }, true);
+    // A capture that went elsewhere made a thought of its own: deleted too, so a failure leaves none behind.
+    const strayId = /^\/dashboard\/thoughts\/([0-9a-f-]{36})$/.exec(merged.location)?.[1];
+    if (strayId && strayId !== otherId) await post(`/thoughts/${strayId}/delete?/delete`, {});
     const mergedFlash = merged.setCookies.find((c) => c.startsWith(`${COOKIE}_captured=`)) ?? "";
     const r = await fetch(`${BASE}/thoughts/${otherId}`, { redirect: "manual", headers: { cookie: `${cookie}; ${mergedFlash}` } });
     const html = await r.text();

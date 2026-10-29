@@ -50,7 +50,7 @@ export const actions: Actions = {
 		const code = codeOf(answer.body);
 		if (answer.ok || answer.status >= 500) console.error(`[dashboard] capture_thought: ${answer.status} ${code ?? (answer.ok ? 'no thought id in the answer' : '')}`.trimEnd());
 		const said =
-			notAnswered(code, 'thought') ??
+			notAnswered(code, 'capture') ??
 			(answer.status === 403 ? notYours('capture')
 			: answer.ok ? 'The brain saved the thought but did not say its id. Find it under Browse.'
 			: answer.status >= 500 ? `The brain could not capture the thought${code ? ` (${code})` : ''}.`

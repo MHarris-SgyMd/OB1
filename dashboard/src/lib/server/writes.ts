@@ -51,13 +51,23 @@ export const FLASH_MAX_AGE = 60;
  */
 export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captured`;
 
+/** Each write's words for one that may have been made, and for one that was not (notAnswered). */
+const UNANSWERED = {
+	edit: { maybe: 'the edit may still have been saved. Open the thought to see before editing again', not: 'the edit was not saved' },
+	delete: { maybe: 'the thought may already be deleted. Look for it under Browse before trying again', not: 'the thought was not deleted' },
+	capture: { maybe: 'the thought may still have been captured. Look for it under Browse before capturing it again', not: 'the thought was not captured' },
+} as const;
+
 /**
- * What a write the REST core did not answer is said as (rest.ts write): one that ran past WRITE_TIMEOUT_MS may still
- * have been saved, and a retry would capture or edit again, so the visitor is sent to look first.
+ * What a write the REST core did not answer is said as (rest.ts write): one that may have been made — past
+ * WRITE_TIMEOUT_MS, or its connection lost after sending — sends the visitor to look first, since a retry would edit
+ * or capture again; only one never sent is said not to have been made (review pass 2).
  */
-export function notAnswered(code: string | undefined, what: string): string | undefined {
-	if (code === 'GUI_TIMEOUT') return `The brain did not answer within five minutes, so the ${what} may still have been saved. Look for it under Browse before trying again.`;
-	if (code === 'GUI_UNREACHABLE') return `The brain did not answer, so the ${what} was not saved. The dashboard log has the reason; try again in a moment.`;
+export function notAnswered(code: string | undefined, verb: keyof typeof UNANSWERED): string | undefined {
+	const w = UNANSWERED[verb];
+	if (code === 'GUI_TIMEOUT') return `The brain did not answer within 90 seconds, so ${w.maybe}.`;
+	if (code === 'GUI_LOST') return `The connection to the brain was lost before it answered, so ${w.maybe}.`;
+	if (code === 'GUI_UNREACHABLE') return `The brain could not be reached, so ${w.not}. The dashboard log has the reason; try again in a moment.`;
 	return undefined;
 }
 
