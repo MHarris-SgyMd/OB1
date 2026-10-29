@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, ClaimGoneAtGate, type Admit, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -330,6 +330,23 @@ export interface ExtractOptions {
    * beside `sql`, a caller's client, which it would not reach.
    */
   session?: SessionSettings;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
+   * claim, at the start of each pass — before its pool and its counts — and
+   * before each window of a windowed thought that is sent. A worker waiting
+   * between thoughts holds no claim; one waiting between windows keeps its
+   * claim and lease, and the wait moves the thought's time held on, as a
+   * provider pause does, and is not counted as the model's (a hard stop
+   * counts the thought's time up to the wait). A stop while it waits ends the
+   * worker there, as does the pass ending for a reason of its own (another
+   * worker's outage, the provider's refusal, a worker's throw): between
+   * windows as a first stop ends a thought there, its windows answered so far
+   * kept (or, with no kept windows, its claim back in the pool). When the
+   * gate held it, the claim is read again before a window is sent: a thought
+   * deleted or no longer this worker's has nothing more sent, one edited goes
+   * back to the pool for its new text. Unused by --status and --dry-run.
+   */
+  admit?: Admit;
 }
 
 /**
@@ -560,6 +577,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   const say: Writer["out"] = opts.banner === false ? () => {} : out;
   /** The end-of-run summary's queries, which a pass the scheduler drives leaves out (SMD-2752). */
   const SUMMARY = opts.summary !== false;
+  const ADMIT = opts.admit;
   /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
   const refused = (kind: StartRefusal, line: string): number => {
     err(line);
@@ -1034,6 +1052,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * pass after the thought in hand (SMD-2599).
    */
   let halt = new AbortController();
+  /**
+   * Aborted when the pass ends for a reason of its own — the provider's
+   * refusal, a worker's throw — so a worker waiting at the admit gate wakes to
+   * it, as one pausing on a provider error wakes on `halt`. `gate`, the signal
+   * the gate waits on, is the first stop, `halt` and this, made new with each
+   * pass (SMD-3379 PR 1b-1, review pass 1).
+   */
+  let passEnds = new AbortController();
+  let gate: AbortSignal = onStop.signal;
   let done = 0;
   /** Of `done`, the thoughts extracted over a prefix only (SMD-2240), and those with windows left out as malformed, a prefix of one included, with how many windows (SMD-2260). */
   let partial = 0;
@@ -1097,7 +1124,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     );
   }
 
-  type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null };
+  type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null; metadata_hash: string | null };
   type Outcome =
     /** `caveat` is set for a thought extracted in part: 028's caveat, released on the succeeded row (SMD-2240); `leftOut`, how many of its windows were left out as malformed (SMD-2260). */
     | { outcome: "succeeded"; caveat?: string; leftOut?: number }
@@ -1106,7 +1133,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     /** Edited while it was being extracted; the trigger has already re-queued it and the pool will redo it. */
     | { outcome: "superseded" }
     /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
-    | { outcome: "abandoned" };
+    | { outcome: "abandoned" }
+    /** Reaped while its worker waited at the admit gate (a requeue is superseded): nothing more sent, and not this worker's to release (review passes 4 and 5). */
+    | { outcome: "lost" };
 
   /**
    * A long thought's answered windows, kept across a claim that does not
@@ -1137,9 +1166,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * The thought each worker has in hand, for the hard stop's count (noteStop):
    * set while processRow runs, with when it was taken up — moved on past a
    * provider pause, which is the provider's time and not the window's
-   * (review pass 3) — which says whether the stop was long.
+   * (review pass 3) — which says whether the stop was long. A wait at the
+   * admit gate moves it on too, and `pausedAt` marks one in progress, so a
+   * hard stop during it counts up to the wait (SMD-3379 PR 1b-1).
    */
-  const inHand = new Map<string, { id: string; fingerprint: string; since: number }>();
+  const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
   /**
    * The hard stop's count for each worker, which the worker's own release
@@ -1199,7 +1230,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // Long: held at least the floor. Not the thought's slowest window, which
     // took a kept 280 s window's document out of the stall for good (review
     // pass 3).
-    const long = Date.now() - t.since >= STALL_FLOOR;
+    // Up to a wait at the admit gate it is in, which is not the thought's time
+    // held: the hard stop reads it before the wait has ended (review pass 1).
+    const long = (t.pausedAt ?? Date.now()) - t.since >= STALL_FLOOR;
     try {
       await sql`SELECT note_extraction_stop(${t.id}::uuid, ${JOB}, ${workerId}, ${t.fingerprint}, ${WINDOWING_SIG}, ${long})`;
     } catch (e) {
@@ -1264,15 +1297,46 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const t0 = Date.now();
+    // The admit gate between windows (SMD-3379 PR 1b): its wait is neither
+    // the model's time nor the thought's held, and a stop while it waits ends
+    // the thought there as a first stop does, its windows kept.
+    let paused = 0;
+    const admitWindow = ADMIT ? async (): Promise<void> => {
+      const at = Date.now();
+      const held = inHand.get(workerId);
+      if (held) held.pausedAt = at;
+      let through: false | "open" | "waited" = false;
+      try {
+        through = await admitted(ADMIT, gate);
+      } catch (e) {
+        throw new AdmitThrow(e);
+      } finally {
+        const waited = Date.now() - at;
+        paused += waited;
+        if (held) {
+          held.since += waited;
+          held.pausedAt = undefined;
+        }
+      }
+      if (!through) throw new StoppedBetweenWindows();
+      // After the gate held it the claim is read again: the live write that
+      // closed the gate may be a delete or an edit of this thought, whose text
+      // must not go to the provider after it (review passes 3 and 4). A read
+      // that fails goes on, as before.
+      if (through === "waited") {
+        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true, row.metadata_hash).catch(() => "ours" as const);
+        if (claim !== "ours") throw new ClaimGoneAtGate(claim);
+      }
+    } : undefined;
     let extraction: Extraction;
     try {
       const progress = await progressFor(row, workerId);
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
       // call — per window of a long thought (SMD-1879).
-      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress);
+      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress, admitWindow);
     } finally {
-      llmMs += Date.now() - t0;
+      llmMs += Date.now() - t0 - paused;
     }
     // Every call the thought cost: one per window, and one more per window
     // that was retried (first review pass: the retries went uncounted) — a
@@ -1411,6 +1475,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     });
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
+        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
+        // here holding no claim, and a stop while it waits ends it.
+        if (ADMIT) {
+          if (!(await admitted(ADMIT, gate))) return;
+          if (stopping || outage.reason !== null || limitReached()) return;
+        }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -1430,7 +1500,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           const rows = (await sql`
-            SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata
+            SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
@@ -1467,12 +1537,33 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
                 calls += callsMadeBy(e);
+                // The admit gate's own error, not the thought's: the pass ends with it.
+                if (e instanceof AdmitThrow) throw e.error;
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
                 // A first stop ended it between windows, those answered kept: it
                 // goes back to the pool with the leases the finally returns, its
                 // attempt refunded, no stop counted (review pass 5).
                 if (e instanceof StoppedBetweenWindows) return;
+                // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
+                if (e instanceof ClaimGoneAtGate) {
+                  // Still ours, its text moved under a key nothing requeues, or its
+                  // metadata, which the egress gate reads (review pass 6): back to the
+                  // pool for the new text, as a stale write is, out of the heartbeat's
+                  // set first; if that fails, the finally returns it with this worker's
+                  // leases (review passes 4 and 5).
+                  if (e.claim === "moved") {
+                    hb.held.delete(b.thought_id);
+                    const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
+                    if (requeued !== null) {
+                      hb.held.add(b.thought_id);
+                      err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
+                      return;
+                    }
+                  }
+                  outcome = e.claim === "deleted" ? { outcome: "vanished" } : e.claim === "lost" ? { outcome: "lost" } : { outcome: "superseded" };
+                  continue;
+                }
                 // The database went away under the write: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -1519,6 +1610,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // leases the finally returns.
                   configError = msg;
                   stopping = true;
+                  passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
                 } else if (stopping || outage.reason !== null) {
@@ -1596,6 +1688,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           hb.held.delete(b.thought_id);
           if (outcome.outcome === "vanished") {
             vanished++;
+            continue;
+          }
+          if (outcome.outcome === "lost") {
+            lost++;
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped; nothing more of it was sent`);
             continue;
           }
           if (outcome.outcome === "superseded") {
@@ -1834,9 +1931,20 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    if (ADMIT) {
+      passEnds = new AbortController();
+      gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+    }
     for (const w of unreturned) {
       await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
       unreturned.delete(w);
+    }
+    // After the leases a worker could not return, a small write and no new
+    // work (review pass 6): the admit gate before the pass's pool and counts (SMD-3379 PR 1b). A
+    // stop while it waits ends the run with no pass: the summary's counts are
+    // read only for a summary.
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
+      return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, partial: 0, leftOut: 0, leftOutOver: 0, failed: 0, unpooled: 0, thoughts: 0 };
     }
     // The backlog is pooled once. While following, the trigger enqueues every
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
@@ -1870,6 +1978,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // still hold rows and the client (review pass 1).
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
+      passEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
