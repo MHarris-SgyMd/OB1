@@ -6092,6 +6092,8 @@ if (want("10")) {
   };
   const statusOf = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
   const othersPending = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
+  // The cases below count calls and asks: the pool must hold their thoughts alone (review pass 6).
+  assert(othersPending === 0, `the gate's cases start on an empty pool (${othersPending} row(s) pending or claimed)`);
   const gatedNote = await seed("Kenji tuned the gated cache warmers.");
   // Closed from the first ask: the pass waits before its pool and counts.
   const atPass = heldGate(0);
@@ -6199,7 +6201,6 @@ if (want("10")) {
   const goneRun = runExtract({ url: URL_!, env, workers: 1, admit: atGone.admit, writer: { out: (l) => goneLines.push(l), err: (l) => goneLines.push(l) } });
   const goneWaiting = await pollUntil(async () => atGone.waiting === 1, 10_000);
   await sql`SELECT delete_thought(${goneNote}::uuid, NULL::jsonb)`;
-  await Bun.sleep(200);
   atGone.open();
   const goneCode = await goneRun;
   const goneSummary = goneLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
@@ -6221,7 +6222,6 @@ if (want("10")) {
   } finally {
     await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
   }
-  await Bun.sleep(200);
   atEdited.open();
   const editedCode = await editedRun;
   const editedAfter = await statusOf(editedNote);
@@ -6239,13 +6239,29 @@ if (want("10")) {
   const requeuedRun = runExtract({ url: URL_!, env, workers: 1, admit: atRequeued.admit, writer: { out: (l) => requeuedLines.push(l), err: (l) => requeuedLines.push(l) } });
   const requeuedWaiting = await pollUntil(async () => atRequeued.waiting === 1, 10_000);
   await sql`SELECT update_thought(${requeuedNote}::uuid, 'Kenji rewrote the requeued registry notes.', NULL, NULL::vector)`;
-  await Bun.sleep(200);
   atRequeued.open();
   const requeuedCode = await requeuedRun;
   const requeuedSummary = requeuedLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
   assert(requeuedWaiting && ledgerCalls - requeuedFrom === 1 && /, 1 edited mid-extraction and re-queued/.test(requeuedSummary) && !/no longer this worker's/.test(requeuedSummary) && (await statusOf(requeuedNote)) === "succeeded" && requeuedCode <= 1,
          `…one edited under the key the trigger follows has no more of its old text sent, is counted edited, and is extracted at its new text (${ledgerCalls - requeuedFrom} old window(s) sent, exit ${requeuedCode}: ${requeuedSummary.trim().slice(0, 140)})`);
   await sql`SELECT delete_thought(${requeuedNote}::uuid, NULL::jsonb)`;
+  // …and one whose metadata alone is edited then, which the egress gate
+  // reads: no more of it is sent under the old tags, and it goes back to the
+  // pool, extracted again under the new (review pass 6).
+  const retaggedNote = await seed(Array.from({ length: 6 }, (_, p) => `The retagged ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita retagged point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const atRetagged = heldGate(3);
+  const retaggedFrom = ledgerCalls;
+  const retaggedLines: string[] = [];
+  const retaggedRun = runExtract({ url: URL_!, env, workers: 1, admit: atRetagged.admit, writer: { out: (l) => retaggedLines.push(l), err: (l) => retaggedLines.push(l) } });
+  const retaggedWaiting = await pollUntil(async () => atRetagged.waiting === 1, 10_000);
+  await sql`UPDATE thoughts SET metadata = metadata || '{"topics": ["private"]}'::jsonb WHERE id = ${retaggedNote}::uuid`;
+  atRetagged.open();
+  const retaggedCode = await retaggedRun;
+  const retaggedSummary = retaggedLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  const retaggedWindows = ledgerCalls - retaggedFrom;
+  assert(retaggedWaiting && /, 1 edited mid-extraction and re-queued/.test(retaggedSummary) && retaggedWindows > 1 && (await statusOf(retaggedNote)) === "succeeded" && retaggedCode <= 1,
+         `…one whose metadata alone is edited then goes back to the pool and is extracted again under its new metadata, counted edited (${retaggedWindows} window(s) sent in all, exit ${retaggedCode}: ${retaggedSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${retaggedNote}::uuid, NULL::jsonb)`;
   // A pause moves the thought's time held on (N17): a hard stop while the
   // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
   // and stalls nothing (review pass 3).
@@ -9575,6 +9591,9 @@ if (want("16")) {
   await seed("[16g] The gatehouse opens at nine.", 30, 3, ["gatehouse"]);
   await seed("[16g] The gatehouse opens at ten.", 30, 2, ["gatehouse"]);
   await consolidateInProcess({ workers: 1 });
+  // The cases below count calls and asks: the pool must hold their thoughts alone (review pass 6).
+  const othersPendingC = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
+  assert(othersPendingC === 0, `the consolidation gate's cases start on an empty pool (${othersPendingC} row(s) pending or claimed)`);
   const gatedNewer = await seed("[16g] The gatehouse opens at eleven now.", 30, 0, ["gatehouse"]);
   const gatedStatus = async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${gatedNewer}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
   const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => runConsolidate({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: () => {}, err: () => {} } });
@@ -9613,7 +9632,6 @@ if (want("16")) {
   const goneRunC = gatedRun(atGoneC, new AbortController().signal);
   const goneWaitingC = await pollUntil(async () => atGoneC.waiting === 1, 10_000);
   await sql`SELECT delete_thought(${goneNewer}::uuid, NULL::jsonb)`;
-  await Bun.sleep(200);
   atGoneC.open();
   const goneCodeC = await goneRunC;
   assert(goneWaitingC && calls - goneFromC === 1 && goneCodeC <= 1,
@@ -9632,7 +9650,6 @@ if (want("16")) {
   const movedRunC = gatedRun(atMovedC, new AbortController().signal);
   const movedWaitingC = await pollUntil(async () => atMovedC.waiting === 1, 10_000);
   await sql`UPDATE thoughts SET content = '[16g] The watchtower opens at one now.' WHERE id = ${watched}::uuid`;
-  await Bun.sleep(200);
   atMovedC.open();
   const movedCodeC = await movedRunC;
   const movedAfterC = await watchedStatus();
@@ -9650,7 +9667,6 @@ if (want("16")) {
   const oldersRun = gatedRun(atOlders, new AbortController().signal);
   const oldersWaiting = await pollUntil(async () => atOlders.waiting === 1, 10_000);
   for (const id of olders) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
-  await Bun.sleep(200);
   atOlders.open();
   const oldersCode = await oldersRun;
   const oldersAfter = await latestStatus();

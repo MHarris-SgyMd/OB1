@@ -1134,7 +1134,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     | { outcome: "superseded" }
     /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
     | { outcome: "abandoned" }
-    /** Requeued or reaped while its worker waited at the admit gate: nothing more sent, and not this worker's to release (review pass 4). */
+    /** Reaped while its worker waited at the admit gate (a requeue is superseded): nothing more sent, and not this worker's to release (review passes 4 and 5). */
     | { outcome: "lost" };
 
   /**
@@ -1324,7 +1324,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // must not go to the provider after it (review passes 3 and 4). A read
       // that fails goes on, as before.
       if (through === "waited") {
-        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true).catch(() => "ours" as const);
+        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true, row.metadata).catch(() => "ours" as const);
         if (claim !== "ours") throw new ClaimGoneAtGate(claim);
       }
     } : undefined;
@@ -1547,8 +1547,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (e instanceof StoppedBetweenWindows) return;
                 // Deleted or edited while the worker waited at the gate: not ours to finish (review pass 3).
                 if (e instanceof ClaimGoneAtGate) {
-                  if (hardStopped) return;
-                  // Still ours, its text moved under a key nothing requeues: back to the
+                  // Still ours, its text moved under a key nothing requeues, or its
+                  // metadata, which the egress gate reads (review pass 6): back to the
                   // pool for the new text, as a stale write is, out of the heartbeat's
                   // set first; if that fails, the finally returns it with this worker's
                   // leases (review passes 4 and 5).
@@ -1692,7 +1692,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           }
           if (outcome.outcome === "lost") {
             lost++;
-            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — requeued or reaped; nothing more of it was sent`);
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped; nothing more of it was sent`);
             continue;
           }
           if (outcome.outcome === "superseded") {
@@ -1935,15 +1935,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       passEnds = new AbortController();
       gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
     }
-    // The admit gate before the pass's pool and counts (SMD-3379 PR 1b). A
+    for (const w of unreturned) {
+      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
+      unreturned.delete(w);
+    }
+    // After the leases a worker could not return, a small write and no new
+    // work (review pass 6): the admit gate before the pass's pool and counts (SMD-3379 PR 1b). A
     // stop while it waits ends the run with no pass: the summary's counts are
     // read only for a summary.
     if (ADMIT && !(await admitted(ADMIT, gate))) {
       return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, partial: 0, leftOut: 0, leftOutOver: 0, failed: 0, unpooled: 0, thoughts: 0 };
-    }
-    for (const w of unreturned) {
-      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-      unreturned.delete(w);
     }
     // The backlog is pooled once. While following, the trigger enqueues every
     // new capture, so re-running enqueue_thoughts — a scan of every thought —

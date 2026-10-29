@@ -1739,11 +1739,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // any older side still to judge, whose text must not go to the judge
         // after it (review passes 3 and 4). A read that fails goes on, as before.
         if (through === "waited") {
-          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false).catch(() => "ours" as const);
+          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false, row.metadata).catch(() => "ours" as const);
           if (claim === "deleted") return { outcome: "vanished" };
           if (claim === "lost" || claim === "requeued") return { outcome: "lost" };
           // Still ours, its text moved (063 requeues a judged thought only
-          // through its proposals): the worker puts it back in the pool.
+          // through its proposals) or its metadata, which the egress gate reads
+          // (review pass 6): the worker puts it back in the pool.
           if (claim === "moved") return { outcome: "moved" };
           const rest = candidates.slice(at).map((x) => x.older_id);
           const fresh = (await sql`
@@ -2402,15 +2403,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       passEnds = new AbortController();
       gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
     }
-    // The admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
+    for (const w of unreturned) {
+      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
+      unreturned.delete(w);
+    }
+    // After the leases a worker could not return, a small write and no new
+    // work (review pass 6): the admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
     // 1b). A stop while it waits ends the run with no pass: the summary's
     // counts are read only for a summary.
     if (ADMIT && !(await admitted(ADMIT, gate))) {
       return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, failed: 0, unpooled: 0, thoughts: 0, proposals: 0 };
-    }
-    for (const w of unreturned) {
-      await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
-      unreturned.delete(w);
     }
     // The pool rule, every pass, from migration 029's consolidation_pool (one
     // definition for this, --status and preflight). No trigger feeds it (see

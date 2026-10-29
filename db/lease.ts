@@ -343,26 +343,29 @@ export class AdmitThrow extends Error {
  * provider after. "ours"; "deleted", the thought gone; "requeued", the claim
  * the pool's again (an edit's requeue under the key 016 follows); "lost",
  * another's or settled (a reap); "moved", still this worker's but its text
- * changed (an edit under a key nothing requeues).
- * `fingerprint` is the claim's, by the engine's own rule: `coalesced` reads
- * the stored key first, as extraction does, else the text's.
+ * changed (an edit under a key nothing requeues) or its metadata, which the
+ * egress gate reads (review pass 6). `fingerprint` and `metadata` are the
+ * claim's as the worker read them, the fingerprint by the engine's own rule:
+ * `coalesced` reads the stored key first, as extraction does, else the text's.
  */
-export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean, metadata: Record<string, unknown> | null): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
   const [r] = (await sql`
-    SELECT (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END
-              FROM thoughts WHERE id = ${id}::uuid) AS fingerprint,
-           c.status, c.worker_id
-      FROM (SELECT 1) one LEFT JOIN thought_work_claims c ON c.thought_id = ${id}::uuid AND c.work_type = ${job}`) as { fingerprint: string | null; status: string | null; worker_id: string | null }[];
+    SELECT t.fingerprint, t.retagged, c.status, c.worker_id
+      FROM (SELECT 1) one
+      LEFT JOIN (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END AS fingerprint,
+                        metadata IS DISTINCT FROM ${metadata}::jsonb AS retagged
+                   FROM thoughts WHERE id = ${id}::uuid) t ON true
+      LEFT JOIN thought_work_claims c ON c.thought_id = ${id}::uuid AND c.work_type = ${job}`) as { fingerprint: string | null; retagged: boolean | null; status: string | null; worker_id: string | null }[];
   if (r.fingerprint === null) return "deleted";
   if (r.status === "pending") return "requeued";
   if (r.status !== "claimed" || r.worker_id !== workerId) return "lost";
-  return fingerprint === null || r.fingerprint === fingerprint ? "ours" : "moved";
+  return (fingerprint === null || r.fingerprint === fingerprint) && !r.retagged ? "ours" : "moved";
 }
 
 /** The claim on the thought in hand found not this worker's to go on with after the admit gate held it (claimAfterWait): nothing more of it is sent. */
 export class ClaimGoneAtGate extends Error {
   constructor(readonly claim: "deleted" | "requeued" | "lost" | "moved") {
-    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "lost" ? "reaped" : "edited"} while its worker waited at the admit gate`);
+    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "lost" ? "reaped" : claim === "requeued" ? "requeued (an edit, or its lease returned by hand)" : "edited"} while its worker waited at the admit gate`);
     this.name = "ClaimGoneAtGate";
   }
 }

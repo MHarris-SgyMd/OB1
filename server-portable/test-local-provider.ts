@@ -1515,16 +1515,20 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   const { StoppedBetweenWindows: Stopped } = await import("./entities.ts");
   const gates: number[] = [];
   let open: (() => void) | null = null;
+  /** Set once the case opens the gate: an ask after it goes through, so a slow runner fails a row rather than hangs (review pass 6). */
+  let released = false;
   const closedAt = (n: number, reject = false) => (): Promise<void> => {
     gates.push(reqs.length);
-    if (gates.length !== n) return Promise.resolve();
+    if (gates.length !== n || (released && !reject)) return Promise.resolve();
     return reject ? Promise.reject(new Stopped()) : new Promise<void>((resolve) => { open = resolve; });
   };
   store.clear();
   reqs.length = 0;
   const waiting = extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD, closedAt(2));
-  await Bun.sleep(300);
+  for (let i = 0; i < 250 && open === null; i++) await Bun.sleep(20);
+  await Bun.sleep(100);
   const sentWhileClosed = reqs.length;
+  released = true;
   (open as (() => void) | null)?.();
   const throughGate = await waiting;
   assert(sentWhileClosed === 1 && gates.join(",") === Array.from({ length: all }, (_, i) => i).join(",") && reqs.length === all && JSON.stringify(throughGate.entities) === JSON.stringify(unbroken.entities),
