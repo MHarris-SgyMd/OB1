@@ -13,10 +13,10 @@
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Workers</h1>
-	{#if form && 'done' in form}
-		<p class="text-sm" role="status" data-testid="worker-done">{form.done}</p>
-	{:else if form && 'error' in form}
+	{#if form?.error}
 		<p class="text-sm text-amber-300" role="alert" data-testid="worker-error">{form.error}</p>
+	{:else if data.done}
+		<p class="text-sm" role="status" data-testid="worker-done">{data.done}</p>
 	{/if}
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5 space-y-3">
 		{#if data.pools.length === 0}
@@ -62,13 +62,13 @@
 											{#if data.canRetry && p.failed > 0}
 												<form method="POST" action="?/retry" data-testid="retry">
 													<input type="hidden" name="work_type" value={p.key} />
-													<button type="submit" class="button text-xs">Retry {n(p.failed)} failed</button>
+													<button type="submit" class="button text-xs" aria-label="Retry {n(p.failed)} failed in {p.workType}">Retry {n(p.failed)} failed</button>
 												</form>
 											{/if}
 											{#if data.canRelease && p.stale > 0}
 												<form method="POST" action="?/release" data-testid="release">
 													<input type="hidden" name="work_type" value={p.key} />
-													<button type="submit" class="button text-xs">Release {n(p.stale)} stale</button>
+													<button type="submit" class="button text-xs" aria-label="Release {n(p.stale)} stale in {p.workType}">Release {n(p.stale)} stale</button>
 												</form>
 											{/if}
 										</div>

@@ -889,14 +889,22 @@ async function writesArm() {
   else {
     const unnamed = await post("/workers?/retry", { work_type: " " });
     assert(unnamed.status === 400 && /data-testid="worker-error"[^>]*>[^<]*Name the pool/.test(unnamed.html), `a retry naming no pool is refused in words (${unnamed.status})`);
-    const retried = await post("/workers?/retry", { work_type: retryPool });
-    assert(retried.status === 200 && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Requeued \d+ failed rows? of /.test(retried.html) && !poolsIn(retried.html, "retry").includes(retryPool),
-      `the write key retries a pool's failed rows: the page says how many it requeued, and offers that pool no Retry after (${retried.status})`);
-    const again = await post("/workers?/retry", { work_type: retryPool });
-    assert(again.status === 200 && /held no failed row: nothing was requeued/.test(again.html), `…and a second retry of it requeues nothing, saying so (${again.status})`);
-    const released = await post("/workers?/release", { work_type: releasePool });
-    assert(released.status === 200 && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Returned \d+ stale leases? of /.test(released.html) && !poolsIn(released.html, "release").includes(releasePool),
-      `the write key releases a pool's stale leases: the page says how many it returned, and offers that pool no Release after (${released.status})`);
+    // Each action answers with a redirect to the page and a flash cookie, so a reload asks the page, not the action again
+    // (review pass 1): the page then says what was done, once, and clears the cookie.
+    const landed = async (posted: { status: number; location: string; setCookies: string[] }) => {
+      const flash = posted.setCookies.find((c) => c.startsWith(`${COOKIE}_workers=`)) ?? "";
+      const r = await fetch(`${BASE}/workers`, { redirect: "manual", headers: { cookie: `${cookie}; ${flash}` } });
+      const cleared = (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${COOKIE}_workers=;`) && /Max-Age=0/i.test(c) && attributesHold(c));
+      return { redirected: posted.status === 303 && posted.location === "/dashboard/workers" && flash !== "", status: r.status, html: await r.text(), cleared };
+    };
+    const retried = await landed(await post("/workers?/retry", { work_type: retryPool }));
+    assert(retried.redirected && retried.cleared && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Requeued [\d,]+ failed rows? of /.test(retried.html) && !poolsIn(retried.html, "retry").includes(retryPool),
+      `the write key retries a pool's failed rows: 303 back to the page, which says how many it requeued, clears its cookie, and offers that pool no Retry after (${retried.status})`);
+    const again = await landed(await post("/workers?/retry", { work_type: retryPool }));
+    assert(again.redirected && /held no failed row: nothing was requeued/.test(again.html), `…and a second retry of it requeues nothing, saying so (${again.status})`);
+    const released = await landed(await post("/workers?/release", { work_type: releasePool }));
+    assert(released.redirected && released.cleared && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Returned [\d,]+ stale leases? of /.test(released.html) && !poolsIn(released.html, "release").includes(releasePool),
+      `the write key releases a pool's stale leases: 303 back to the page, which says how many it returned, clears its cookie, and offers that pool no Release after (${released.status})`);
   }
 
   const confirm = await get(`/thoughts/${id}/delete`);

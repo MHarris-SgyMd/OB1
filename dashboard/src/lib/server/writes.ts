@@ -63,6 +63,12 @@ export const deletedCookie = (sessionCookie: string) => `${sessionCookie}_delete
  */
 export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captured`;
 
+/**
+ * The flash cookie the workers page's actions set for the page to say what they did, after their redirect:
+ * `<retry|release>.<rows moved>.<pool, URI-encoded>`. Read and cleared by the page (SMD-3322 PR 3 review pass 1).
+ */
+export const workersCookie = (sessionCookie: string) => `${sessionCookie}_workers`;
+
 /** Each write's words for one that may have been made, and for one that was not (notAnswered). */
 const UNANSWERED = {
 	edit: { maybe: 'the edit may still have been saved. Open the thought to see before editing again', not: 'the edit was not saved' },
