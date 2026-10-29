@@ -48,14 +48,51 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 }
 
 /**
+ * The longest one write may take: a capture embeds its text and extracts its metadata, and an edit re-embeds, so a
+ * page's 30 s ended some while the core went on to save (SMD-3322 PR 2 review pass 1). Not longer than 90 s: a
+ * front proxy ends a request sooner than its write might (a Cloudflare tunnel at 100 s), and a browser at 300 s, so
+ * a longer wait would end in their error page, the typed text lost (review pass 2). A write past it is said to have
+ * maybe been saved.
+ */
+export const WRITE_TIMEOUT_MS = 90_000;
+
+/** The errors that come before a request is sent (Bun's fetch: measured, review pass 2): a write that threw one was not made. */
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
+let writer: RestClient | undefined;
+/** The client for writes, as `rest()` but with WRITE_TIMEOUT_MS. */
+function restForWrites(): RestClient {
+	writer ??= createRestClient({ baseUrl: restUrl(env), timeoutMs: WRITE_TIMEOUT_MS });
+	return writer;
+}
+
+/**
  * One write under the signed-in visitor's credential (SMD-3322): its answer for
  * the form action to read, so a refusal is said beside the form, not as the
  * page's error. A credential the REST core no longer takes ends the session, as
- * a read's does; a core that does not answer is the page's 502.
+ * a read's does. A core that did not answer is an answer too, so the form
+ * keeps what the visitor typed (review pass 1): 502 `GUI_UNREACHABLE` for a
+ * write never sent (the connection refused, the name unknown), and otherwise
+ * — 504 `GUI_TIMEOUT` past WRITE_TIMEOUT_MS, 502 `GUI_LOST` for a connection
+ * lost after sending — one that may have been made (review pass 2).
  */
 export async function write<K extends CallableOperation>(event: RequestEvent, session: Session, name: K, input: InputOf<K>): Promise<Answer> {
 	const credential = await credentialOf(event, session);
-	return answered(event, name, () => rest().call(name, input, { ...credential, signal: event.request.signal }));
+	let answer: Answer;
+	try {
+		answer = await restForWrites().call(name, input, { ...credential, signal: event.request.signal });
+	} catch (err) {
+		// The request's signal ends for a visitor who left before their form was read, which an action, having read
+		// it, never meets (SvelteKit's getRequest); a write it started runs on. Kept for a signal that did end.
+		if (event.request.signal.aborted) throw err;
+		const timedOut = err instanceof Error && err.name === 'TimeoutError';
+		const notSent = !timedOut && NOT_SENT.has(String((err as { code?: unknown }).code));
+		console.error(`[dashboard] ${name}: the REST core did not answer${timedOut ? ` within ${WRITE_TIMEOUT_MS / 1000} s` : ''}: ${err instanceof Error ? err.message : String(err)}`);
+		const code = timedOut ? 'GUI_TIMEOUT' : notSent ? 'GUI_UNREACHABLE' : 'GUI_LOST';
+		return { status: timedOut ? 504 : 502, ok: false, headers: new Headers(), body: { code }, sent: !notSent };
+	}
+	if (answer.status === 401) signOutHere(event);
+	return answer;
 }
 
 /** Whether the session's whoami named this operation at sign-in: what a page offers a write by (SMD-3322). The REST core still decides the call. */
