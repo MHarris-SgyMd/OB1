@@ -14,9 +14,9 @@
  *
  * What runs. OB1_PASSES, a list of `sleep`, `workers` and `board-sync`
  * (commas or spaces). `workers` is the two followers, `extract` and
- * `consolidate`; `board-sync` is one pass a trigger, every
- * OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock, where the
- * tool ran a loop of its own before (supervise's `every`). Named beside `sleep`, it is left out and the log says so:
+ * `consolidate`; `board-sync` passes at its start and at each trigger,
+ * every OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock,
+ * where the tool kept a loop of its own before (supervise's `every`). Named beside `sleep`, it is left out and the log says so:
  * the scheduler runs extraction and consolidation itself. A name that is no
  * pass is left out the same way, the rest still run. None named, none run,
  * and the coordinator waits for its stop. A change needs the coordinator
@@ -89,7 +89,7 @@ export type Child = {
   digits: readonly string[];
   /** Its argv after `bun <script>`, from its own environment. */
   args(env: Record<string, string | undefined>): string[];
-  /** A trigger's period in ms, from its own environment: one pass a run, the coordinator's clock between them (SMD-3476). Unset, it runs until stopped. */
+  /** A trigger's period in ms, from its own environment: the child is sent supervise's TRIGGER_SIGNAL that often, a pass each (SMD-3476). Unset, it is sent none. */
   every?(env: Record<string, string | undefined>): number;
   script: string;
 };
@@ -99,6 +99,9 @@ const WORKER_OWN = ["OB1_WORKER_KEY", "MCP_ACCESS_KEYS"] as const;
 
 /** A setting, or the pass's default when it is unset or empty. */
 const or = (env: Record<string, string | undefined>, name: string, fallback: string): string => env[name] || fallback;
+
+/** board-sync's trigger period, as OB1_BOARD_SYNC_INTERVAL gives it, trimmed: 300 seconds unset or blank. */
+const boardInterval = (env: Record<string, string | undefined>): string => env.OB1_BOARD_SYNC_INTERVAL?.trim() || "300";
 
 const SLEEP_DIGITS = [
   "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET",
@@ -110,11 +113,13 @@ export const CHILDREN: Record<ChildName, Child> = {
   "board-sync": {
     name: "board-sync", uid: 1101, script: "sync-linear.ts",
     own: ["LINEAR_API_KEY", "OB1_LINEAR_INITIATIVE", "OB1_BOARD_SYNC_INTERVAL", "LINEAR_COMMENT_API_KEY", "OB1_FINDINGS_POST_CAP"],
-    // The interval is the coordinator's clock, so digits only here; its floor (10 s) and the findings cap the tool refuses itself.
-    requireKey: false, digits: ["OB1_BOARD_SYNC_INTERVAL"],
-    // One pass a trigger (SMD-3476): the loop the tool ran is the coordinator's clock.
-    args: () => ["--trigger"],
-    every: (env) => Number(or(env, "OB1_BOARD_SYNC_INTERVAL", "300")) * 1000,
+    requireKey: false, digits: [],
+    // One process, a pass at its start and at each of the coordinator's triggers (SMD-3476), where the tool kept
+    // a clock of its own (--loop). The interval goes to it as --interval, so its heartbeat's period is the clock's
+    // whatever a checkout's .env says; a value it does not take (not whole seconds, under 10) it refuses itself,
+    // held as any refusal is. The findings cap it reads and refuses itself too.
+    args: (env) => ["--trigger", "--interval", boardInterval(env)],
+    every: (env) => (Number(boardInterval(env)) || 300) * 1000,
   },
   extract: {
     name: "extract", uid: 1102, script: "extract-entities.ts",

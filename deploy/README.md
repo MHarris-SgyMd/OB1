@@ -1917,8 +1917,8 @@ it; such a warning in the start-up log clears on the next `bun preflight.ts`.
 shape.
 
 Every `OB1_BOARD_SYNC_INTERVAL` seconds (300), on the coordinator's clock
-(SMD-3476; the tool's own `--loop` is retired), it runs `bun db/sync-linear.ts
---trigger`, one pass: a few requests list every issue's identifier, last-updated time and names
+(SMD-3476; the tool's own `--loop` is retired), `bun db/sync-linear.ts
+--trigger`, which the coordinator starts and signals, runs a pass: a few requests list every issue's identifier, last-updated time and names
 (a hundred a page), one query reads the brain's ticket rows, and the difference
 is the work — a new
 issue is captured (vector, tags, and the facets Linear knows: project, status,

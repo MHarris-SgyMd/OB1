@@ -21,7 +21,8 @@ import { chmodSync, existsSync, lchownSync, mkdirSync, mkdtempSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHILDREN, COORDINATOR_OWN, OWNED, PASSES, childEnv, childHome, coordinate, planPasses, runOnce, type Child } from "./coordinator.ts";
-import { supervise } from "./supervise.ts";
+import { supervise, TRIGGER_SIGNAL as SUPERVISE_TRIGGER } from "./supervise.ts";
+import { TRIGGER_SIGNAL as SYNC_TRIGGER } from "./sync-linear.ts";
 
 let pass = 0;
 let fail = 0;
@@ -94,10 +95,12 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
 // ---------------------------------------------------------------------------
 {
   const args = (name: keyof typeof CHILDREN, env: Record<string, string> = {}) => CHILDREN[name].args(env).join(" ");
-  ok(args("board-sync") === "--trigger", "board-sync: one pass a trigger (SMD-3476)");
+  ok(args("board-sync") === "--trigger --interval 300" && args("board-sync", { OB1_BOARD_SYNC_INTERVAL: " 60 " }) === "--trigger --interval 60" && args("board-sync", { OB1_BOARD_SYNC_INTERVAL: "5" }) === "--trigger --interval 5",
+    `board-sync: --trigger, its interval handed in as --interval, trimmed — one the tool does not take its own to refuse (${args("board-sync")})`);
   const every = CHILDREN["board-sync"].every!;
-  ok(every({}) === 300_000 && every({ OB1_BOARD_SYNC_INTERVAL: "60" }) === 60_000 && CHILDREN["board-sync"].digits.join() === "OB1_BOARD_SYNC_INTERVAL" && CHILDREN.sleep.every === undefined,
-    `board-sync's trigger runs every OB1_BOARD_SYNC_INTERVAL seconds (300 unset), guarded digits only; the followers run until stopped (${every({})}, ${every({ OB1_BOARD_SYNC_INTERVAL: "60" })})`);
+  ok(every({}) === 300_000 && every({ OB1_BOARD_SYNC_INTERVAL: " 60 " }) === 60_000 && every({ OB1_BOARD_SYNC_INTERVAL: "x" }) === 300_000 && CHILDREN["board-sync"].digits.length === 0 && CHILDREN.sleep.every === undefined,
+    `board-sync's trigger every OB1_BOARD_SYNC_INTERVAL seconds (300 unset or unread), the followers sent none (${every({})}, ${every({ OB1_BOARD_SYNC_INTERVAL: " 60 " })})`);
+  ok(SUPERVISE_TRIGGER === SYNC_TRIGGER && SYNC_TRIGGER === "SIGUSR2", `the signal the clock sends is the one board-sync hears (${SUPERVISE_TRIGGER}, ${SYNC_TRIGGER})`);
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");

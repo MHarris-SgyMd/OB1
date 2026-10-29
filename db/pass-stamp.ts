@@ -38,7 +38,7 @@
  * backlog can run for an hour, far past three of its 15-second polls. The
  * timer says the process is alive, as lease renewal does (lease.ts); a model
  * call hung inside a live process is not what it catches. Only the
- * long-running modes stamp — sync-linear.ts --trigger (each of the coordinator's passes, SMD-3476), the --follow of
+ * long-running modes stamp — sync-linear.ts --trigger (a pass at each of the coordinator's triggers, SMD-3476), the --follow of
  * extract-entities.ts, consolidate.ts and reembed.ts (SMD-2679), and sleep.ts --follow, through whose
  * row its followers stamp (SMD-1794) — so a one-shot run never leaves a row
  * that goes stale behind it.

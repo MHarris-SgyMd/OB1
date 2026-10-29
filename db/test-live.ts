@@ -64,7 +64,7 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggeredPass, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { passDumpFile, run as runSleep } from "./sleep.ts";
@@ -14481,41 +14481,43 @@ if (want("37")) {
     await throwing.stamp("ok");
     assert(first === "resolved" && throwCalls === 1 && (await row(throwing.key))?.outcome === "ok", `a throwing reporter is told once, neither rejects the stamp nor stops the next (${first}, ${throwCalls})`);
 
-    // board-sync's trigger pass (SMD-3476): one that reports errors, one that
-    // throws, one that finishes, each a run of its own — stamped running while
-    // it runs, then its outcome, the row left waiting for the next trigger,
-    // not ended; each pass's code its own.
+    // board-sync's trigger (SMD-3476): a pass that reports errors, one that
+    // throws, one that finishes, each at a trigger; then the signal to stop.
+    // The process's code is the last pass's.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     const codes = [1, "throw", 0] as const;
+    let i = 0;
+    let triggers = 0;
     const seenOutcomes: string[] = [];
-    const passCodes: number[] = [];
+    const tStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
+    const origStamp = tStamper.stamp.bind(tStamper);
+    tStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
+    const origEnd = tStamper.end.bind(tStamper);
+    tStamper.end = async (o, m) => { seenOutcomes.push(`end:${o}`); await origEnd(o, m); };
     const log = console.log, error = console.error;
-    let midPass: { running?: boolean } | null = null;
     console.log = () => {};
     console.error = () => {};
+    let tCode: number;
+    let midPass: { running?: boolean } | null = null;
     try {
-      for (const [i, c] of codes.entries()) {
-        const tStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
-        const origStamp = tStamper.stamp.bind(tStamper);
-        tStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
-        passCodes.push(await triggeredPass({
-          once: async () => { if (i === 0) { await Bun.sleep(300); midPass = await row("heartbeat:board-sync"); } if (c === "throw") throw new Error("Linear unreachable"); return c; },
-          stamper: tStamper,
-        }));
-      }
+      tCode = await triggerPasses({
+        once: async () => { if (i === 0) { await Bun.sleep(300); midPass = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
+        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper,
+      });
     } finally {
       console.log = log;
       console.error = error;
     }
     const board = await row("heartbeat:board-sync");
     assert((midPass as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midPass)})`);
-    assert(seenOutcomes.join(",") === "failed,failed,ok" && passCodes.join(",") === "1,1,0" && board?.outcome === "ok" && board.running === false && !("ended" in board) && board.every_s === 60,
-      `each trigger's pass stamps its outcome (errors and a throw both failed), its code its own, the row waiting, not ended (${seenOutcomes.join(",")}; ${passCodes.join(",")}; ${JSON.stringify(board)})`);
-    // A dry run or an audit passes no stamper: the pass writes no row.
+    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && tCode! === 0 && triggers === 2 && board?.outcome === "stopped" && board.ended === true && board.every_s === 60,
+      `the trigger stamps each pass's outcome (errors and a throw both failed), waits for a trigger between passes, then stopped (${seenOutcomes.join(",")}; ${triggers} triggers; ${JSON.stringify(board)})`);
+    // A dry run or an audit passes no stamper: the passes write no row.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    let j = 0;
     console.log = () => {};
-    try { await triggeredPass({ once: async () => 0, stamper: null }); } finally { console.log = log; }
-    assert((await row("heartbeat:board-sync")) === null, "a pass with no stamper (a dry run, an audit) writes no heartbeat");
+    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null }); } finally { console.log = log; }
+    assert((await row("heartbeat:board-sync")) === null, "passes with no stamper (a dry run, an audit) write no heartbeat");
 
     // A tier refresh copies ob1_config whole: its settle step deletes the
     // source's heartbeats, so a canary never reports stable's workers (review pass 1).
@@ -14551,7 +14553,7 @@ if (want("37")) {
       `a one-shot run and a dry run refused the same exit 2 and write no row (${unlooped.map((r) => r.code).join(", ")})`);
     // --loop is retired (SMD-3476): refused by name, pointing at the coordinator, before anything is read or written.
     const retired = boardRun({ LINEAR_API_KEY: "lin_api_not_real" }, "--loop");
-    assert(retired.code === 2 && /^--loop is retired \(SMD-3476\): the coordinator runs board-sync's pass every OB1_BOARD_SYNC_INTERVAL seconds/m.test(retired.err) && (await row("heartbeat:board-sync")) === null,
+    assert(retired.code === 2 && /^--loop is retired \(SMD-3476\): the coordinator runs board-sync's passes every OB1_BOARD_SYNC_INTERVAL seconds/m.test(retired.err) && (await row("heartbeat:board-sync")) === null,
       `--loop is refused by name, the coordinator named, no row written (exit ${retired.code}: ${retired.err.split("\n")[0].slice(0, 90)})`);
     // A database not answering: the end is left within its bound, said, and the refusal goes on.
     const deadSql = new SQL({ url: "postgres://u@127.0.0.1:1/none", max: 1 });
@@ -14687,31 +14689,22 @@ if (want("37b")) {
     labelled.stop("SIGTERM");
     assert((await within(labelled.done, 1000)) === 0 && ["[board-sync] one", "[board-sync] two", "[board-sync] three"].every((l) => said.includes(l)),
       `a labelled follower's every line reaches the writer after its label (${said.filter((l) => l.startsWith("[")).join(" | ")})`);
-    // A trigger (SMD-3476): a pass that ends 0 or 1 runs again on the trigger's
-    // clock — no backoff, no "exited" line, no row of the supervisor's — and a
-    // stop after one ends its row "stopped"; a refusal is held as a follower's.
+    // A trigger (SMD-3476): while the follower runs it is sent TRIGGER_SIGNAL
+    // every `every` ms, a pass each, and nothing else about it changes — no
+    // end, no restart, no row of the supervisor's.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     said.length = 0;
-    const passes = join(tmpdir(), `ob1-trigger-${process.pid}`);
-    rmSync(passes, { force: true });
-    const triggered = supervise({ worker: "board-sync", cmd: ["sh", "-c", `echo pass >> ${passes}; [ "$(wc -l < ${passes})" -eq 2 ] && exit 1; exit 0`], every: 50, sql: ssql as never, waits: fast, writer });
-    await pollUntil(async () => existsSync(passes) && readFileSync(passes, "utf8").split("\n").filter(Boolean).length >= 4, 5000);
+    const heardAt = join(tmpdir(), `ob1-trigger-${process.pid}`);
+    rmSync(heardAt, { force: true });
+    const triggered = supervise({ worker: "board-sync", cmd: ["sh", "-c", `trap 'echo pass >> ${heardAt}' USR2; while :; do sleep 0.05; done`], every: 80, sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => existsSync(heardAt) && readFileSync(heardAt, "utf8").split("\n").filter(Boolean).length >= 3, 5000);
     const midTrigger = await row("heartbeat:board-sync");
     triggered.stop("SIGTERM");
     const triggerCode = await within(triggered.done, 2000);
-    const stoppedRow = await row("heartbeat:board-sync");
-    const passCount = existsSync(passes) ? readFileSync(passes, "utf8").split("\n").filter(Boolean).length : 0;
-    rmSync(passes, { force: true });
-    assert(triggerCode === 0 && passCount >= 4 && midTrigger === null && !said.some((l) => /exited/.test(l)) && stoppedRow?.outcome === "stopped" && stoppedRow.ended === true && stoppedRow.running === false,
-      `a trigger's passes, a failed one among them, run again on its clock with no backoff and no row of the supervisor's, and a stop ends the row stopped (${passCount} passes; row then ${JSON.stringify(midTrigger)}, after ${JSON.stringify(stoppedRow)})`);
-    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    said.length = 0;
-    const refusedTrigger = supervise({ worker: "board-sync", cmd: ["sh", "-c", "exit 2"], every: 50, sql: ssql as never, waits: fast, writer });
-    await pollUntil(async () => ((await row("heartbeat:board-sync"))?.restart?.tries ?? 0) >= 2, 5000);
-    refusedTrigger.stop("SIGTERM");
-    const heldTrigger = await row("heartbeat:board-sync");
-    assert((await within(refusedTrigger.done, 2000)) === 0 && heldTrigger?.restart?.code === 2 && heldTrigger.outcome === "failed" && said.some((l) => /exited 2 after \d+ s — a refusal/.test(l)),
-      `a trigger's refusal is held on the supervisor's clock, its row the refusal's, and a stop then leaves it held, not stopped (${JSON.stringify(heldTrigger)})`);
+    const passesHeard = existsSync(heardAt) ? readFileSync(heardAt, "utf8").split("\n").filter(Boolean).length : 0;
+    rmSync(heardAt, { force: true });
+    assert(triggerCode === 0 && passesHeard >= 3 && midTrigger === null && !said.some((l) => /exited/.test(l)),
+      `a trigger's follower is sent its signal on the clock, a pass each, and never ended or restarted for it (${passesHeard} heard; row ${JSON.stringify(midTrigger)}; ${said.join(" | ").slice(0, 120)})`);
     // No database to write to: the supervisor runs and holds the same, the row left alone.
     const unstamped = supervise({ worker: "sleep", cmd: ["sh", "-c", "exit 2"], sql: null, waits: fast, writer });
     await Bun.sleep(200);
