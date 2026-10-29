@@ -447,9 +447,19 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       out(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
       out(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
       const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
-      const [named] = (await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_key'`) as { value: string }[];
+      // The named subject pool, read for the drainer: a role that cannot read ob1_config is told so on a subject
+      // pool's line, and the rest stand (review pass 6: its status failed on the read).
+      let named: string | null | undefined;
+      try {
+        named = ((await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_key'`) as { value: string }[])[0]?.value || null;
+      } catch (e) {
+        if ((e as { errno?: string }).errno !== "42501") throw e;
+        named = undefined;
+      }
       out(`  pools:       ${pools.length ? pools.map((p) => `${p.w} (${p.n} pending)`).join(", ") : "nothing pending"}`);
-      for (const p of pools) out(`    ${p.w}  →  ${drainer(p.w, named?.value || null)}`);
+      for (const p of pools) {
+        out(`    ${p.w}  →  ${named === undefined && p.w.startsWith("subjects:") ? "(--subjects, if ob1_config.subject_pool_key names it: this role cannot read which it names)" : drainer(p.w, named ?? null)}`);
+      }
       return 0;
     }
     if (INPUT !== undefined) {

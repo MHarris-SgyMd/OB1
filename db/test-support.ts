@@ -366,6 +366,7 @@ const FUNCTIONS = [
   "thoughts_enqueue_subject()",
   "close_thought_subject(uuid, uuid, text)",
   "ob1_filed_ticket(jsonb)",
+  "ob1_js_space()",
 ];
 
 /**

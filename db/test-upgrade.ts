@@ -5005,7 +5005,7 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not unless it files the thought under a ticket, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
+console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not unless it changes metadata.ticket or metadata.issue, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
 {
   const the113 = MIGRATIONS.find((f) => f.endsWith("_subject_pool.sql"))!;  // by name: renumbered when main takes its number
   // Each prerequisite in turn, the first missing named.
@@ -5018,6 +5018,23 @@ console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; on
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
     const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
     assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+  // A database not UTF8 is refused by name, before anything else: the file holds no escape a SQL_ASCII server cannot
+  // read (review pass 6, run-it: it failed on them, "conversion between UTF8 and SQL_ASCII is not supported").
+  {
+    const admin = new SQL({ url: URL_, max: 1 });
+    const ascii = new URL(URL_);
+    ascii.pathname = "/ob1_up113_ascii";
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii");
+      await admin.unsafe("CREATE DATABASE ob1_up113_ascii ENCODING 'SQL_ASCII' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'");
+      const refusedAscii = await applyMigrations(ascii.toString(), { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+      assert(refusedAscii === "migration 113 needs a UTF8 database; this one's encoding is SQL_ASCII",
+        `113 on a SQL_ASCII database is refused by name (${refusedAscii.slice(0, 120)})`);
+    } finally {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii").catch(() => {});
+      await admin.close();
+    }
   }
 
   await dropSchema(URL_);

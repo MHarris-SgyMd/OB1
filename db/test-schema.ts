@@ -15962,7 +15962,7 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
-console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one filed under another ticket, nothing while none (or a blank one) is named or for any other metadata edit; the door refusing a subject the ticket a thought is filed under disagrees with (ob1_filed_ticket); close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one whose metadata.ticket or metadata.issue changes, nothing while none (or a blank one) is named or for any other metadata edit; the door refusing a subject the ticket a thought is filed under disagrees with (ob1_filed_ticket); close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
 {
   const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
   const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");

@@ -101,8 +101,11 @@ export const POOL_GRANTS = "SELECT, INSERT and UPDATE on thought_work_claims, an
 /** A claim's lease past the limit a call: the door's write and the reads beside the call. */
 export const LEASE_MARGIN_S = 300;
 
-/** How long a naming waits for the write transactions open as it named the pool, before it pools without them. */
-const WRITERS_WAIT_S = 30;
+/**
+ * How long a naming waits for the transactions writing thoughts as it named the pool before it pools without them,
+ * leaving its pooling unfinished for the next run: read as the run goes, so a test shortens it, as OUTAGE_MS is.
+ */
+export const WRITERS_WAIT = { ms: 30_000 };
 
 /** The least thought id: a cursor before every page. */
 const NIL_ID = "00000000-0000-0000-0000-000000000000";
@@ -322,7 +325,7 @@ async function sweep(
   const noCurrentSubject = (c: SQL, after = NIL_ID) => c`
     NOT EXISTS (
       SELECT 1 FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
-       WHERE f.thought_id = t.id AND f.thought_id > ${after}::uuid AND f.kind = 'subject' AND f.valid_until IS NULL
+       WHERE f.thought_id = t.id AND f.thought_id >= ${after}::uuid AND f.kind = 'subject' AND f.valid_until IS NULL
          AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
          AND ${currentSubjectSql(c, reasoningOn)}
          AND (CASE WHEN f.payload->>'by' = 'metadata' THEN f.payload->>'key' = 'ticket:' || ${filedTicketSql(c)}
@@ -418,19 +421,29 @@ async function sweep(
       await db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL}), ('subject_pool_filled', '')
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       // A capture whose transaction was open as the pool was named read no pool, or the one before, and the pooling
-      // cannot see it until it commits: each write transaction open at the naming is waited for first, at most
-      // WRITERS_WAIT_S (review pass 5: such a capture was never pooled).
-      const [{ snap }] = (await db`SELECT pg_current_snapshot()::text AS snap`) as { snap: string }[];
-      let told = false;
-      for (const since = Date.now(); ;) {
+      // cannot see it until it commits: each transaction holding a write lock on thoughts in this database as the pool
+      // was named is waited for first, by its virtual transaction id, at most WRITERS_WAIT (review pass 5: such a capture
+      // was never pooled). A statement takes its table lock before its snapshot, so one that takes it after this read
+      // sees the pool named; the xids pg_snapshot_xip lists missed a capture whose xid followed the naming's, and counted
+      // writers of any table in any database (review pass 6, run-it). Past the wait the pooling is left unfinished, and
+      // the next run pools again (review pass 6: it was marked finished, and they were never pooled). A capture under
+      // REPEATABLE READ, whose snapshot can predate the naming, is not waited for: preflight refuses that level for the
+      // writers (068).
+      const [{ vxids }] = (await db`
+        SELECT COALESCE(array_agg(DISTINCT virtualtransaction), '{}')::text[] AS vxids FROM pg_locks
+         WHERE locktype = 'relation' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND relation = 'thoughts'::regclass AND mode = 'RowExclusiveLock' AND pid IS DISTINCT FROM pg_backend_pid()`) as { vxids: string[] }[];
+      let told = false, gaveUp = false;
+      for (const since = Date.now(); vxids.length > 0;) {
         const [{ open }] = (await db`
-          SELECT count(*)::int AS open FROM pg_snapshot_xip(${snap}::pg_snapshot) x WHERE pg_xact_status(x) = 'in progress'`) as { open: number }[];
+          SELECT count(*)::int AS open FROM pg_locks WHERE locktype = 'virtualxid' AND virtualxid = ANY(${`{${vxids.join(",")}}`}::text[])`) as { open: number }[];
         if (open === 0) break;
-        if (Date.now() - since >= WRITERS_WAIT_S * 1000) {
-          out(`  ${open} write transaction(s) open as the pool was named still are after ${WRITERS_WAIT_S} s: a thought one of them captures joins the pool at its next edit`);
+        if (Date.now() - since >= WRITERS_WAIT.ms) {
+          out(`  ${open} transaction(s) writing thoughts as the pool was named still are after ${WRITERS_WAIT.ms / 1000} s: its pooling is left unfinished, and the next run pools again`);
+          gaveUp = true;
           break;
         }
-        if (!told) out(`  waiting for ${open} write transaction(s) open as the pool was named, so the pooling sees what they capture`);
+        if (!told) out(`  waiting for ${open} transaction(s) writing thoughts as the pool was named, so the pooling sees what they capture`);
         told = true;
         await Bun.sleep(100);
       }
@@ -460,8 +473,10 @@ async function sweep(
           return 1;
         }
       }
-      await db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_filled', ${POOL})
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      if (!gaveUp) {
+        await db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_filled', ${POOL})
+                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      }
       out(named === POOL
         ? `  pool ${POOL}: named, its pooling broken off before: the ${pooled} thought(s) with no current subject pooled now`
         : `  pool ${POOL}: named (${unnamed}), and the ${pooled} thought(s) with no current subject pooled; new and edited thoughts join it from here on`);
@@ -505,7 +520,7 @@ async function sweep(
    * `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's when it released them, across them
    * all: no bucket of their own.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0, lost: 0, lostFailed: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, lost: 0, lostFailed: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -675,10 +690,14 @@ async function sweep(
         // Asked, got nothing: the claim finished is the record, so it is not asked again until its text or the pool
         // changes; an out-of-date subject standing on it closes, if it is still the one read at the text read. Counted
         // once the close has answered: a text moved since is edited mid-sweep, a thought deleted is gone, and past the
-        // hard stop nothing is closed nor finished (review pass 1: each was counted as named nothing).
+        // hard stop nothing is closed nor finished (review pass 1: each was counted as named nothing). A subject written
+        // since the read, by another pass or another key's run, is one the answer said nothing of: the thought goes
+        // back in the pool and the run reads what stands when it comes up (review pass 6: across a switch to another
+        // question and back, a subject the other key's run wrote stood out of date, its claim finished here).
         if (hardStop.signal.aborted) return false;
+        let written = false;
         if (row.standing_id !== null) {
-          let c: { action: string; stale?: boolean; gone?: boolean };
+          let c: { action: string; stale?: boolean; gone?: boolean; moved?: boolean };
           try {
             [{ c }] = (await sql`SELECT close_thought_subject(${row.id}::uuid, ${row.standing_id}::uuid, ${row.fingerprint}) AS c`) as { c: typeof c }[];
           } catch (e) {
@@ -701,7 +720,23 @@ async function sweep(
             n.gone++;
             return { release: "none" };
           }
-          if (c.action === "closed") n.closed++;
+          if (c.moved) written = true;
+          else if (c.action === "closed") n.closed++;
+        }
+        try {
+          if (row.standing_id === null) {
+            [{ written }] = (await sql`
+              SELECT EXISTS (SELECT 1 FROM thought_facets WHERE thought_id = ${row.id}::uuid AND kind = 'subject' AND valid_until IS NULL) AS written`) as { written: boolean }[];
+          }
+          if (written) await sql`SELECT requeue_thought_work(${POOL}, ${row.id}::uuid)`;
+        } catch (e) {
+          if (!databaseUnavailable(e)) throw e;
+          endedBy = { code: 1, line: databaseDown(e) };
+          return false;
+        }
+        if (written) {
+          n.rewritten++;
+          return { release: "none" };
         }
         n.named++;
         return { release: "succeeded" };
@@ -735,8 +770,9 @@ async function sweep(
       throw e;
     }
     if (w.stale) {
-      // The text moved mid-sweep (review pass 4): the pool's trigger has the thought again, at its new text, so its
-      // claim is not this worker's to finish, and this run takes it again when it comes up.
+      // The text, or since 113's door the ticket the thought is filed under, moved mid-sweep (review passes 4 and 5): the
+      // pool's trigger has the thought again, so its claim is not this worker's to finish, and this run takes it again
+      // when it comes up.
       n.stale++;
       return { release: "none" };
     }
@@ -894,7 +930,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.rewritten, "read again, a subject written meanwhile"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
   out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}`);

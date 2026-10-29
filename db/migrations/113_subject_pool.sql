@@ -42,13 +42,15 @@
 --     FOR KEY SHARE first, as record_thought_subject. The sweep calls it when
 --     the model names nothing for a thought whose subject is out of date.
 --   * ob1_filed_ticket(metadata) — the ticket a thought is filed under,
---     subject.ts's metadataTicket in SQL — and record_thought_subject, 111's
---     door, redefined to read it under its lock: a rule's subject under
---     another ticket than the thought is filed under now, or a session
---     header's or a model's on a thought filed since, is refused as stale,
---     as one found in a text that moved. The edit that moved the ticket put
---     the thought back in the pool, so a write landing after another pass
---     recorded the ticket's subject and finished its claim replaces nothing
+--     subject.ts's metadataTicket in SQL, trimming ob1_js_space(), the set
+--     JavaScript's trim takes — and record_thought_subject, 111's
+--     door, redefined to read it under its lock: the metadata rule's subject
+--     under another ticket than the thought is filed under now, or none, or
+--     a session header's or a model's on a thought filed since, is refused
+--     as stale, as one found in a text that moved. The edit that moved the
+--     ticket put the thought back in the pool, or, with none named, the next
+--     naming pools it, so a write landing after another pass recorded the
+--     ticket's subject and finished its claim replaces nothing
 --     (SMD-3306 PR 5's review pass 5: a sweep's answer, or the extraction
 --     pass's rule, read before the move, replaced it, and no run took the
 --     thought again).
@@ -78,11 +80,14 @@
 --     named pools each thought it replays. The fold decides for both.
 --
 -- SAFETY
---   A new trigger function, a trigger, two new functions and 111's door
---   redefined with one check more: no existing row changes, and the trigger
---   writes nothing until the sweep has named its pool. Before then it reads ob1_config, as the caller, on a capture, a
---   text edit or an edit that moves the ticket: the last a read a role that
---   only edits metadata did not make before 113 (Grants, above).
+--   A new trigger function, a trigger, three new functions and 111's door
+--   redefined with one check more: a database whose encoding is not UTF8 is
+--   refused by name, before anything changes (the file holds no Unicode
+--   escape, which a SQL_ASCII server cannot convert); no existing row changes, and the trigger
+--   writes nothing until the sweep has named its pool. Before then it reads
+--   ob1_config, as the caller, on a capture, a text edit, or an edit that
+--   changes metadata.ticket or metadata.issue: that last read is one a role
+--   that only edits metadata did not make before 113 (Grants, above).
 --
 -- Idempotent: CREATE OR REPLACE, the trigger dropped by name first.
 -- =============================================================================
@@ -97,6 +102,16 @@ BEGIN
     WHEN to_regprocedure('requeue_thought_work(text, uuid)') IS NULL THEN '016 (requeue_thought_work)'
     WHEN to_regprocedure('record_thought_subject(uuid, text, text, text, uuid, text, jsonb)') IS NULL THEN '111 (record_thought_subject)'
   END;
+  -- ob1_filed_ticket trims what JavaScript trims, a no-break space and a BOM
+  -- among it, which only UTF8 holds: another encoding is refused here, by
+  -- name (review pass 6: it failed on the escapes, SQL_ASCII's conversion
+  -- error; SMD-3349 tracks non-UTF8 brains).
+  IF current_setting('server_encoding') <> 'UTF8' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('migration 113 needs a UTF8 database; this one''s encoding is %s', current_setting('server_encoding')),
+      HINT = 'ob1_filed_ticket trims what JavaScript trims (a no-break space, a BOM), which only UTF8 holds. SMD-3349 tracks non-UTF8 brains.',
+      ERRCODE = 'feature_not_supported';
+  END IF;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
       MESSAGE = format('migration 113 needs %s; this schema lacks it', v_missing),
@@ -114,8 +129,8 @@ $qc$;
 -- this trigger puts each new or edited thought (back) in it, as 016's does
 -- for the extraction pass's key. requeue_thought_work sets an existing claim
 -- back to pending whatever its state: a thought finished under the key, the
--- model having named nothing for it, is asked again once its text, or the
--- ticket it is filed under, changes.
+-- model having named nothing for it, is asked again once its text, or its
+-- metadata.ticket or metadata.issue, changes.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION thoughts_enqueue_subject()
 RETURNS trigger
@@ -124,8 +139,8 @@ AS $$
 DECLARE
   v_key text;
 BEGIN
-  -- What the subject is read from: the text, and the ticket it is filed under
-  -- (metadata.ticket, else metadata.issue: the metadata rule's fields). Asked
+  -- What the subject is read from: the text, and metadata.ticket and
+  -- metadata.issue (the metadata rule's fields), any change of either. Asked
   -- first, so an update that moves neither reads nothing as the caller: a role
   -- that only enriches metadata needs no SELECT on ob1_config.
   IF TG_OP = 'UPDATE'
@@ -216,18 +231,45 @@ COMMENT ON FUNCTION close_thought_subject(uuid, uuid, text) IS
 -- terminators, which [[:space:]] does not all take, by the database's
 -- locale: a no-break space, a BOM), short enough for a subject key; NULL for
 -- none. The sweep's "no current subject" reads it, and so does the door
--- below. test-live [10h] holds it to metadataTicket value by value.
+-- below. One expression, no sub-SELECT, so Postgres inlines it into the
+-- statements that read it per thought (review pass 6: written with
+-- sub-SELECTs it was a call a thought). test-live [10h] holds it to
+-- metadataTicket value by value.
 -- ---------------------------------------------------------------------------
+-- ob1_js_space() is the set JavaScript's trim takes from either end of a
+-- string (its white space and line terminators, 25 characters), which
+-- metadataTicket's trim takes, as btrim's set: built by chr() from their code
+-- points, so this file holds no Unicode escape, and a database that cannot
+-- hold them is refused by the guard above, not by the parser. One
+-- constant expression: the planner folds it where ob1_filed_ticket is inlined.
+CREATE OR REPLACE FUNCTION ob1_js_space()
+RETURNS text
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+AS $$
+  SELECT chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32) || chr(160) || chr(5760) ||
+         chr(8192) || chr(8193) || chr(8194) || chr(8195) || chr(8196) || chr(8197) || chr(8198) || chr(8199) ||
+         chr(8200) || chr(8201) || chr(8202) || chr(8232) || chr(8233) || chr(8239) || chr(8287) || chr(12288) ||
+         chr(65279)
+$$;
+
+COMMENT ON FUNCTION ob1_js_space() IS
+  'The 25 characters JavaScript''s trim takes from either end of a string (its white space and line terminators), as btrim''s set, built by chr() from their code points: what server-portable/subject.ts''s metadataTicket trims, which ob1_filed_ticket reads (113, SMD-3306). Migration 113 / SMD-3306.';
+
 CREATE OR REPLACE FUNCTION ob1_filed_ticket(p_metadata jsonb)
 RETURNS text
 LANGUAGE sql
 IMMUTABLE PARALLEL SAFE
 AS $$
   SELECT COALESCE(
-    (SELECT v FROM (SELECT btrim(p_metadata->>'ticket', E'\t\n\x0B\x0C\r \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF')) s(v)
-      WHERE jsonb_typeof(p_metadata->'ticket') = 'string' AND v ~ '^[A-Z][A-Z0-9]+-[0-9]+$' AND length(v) <= 200),
-    (SELECT v FROM (SELECT btrim(p_metadata->>'issue', E'\t\n\x0B\x0C\r \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF')) s(v)
-      WHERE jsonb_typeof(p_metadata->'issue') = 'string' AND v ~ '^[A-Z][A-Z0-9]+-[0-9]+$' AND length(v) <= 200))
+    CASE WHEN jsonb_typeof(p_metadata->'ticket') = 'string'
+          AND btrim(p_metadata->>'ticket', ob1_js_space()) ~ '^[A-Z][A-Z0-9]+-[0-9]+$'
+          AND length(btrim(p_metadata->>'ticket', ob1_js_space())) <= 200
+         THEN btrim(p_metadata->>'ticket', ob1_js_space()) END,
+    CASE WHEN jsonb_typeof(p_metadata->'issue') = 'string'
+          AND btrim(p_metadata->>'issue', ob1_js_space()) ~ '^[A-Z][A-Z0-9]+-[0-9]+$'
+          AND length(btrim(p_metadata->>'issue', ob1_js_space())) <= 200
+         THEN btrim(p_metadata->>'issue', ob1_js_space()) END)
 $$;
 
 COMMENT ON FUNCTION ob1_filed_ticket(jsonb) IS
@@ -344,4 +386,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) IS
-  'The subject pass''s write of one thought''s own subject (SMD-3306): a `subject` facet on the thought, one standing, under an advisory lock on the thought, the thought locked FOR KEY SHARE first. Refused (action none, stale) when the thought''s fingerprint is not the one the pass read — the subject was found in a text that is gone — and, since 113, when the ticket the thought is filed under (ob1_filed_ticket) disagrees with it: a rule''s subject under another ticket than it is filed under now, or a session header''s or a model''s on a thought filed since. The same key, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); anything else replaces it (the old facet closed with valid_until, a new one inserted — a subject is never edited); a NULL key closes the standing subject, or answers none; a thought gone answers none. Each new facet''s lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) is written in the same transaction (ob1:subject-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id, stale?, gone?}. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group). Migrations 111, 113 / SMD-3306.';
+  'The subject pass''s write of one thought''s own subject (SMD-3306): a `subject` facet on the thought, one standing, under an advisory lock on the thought, the thought locked FOR KEY SHARE first. Refused (action none, stale) when the thought''s fingerprint is not the one the pass read — the subject was found in a text that is gone — and, since 113, when the ticket the thought is filed under (ob1_filed_ticket) disagrees with it: the metadata rule''s subject under another ticket than it is filed under now, or none, or a session header''s or a model''s on a thought filed since. The same key, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); anything else replaces it (the old facet closed with valid_until, a new one inserted — a subject is never edited); a NULL key closes the standing subject, or answers none; a thought gone answers none. Each new facet''s lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) is written in the same transaction (ob1:subject-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id, stale?, gone?}. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group). Migrations 111, 113 / SMD-3306.';

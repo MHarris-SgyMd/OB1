@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, recordSubject, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, recordSubject, sweepSubjects, WRITERS_WAIT, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -6811,8 +6811,8 @@ if (want("10h")) {
     if (!mayCreateC) {
       skip("the first naming refused while a login role cannot write the trigger's claims", "the connection's role cannot CREATE ROLE");
     } else {
-      const CROLE = "ob1_live_capture_only", EROLE = "ob1_live_embed_only", UROLE = "ob1_live_edit_only", IROLE = "ob1_live_noinsert", NROLE = "ob1_live_enrich_only";
-      const dropC = () => sql.unsafe(`DO $$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY['${CROLE}', '${EROLE}', '${UROLE}', '${IROLE}', '${NROLE}'] LOOP IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END IF; END LOOP; END $$`);
+      const CROLE = "ob1_live_capture_only", EROLE = "ob1_live_embed_only", UROLE = "ob1_live_edit_only", IROLE = "ob1_live_noinsert", NROLE = "ob1_live_enrich_only", KROLE = "ob1_live_key_only";
+      const dropC = () => sql.unsafe(`DO $$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY['${CROLE}', '${EROLE}', '${UROLE}', '${IROLE}', '${NROLE}', '${KROLE}'] LOOP IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END IF; END LOOP; END $$`);
       await dropC();
       try {
         // INSERT and UPDATE on the claims are not enough: requeue_thought_work's upsert reads the conflict (review pass
@@ -6826,7 +6826,8 @@ if (want("10h")) {
           CREATE ROLE ${UROLE} LOGIN; GRANT UPDATE (content) ON thoughts TO ${UROLE}; GRANT SELECT, INSERT ON thought_work_claims TO ${UROLE};
           CREATE ROLE ${IROLE} LOGIN; GRANT INSERT ON thoughts TO ${IROLE}; GRANT SELECT, UPDATE ON thought_work_claims TO ${IROLE};
           GRANT SELECT ON ob1_config TO ${CROLE}, ${UROLE}; GRANT SELECT (key, value) ON ob1_config TO ${IROLE};
-          CREATE ROLE ${NROLE} LOGIN; GRANT SELECT, UPDATE ON thoughts TO ${NROLE}`);
+          CREATE ROLE ${NROLE} LOGIN; GRANT SELECT, UPDATE ON thoughts TO ${NROLE};
+          CREATE ROLE ${KROLE} LOGIN; GRANT INSERT ON thoughts TO ${KROLE}; GRANT SELECT (key) ON ob1_config TO ${KROLE}`);
         // The enrichment recipe's role, SELECT and UPDATE on thoughts and nothing on ob1_config, is not flagged: 016's
         // trigger already refuses its captures and text edits, pool or no (review pass 4). One granted the two columns
         // the triggers read, not the table, is (review pass 5: a table-level check passed it).
@@ -6836,7 +6837,7 @@ if (want("10h")) {
         const capGranted = await sweep({ dryRun: true, model: false });
         assert(capRun.code === 2 && /Refusing to name a subject pool: naming the pool would fail the captures of ob1_live_capture_only, ob1_live_edit_only, ob1_live_noinsert: 113's trigger writes a work claim .* cannot SELECT, INSERT and UPDATE thought_work_claims\. Grant them that \(GRANT SELECT, INSERT, UPDATE ON thought_work_claims/.test(capRun.stderr)
             && (await named()) === "" && /A run would be refused: naming the pool would fail the captures of ob1_live_capture_only/.test(capDry.stdout)
-            && !/would fail the captures/.test(capGranted.stdout) && !/ob1_live_embed_only|ob1_live_enrich_only/.test(capRun.stderr + capDry.stdout),
+            && !/would fail the captures/.test(capGranted.stdout) && !/ob1_live_embed_only|ob1_live_enrich_only|ob1_live_key_only/.test(capRun.stderr + capDry.stdout),
           `the first naming is refused while a login role can write thoughts but not SELECT, INSERT and UPDATE the claims, nothing named, a dry run saying so, and not once it can (exit ${capRun.code}: ${capRun.stderr.trim().split("\n")[0]?.slice(0, 120)})`);
         // A metadata edit that moves no ticket reads nothing as its writer, so that role — with the audit trigger's
         // thought_audit, as the recipe's README grants — still enriches a thought filed under one; an edit that moves the
@@ -7272,9 +7273,11 @@ if (want("10h")) {
         && rebuildPools.out.includes("    subjects:r0  →  (not the subject pool ob1_config.subject_pool_key names: no run takes it)\n"),
       `rebuild.ts --status names --subjects as the named subject pool's drainer, and another subject pool as one no run takes (${rebuildPools.out.split("\n").filter((l) => /subjects:r[01]/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
     // …each named one by its key's question: the rules' none, reasoning off for one without its `r`.
-    const drains = [drainer("subjects:r1.2", "subjects:r1.2"), drainer("subjects:r1.2:p2", "subjects:r1.2:p2"), drainer("subjects:r1.2:p2r", "subjects:r1.2:p2r"), drainer("subjects:r1.2:p2", "subjects:r1.2:p2r")];
+    const drains = [drainer("subjects:r1.2", "subjects:r1.2"), drainer("subjects:r1.2:p2", "subjects:r1.2:p2"), drainer("subjects:r1.2:p2r", "subjects:r1.2:p2r"), drainer("subjects:r1.2:p2", "subjects:r1.2:p2r"),
+      drainer("subjects:r1.2:p10r", "subjects:r1.2:p10r"), drainer("subjects:r1.2:p10", "subjects:r1.2:p10")];
     assert(drains[0] === "bun db/extract-entities.ts --url <url> --subjects rules" && drains[1] === "OB1_SUBJECT_REASONING=off bun db/extract-entities.ts --url <url> --subjects"
-        && drains[2] === "bun db/extract-entities.ts --url <url> --subjects" && drains[3].startsWith("(not the subject pool"),
+        && drains[2] === "bun db/extract-entities.ts --url <url> --subjects" && drains[3].startsWith("(not the subject pool")
+        && drains[4] === drains[2] && drains[5] === drains[1],
       `rebuild.ts's drainer names each named subject pool's run by its key's question (${drains.join(" | ")})`);
     assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3 \(1 with an out-of-date subject\)\. Nothing was written, pooled or asked\./.test(keepDry.stdout),
       `a dry run counts a subject the door would keep as kept, each pooled thought once (exit ${keepDry.code}: ${keepDry.stdout.trim().split("\n").slice(-1)[0]})`);
@@ -7601,6 +7604,28 @@ if (want("10h")) {
     const heldRun = await sweep().finally(() => { onOwn = null; garbledAnswers = true; });
     assert(heldAsks === 1 && back !== null && /^ {2}pool subjects:r1\.2:p2r: named \(subjects:r0 was\)/m.test(back.stdout) && (await claimOf(heldT))?.status === "succeeded" && heldRun.code === 0,
       `a naming at a key's switch back leaves a claim a live run holds to it: the thought asked once (${heldAsks} asked; exit ${heldRun.code}; ${back === null ? "no naming" : back.stdout.split("\n").find((l) => /pool subjects/.test(l))?.trim().slice(0, 100)})`);
+    // …and a subject another run wrote while the model was asked, under another key, which the answer naming nothing
+    // said nothing of: no claim finishes over it — the thought goes back in the pool, and the run reads what stands when
+    // it comes up, closing that subject out of date. One read none, the other read an older subject the new one
+    // replaced (review pass 6, cold read: across a switch to the question with its reasoning off and back, such a
+    // subject stood, its claim finished).
+    const meanNone = await seed("Meanwhile, none: a note whose subject a run under another key wrote while it was asked.");
+    const meanOld = await seed("Meanwhile, older: a note whose older subject a run under another key replaced while it was asked.");
+    const fpNow = async (id: string) => ((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0] as { f: string }).f;
+    const asOther = async (id: string, key: string, judge: string) =>
+      recordSubject(sql, { id, fingerprint: await fpNow(id) }, key, "model", judge, subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
+    await asOther(meanOld, "phrase:the oldest question", "subject:stub-judge@p1");
+    const meanAsks = { none: 0, older: 0 };
+    onOwn = async (t) => {
+      const which = t.includes("Meanwhile, none:") ? "none" : t.includes("Meanwhile, older:") ? "older" : null;
+      if (which === null || ++meanAsks[which] > 1) return;
+      await asOther(which === "none" ? meanNone : meanOld, "phrase:an older question", "subject:stub-judge@p2");
+    };
+    const meanRun = await sweep().finally(() => { onOwn = null; });
+    assert(meanAsks.none === 2 && meanAsks.older === 2 && (await standingOf(meanNone)) === undefined && (await standingOf(meanOld)) === undefined
+        && /2 read again, a subject written meanwhile/.test(tally(meanRun)) && /2 out-of-date subject\(s\) closed/.test(tally(meanRun))
+        && (await claimOf(meanNone))?.status === "succeeded" && (await claimOf(meanOld))?.status === "succeeded",
+      `a subject written while the model was asked, which its answer said nothing of, is read again and closed out of date, the claim finished then (${meanAsks.none} and ${meanAsks.older} asked: ${tally(meanRun)})`);
     // A stop during a pause for the provider ends the sweep there, the call not made again (review pass 2: four were).
     await sql`SELECT requeue_thought_work(${POOL}, ${garbled}::uuid)`;
     const pauseStop = new AbortController();
@@ -7652,8 +7677,74 @@ if (want("10h")) {
       await holding.close();
     }
     const straddleRun = await naming!;
-    assert(/^ {2}waiting for \d+ write transaction\(s\) open as the pool was named/m.test(straddleRun.stdout) && (await standingOf(straddled))?.key === "ticket:SMD-82",
+    assert(/^ {2}waiting for \d+ transaction\(s\) writing thoughts as the pool was named/m.test(straddleRun.stdout) && (await standingOf(straddled))?.key === "ticket:SMD-82",
       `a capture open as its pool was named is waited for, pooled and read (exit ${straddleRun.code}: ${straddleRun.stdout.split("\n").filter((l) => /waiting|pool subjects/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+    // …and one still open past the wait: the pooling is left unfinished, said, and the next run pools what it captured
+    // (review pass 6, cold read: the pooling was marked finished, and that capture was never pooled).
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+    const savedWait = WRITERS_WAIT.ms;
+    WRITERS_WAIT.ms = 300;
+    const lateHolder = new SQL({ url: URL_!, max: 1 });
+    let lateT = "";
+    let pastWait = null as Awaited<ReturnType<typeof sweep>> | null;
+    let pastWaitMs = -1;
+    try {
+      await lateHolder.begin(async (tx: SQL) => {
+        lateT = ((await tx`SELECT upsert_thought(${"A note filed under SMD-83 in a transaction open past the naming's wait."}, ${{ metadata: { ticket: "SMD-83" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
+        const waitFrom = Date.now();
+        pastWait = await sweep({ model: false });
+        pastWaitMs = Date.now() - waitFrom;
+      });
+    } finally {
+      WRITERS_WAIT.ms = savedWait;
+      await lateHolder.close();
+    }
+    const unfinished = await filledKey();
+    const afterWait = await sweep({ model: false });
+    assert(pastWait !== null && /^ {2}\d+ transaction\(s\) writing thoughts as the pool was named still are after 0\.3 s: its pooling is left unfinished, and the next run pools again$/m.test(pastWait.stdout)
+        && pastWaitMs < 10_000 && unfinished === "" && /^ {2}pool subjects:r1\.2: named, its pooling broken off before/m.test(afterWait.stdout) && (await standingOf(lateT))?.key === "ticket:SMD-83",
+      `a capture open past the naming's wait: its pooling left unfinished, said, and the next run pools and reads it (${pastWait === null ? "no run" : pastWait.stdout.split("\n").find((l) => /still are/.test(l))?.trim().slice(0, 90)}; filled ${JSON.stringify(unfinished)}; the run took ${pastWaitMs} ms)`);
+    // A capture whose xid follows the naming's, its trigger reading the pool before the naming committed: waited for by
+    // its write lock on thoughts, and pooled (review pass 6, run-it: the xids pg_snapshot_xip lists, those below the
+    // snapshot's xmax, left it out, and it was never pooled). The naming's window is held open by a lock on the
+    // subject_pool_filled row its first statement writes.
+    await setNamed("subjects:r0");
+    const rowLock = new SQL({ url: URL_!, max: 1 }), lateCapture = new SQL({ url: URL_!, max: 1 });
+    let raceT = "";
+    let raceRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const L = await rowLock.reserve();
+      await L`BEGIN`;
+      await L`SELECT 1 FROM ob1_config WHERE key = 'subject_pool_filled' FOR UPDATE`;
+      const naming = sweep({ model: false, switchKey: true });
+      for (let i = 0; i < 200; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'INSERT INTO ob1_config%'`) as { n: number }[];
+        if (n > 0) break;
+        await Bun.sleep(50);
+      }
+      const W = await lateCapture.reserve();
+      await W`BEGIN`;
+      raceT = ((await W`SELECT upsert_thought(${"A note filed under SMD-84, captured while its pool was being named."}, ${{ metadata: { ticket: "SMD-84" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
+      await L`COMMIT`;
+      L.release();
+      await Bun.sleep(500);
+      await W`COMMIT`;
+      W.release();
+      raceRun = await naming;
+    } finally {
+      await rowLock.close();
+      await lateCapture.close();
+    }
+    assert(raceRun !== null && /^ {2}waiting for \d+ transaction\(s\) writing thoughts as the pool was named/m.test(raceRun.stdout) && (await standingOf(raceT))?.key === "ticket:SMD-84",
+      `a capture whose xid followed the naming's is waited for by its write lock on thoughts, pooled and read (${raceRun === null ? "no run" : raceRun.stdout.split("\n").filter((l) => /waiting|pool subjects/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
+    // A claim another key's run holds live is no reason to leave the thought out of this key's pooling (review pass 6,
+    // mutant: a filter on any key's live lease lived).
+    await setNamed("subjects:r0");
+    const otherKeyT = await seed("A note another key's run holds while this key's pool is named.");
+    await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-elsewhere', claimed_at = now(), ttl_expires_at = now() + interval '1 hour', attempt_count = 1 WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r0'`;
+    await sweep({ model: false, switchKey: true });
+    const [{ underNew }] = (await sql`SELECT count(*)::int AS "underNew" FROM thought_work_claims WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r1.2'`) as { underNew: number }[];
+    assert(underNew === 1, `a thought another key's run holds live is pooled under the key named now (${underNew} claim(s) under it)`);
     // The filed ticket in SQL against metadataTicket, value by value: the key's length at its edge, and what JavaScript's
     // trim takes that the locale's [[:space:]] may not (review pass 4, cold read: a no-break space about an id).
     const metas: unknown[] = [{}, { ticket: "SMD-1" }, { ticket: " SMD-2 " }, { ticket: "\tSMD-3\n" }, { ticket: "smd-4" }, { ticket: 5 }, { ticket: "S-6" },
