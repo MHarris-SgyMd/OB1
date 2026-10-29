@@ -1280,54 +1280,39 @@ jobs:
       # the supervisor holds that too, to run it again in a minute. Each case
       # is still running once its line is logged — the container does not
       # exit, so `unless-stopped` has nothing to restart in a loop — and a
-      # stop ends it promptly with 0.
+      # stop ends it promptly with 0. The cases share nothing but heartbeat
+      # rows nothing here reads, so they run side by side
+      # (.github/ci/held-cases.sh, SMD-3365).
       - name: The coordinator's workers hold a refusal rather than exiting
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
           before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
-          # Bounded: each case waits up to 60 s for its line, then is stopped.
-          held() {
-            local passes=$1 want=$2; shift 2
-            local ct="ci-held-$RANDOM"
-            docker compose -f compose.yaml run -d --no-deps --name "$ct" -e OB1_PASSES="$passes" "$@" coordinator > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
-          never() { ! grep -qF -- "$1" /tmp/held.out || { echo "--- expected no \"$1\": ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
-          held workers 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          also 'coordinator: runs extract (uid 1102) and consolidate (uid 1103)'
-          also 'supervise: extract is held, not started'
-          also 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
-          held workers "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          held workers "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          source ../.github/ci/held-cases.sh
+          held_case nokey workers 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case x-follow workers "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held_case c-workers workers "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
           # …and each setting is checked, not only the pair's first.
-          held workers "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          held workers "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          held workers 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          also '[extract] '
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
-          also 'it runs again at'
-          held workers 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_case c-follow workers "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held_case x-both workers "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held_case x-probe workers 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          held_case c-probe workers 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
           # The exclusion by construction: both named, sleep runs and the followers do not, and nothing is refused for it.
-          held 'workers,sleep' 'names both sleep and workers, which never run together — sleep runs' -e OB1_WORKER_KEY=
-          also 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
-          never 'extract: '
-          never 'consolidate: '
+          held_case both 'workers,sleep' 'names both sleep and workers, which never run together — sleep runs' -e OB1_WORKER_KEY=
           # A name that is no pass is left out, the rest still run.
-          held 'workers,extractor' "names 'extractor', which is no pass" -e OB1_WORKER_KEY=
-          also 'extract: OB1_WORKER_KEY is not set in deploy/.env'
+          held_case unknown 'workers,extractor' "names 'extractor', which is no pass" -e OB1_WORKER_KEY=
+          held_wait
+          held_also nokey 'coordinator: runs extract (uid 1102) and consolidate (uid 1103)'
+          held_also nokey 'supervise: extract is held, not started'
+          held_also nokey 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
+          held_also x-probe '[extract] '
+          held_also x-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_also x-probe 'it runs again at'
+          held_also c-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_also both 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
+          held_never both 'extract: '
+          held_never both 'consolidate: '
+          held_also unknown 'extract: OB1_WORKER_KEY is not set in deploy/.env'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
             printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
@@ -1335,8 +1320,7 @@ jobs:
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
           # read another's /proc/<pid>/environ, which it reads with the users
-          # dropped.
-          # The suite is no file of the image's: mounted for this run alone.
+          # dropped. The suite is no file of the image's: mounted for this run alone.
           docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
 
       # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
@@ -1347,57 +1331,47 @@ jobs:
       # prove the arguments were taken — --poll past a minute, and a claim
       # follower's fresh heartbeat in this stack's database, beside which it
       # will not sleep, which also proves it reaches the database on the
-      # server's environment — each held, to run again in a minute.
+      # server's environment — each held, to run again in a minute. Each
+      # writes heartbeat:sleep, which two cases read, so those two run as
+      # batches of their own and the rest between them side by side
+      # (.github/ci/held-cases.sh, SMD-3365).
       - name: The coordinator's sleep holds a refusal rather than exiting
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          held() {
-            local want=$1; shift
-            local ct="ci-held-sleep-$RANDOM"
-            docker compose -f compose.yaml run -d --no-deps --name "$ct" -e OB1_PASSES=sleep "$@" coordinator > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          source ../.github/ci/held-cases.sh
           row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
-          held 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case nokey sleep 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_wait
           stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           # concat_ws skips the null in_s: held for a recreate, no next try.
           [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
-          held "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          held "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
-          also 'supervise: sleep exited 2'
+          held_case quiet sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held_case poll sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held_case workers sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held_case poll61 sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
           # the path one argument with its space, and one it cannot write is
           # the scheduler's own refusal, before it reads the database.
-          held '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
+          held_case dumpdir sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-3476: the dump volume is handed to sleep's own user, which can write there.
-          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps
-          also 'coordinator: runs sleep (uid 1104)'
-          if grep -qF 'is not a directory this process can write' /tmp/held.out; then echo "--- sleep's user cannot write the dump volume: ---" >&2; cat /tmp/held.out >&2; exit 1; fi
+          held_case dumpvol sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
-          held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          held "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
-          held '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_case budget sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held_case mwm sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held_case budget-max sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_wait
+          held_also poll61 'supervise: sleep exited 2'
+          held_also dumpvol 'coordinator: runs sleep (uid 1104)'
+          held_never dumpvol 'is not a directory this process can write'
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_case outside sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_wait
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
-          also 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          held_also outside 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
           # The refusal ends heartbeat:sleep on a failure, and the supervisor
           # adds its next try, so preflight's sleep row says it is held and
           # names the followers keeping it down; then the row goes, leaving
