@@ -1266,10 +1266,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * entities are: the ticket it is filed under, else a session summary's
    * header ticket its prompts name (subject.ts's ruleSubject), each under its
    * rule's key, at the text the claim read; record_thought_subject refuses a
-   * text that moved since, and since 113 a ticket that did. No model is asked here: a thought no rule keys is
-   * --subjects' (db/subject-sweep.ts). A courtesy, as the kept windows are: a
-   * brain before 111, or a role without its door's grants, records none and
-   * says so once; another error is said once, and the thought's entities stand.
+   * text that moved since, and since 113 a ticket that did. No model is asked
+   * here: a thought no rule keys is --subjects' (db/subject-sweep.ts). A
+   * courtesy, as the kept windows are: a brain before 111, or a role without
+   * its door's grants, records none and says so once; another error is said
+   * once, and the thought's entities stand.
    */
   let subjecting = true;
   const subjects = { recorded: 0, kept: 0 };

@@ -14,56 +14,55 @@
  *   --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off)
  *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
  *   exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it
- *   claimed), its pooling broke off, or the provider or the database stopped answering · 2 usage, configuration,
- *   another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would
- *   fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the
- *   call in hand, which can run to the limit a call; a second at once, the claim in hand handed back), or a caller's
- *   stop during the naming's waits
+ *   claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage,
+ *   configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a
+ *   pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first
+ *   after the call in hand, which can run to the limit a call; a second at once, the claim in hand handed back), or a
+ *   caller's stop during the naming's waits
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
- * under its own, so a run costs what is in the pool, not the brain's size: until PR 5 every run read every thought,
- * its count and its pages, and a PGlite run timed the count alone at 5.9 s over a million synthetic thoughts. 113's
- * trigger puts each new or edited thought (back) in the pool ob1_config.subject_pool_key names. The first sweep names
- * its own and pools every thought with no current subject; after a rule's, the question's or the reasoning's change,
- * or for `--subjects rules`, whose pool is its own, a sweep under another key does so only with --switch-key, as the
- * pass's own key change is refused without it (review pass 1: a rules run renamed the model's pool unasked). They are
- * requeued, not only added, since a pool used before keeps its finished claims and a thought edited since must be
- * asked again; a claim records no fingerprint, so a switch to another key and back asks again, too, those the model
- * named nothing for. The pooling is marked finished in ob1_config.subject_pool_filled once it commits, so one that
- * broke off (a thought deleted under it, a lost connection) is pooled again by the next run (review pass 1: the pool
- * stood named and its backlog was never pooled). The naming's write of the name waits for each write in flight under
- * the pool named; before it pools, a naming waits for the transactions writing thoughts as it named the pool, whose
- * triggers may have read the pool before, so the pooling sees what they capture; and the pooling waits for whatever
- * holds a lock it needs, a claim an edit's trigger wrote among them. No wait has an end of its own: each says which
- * pids it waits on — the writers it read, or for a statement those the server says hold it up — again every
- * NAMING_WAIT.sayMs, until they end (review passes 7 and 8: past a bound, every run pooled again and asked again what
- * the model had named nothing for, for as long as the writer stayed open). A signal during the naming and pooling ends
- * the CLI at once, the stop not yet handed out, and the server ends the statement in hand within a second of the CLI
- * going (client_connection_check_interval): the name left as it was, or named and its pooling unmarked. A caller's stop
- * ends an in-process run's waits, 130: a statement among them cancelled from the run's own second connection, opened
- * on its url, or, without one, heard once the statement ends, said. Either way the next run pools again. The first naming is refused while a login role that can capture (it
- * reads ob1_config, without which 016's trigger refuses it already) cannot write the claims 113's trigger writes as
- * it, which would fail its every capture.
+ * under its own, so a run costs what is in the pool, not the brain's size: until PR 5 every run read every thought, its
+ * count and its pages, and a PGlite run timed the count alone at 5.9 s over a million synthetic thoughts. 113's trigger
+ * puts each new or edited thought (back) in the pool ob1_config.subject_pool_key names. The first sweep names its own
+ * and pools every thought with no current subject; after a rule's, the question's or the reasoning's change, or for
+ * `--subjects rules`, whose pool is its own, a sweep under another key does so only with --switch-key, as the pass's
+ * own key change is refused without it (review pass 1: a rules run renamed the model's pool unasked). They are
+ * requeued, not only added, since a pool used before keeps its finished claims and a thought edited since must be asked
+ * again; a claim records no fingerprint, so a switch to another key and back asks again, too, those the model named
+ * nothing for. The pooling is marked finished in ob1_config.subject_pool_filled once it commits, so one that broke off
+ * (a thought deleted under it, a lost connection) is pooled again by the next run (review pass 1: the pool stood named
+ * and its backlog was never pooled). The naming's write of the name waits for each write in flight under the pool
+ * named; before it pools, a naming waits for the transactions writing thoughts as it named the pool, whose triggers may
+ * have read the pool before, so the pooling sees what they capture; and the pooling waits for whatever holds a lock it
+ * needs, a claim an edit's trigger wrote among them. No wait has an end of its own: each says which pids it waits on —
+ * the writers it read, or for a statement those the server says hold it up — again every NAMING_WAIT.sayMs, until they
+ * end (review passes 7 and 8: past a bound, every run pooled again and asked again what the model had named nothing
+ * for, for as long as the writer stayed open). A signal during the naming and pooling ends the CLI at once, the stop
+ * not yet handed out, and the server ends the statement in hand within a second of the CLI going
+ * (client_connection_check_interval): the name left as it was, or named and its pooling unmarked. A caller's stop ends
+ * an in-process run's waits, 130: a statement among them cancelled from the run's own second connection, opened on its
+ * url, or, without one, heard once the statement ends, said. Either way the next run pools again. The first naming is
+ * refused while a login role that can capture (it reads ob1_config, without which 016's trigger refuses it already)
+ * cannot write the claims 113's trigger writes as it, which would fail its every capture.
  *
- * Each claim is one thought, leased for the limit a call and LEASE_MARGIN_S more, renewed (031's renew_claims) before
- * a call is asked again, so a worker that dies hands it back within that; a run that stops hands back what it holds,
- * and a second signal hands back the claim in hand before the CLI exits. A thought the provider stopped answering on
- * goes back to the end of the pool, so the next run starts with another (review pass 1: it came first again, and
- * ended every run). A thought the extraction pass gave a current subject
- * after it was pooled is finished unasked, so long as the rules agree now (a ticket filed, moved or taken away is read
- * again). A claim finished records that the thought was asked at its text under the
- * pool's key: one the model named nothing for is not asked again until its text or the key changes ("asked, got
- * nothing"), and an out-of-date subject standing on it is closed through close_thought_subject (113), which closes it
- * only while it is still the one read at the text read, so a subject a pass wrote since stands. An answer that is not
- * JSON with a subject, a timeout or the provider refusing the thought's length, a row the egress gate refuses, and a
- * key the door refuses each fail the claim, counted, the subject standing; `--retry-failed` puts them back in the
- * pool. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then ends
- * the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes, pools and asks
- * nothing, counts what a run would take (the pool's, or every thought with no current subject when its pool is not
- * named yet or its pooling broke off), reads on through a signal as the pass's does, and names the refusals a run
- * would meet. Its pages go in thought id order, so with --limit it counts the first by id, which a run, taking the
- * oldest pooled first, need not.
+ * Each claim is one thought, leased for the limit a call and LEASE_MARGIN_S more, renewed (031's renew_claims) before a
+ * call is asked again, so a worker that dies hands it back within that; a run that stops hands back what it holds, and
+ * a second signal hands back the claim in hand before the CLI exits. A thought the provider stopped answering on goes
+ * back to the end of the pool, so the next run starts with another (review pass 1: it came first again, and ended every
+ * run). A thought the extraction pass gave a current subject after it was pooled is finished unasked, so long as the
+ * rules agree now (a ticket filed, moved or taken away is read again). A claim finished records that the thought was
+ * asked at its text under the pool's key: one the model named nothing for is not asked again until its text, the ticket
+ * it is filed under or the key changes ("asked, got nothing"), and an out-of-date subject standing on it is closed
+ * through close_thought_subject (113), which closes it only while it is still the one read at the text read, so a
+ * subject a pass wrote since stands. An answer that is not JSON with a subject, a timeout or the provider refusing the
+ * thought's length, a row the egress gate refuses, and a key the door refuses each fail the claim, counted, the subject
+ * standing; `--retry-failed` puts them back in the pool. A rate limit, a server error or a lost connection is paused
+ * for and retried (TRANSIENT_PAUSES_MS), then ends the sweep; any other refusal of the request ends it, exit 2, as it
+ * ends the pass. A dry run writes, pools and asks nothing, counts what a run would take (the pool's, or every thought
+ * with no current subject when its pool is not named yet or its pooling broke off), reads on through a signal as the
+ * pass's does, and names the refusals a run would meet. Its pages go in thought id order, so with --limit it counts the
+ * first by id, which a run, taking the oldest pooled first, need not.
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
@@ -176,15 +175,14 @@ const sqlState = (e: unknown): string | undefined => {
 const databaseDown = (e: unknown) => `\n  The database stopped answering (${String((e as Error)?.message ?? e).slice(0, 300)}): the sweep stops here; run it again.`;
 
 /**
- * What one sweep is asked: `model` false for the rules alone; `limit` 0 for no limit; `timeout` in seconds, per model
- * call (left out, 900 with the judge model's reasoning on and 300 off); `switchKey` to name this run's pool in place of
- * another named; `retryFailed` to put the pool's failed claims
- * back in it first. `sql` is the caller's client in place of `url`, never closed here; `env` what the run reads,
- * process.env when absent; `url` and `sql` name one database. `signal` stops the sweep after the thought in hand, as the
- * CLI's first signal does, and ends a wait of the naming's at once, 130, its pooling left to the next run (a statement's
- * once it ends when the run has no url to watch it from), where the CLI's signal ends the process;
- * `onPass` is handed the sweep's stop as its thoughts begin, whose second call aborts the model call in hand too.
- * A dry run hears neither: it reads on.
+ * What one sweep is asked: `model` false for the rules alone; `limit` left out for no limit; `timeout` in seconds, per
+ * model call (left out, 900 with the judge model's reasoning on and 300 off); `switchKey` to name this run's pool in
+ * place of another named; `retryFailed` to put the pool's failed claims back in it first. `sql` is the caller's client
+ * in place of `url`, never closed here; `env` what the run reads, process.env when absent; `url` and `sql` name one
+ * database. `signal` stops the sweep after the thought in hand, as the CLI's first signal does, and ends a wait of the
+ * naming's at once, 130, its pooling left to the next run (a statement's once it ends when the run has no url to watch
+ * it from), where the CLI's signal ends the process; `onPass` is handed the sweep's stop as its thoughts begin, whose
+ * second call aborts the model call in hand too. A dry run hears neither: it reads on.
  */
 export interface SubjectSweepOptions {
   url?: string;
@@ -214,7 +212,10 @@ type Candidate = {
   standing_id: string | null; standing_key: string | null; standing_by: string | null; standing_judge: string | null; current: boolean;
 };
 
-/** What became of a claimed thought: the claim finished or failed (with why), or left as it is (the pool has it again, or it is gone). False ends the sweep. */
+/**
+ * What the loop does with a claimed thought's claim: finish it, fail it (with why), or nothing — the pool has it again,
+ * it is gone, the finish ended it already (a model's empty answer), or a dry run claimed none.
+ */
 type Done = { release: "succeeded" } | { release: "failed"; error: string } | { release: "none" };
 
 /** The sweep, callable: the code the CLI exits with (the header's list). */
@@ -376,7 +377,7 @@ async function sweep(
    * The connection a watched statement is watched from, opened and tried at the first on the run's url; "none" when
    * there is no url or it could not be opened, said, the statements then unwatched.
    */
-  let side: SQL | "none" | null = null;
+  let second: SQL | "none" | null = null;
   /** The pin's client_connection_check_interval as it was, set back as the pin goes back to the caller. */
   let checkWas: string | null = null;
   /** The line a stop ends the naming with: at the pool's lock, before the name is written, or before the pooling. */
@@ -385,6 +386,9 @@ async function sweep(
     : stage === "naming"
       ? `\n  stopped before pool ${POOL} was named: the caller's signal was aborted; nothing was named, pooled or claimed`
       : `\n  stopped before pool ${POOL} was pooled: the caller's signal was aborted; the pool is named, its pooling unfinished, nothing claimed, and the next run pools it`;
+  /** A wait's line: "waiting", then "still waiting, after N s," (N from `since`), for `n` transaction(s) `rest`. */
+  const sayWaiting = (saidAt: number, since: number, n: number, rest: string) =>
+    out(`  ${saidAt === 0 ? "waiting" : `still waiting, after ${Math.round((Date.now() - since) / 1000)} s,`} for ${n} transaction(s) ${rest}`);
   /** A wait's pause; true, said, when the caller's stop came. */
   const stopped = async (ms: number, stage: "lock" | "pooling") => {
     if (o.signal) await sleepUnless(ms, o.signal);
@@ -411,13 +415,13 @@ async function sweep(
       err(stopLine(stage));
       return STOPPED;
     }
-    if (side === null) {
-      side = "none";
+    if (second === null) {
+      second = "none";
       if (o.url) {
         const tried = openSql(o.url, { max: 1 });
         try {
           await tried`SELECT 1`;
-          side = tried;
+          second = tried;
         } catch (e) {
           await tried.close().catch(() => {});
           out(`  the naming's waits go unwatched: a second connection could not be opened (${String((e as Error)?.message ?? e).slice(0, 200)}); a wait is not named, and a stop is heard between its statements`);
@@ -426,7 +430,7 @@ async function sweep(
         out("  the naming's waits go unwatched: the run was lent a client and no url; a wait is not named, and a stop is heard between its statements");
       }
     }
-    const watcher = side;
+    const watcher = second;
     if (watcher === "none") return await q();
     const [{ pid }] = (await db`SELECT pg_backend_pid() AS pid`) as { pid: number }[];
     const done = new AbortController();
@@ -472,7 +476,7 @@ async function sweep(
         heldSince ||= Date.now();
         if (Date.now() - heldSince >= NAMING_WAIT.quietMs && Date.now() - saidAt >= NAMING_WAIT.sayMs) {
           const who = by.map((p) => (p === 0 ? "a prepared transaction" : `pid ${p}`)).join(", ");
-          out(`  ${saidAt === 0 ? "waiting" : `still waiting, after ${Math.round((Date.now() - heldSince) / 1000)} s,`} for ${by.length} transaction(s) the ${stage === "naming" ? `naming of pool ${POOL} waits on (${who}): writes in flight under the pool named lock its name, as may a transaction editing ob1_config; a stop leaves it named as it was` : `pooling waits on (${who}); a stop leaves the pooling to the next run`}`);
+          sayWaiting(saidAt, heldSince, by.length, `the ${stage === "naming" ? `naming of pool ${POOL} waits on (${who}): writes in flight under the pool named lock its name, as may a transaction editing ob1_config; a stop leaves it named as it was` : `pooling waits on (${who}); a stop leaves the pooling to the next run`}`);
           saidAt = Date.now();
         }
       }
@@ -494,14 +498,14 @@ async function sweep(
    * Waits until none of the virtual transactions `vxids` is open, saying which pids hold them, at once and again
    * every NAMING_WAIT.sayMs: false when the caller's stop came first.
    */
-  const waitOut = async (vxids: string[], what: string): Promise<boolean> => {
+  const waitForWriters = async (vxids: string[], what: string): Promise<boolean> => {
     let saidAt = 0;
     for (const since = Date.now(); vxids.length > 0;) {
       const open = (await db`
         SELECT DISTINCT pid FROM pg_locks WHERE locktype = 'virtualxid' AND granted AND virtualxid = ANY(${`{${vxids.join(",")}}`}::text[]) ORDER BY pid`) as { pid: number }[];
       if (open.length === 0) return true;
       if (Date.now() - saidAt >= NAMING_WAIT.sayMs) {
-        out(`  ${saidAt === 0 ? "waiting" : `still waiting, after ${Math.round((Date.now() - since) / 1000)} s,`} for ${open.length} transaction(s) ${what} (pid ${open.map((r) => r.pid).join(", ")}); a stop leaves the pooling to the next run`);
+        sayWaiting(saidAt, since, open.length, `${what} (pid ${open.map((r) => r.pid).join(", ")}); a stop leaves the pooling to the next run`);
         saidAt = Date.now();
       }
       if (await stopped(100, "pooling")) return false;
@@ -627,7 +631,7 @@ async function sweep(
          WHERE l.locktype = 'relation' AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
            AND l.relation = 'thoughts'::regclass AND l.mode = 'RowExclusiveLock' AND l.granted AND l.pid IS DISTINCT FROM pg_backend_pid()
            AND EXISTS (SELECT 1 FROM pg_locks x WHERE x.locktype = 'transactionid' AND x.granted AND x.virtualtransaction = l.virtualtransaction)`) as { vxids: string[] }[];
-      if (!(await waitOut(vxids, "writing thoughts as the pool was named, so the pooling sees what they capture"))) return 130;
+      if (!(await waitForWriters(vxids, "writing thoughts as the pool was named, so the pooling sees what they capture"))) return 130;
       // A stop since the naming, with no writer to wait for, is heard as the pooling is watched, before it is sent
       // (review pass 9: nothing heard it before the pooling, which ran whole).
       let pooled = -1;
@@ -675,7 +679,7 @@ async function sweep(
       pin.release();
     }
     // Set inside `watched`, which control-flow analysis does not follow: the cast keeps the declared type.
-    const watcher = side as SQL | "none" | null;
+    const watcher = second as SQL | "none" | null;
     if (watcher !== null && watcher !== "none") await watcher.close().catch(() => {});
   }
   if (RETRY_FAILED && !DRY_RUN) {
@@ -710,7 +714,7 @@ async function sweep(
    * counts it. `taken`, for --limit, counts that one too.
    * `replaced` and `newKey` count within the recorded ones, `closed` within those the model named nothing for,
    * `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's when it released them, across them
-   * all: no bucket of their own.
+   * all: no bucket of their own; `lostFailed` the failed ones among the lost, which the failure count leaves out.
    */
   const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, lost: 0, lostFailed: 0 };
   let taken = 0;
@@ -895,23 +899,24 @@ async function sweep(
         return { release: "failed", error: `${cfg.judgeModel}'s answer was not JSON of the expected shape` };
       }
       if (a.key === null) {
-        // Asked, got nothing: the claim finished is the record, so it is not asked again until its text or the pool
-        // changes; an out-of-date subject standing on it closes, if it is still the one read at the text read. Counted
-        // once the close has answered: a text moved since is edited mid-sweep, a thought deleted is gone, and past the
-        // hard stop nothing is closed nor finished (review pass 1: each was counted as named nothing). A subject written
-        // since the read, by another pass or another key's run, is one the answer said nothing of: the thought goes
-        // back in the pool and the run reads what stands when it comes up (review pass 6: across a switch to another
-        // question and back, a subject the other key's run wrote stood out of date, its claim finished here). The
-        // check and the claim's end are one transaction under the door's lock on the thought, so a subject written
-        // after the check waits for it (review pass 7: one landing between them was finished over), and the claim is
-        // handed back only while this run holds it (review pass 7, run-it: requeue_thought_work set pending a claim
-        // another run had finished, or took the live lease another run held, which asked again). The thought is read
-        // first, locked as the door locks it: a text or a filed ticket moved since the read is edited mid-sweep, its
-        // claim handed back while this run holds it, and a thought gone is gone (review pass 8: with no subject standing
-        // the finish read neither, and across a switch to another pool and back during the call, an edit made while
-        // the other was named left this run's claim, which finished at the old text).
+        // Asked, got nothing: the claim finished is the record, so it is not asked again until its text, the ticket it
+        // is filed under or the pool changes; an out-of-date subject standing on it closes, if it is still the one read
+        // at the text read. Counted once the finish has answered: a text moved since is edited mid-sweep, a thought
+        // deleted is gone, and past the hard stop nothing is closed nor finished (review pass 1: each was counted as
+        // named nothing). A subject written since the read, by another pass or another key's run, is one the answer
+        // said nothing of: the thought goes back in the pool and the run reads what stands when it comes up (review
+        // pass 6: across a switch to another question and back, a subject the other key's run wrote stood out of date,
+        // its claim finished here). The check and the claim's end are one transaction under the door's lock on the
+        // thought, so a subject written after the check waits for it (review pass 7: one landing between them was
+        // finished over), and the claim is handed back only while this run holds it (review pass 7, run-it:
+        // requeue_thought_work set pending a claim another run had finished, or took the live lease another run held,
+        // which asked again). The thought is read first, locked as the door locks it: a text or a filed ticket moved
+        // since the read is edited mid-sweep, its claim handed back while this run holds it, and a thought gone is gone
+        // (review pass 8: with no subject standing the finish read neither, and across a switch to another pool and
+        // back during the call, an edit made while the other was named left this run's claim, which finished at the old
+        // text).
         if (hardStop.signal.aborted) return false;
-        type Close = { action: string; stale?: boolean; gone?: boolean; moved?: boolean };
+        type Close = { action: string; stale?: boolean; moved?: boolean };
         let fin: string | { c: Close | null; stale: boolean; gone: boolean; written: boolean; held: boolean };
         try {
           fin = await sql.begin(async (tx: SQL) => {
@@ -933,8 +938,9 @@ async function sweep(
             let c: Close | null = null, written: boolean;
             if (row.standing_id !== null) {
               [{ c }] = (await tx`SELECT close_thought_subject(${row.id}::uuid, ${row.standing_id}::uuid, ${row.fingerprint}) AS c`) as { c: Close }[];
-              // A text moved between that read and the close's own: the claim handed back as above.
-              if (c.stale || c.gone) return { c, stale: c.stale === true, gone: c.gone === true, written: false, held: c.stale === true ? await back() : false };
+              // A text moved between that read and the close's own: the claim handed back as above. Never gone: a
+              // delete waits on that read's FOR KEY SHARE until this transaction ends.
+              if (c.stale) return { c, stale: true, gone: false, written: false, held: await back() };
               written = c.moved === true;
             } else {
               [{ written }] = (await tx`
@@ -1029,8 +1035,8 @@ async function sweep(
     return { release: "succeeded" };
   }
 
-  /** A progress line, at most every 10 s, for a run: of the claims pending at its start, which an edit can add to. */
   const todo = LIMIT ? Math.min(LIMIT, pool.pending + pool.expired) : pool.pending + pool.expired;
+  /** A progress line, at most every 10 s, for a run: of the claims pending at its start, which an edit can add to. */
   const progress = () => {
     if (DRY_RUN || Date.now() - reported < 10_000) return;
     reported = Date.now();

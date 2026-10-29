@@ -3253,14 +3253,14 @@ else {
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims
       // INSERT/UPDATE — which this role (SELECT-everywhere, no worker DML) lacks.
-      // Preflight refuses it, naming them with the trigger as the reason.
+      // Preflight refuses it, naming them with the triggers as the reason.
       await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:test') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
       const extractOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(extractOn.code === 1 &&
              /INSERT, UPDATE on thought_work_claims/.test(writeLine(extractOn.out)) &&
              /016's and 113's enqueue triggers/.test(writeLine(extractOn.out)) &&
              /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(extractOn.out),
-             `with entity extraction enabled, a role lacking the work-claim writes is refused, the trigger named (exit ${extractOn.code})`);
+             `with entity extraction enabled, a role lacking the work-claim writes is refused, the triggers named (exit ${extractOn.code})`);
 
       // The executable spelling: migrate.ts --grant issues the whole documented
       // set — the server, worker and extraction groups too, quoted role — so the

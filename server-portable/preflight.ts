@@ -1852,8 +1852,9 @@ if (configFailed) {
           // thoughts matches nothing rather than raising); the key inside CASE
           // guards, so has_table_privilege — which raises for a relation it cannot
           // see — is reached only when the trigger, hence 006's ob1_config, exists.
-          // 113's subject-pool trigger (SMD-3306) has 016's shape: its own ob1_config read on every capture, and a
-          // work-claim upsert while ob1_config.subject_pool_key names a pool.
+          // 113's subject-pool trigger (SMD-3306) has 016's shape: its own
+          // ob1_config read on every capture, and a work-claim upsert while
+          // ob1_config.subject_pool_key names a pool.
           const [{ triggerPresent, poolTriggerPresent, canReadConfig }] = (await sql`
             SELECT EXISTS (SELECT 1 FROM pg_trigger
                             WHERE tgrelid = to_regclass('public.thoughts')
@@ -1864,14 +1865,14 @@ if (configFailed) {
                    CASE WHEN to_regclass('public.ob1_config') IS NOT NULL
                         THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"`) as
             { triggerPresent: boolean; poolTriggerPresent: boolean; canReadConfig: boolean }[];
-          // Read the key in its own statement, run only when the role can SELECT
+          // Read the keys in their own statement, run only when the role can SELECT
           // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
           // above would become an InitPlan Postgres evaluates regardless of any
           // CASE guard, raising `permission denied` for a role without that SELECT
-          // and taking every later check down with it. When the trigger is present
-          // but the role cannot read the key, extraction is treated as off — but
-          // ob1_config SELECT is still required below (the trigger reads it), so the
-          // role is refused for that, not blessed. Schema-qualified, as the
+          // and taking every later check down with it. When a trigger is present
+          // but the role cannot read the keys, extraction and the subject pool are
+          // treated as off — but ob1_config SELECT is still required below (the
+          // triggers read it), so the role is refused for that, not blessed. Schema-qualified, as the
           // privilege it is gated on was tested: a bare ob1_config resolves
           // through the role's search_path, and a role that may read the table
           // without public on its path read "relation does not exist" (SMD-2062).

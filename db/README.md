@@ -2189,8 +2189,9 @@ the metadata rule's subject under another ticket than the thought is filed under
 now, or none, or a session header's or a model's on a thought filed since, is
 refused as stale, as one found in a text that moved, so a write landing after
 another pass recorded the ticket's subject replaces nothing. Refuses by name
-without 015, 016 or 111, and on a database whose encoding is not UTF8, which
-cannot hold what JavaScript's trim takes (SMD-3349 tracks such brains); a re-apply
+without 015, 016 or 111, and on a database whose encoding is not UTF8, where
+chr() cannot build all of what JavaScript's trim takes (SMD-3349 tracks such
+brains); a re-apply
 is a no-op. No grant is issued, but the
 trigger runs as the caller, as 016's does: a ticket edit reads `ob1_config`
 (above), and once a pool is named a capturing role needs `SELECT, INSERT,
@@ -2911,7 +2912,7 @@ bun extract-entities.ts --url … --subjects rules        # …the rules alone, 
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction

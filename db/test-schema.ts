@@ -15984,14 +15984,14 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'subject_pool_key'`, [POOL]);
   const after = await add("[101] captured after");
   assert((await status(after)) === "pending", "a pool named: a new thought joins it, pending");
-  await db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  const finish = () => db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  await finish();
   await db.query(`UPDATE thoughts SET metadata = '{"note": "a metadata edit"}' WHERE id = $1`, [after]);
   assert((await status(after)) === "succeeded", "a metadata edit does not put it back");
   await db.query(`UPDATE thoughts SET content = content WHERE id = $1`, [after]);
   assert((await status(after)) === "succeeded", "nor does a write of the same text");
   // Filed under a ticket after it was asked: the metadata rule reads metadata.ticket, else metadata.issue, so either
   // moving puts it back (review pass 1: a ticket filed later was never read).
-  const finish = () => db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
   await db.query(`UPDATE thoughts SET metadata = metadata || '{"ticket": "SMD-101"}'::jsonb WHERE id = $1`, [after]);
   const byTicket = await status(after);
   await finish();

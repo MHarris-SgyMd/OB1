@@ -7014,6 +7014,8 @@ if (want("10h")) {
   };
   const extractRun = (opts: Omit<ExtractOptions, "writer"> = {}, url = URL_!, e = env) => caught((writer) => runExtract({ url, env: e, workers: 1, ...opts, writer }));
   const sweep = (opts: Omit<SubjectSweepOptions, "writer"> = {}, e = env, url = URL_!) => caught((writer) => sweepSubjects({ url, env: e, ...opts, writer }));
+  /** What a run's call answers: its exit code and the lines on each stream. */
+  type SweepRun = Awaited<ReturnType<typeof sweep>>;
   /** The summary line's counts, after "N thought(s) in …:" — what the sweep did with each thought it took. */
   const tally = (r: { stdout: string }) => /^ {2}\d+ thought\(s\) in [^:]*: (.*)$/m.exec(r.stdout)?.[1] ?? "";
   type Subject = { id: string; thought: string; key: string; by: string; judge: string; standing: boolean; fp: string | null; current: string; produced_by: string | null; recipe: Record<string, unknown> | null; agent: string | null };
@@ -7060,6 +7062,36 @@ if (want("10h")) {
       SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
              count(*) FILTER (WHERE status = 'succeeded')::int AS succeeded, count(*) FILTER (WHERE status = 'failed')::int AS failed
         FROM thought_work_claims WHERE work_type = ${key}`)[0] as { pending: number; claimed: number; succeeded: number; failed: number };
+    /** Until the run polls the transactions it waits on, its list of them read: a case acts while the run waits. */
+    const untilWaiting = async () => {
+      for (let i = 0; i < 200; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%locktype = 'virtualxid'%"}`) as { n: number }[];
+        if (n > 0) return;
+        await Bun.sleep(25);
+      }
+    };
+    /** A connection's own transaction, open: `pid` its backend's, `q` its statements. */
+    const openTx = async (client: SQL) => {
+      const q = await client.reserve();
+      await q`BEGIN`;
+      return { q, pid: ((await q`SELECT pg_backend_pid() AS p`)[0] as { p: number }).p };
+    };
+    /** Until a statement of another session's, its text LIKE `like`, waits on a lock: a case acts while it does. */
+    const untilLockWait = async (like: string) => {
+      for (let i = 0; i < 400; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${like}`) as { n: number }[];
+        if (n > 0) return;
+        await Bun.sleep(25);
+      }
+    };
+    /** Until a session waits on an advisory lock, or two seconds: a case acts while the run's write waits on the door's. */
+    const untilAdvisoryWait = async () => {
+      for (let i = 0; i < 80; i++) {
+        const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
+        if (waits > 0) return;
+        await Bun.sleep(25);
+      }
+    };
     // The first naming is refused while a login role can write thoughts but not the claims 113's trigger writes as it
     // (review pass 1: on a brain whose capturing role lacked them, naming a pool failed its every capture).
     const [{ mayCreate: mayCreateC }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
@@ -7279,7 +7311,7 @@ if (want("10h")) {
     // calls, while no thought is captured.
     asked = ownCalls;
     await sql`ALTER FUNCTION requeue_thought_work(text, uuid) RENAME TO requeue_thought_work_away`;
-    let broken: Awaited<ReturnType<typeof sweep>>;
+    let broken: SweepRun;
     try {
       broken = await sweep({ switchKey: true });
     } finally {
@@ -7297,7 +7329,7 @@ if (want("10h")) {
     // pooling without the retry broke off), as after a deadlock the server broke (40P01; review pass 5, mutant: a retry
     // on 23503 alone lived): one of each, raised by a trigger of the test's own on the first row of two tries.
     await sql.unsafe(`CREATE SEQUENCE zz_pool_once; CREATE FUNCTION zz_pool_once() RETURNS trigger LANGUAGE plpgsql AS $zz$ DECLARE v bigint; BEGIN IF NEW.work_type = 'subjects:r1.2:p2r' THEN v := nextval('zz_pool_once'); IF v = 1 THEN RAISE EXCEPTION USING ERRCODE = 'foreign_key_violation', MESSAGE = 'zz: a thought gone under the pooling'; ELSIF v = 2 THEN RAISE EXCEPTION USING ERRCODE = 'deadlock_detected', MESSAGE = 'zz: a deadlock the server broke'; END IF; END IF; RETURN NEW; END $zz$; CREATE TRIGGER zz_pool_once BEFORE INSERT ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_pool_once()`);
-    let reRun: Awaited<ReturnType<typeof sweep>>, retriedPooling = false;
+    let reRun: SweepRun, retriedPooling = false;
     try {
       reRun = await sweep();
       retriedPooling = ((await sql`SELECT last_value > 2 AS again FROM zz_pool_once`)[0] as { again: boolean }).again;
@@ -7622,10 +7654,9 @@ if (want("10h")) {
                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
         await sql.unsafe(`ALTER ROLE ${SROLE} SET statement_timeout = '1500ms'`);
         const timedHolder = new SQL({ url: URL_!, max: 1 });
-        let timedOut = null as Awaited<ReturnType<typeof sweep>> | null;
+        let timedOut = null as SweepRun | null;
         try {
-          const h = { q: await timedHolder.reserve() };
-          await h.q`BEGIN`;
+          const h = await openTx(timedHolder);
           await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
           const safety = setTimeout(() => void h.q`COMMIT`.catch(() => {}), 10_000);
           timedOut = await sweep({ model: false, switchKey: true }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` })).finally(() => clearTimeout(safety));
@@ -7635,7 +7666,7 @@ if (want("10h")) {
           await sql.unsafe(`ALTER ROLE ${SROLE} RESET statement_timeout`);
           await timedHolder.close({ timeout: 5 });
         }
-        const [{ timedKept }] = (await sql`SELECT value AS "timedKept" FROM ob1_config WHERE key = 'subject_pool_key'`) as { timedKept: string }[];
+        const timedKept = await named();
         await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
         for (const k of timedWas) await sql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
         assert(timedOut?.code === 1 && /Naming pool subjects:r1\.2 broke off \(canceling statement due to statement timeout\): pool subjects:r0 is named as it was; run it again\./.test(timedOut.stderr)
@@ -7817,7 +7848,7 @@ if (want("10h")) {
     assert(lostMix.code === 1 && /1 claim\(s\) no longer this run's when released/.test(tally(lostMix)) && /^ {2}1 claim\(s\) failed: /m.test(lostMix.stderr)
         && (await claimOf(garbled))?.status === "failed" && (await claimOf(lostOk))?.status === "succeeded" && (await standingOf(lostOk))?.key === "pr:727",
       `a finished claim pooled again while it was asked, beside a failed one kept: one failure, exit 1 (exit ${lostMix.code}: ${tally(lostMix)})`);
-    // A thought deleted while the model answered, naming nothing for its out-of-date subject: the close finds it gone,
+    // A thought deleted while the model answered, naming nothing for its out-of-date subject: the finish's read of the thought finds it gone,
     // counted as deleted mid-sweep, not as named nothing (review pass 2).
     const doomed = await seed("A doomed note, deleted while the model answers.");
     await asV1(doomed, "phrase:doomed note", "model", "subject:stub-judge@p1");
@@ -7863,7 +7894,7 @@ if (want("10h")) {
     // refused at the door, which reads the ticket the thought is filed under, under its lock (review pass 5, run-it: it
     // replaced the rule's subject, the claim finished, and no run took the thought again).
     const raced = await seed("Raced: reviewed and merged pull request 727 for the search page.");
-    let inner = null as Awaited<ReturnType<typeof sweep>> | null;
+    let inner = null as SweepRun | null;
     onOwn = async (t) => {
       if (!t.includes("Raced:")) return;
       onOwn = null;
@@ -7886,7 +7917,7 @@ if (want("10h")) {
     // and another run asked the same text again while the first still had it).
     const heldT = await seed("Held: a note the export page answered while its pool was named again.");
     let heldAsks = 0;
-    let back = null as Awaited<ReturnType<typeof sweep>> | null;
+    let back = null as SweepRun | null;
     garbledAnswers = false;
     onOwn = async (t) => {
       if (!t.includes("Held:") || ++heldAsks > 1) return;
@@ -7940,7 +7971,7 @@ if (want("10h")) {
     const lockedT = await seed("Locked: a note given a subject as its answer came back empty.");
     const betweenClient = new SQL({ url: URL_!, max: 1 });
     let betweenDone = null as Promise<void> | null;
-    let lockedRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let lockedRun = null as SweepRun | null;
     try {
       const between = await betweenClient.reserve();
       onOwn = async (t) => {
@@ -7949,12 +7980,7 @@ if (want("10h")) {
         await between`BEGIN`;
         await between`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${lockedT}::uuid::text, 0))`;
         betweenDone = (async () => {
-          // The run's end waiting on the lock, or two seconds, whichever comes first.
-          for (let i = 0; i < 80; i++) {
-            const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
-            if (waits > 0) break;
-            await Bun.sleep(25);
-          }
+          await untilAdvisoryWait();
           await between`SELECT record_thought_subject(${lockedT}::uuid, ${"phrase:a note given its subject between"}, 'model', 'subject:stub-judge@p2r', NULL, ${fp}, ${subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "on", answer: "{}" })}::jsonb)`;
           await between`COMMIT`;
         })();
@@ -8000,7 +8026,7 @@ if (want("10h")) {
     const refiledTFirst = await standingOf(refiledT);
     await sql`SELECT update_thought(${refiledT}::uuid, NULL, ${{ ticket: null }}::jsonb)`;
     let refiledTAsks = 0;
-    let otherRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let otherRun = null as SweepRun | null;
     onOwn = async (t) => {
       if (!t.includes("Refiled:") || ++refiledTAsks > 1) return;
       await sql`SELECT update_thought(${refiledT}::uuid, NULL, ${{ ticket: "SMD-89" }}::jsonb)`;
@@ -8050,7 +8076,7 @@ if (want("10h")) {
     await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
     const holding = new SQL({ url: URL_!, max: 1 });
     let straddled = "";
-    let naming = null as Promise<Awaited<ReturnType<typeof sweep>>> | null;
+    let naming = null as Promise<SweepRun> | null;
     try {
       await holding.begin(async (tx: SQL) => {
         straddled = ((await tx`SELECT upsert_thought(${"A note filed under SMD-82 while its pool was named."}, ${{ metadata: { ticket: "SMD-82" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
@@ -8068,24 +8094,10 @@ if (want("10h")) {
     // while the writer stayed open every run waited, pooled again and asked again each thought the model had named
     // nothing for and each failed one).
     const savedWaits = { ...NAMING_WAIT };
-    /** Until the run polls the transactions it waits on, its list of them read: a case acts while the run waits. */
-    const untilWaiting = async () => {
-      for (let i = 0; i < 200; i++) {
-        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%locktype = 'virtualxid'%"}`) as { n: number }[];
-        if (n > 0) return;
-        await Bun.sleep(25);
-      }
-    };
-    /** A connection's own transaction, open: `pid` its backend's, `q` its statements. */
-    const openTx = async (client: SQL) => {
-      const q = await client.reserve();
-      await q`BEGIN`;
-      return { q, pid: ((await q`SELECT pg_backend_pid() AS p`)[0] as { p: number }).p };
-    };
     await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
     const lateHolder = new SQL({ url: URL_!, max: 1 });
     let lateT = "", latePid = -1;
-    let pastWait = null as Awaited<ReturnType<typeof sweep>> | null;
+    let pastWait = null as SweepRun | null;
     try {
       NAMING_WAIT.sayMs = 300;
       const late = await openTx(lateHolder);
@@ -8112,7 +8124,7 @@ if (want("10h")) {
     const stopHolder = new SQL({ url: URL_!, max: 1 });
     const namingStop = new AbortController();
     let stopT = "", stopMs = -1;
-    let stoppedNaming = null as Awaited<ReturnType<typeof sweep>> | null;
+    let stoppedNaming = null as SweepRun | null;
     try {
       const held = await openTx(stopHolder);
       stopT = ((await held.q`SELECT upsert_thought(${"A note filed under SMD-85 in a transaction open as a stopped naming waited."}, ${{ metadata: { ticket: "SMD-85" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
@@ -8141,7 +8153,7 @@ if (want("10h")) {
     const lockHolder = new SQL({ url: URL_!, max: 1 });
     const lockStop = new AbortController();
     let lockMs = -1;
-    let lockStopped = null as Awaited<ReturnType<typeof sweep>> | null;
+    let lockStopped = null as SweepRun | null;
     try {
       const K = await lockHolder.reserve();
       await K`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
@@ -8157,7 +8169,7 @@ if (want("10h")) {
     } finally {
       await lockHolder.close({ timeout: 5 });
     }
-    const [{ stillNamed }] = (await sql`SELECT value AS "stillNamed" FROM ob1_config WHERE key = 'subject_pool_key'`) as { stillNamed: string }[];
+    const stillNamed = await named();
     assert(lockStopped?.code === 130 && lockMs < 2000 && /^ {2}waiting for another run holding the subject pool's lock/m.test(lockStopped.stdout)
         && /stopped at the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed/.test(lockStopped.stderr) && stillNamed === "subjects:r0",
       `a stop while another run holds the pool's lock ends the run there, 130, nothing named (exit ${lockStopped?.code} after ${lockMs} ms; named ${stillNamed})`);
@@ -8170,7 +8182,7 @@ if (want("10h")) {
     const editedT = await seed("A note filed under SMD-86, its ticket moved while its pool was named.", { ticket: "SMD-86" });
     const firstHolder = new SQL({ url: URL_!, max: 1 }), editHolder = new SQL({ url: URL_!, max: 1 }), idleHolder = new SQL({ url: URL_!, max: 1 });
     let editPid = -1;
-    let lockWaited = null as Awaited<ReturnType<typeof sweep>> | null;
+    let lockWaited = null as SweepRun | null;
     try {
       Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50, sayMs: 400 });
       const idle = await openTx(idleHolder);
@@ -8209,7 +8221,7 @@ if (want("10h")) {
     await setNamed("subjects:r0");
     const readHolder = new SQL({ url: URL_!, max: 1 }), emptyHolder = new SQL({ url: URL_!, max: 1 });
     const readStop = new AbortController();
-    let readerRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let readerRun = null as SweepRun | null;
     try {
       const reader = await openTx(readHolder), empty = await openTx(emptyHolder);
       await reader.q`SELECT count(*) FROM thoughts`;
@@ -8235,7 +8247,7 @@ if (want("10h")) {
     const queueReader = new SQL({ url: URL_!, max: 1 }), queueDdl = new SQL({ url: URL_!, max: 1 });
     const queueStop = new AbortController();
     let ddlPid = -1, queueMs = -1;
-    let queued = null as Awaited<ReturnType<typeof sweep>> | null;
+    let queued = null as SweepRun | null;
     try {
       Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50 });
       const r = await openTx(queueReader), d = await openTx(queueDdl);
@@ -8244,11 +8256,7 @@ if (want("10h")) {
       const ddl = d.q`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`.then(() => "granted", (e: Error) => e.message);
       for (let i = 0; i < 200 && ((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE pid = ${ddlPid} AND NOT granted`)[0] as { n: number }).n === 0; i++) await Bun.sleep(25);
       const run = sweep({ model: false, switchKey: true, signal: queueStop.signal });
-      for (let i = 0; i < 400; i++) {
-        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"%WITH pooled AS MATERIALIZED%"}`) as { n: number }[];
-        if (n > 0) break;
-        await Bun.sleep(25);
-      }
+      await untilLockWait("%WITH pooled AS MATERIALIZED%");
       await Bun.sleep(600);
       const at = Date.now();
       queueStop.abort();
@@ -8279,18 +8287,14 @@ if (want("10h")) {
     const shareHolder = new SQL({ url: URL_!, max: 1 });
     const shareStop = new AbortController();
     let sharePid = -1, shareMs = -1, connsAfter = -1;
-    let shared = null as Awaited<ReturnType<typeof sweep>> | null;
+    let shared = null as SweepRun | null;
     try {
       Object.assign(NAMING_WAIT, { quietMs: 200, pollMs: 50 });
       const h = await openTx(shareHolder);
       sharePid = h.pid;
       await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
       const run = sweep({ model: false, switchKey: true, signal: shareStop.signal });
-      for (let i = 0; i < 400; i++) {
-        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"INSERT INTO ob1_config%"}`) as { n: number }[];
-        if (n > 0) break;
-        await Bun.sleep(25);
-      }
+      await untilLockWait("INSERT INTO ob1_config%");
       await Bun.sleep(600);
       const at = Date.now();
       shareStop.abort();
@@ -8306,7 +8310,7 @@ if (want("10h")) {
     // The run's connections gone, its watcher's among them, once its client closes (review pass 9, run-it: a watcher
     // never closed lived).
     for (let i = 0; i < 80 && (connsAfter = await clientConns()) !== connsBefore; i++) await Bun.sleep(25);
-    const [{ keptName }] = (await sql`SELECT value AS "keptName" FROM ob1_config WHERE key = 'subject_pool_key'`) as { keptName: string }[];
+    const keptName = await named();
     const keptFilled = await filledKey();
     // One stop, said once, nothing pooled (review pass 9, run-it: a run that went on past the naming's stop lived).
     assert(shared?.code === 130 && shareMs < 2000
@@ -8317,7 +8321,7 @@ if (want("10h")) {
     // …and one held up for less than NAMING_WAIT.quietMs says nothing (review pass 9, run-it: the quiet check lived).
     await setNamed("subjects:r0");
     const briefHolder = new SQL({ url: URL_!, max: 1 });
-    let brief = null as Awaited<ReturnType<typeof sweep>> | null;
+    let brief = null as SweepRun | null;
     try {
       Object.assign(NAMING_WAIT, { quietMs: 2000, pollMs: 50 });
       const h = await openTx(briefHolder);
@@ -8343,11 +8347,7 @@ if (want("10h")) {
       const h = await openTx(cliHolder);
       await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
       const cli = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules", "--switch-key"], { env: env as Record<string, string>, cwd: HERE, stdout: "ignore", stderr: "ignore" });
-      for (let i = 0; i < 400; i++) {
-        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"INSERT INTO ob1_config%"}`) as { n: number }[];
-        if (n > 0) break;
-        await Bun.sleep(25);
-      }
+      await untilLockWait("INSERT INTO ob1_config%");
       cli.kill("SIGINT");
       await Promise.race([cli.exited, Bun.sleep(30_000).then(() => cli.kill("SIGKILL"))]);
       // Two of the server's checks, a second apart.
@@ -8362,7 +8362,7 @@ if (want("10h")) {
       await cliHolder.close({ timeout: 5 });
     }
     await Bun.sleep(300);
-    const [{ afterCli }] = (await sql`SELECT value AS "afterCli" FROM ob1_config WHERE key = 'subject_pool_key'`) as { afterCli: string }[];
+    const afterCli = await named();
     assert(orphans === 0 && afterCli === "subjects:r0",
       `a CLI a signal ended leaves no write of the name running on, to rename the pool later (${orphans} left running; named ${afterCli})`);
     // A run whose second connection cannot be opened says its waits go unwatched, and hears a stop between its
@@ -8371,7 +8371,7 @@ if (want("10h")) {
     await setNamed("subjects:r0");
     const deafClient = new SQL({ url: URL_!, max: 2 }), deafHolder = new SQL({ url: URL_!, max: 1 });
     const deafStop = new AbortController();
-    let deafRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let deafRun = null as SweepRun | null;
     try {
       const h = await openTx(deafHolder);
       await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
@@ -8379,11 +8379,7 @@ if (want("10h")) {
       const nowhere = new URL(URL_!);
       nowhere.port = "1";
       const run = caught((writer) => sweepSubjects({ sql: deafClient, url: nowhere.toString(), env: { ...env, OB1_WORKER_KEY: "" }, model: false, switchKey: true, signal: deafStop.signal, writer }));
-      for (let i = 0; i < 400; i++) {
-        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${"INSERT INTO ob1_config%"}`) as { n: number }[];
-        if (n > 0) break;
-        await Bun.sleep(25);
-      }
+      await untilLockWait("INSERT INTO ob1_config%");
       deafStop.abort();
       await Bun.sleep(500);
       await h.q`COMMIT`;
@@ -8399,7 +8395,7 @@ if (want("10h")) {
     // …and one lent a client and no url says its waits go unwatched.
     await setNamed("subjects:r0");
     const lentAlone = new SQL({ url: URL_!, max: 2 });
-    let alone = null as Awaited<ReturnType<typeof sweep>> | null;
+    let alone = null as SweepRun | null;
     try {
       alone = await caught((writer) => sweepSubjects({ sql: lentAlone, env: { ...env, OB1_WORKER_KEY: "" }, model: false, switchKey: true, writer }));
     } finally {
@@ -8414,7 +8410,7 @@ if (want("10h")) {
     await setNamed("subjects:r0");
     const rowLock = new SQL({ url: URL_!, max: 1 }), lateCapture = new SQL({ url: URL_!, max: 1 });
     let raceT = "";
-    let raceRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let raceRun = null as SweepRun | null;
     try {
       const L = await rowLock.reserve();
       await L`BEGIN`;
@@ -8520,7 +8516,7 @@ if (want("10h")) {
     const doorHolder = new SQL({ url: URL_!, max: 1 }), namer = new SQL({ url: URL_!, max: 1 });
     let renamed = "";
     let flightDone = null as Promise<void> | null;
-    let flightRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let flightRun = null as SweepRun | null;
     try {
       const D = await doorHolder.reserve();
       onOwn = async (t) => {
@@ -8528,11 +8524,7 @@ if (want("10h")) {
         await D`BEGIN`;
         await D`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${flightT}::uuid::text, 0))`;
         flightDone = (async () => {
-          for (let i = 0; i < 80; i++) {
-            const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
-            if (waits > 0) break;
-            await Bun.sleep(25);
-          }
+          await untilAdvisoryWait();
           renamed = await namer.begin(async (tx: SQL) => {
             await tx`SET LOCAL lock_timeout = '1s'`;
             await tx`UPDATE ob1_config SET value = ${POOL} WHERE key = 'subject_pool_key'`;
@@ -8559,7 +8551,7 @@ if (want("10h")) {
     const emptyDoorHolder = new SQL({ url: URL_!, max: 1 }), emptyNamer = new SQL({ url: URL_!, max: 1 });
     let emptyRenamed = "";
     let emptyDone = null as Promise<void> | null;
-    let emptyRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    let emptyRun = null as SweepRun | null;
     try {
       const D = await emptyDoorHolder.reserve();
       onOwn = async (t) => {
@@ -8567,11 +8559,7 @@ if (want("10h")) {
         await D`BEGIN`;
         await D`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${emptyT}::uuid::text, 0))`;
         emptyDone = (async () => {
-          for (let i = 0; i < 80; i++) {
-            const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
-            if (waits > 0) break;
-            await Bun.sleep(25);
-          }
+          await untilAdvisoryWait();
           emptyRenamed = await emptyNamer.begin(async (tx: SQL) => {
             await tx`SET LOCAL lock_timeout = '1s'`;
             await tx`UPDATE ob1_config SET value = ${POOL} WHERE key = 'subject_pool_key'`;
