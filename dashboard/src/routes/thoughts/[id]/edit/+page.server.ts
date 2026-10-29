@@ -2,7 +2,7 @@ import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { base } from '$app/paths';
 import { codeOf, may, read, write } from '$lib/server/rest';
-import { EDIT_MAX_BYTES, notYours, postedBytes } from '$lib/server/writes';
+import { EDIT_MAX_BYTES, notAnswered, notYours, postedBytes } from '$lib/server/writes';
 import type { FetchedThought } from '$lib/types';
 
 // A thought's text, edited (SMD-3322): update_thought under the visitor's
@@ -62,12 +62,13 @@ export const actions: Actions = {
 		const code = codeOf(answer.body);
 		if (answer.status >= 500) console.error(`[dashboard] update_thought: ${answer.status} ${code ?? ''}`.trimEnd());
 		const said =
-			answer.status === 403 ? notYours('edit')
+			notAnswered(code, 'edit') ??
+			(answer.status === 403 ? notYours('edit')
 			: code === 'REFUSED_STALE_READ' ? 'The thought changed after this page read it, so the edit was not saved. Open the thought again to see the change, then edit that.'
 			: code === 'NOT_FOUND' ? 'The brain no longer holds this thought.'
 			: code === 'REFUSED_DUPLICATE_CONTENT' ? 'Another thought already holds this text.'
 			: answer.status >= 500 ? `The brain could not save the edit${code ? ` (${code})` : ''}.`
-			: `The brain refused the edit${code ? ` (${code})` : ''}.`;
+			: `The brain refused the edit${code ? ` (${code})` : ''}.`);
 		return fail(answer.status, { ...kept, error: said });
 	},
 };

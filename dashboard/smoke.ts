@@ -54,7 +54,8 @@
  *   - the write verbs (SMD-3322), with `--writes`: a thought captured on the
  *     capture page (named in the write key's nav alone; an empty text refused;
  *     the thought's page saying it was captured, its source `dashboard`, and
- *     a second capture of its text saying it already was) is edited and
+ *     a second capture of its text saying it was merged into, as is a text
+ *     another source captured, relabelled `dashboard`) is edited and
  *     deleted on its own pages — the edit posted as the page's multipart form does, a
  *     160 kB text of it saved, refused in words when its text is empty, its
  *     time altered, or stale (keeping that stale time in the form); the delete
@@ -754,7 +755,8 @@ async function writesArm() {
   assert(home.html.includes('href="/dashboard/capture"') && capturePage.status === 200 && /<form[^>]*action="\?\/capture"[^>]*enctype="multipart\/form-data"[^>]*data-testid="capture-form"/.test(capturePage.html), `the write key's nav names Capture, and its page posts its form as multipart (${capturePage.status})`);
   const blank = await post("/capture?/capture", { content: " \r\n " }, true);
   assert(blank.status === 400 && /data-testid="capture-error"[^>]*>[^<]*Write the thought first/.test(blank.html), `an empty capture is refused in words (${blank.status})`);
-  const content = `The operator GUI smoke captures, edits and deletes this thought (SMD-3322, ${marker}).`;
+  // Past 64 kB, so the hook's allowance for the capture page's post is held too (review pass 1).
+  const content = `The operator GUI smoke captures, edits and deletes this thought (SMD-3322, ${marker}).\n${"w".repeat(70_000)}`;
   const captured = await post("/capture?/capture", { content }, true);
   const id = /^\/dashboard\/thoughts\/([0-9a-f-]{36})$/.exec(captured.location)?.[1];
   if (captured.status !== 303 || !id) return bad(`the write key's capture: 303 to the new thought's page (${captured.status} → ${captured.location})`);
@@ -766,12 +768,30 @@ async function writesArm() {
     return { status: r.status, html: await r.text(), cleared: (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${COOKIE}_captured=;`) && /Max-Age=0/i.test(c) && attributesHold(c)) };
   };
   const shown = await withCaptured(capturedFlash);
-  assert(shown.status === 200 && /data-testid="captured"[^>]*>\s*Captured\./.test(shown.html) && shown.cleared, "…whose page says it was captured, and clears the cookie as it does");
+  assert(shown.status === 200 && /data-testid="captured"[^>]*>(?:\s|<!--[^>]*-->)*Captured\./.test(shown.html) && shown.cleared, "…whose page says it was captured, and clears the cookie as it does");
   assert(/<dt[^>]*>source<\/dt>\s*<dd[^>]*>dashboard</.test(shown.html), "…its source recorded as dashboard, the GUI's own label, not mcp");
   const again = await post("/capture?/capture", { content }, true);
   const againFlash = again.setCookies.find((c) => c.startsWith(`${COOKIE}_captured=`)) ?? "";
   const againShown = await withCaptured(againFlash);
-  assert(again.status === 303 && again.location === `/dashboard/thoughts/${id}` && /data-testid="captured"[^>]*>\s*That text was already a thought/.test(againShown.html), `capturing the same text again leads to that thought, its page saying it already was one (${again.status})`);
+  assert(again.status === 303 && again.location === `/dashboard/thoughts/${id}` && /data-testid="captured"[^>]*>(?:\s|<!--[^>]*-->)*That text was already a thought, so the capture merged into it/.test(againShown.html), `capturing the same text again leads to that thought, its page saying it already was one and the capture merged into it (${again.status})`);
+  // A thought another source captured: the page's capture of its text relabels it dashboard, and the notice says so (review pass 1).
+  const elsewhere = `A thought the operator GUI smoke captures elsewhere first (SMD-3322, ${marker}).`;
+  const mcpReply = await fetch(`${ORIGIN}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": WRITE_KEY! },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "capture_thought", arguments: { content: elsewhere, source: "gui-smoke" } } }),
+  });
+  const otherId = /id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(await mcpReply.text())?.[1];
+  if (!otherId) bad(`the write arm's capture under another source gave no thought id (${mcpReply.status})`);
+  else {
+    const merged = await post("/capture?/capture", { content: elsewhere }, true);
+    const mergedFlash = merged.setCookies.find((c) => c.startsWith(`${COOKIE}_captured=`)) ?? "";
+    const r = await fetch(`${BASE}/thoughts/${otherId}`, { redirect: "manual", headers: { cookie: `${cookie}; ${mergedFlash}` } });
+    const html = await r.text();
+    assert(merged.location === `/dashboard/thoughts/${otherId}` && /its source is now dashboard/.test(html) && /<dt[^>]*>source<\/dt>\s*<dd[^>]*>dashboard</.test(html), `capturing on the page a text another source captured leads to that thought, relabelled dashboard, its page saying so (${merged.status})`);
+    const gone = await post(`/thoughts/${otherId}/delete?/delete`, {});
+    assert(gone.status === 303, `…and is deleted (${gone.status})`);
+  }
 
   const bigDelete = await post(`/thoughts/${id}/delete?/delete`, { pad: "p".repeat(70_000) });
   assert(bigDelete.status === 413 && (await get(`/thoughts/${id}`)).status === 200, `signed in, a post past 64 kB to any page but an edit is refused, the thought kept (${bigDelete.status})`);

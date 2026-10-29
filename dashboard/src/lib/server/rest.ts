@@ -48,14 +48,41 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 }
 
 /**
+ * The longest one write may take: a capture embeds its text and extracts its metadata, and an edit re-embeds, each
+ * call to the provider bounded by OB1_LLM_TIMEOUT (120 s by default), so a page's 30 s would end most of them while
+ * the core went on to save (SMD-3322 PR 2 review pass 1).
+ */
+export const WRITE_TIMEOUT_MS = 300_000;
+
+let writer: RestClient | undefined;
+/** The client for writes, as `rest()` but with WRITE_TIMEOUT_MS. */
+function restForWrites(): RestClient {
+	writer ??= createRestClient({ baseUrl: restUrl(env), timeoutMs: WRITE_TIMEOUT_MS });
+	return writer;
+}
+
+/**
  * One write under the signed-in visitor's credential (SMD-3322): its answer for
  * the form action to read, so a refusal is said beside the form, not as the
  * page's error. A credential the REST core no longer takes ends the session, as
- * a read's does; a core that does not answer is the page's 502.
+ * a read's does. A core that did not answer in time, or at all, is an answer
+ * too — 504 `GUI_TIMEOUT`, which may still have been saved, or 502
+ * `GUI_UNREACHABLE` — so the form keeps what the visitor typed (review pass 1).
  */
 export async function write<K extends CallableOperation>(event: RequestEvent, session: Session, name: K, input: InputOf<K>): Promise<Answer> {
 	const credential = await credentialOf(event, session);
-	return answered(event, name, () => rest().call(name, input, { ...credential, signal: event.request.signal }));
+	let answer: Answer;
+	try {
+		answer = await restForWrites().call(name, input, { ...credential, signal: event.request.signal });
+	} catch (err) {
+		// A visitor who left aborted the call: nobody reads the answer.
+		if (event.request.signal.aborted) throw err;
+		const timedOut = err instanceof Error && err.name === 'TimeoutError';
+		console.error(`[dashboard] ${name}: the REST core did not answer${timedOut ? ` within ${WRITE_TIMEOUT_MS / 1000} s` : ''}: ${err instanceof Error ? err.message : String(err)}`);
+		return { status: timedOut ? 504 : 502, ok: false, headers: new Headers(), body: { code: timedOut ? 'GUI_TIMEOUT' : 'GUI_UNREACHABLE' }, sent: timedOut };
+	}
+	if (answer.status === 401) signOutHere(event);
+	return answer;
 }
 
 /** Whether the session's whoami named this operation at sign-in: what a page offers a write by (SMD-3322). The REST core still decides the call. */

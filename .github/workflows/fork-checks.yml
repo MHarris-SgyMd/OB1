@@ -1892,7 +1892,8 @@ jobs:
       # captured on the GUI's capture page, is edited and deleted on its own
       # pages — a stale edit refused, a read key offered none of them — and
       # its audit rows then read here, in order: the capture, the one edit
-      # saved and the delete (a second capture of the same text writes none),
+      # saved and the delete (a second capture of the same text, from the same
+      # key and source, changes nothing and writes none),
       # each labelled with the GUI's source, `dashboard`, each a direct call
       # to the REST core with no carrier, as the GUI makes them, all under the
       # smoke key's name, as Verify asks. The smoke reads its

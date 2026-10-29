@@ -26,7 +26,7 @@ export const LARGE_BODY_PATH = new RegExp(`^${base}/(?:capture|thoughts/[^/]+/ed
 
 /**
  * The source a capture from the GUI names (SMD-3322, SMD-3208): a direct REST capture that names none is labelled
- * `mcp`, the conversational label egress `source:` terms and per-source weights key on.
+ * `mcp`, the conversational label egress `source:` terms key on (and per-source weights will, SMD-1297).
  */
 export const CAPTURE_SOURCE = 'dashboard';
 
@@ -50,6 +50,16 @@ export const FLASH_MAX_AGE = 60;
  * and cleared by that thought's page alone, as the delete's is by the list.
  */
 export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captured`;
+
+/**
+ * What a write the REST core did not answer is said as (rest.ts write): one that ran past WRITE_TIMEOUT_MS may still
+ * have been saved, and a retry would capture or edit again, so the visitor is sent to look first.
+ */
+export function notAnswered(code: string | undefined, what: string): string | undefined {
+	if (code === 'GUI_TIMEOUT') return `The brain did not answer within five minutes, so the ${what} may still have been saved. Look for it under Browse before trying again.`;
+	if (code === 'GUI_UNREACHABLE') return `The brain did not answer, so the ${what} was not saved. The dashboard log has the reason; try again in a moment.`;
+	return undefined;
+}
 
 /** What a session that may not write is told: by key or by the operator's sign-in, it is the session that may not. */
 export const notYours = (verb: 'edit' | 'delete' | 'capture') =>

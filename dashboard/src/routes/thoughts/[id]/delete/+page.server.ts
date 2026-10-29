@@ -4,7 +4,7 @@ import { base } from '$app/paths';
 import { firstLine } from '$lib/format';
 import { codeOf, may, read, write } from '$lib/server/rest';
 import { cookieOptions } from '$lib/server/session';
-import { deletedCookie, FLASH_MAX_AGE, notYours } from '$lib/server/writes';
+import { deletedCookie, FLASH_MAX_AGE, notAnswered, notYours } from '$lib/server/writes';
 import type { FetchedThought } from '$lib/types';
 
 // A thought deleted (SMD-3322): delete_thought under the visitor's credential,
@@ -46,10 +46,11 @@ export const actions: Actions = {
 			return fail(409, { cited: typeof n === 'number' ? n : null });
 		}
 		const said =
-			answer.status === 403 ? notYours('delete')
+			notAnswered(code, 'delete') ??
+			(answer.status === 403 ? notYours('delete')
 			: code === 'NOT_FOUND' ? 'The brain no longer holds this thought.'
 			: answer.status >= 500 ? `The brain could not delete the thought${code ? ` (${code})` : ''}.`
-			: `The brain refused the delete${code ? ` (${code})` : ''}.`;
+			: `The brain refused the delete${code ? ` (${code})` : ''}.`);
 		return fail(answer.status, { error: said });
 	},
 };

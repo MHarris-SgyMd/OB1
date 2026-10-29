@@ -36,8 +36,11 @@
 
 	{#if data.captured}
 		<p class="text-sm" role="status" data-testid="captured">
-			{data.captured.existed ? 'That text was already a thought: this is it.' : 'Captured.'}
-			{#if data.captured.noVector}{' '}It was saved without an embedding, so a search by meaning will not find it until it is re-embedded; a search by exact text will.{/if}
+			{#if data.captured.existed}
+				That text was already a thought, so the capture merged into it: its source is now dashboard, and the metadata extracted this time was merged into its own (the audit trail records any change).{#if data.captured.noVector}{' '}This capture wrote no embedding; the thought keeps the one it had, if any.{/if}
+			{:else}
+				Captured.{#if data.captured.noVector}{' '}It was saved without an embedding, so a search by meaning will not find it until it is re-embedded; a search by exact text will.{/if}
+			{/if}
 		</p>
 	{/if}
 	{#if notice}
