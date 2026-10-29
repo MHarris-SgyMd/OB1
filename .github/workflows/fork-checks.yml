@@ -136,7 +136,8 @@ jobs:
       - name: The edge proxy's registry, table and shape
         run: bun deploy/edge/edge.ts --self-check
       # SMD-3305: the maintainer scripts' parsing and figures on fixtures — a CI job's step times over runs, and a
-      # suite's sections by wall time. Neither is a gate; their self-checks keep the fixtures from going stale.
+      # suite's sections by wall time. Neither is a gate; their self-checks keep the fixtures from going stale. The
+      # first also holds the shifts ci-shift.yml warns of on main (SMD-3467) to two of main's real slowdowns.
       - name: The CI step-times script's figures
         run: bun scripts/ci-step-times.ts --self-check
       - name: The suite-sections script's reading of a suite's output

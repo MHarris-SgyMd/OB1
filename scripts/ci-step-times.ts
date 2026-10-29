@@ -11,27 +11,46 @@
  *   bun scripts/ci-step-times.ts --job "Portable server"
  *   bun scripts/ci-step-times.ts --job "Portable server" --step "REST core" --days 14
  *   bun scripts/ci-step-times.ts --job "Portable server" --runs 40150766871,40059346321
- *   bun scripts/ci-step-times.ts --self-check         # the parsing and the figures, on fixtures
+ *   bun scripts/ci-step-times.ts --shift              # every job and step on main that got slower (SMD-3467)
+ *   bun scripts/ci-step-times.ts --self-check         # the parsing, the figures and the shifts, on fixtures
+ *
+ * --shift reads every job and step of main's push runs instead, each a series over the runs where its job succeeded,
+ * and names a shift: all of a series' last 3 runs over its line, the median of the 10 before them plus max(30 s,
+ * 20%). A step under 5 s cannot get there without taking 30 s more, so every step is read. A shift is named once,
+ * at the run that makes it, and again only after a run of 3 back under the line. It says where it landed: from the
+ * run before the first of those 13 runs over the line to the first of the 3, and the pull requests merged there,
+ * since a step that slows only some of the time leaves runs under the line after its cause. Each shift made at the
+ * newest run read (or --through's) is a `::warning`, and a table in $GITHUB_STEP_SUMMARY when that is set; the
+ * earlier ones in the window are listed. .github/workflows/ci-shift.yml runs it after each Fork Checks run on main.
  *
  * Options:
- *   --job <name>          the job, by its exact name (required unless --self-check)
+ *   --job <name>          the job, by its exact name (required unless --shift or --self-check)
  *   --step <regex>        steps whose name matches, case-insensitive; default every step of a second or more in
  *                         some run (chosen by name across the runs, so each reads every run it ran in; a step's name
  *                         is taken to be unique in its job, as GitHub's are today)
  *   --workflow <name>     default "Fork Checks"
  *   --branch <name>       default main
  *   --days <n>            runs created in the last n × 24 hours, default 7, at most 400 (GitHub keeps a run 400 days)
- *   --runs <id,id,…>      these runs instead of a window (with --branch, --days or --workflow refused: they would
- *                         be ignored)
+ *   --last <n>            the newest n completed runs instead, at most 500; with --shift the default, 40, and at
+ *                         least 13
+ *   --runs <id,id,…>      these runs instead of a window (with --branch, --days, --last, --workflow or --through
+ *                         refused: they would be ignored)
+ *   --shift               the shifts, above (with --job or --step refused: it reads them all); push runs only, so a
+ *                         fork's pull request from a branch named main is not read as main
+ *   --through <run id>    with --shift, the window ends at this run, and its shifts are the warnings
  *   --repo <owner/name>   default gh's own (the repository of the current directory)
  *
- * Exits 0 with the report; 1 when `gh` is missing or cannot list the runs, there are none, none can be read, or no
- * run read has the job (the job names the runs do have are listed); 2 for a refused option. A re-run shows its latest
- * attempt, marked. Needs `gh` signed in. Reads only; writes nothing.
+ * Exits 0 with the report, warnings or none; 1 when `gh` is missing or cannot list the runs, there are none, none can
+ * be read, --through's run is not among them, or no run read has the job (the job names the runs do have are
+ * listed); 2 for a refused option. A re-run shows its latest attempt, marked. Needs `gh` signed in. Reads only;
+ * writes nothing but the step summary.
  */
 
+import { appendFileSync } from "node:fs";
+
 const KNOWN: Record<string, "value" | "flag"> = {
-  "--job": "value", "--step": "value", "--workflow": "value", "--branch": "value", "--days": "value", "--runs": "value", "--repo": "value", "--self-check": "flag",
+  "--job": "value", "--step": "value", "--workflow": "value", "--branch": "value", "--days": "value", "--last": "value", "--runs": "value",
+  "--shift": "flag", "--through": "value", "--repo": "value", "--self-check": "flag",
 };
 type Opts = { error?: string; [name: string]: string | true | undefined };
 
@@ -58,6 +77,7 @@ export function parseArgs(argv: string[]): Opts {
 
 type Step = { name: string; startedAt?: string | null; completedAt?: string | null; conclusion?: string | null };
 type Job = { name: string; conclusion?: string | null; startedAt?: string | null; completedAt?: string | null; steps?: Step[] };
+type Run = { jobs: Job[]; headSha: string; createdAt: string; attempt?: number };
 
 /** The most runs one `gh run list` returns here; a window that fills it is said to be cut short. */
 const LIST_LIMIT = 500;
@@ -116,6 +136,65 @@ export function stats(xs: number[]): { n: number; median: number; p90: number; m
   return { n: a.length, median, p90, min: a[0], max: a[a.length - 1] };
 }
 
+/** A shift's terms (SMD-3467): the runs before, the runs after, and the line's floor and share over the median before. */
+export const SHIFT = { before: 10, after: 3, floor: 30, share: 0.2 };
+
+/** One run of a series: the run, its commit and the job's or step's seconds. */
+export type Point = { run: string; sha: string; s: number };
+
+/** Each job's and each step's series over the runs, oldest first, a run counted where its job succeeded; a step is `job › step`. */
+export function seriesOf(runs: { id: string; jobs: Job[]; headSha: string }[]): Map<string, Point[]> {
+  const out = new Map<string, Point[]>();
+  const add = (name: string, p: Point) => (out.get(name) ?? out.set(name, []).get(name)!).push(p);
+  for (const run of runs) {
+    for (const job of run.jobs) {
+      if (job.conclusion !== "success") continue;
+      const row = jobRow(job);
+      if (row.job !== null) add(job.name, { run: run.id, sha: run.headSha, s: row.job });
+      for (const st of row.steps) add(`${job.name} › ${st.name}`, { run: run.id, sha: run.headSha, s: st.s });
+    }
+  }
+  return out;
+}
+
+/**
+ * Index `fired` is the run whose series' last 3 all went over the line, the median of the 10 before them plus
+ * max(30 s, 20%); `from` the run before the first of those 13 over the line (-1 when that is the first run read) and
+ * `to` the first of the 3, so the commits after `from` up to `to` hold what slowed it.
+ */
+export type Shift = { fired: number; before: number; line: number; after: number[]; from: number; to: number };
+
+/** A series' shifts, oldest first: each named once, and again only after its last 3 runs were all back under its line. */
+export function findShifts(points: Point[]): Shift[] {
+  const out: Shift[] = [];
+  const k = SHIFT.after, n = SHIFT.before;
+  let armed = true;
+  for (let i = n + k - 1; i < points.length; i++) {
+    const start = i + 1 - k - n, to = i + 1 - k;
+    const before = stats(points.slice(start, to).map((p) => p.s))!.median;
+    const line = before + Math.max(SHIFT.floor, SHIFT.share * before);
+    const after = points.slice(to, i + 1).map((p) => p.s);
+    if (after.every((s) => s > line)) {
+      if (armed) out.push({ fired: i, before, line, after, from: points.findIndex((p, j) => j >= start && p.s > line) - 1, to });
+      armed = false;
+    } else if (after.every((s) => s <= line)) armed = true;
+  }
+  return out;
+}
+
+/** The pull requests a range's commits merged, `#n branch`, from GitHub's merge commits' subjects. */
+export function mergedIn(subjects: string[]): string[] {
+  return subjects.flatMap((s) => {
+    const m = /^Merge pull request #(\d+) from [^/\s]+\/(\S+)/.exec(s);
+    return m ? [`#${m[1]} ${m[2]}`] : [];
+  });
+}
+
+/** A workflow command's message, its %, CR and LF escaped as the runner reads them. */
+export function escapeCommand(s: string): string {
+  return s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
 function refuse(msg: string): never {
   console.error(msg);
   process.exit(2);
@@ -164,6 +243,65 @@ async function pooled<T, R>(items: T[], width: number, f: (item: T) => Promise<R
   return out;
 }
 
+/** Seconds to a tenth, for a median that can fall between two runs. */
+const sec = (s: number) => `${Math.round(s * 10) / 10} s`;
+
+/**
+ * The shifts over the runs read, oldest first: each one in the window listed, and those made at `through` (the
+ * newest run read when not named) given as `::warning`s and, where the runner sets $GITHUB_STEP_SUMMARY, a table.
+ */
+async function shiftReport(runs: { id: string; run: Run }[], through: string | undefined, repo: string[], unread: number): Promise<void> {
+  const ordered = [...runs].sort((a, b) => a.run.createdAt.localeCompare(b.run.createdAt) || Number(a.id) - Number(b.id));
+  const at = through ?? ordered[ordered.length - 1].id;
+  const series = seriesOf(ordered.map(({ id, run }) => ({ id, jobs: run.jobs, headSha: run.headSha })));
+  const created = new Map(ordered.map(({ id, run }) => [id, run.createdAt]));
+  let repoName = repo[1];
+  if (!repoName) {
+    const got = await gh(["repo", "view", "--json", "nameWithOwner"]);
+    repoName = got.ok ? (got.json as { nameWithOwner: string }).nameWithOwner : "";
+  }
+  const found: { name: string; sh: Shift; run: string; from?: string; to: string; prs: string }[] = [];
+  for (const [name, points] of series) {
+    for (const sh of findShifts(points)) {
+      const from = sh.from >= 0 ? points[sh.from].sha : undefined, to = points[sh.to].sha;
+      found.push({ name, sh, run: points[sh.fired].run, from, to, prs: "" });
+    }
+  }
+  found.sort((a, b) => created.get(a.run)!.localeCompare(created.get(b.run)!) || a.name.localeCompare(b.name));
+  // The pull requests in each range, one compare a range; a range gh cannot read is said, not fatal.
+  await pooled(found, 6, async (f) => {
+    if (!f.from) return void (f.prs = "the runs before it are outside the window");
+    if (!repoName) return void (f.prs = "the repository could not be named, so its pull requests were not read");
+    const got = await gh(["api", `repos/${repoName}/compare/${f.from}...${f.to}`]);
+    if (!got.ok) return void (f.prs = `its pull requests could not be read: ${got.error.split("\n")[0].slice(0, 120)}`);
+    const commits = (got.json as { commits?: { commit: { message: string } }[] }).commits ?? [];
+    const prs = mergedIn(commits.map((c) => c.commit.message.split("\n")[0]));
+    f.prs = prs.length ? prs.join(", ") : `${commits.length} commit${commits.length === 1 ? "" : "s"}, no pull request merged`;
+  });
+  const text = (f: (typeof found)[number]) =>
+    `${f.name}: ${sec(f.sh.before)} → ${f.sh.after.join(", ")} s over the last ${SHIFT.after} runs, its line ${sec(f.sh.line)}; landed in ${f.from ? `${f.from.slice(0, 8)}..` : "..."}${f.to.slice(0, 8)} (${f.prs})`;
+  console.log(`\n${series.size} series over ${ordered.length} runs${unread ? ` (${unread} not read)` : ""}; a line is the median of a series' ${SHIFT.before} runs before its last ${SHIFT.after}, plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%).`);
+  console.log(`Shifts in the window: ${found.length}`);
+  for (const f of found) console.log(`  ${created.get(f.run)!.slice(0, 16)} run ${f.run}  ${text(f)}`);
+  const now = found.filter((f) => f.run === at);
+  console.log(now.length ? `\n${now.length} made at run ${at}:` : `\nNone made at run ${at}.`);
+  for (const f of now) console.log(`::warning title=Slower on main::${escapeCommand(text(f))}`);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (!summary) return;
+  const cell = (s: string) => s.replace(/\|/g, "\\|");
+  const range = (f: (typeof found)[number]) =>
+    f.from && repoName ? `[${f.from.slice(0, 8)}..${f.to.slice(0, 8)}](https://github.com/${repoName}/compare/${f.from}...${f.to})` : `..${f.to.slice(0, 8)}`;
+  const md = now.length
+    ? [
+      `### A job or step on main got slower at run ${at}`, "",
+      `| Job or step | Before | Last ${SHIFT.after} runs | Line | Landed in |`, "|---|---|---|---|---|",
+      ...now.map((f) => `| ${cell(f.name)} | ${sec(f.sh.before)} | ${f.sh.after.join(", ")} s | ${sec(f.sh.line)} | ${range(f)}: ${cell(f.prs)} |`), "",
+      `Before: the median of the ${SHIFT.before} runs before the last ${SHIFT.after}; the line, that plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%). Landed in: from the run before the first of those runs over the line to the first of the last ${SHIFT.after}.`,
+    ]
+    : [`No job or step on main got slower at run ${at} (${series.size} series over ${ordered.length} runs, ${found.length} earlier shift${found.length === 1 ? "" : "s"} in the window).`];
+  appendFileSync(summary, md.join("\n") + "\n");
+}
+
 function selfCheck(): number {
   let failed = 0;
   const ok = (cond: boolean, what: string) => {
@@ -198,6 +336,39 @@ function selfCheck(): number {
   ok(odd?.median === 43 && odd.min === 16 && odd.max === 44 && even?.median === 17.5, "the median of an odd and an even list");
   const ten = stats(Array.from({ length: 10 }, (_, i) => i + 1)), eleven = stats(Array.from({ length: 11 }, (_, i) => i + 1));
   ok(ten?.p90 === 9 && eleven?.p90 === 10 && stats([]) === null, "p90 by nearest rank, at 10 runs and at 11; no runs, no figures");
+
+  // The shifts (SMD-3467), first on main's own runs of 10-26 → 10-28, each `sha seconds`, from the 2026-10-28 review.
+  ok(parseArgs(["--shift", "--through", "41"])["--shift"] === true && parseArgs(["--through=41"])["--through"] === "41", "--shift is a flag and --through takes a run");
+  const points = (spec: string): Point[] => spec.split(",").map((x, i) => ({ run: String(i), sha: x.split(" ")[0], s: Number(x.split(" ")[1]) }));
+  const flat = (...parts: [number, number][]) => points(parts.flatMap(([s, n]) => Array.from({ length: n }, () => `x ${s}`)).join(","));
+  // SMD-2679 PR 4b (2b46a488) took the sleep cell from ~196 s to ~270 s.
+  const sleep = points("4bf23b45 198,ea4f9300 198,bbb4356d 196,b74f5653 196,90721887 205,6c1a7c7e 197,1c112152 197,5e718231 195,60605f3f 194,7a2feeaa 193,"
+    + "fb9a270e 195,df9968fe 196,5863647c 191,8a0f40e7 197,2b46a488 268,bcc60003 269,f3267523 280,330f9ad5 273,cf3fa56d 275");
+  const [s1, ...sMore] = findShifts(sleep);
+  ok(sMore.length === 0 && sleep[s1?.fired]?.sha === "f3267523" && sleep[s1.to].sha === "2b46a488" && sleep[s1.from].sha === "8a0f40e7" && s1.before === 195.5 && s1.after.join() === "268,269,280",
+    "SMD-2679 PR 4b's sleep cell: named once, at the third run over, landed in 8a0f40e7..2b46a488, the merge itself");
+  // SMD-3155 (330f9ad5) left board-sync's stop slow only some of the time: two runs back under the line after it.
+  const canary = points("6c1a7c7e 88,1c112152 124,5e718231 114,60605f3f 120,7a2feeaa 111,fb9a270e 113,df9968fe 113,5863647c 114,8a0f40e7 100,2b46a488 117,"
+    + "bcc60003 103,f3267523 101,330f9ad5 155,cf3fa56d 121,08df80e9 150,b3f50fdd 123,b7e784c7 153,32424f81 155,211aaa6f 164,4cff34d3 152,ef5c5151 145");
+  const [c1, ...cMore] = findShifts(canary);
+  ok(cMore.length === 0 && canary[c1?.fired]?.sha === "211aaa6f" && canary[c1.to].sha === "b7e784c7" && canary[c1.from].sha === "f3267523" && c1.before === 115.5,
+    "SMD-3155's canary step: named at 211aaa6f, its range f3267523..b7e784c7 reaching back past the runs under the line to 330f9ad5");
+  ok(findShifts(flat([100, 13], [200, 1], [100, 3])).length === 0 && findShifts(flat([100, 13], [200, 2], [100, 2])).length === 0,
+    "a one-run spike, and a two-run one, are no shift");
+  ok(findShifts(flat([10, 13], [39, 3])).length === 0 && findShifts(flat([10, 13], [41, 3])).length === 1 && findShifts(flat([200, 13], [241, 3])).length === 1 && findShifts(flat([200, 13], [240, 3])).length === 0,
+    "the line is max(30 s, 20%) over the median, and a run on it is not over it: 10 s → 40 s, 200 s → 240 s");
+  const twice = findShifts(flat([100, 13], [200, 10], [300, 3]));
+  ok(twice.length === 2 && twice[0].fired === 15 && twice[1].fired === 25 && findShifts(flat([100, 9], [200, 3])).length === 0,
+    "a series back under its line for 3 runs can shift again; fewer than 13 runs, none");
+  const sRuns = seriesOf([
+    { id: "1", headSha: "a", jobs: [goodRun, failedRun, { ...goodRun, name: "k", steps: [{ name: "Sometimes", conclusion: "skipped", startedAt: at(0), completedAt: at(0) }] }] },
+    { id: "2", headSha: "b", jobs: [goodRun] },
+  ]);
+  ok([...sRuns.keys()].join(";") === "j;j › Build;k" && sRuns.get("j › Build")!.map((p) => `${p.run}${p.sha}${p.s}`).join() === "1a5,2b5",
+    "a series a job, and a step as `job › step`, over the runs where the job succeeded, a skipped step left out");
+  ok(mergedIn(["Merge pull request #546 from MHarris-SgyMd/michaelharris/smd-3155-canary-up-in-place", "[fork] Merge origin/main (6c6e7d39) into SMD-3466", "Fix"]).join() === "#546 michaelharris/smd-3155-canary-up-in-place",
+    "a range's pull requests from GitHub's merge subjects, a branch's own merges of main left out");
+  ok(escapeCommand("50% of\r\nit") === "50%25 of%0D%0Ait", "a warning's %, CR and LF escaped");
   console.log(failed ? `${failed} failed` : "all passed");
   return failed ? 1 : 0;
 }
@@ -206,41 +377,72 @@ if (import.meta.main) {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.error) refuse(opts.error);
   if (opts["--self-check"]) process.exit(selfCheck());
+  const shift = opts["--shift"] === true;
   const jobName = opts["--job"];
-  if (typeof jobName !== "string") refuse("--job <name> is required (the job's exact name, e.g. \"Portable server\")");
+  if (shift) {
+    for (const f of ["--job", "--step"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --shift: it reads every job and step`);
+  } else {
+    if (typeof jobName !== "string") refuse("--job <name> is required (the job's exact name, e.g. \"Portable server\")");
+    if (opts["--through"] !== undefined) refuse("--through goes with --shift: it names the run whose shifts are the warnings");
+  }
   const days = Number(opts["--days"] ?? 7);
   if (!Number.isInteger(days) || days < 1 || days > 400) refuse(`--days takes a whole number from 1 to 400 (GitHub keeps a run 400 days), got ${opts["--days"]}`);
+  if (opts["--days"] !== undefined && opts["--last"] !== undefined) refuse("--days and --last are two windows: give one or the other");
+  const lastFloor = shift ? SHIFT.before + SHIFT.after : 1;
+  const last = opts["--last"] !== undefined ? Number(opts["--last"]) : shift && opts["--days"] === undefined ? 40 : undefined;
+  if (last !== undefined && (!Number.isInteger(last) || last < lastFloor || last > LIST_LIMIT)) {
+    refuse(`--last takes a whole number from ${lastFloor} to ${LIST_LIMIT}${shift ? ` (a shift reads ${lastFloor} runs of a series)` : ""}, got ${opts["--last"]}`);
+  }
+  const through = typeof opts["--through"] === "string" ? opts["--through"] : undefined;
+  if (through !== undefined && !/^\d+$/.test(through)) refuse(`--through takes a run id, got ${JSON.stringify(through)}`);
   let step: RegExp | undefined;
   try {
     step = typeof opts["--step"] === "string" ? new RegExp(opts["--step"], "i") : undefined;
   } catch (e) {
     refuse(`--step is not a regular expression: ${(e as Error).message}`);
   }
-  if (typeof opts["--runs"] === "string") for (const f of ["--branch", "--days", "--workflow"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
+  if (typeof opts["--runs"] === "string") for (const f of ["--branch", "--days", "--last", "--workflow", "--through"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
   const repo = typeof opts["--repo"] === "string" ? ["--repo", opts["--repo"]] : [];
   const workflow = String(opts["--workflow"] ?? "Fork Checks"), branch = String(opts["--branch"] ?? "main");
+  // A shift reads main's own runs: a fork's pull request from a branch it named main lists as main too.
+  const event = shift ? ["--event", "push"] : [];
+  const where = `${workflow} on ${branch}${shift ? " (push)" : ""}`;
   let ids: string[];
   if (typeof opts["--runs"] === "string") {
     ids = opts["--runs"].split(",").map((s) => s.trim()).filter(Boolean);
     if (ids.length === 0 || !ids.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${JSON.stringify(opts["--runs"])}`);
     console.log(`${ids.length} runs named`);
+  } else if (last !== undefined) {
+    // --through may name a run behind the newest: then the list reaches back as far as gh lists, and is cut at it.
+    const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--status", "completed", "--limit", String(through ? LIST_LIMIT : last), "--json", "databaseId"]);
+    if (!listed.ok) fail(`gh run list failed: ${listed.error}`);
+    ids = (listed.json as { databaseId: number }[]).map((r) => String(r.databaseId)).reverse();
+    if (ids.length === 0) fail(`no completed ${where} run: is the branch or workflow named right?`);
   } else {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
-    const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
+    const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
     if (!listed.ok) fail(`gh run list failed: ${listed.error}`);
     const runs = listed.json as { databaseId: number; status: string; createdAt: string }[];
     // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
     const oldest = Math.min(...runs.map((r) => Date.parse(r.createdAt)));
     if (runs.length >= LIST_LIMIT && oldest >= cutoff) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
     ids = runs.filter((r) => r.status === "completed" && Date.parse(r.createdAt) >= cutoff).map((r) => String(r.databaseId)).reverse();
-    console.log(`${workflow} on ${branch} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${ids.length} completed runs`);
-    if (ids.length === 0) fail(`no completed ${workflow} run on ${branch} in the last ${days} days: is the branch or workflow named right?`);
+    console.log(`${where} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${ids.length} completed runs`);
+    if (ids.length === 0) fail(`no completed ${where} run in the last ${days} days: is the branch or workflow named right?`);
+  }
+  if (through !== undefined) {
+    const at = ids.indexOf(through);
+    if (at < 0) fail(`run ${through} is not among the ${ids.length} completed runs of ${where} listed`);
+    ids = ids.slice(0, at + 1);
+  }
+  if (last !== undefined && typeof opts["--runs"] !== "string") {
+    ids = ids.slice(-last);
+    console.log(`the newest ${ids.length} completed runs of ${where}${through ? ` through ${through}` : ""}`);
   }
   // Six runs read at once: one `gh run view` a run takes about 2 s.
   const viewed = await pooled(ids, 6, async (id) => ({ id, got: await gh(["run", "view", id, ...repo, "--json", "jobs,headSha,createdAt,attempt"]) }));
-  type Run = { jobs: Job[]; headSha: string; createdAt: string; attempt?: number };
   const read: { id: string; run: Run; job?: Job; row?: ReturnType<typeof jobRow> }[] = [];
   let unread = 0;
   const seen = new Set<string>();
@@ -256,6 +458,11 @@ if (import.meta.main) {
     read.push({ id, run, job, row: job ? jobRow(job) : undefined });
   }
   if (ids.length > 0 && read.length === 0) fail(`none of the ${ids.length} runs could be read`);
+  if (shift) {
+    if (through !== undefined && !read.some((r) => r.id === through)) fail(`run ${through} could not be read, so no shift made there can be named`);
+    await shiftReport(read, through, repo, unread);
+    process.exit(0);
+  }
   if (read.length > 0 && read.every((r) => !r.job)) {
     console.error(`no run read has a job named "${jobName}"; its jobs are named: ${[...seen].sort().join("; ")}`);
     process.exit(1);
@@ -281,6 +488,6 @@ if (import.meta.main) {
     console.log(f ? `  ${label}: median ${f.median} s, p90 ${f.p90} s, min ${f.min} s, max ${f.max} s over ${f.n} runs` : `  ${label}: ${none}`);
   };
   console.log(`\nOver the runs where the job succeeded${unread ? ` (${unread} run${unread === 1 ? "" : "s"} not read)` : ""}:`);
-  line(jobName, jobTimes, "no successful run");
+  line(String(jobName), jobTimes, "no successful run");
   for (const [name, xs] of stepTimes) line(name, xs, jobTimes.length ? `ran in none of the ${jobTimes.length} successful runs` : "no successful run");
 }

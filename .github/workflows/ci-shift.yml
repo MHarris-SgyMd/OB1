@@ -1,0 +1,58 @@
+# A warning when a Fork Checks job or step on main got slower (SMD-3467).
+#
+# Two slowdowns landed unnoticed in a week: SMD-3155's canary case, 113 →
+# 155 s, and SMD-2679 PR 4b's sleep cell, 196 → 269 s. After each Fork Checks
+# run on main this reads the newest 40 of main's push runs and names any job
+# or step whose last 3 runs all went over its line, the median of the 10
+# before them plus max(30 s, 20%), as a warning on this run and a table in its
+# summary: the job or step, before and after, and the pull requests merged
+# where it landed. scripts/ci-step-times.ts --shift is the reader; its header
+# has the rule. It blocks nothing: no check waits on it, and main's runs are
+# done when it starts.
+#
+# workflow_run reads this file from the default branch, so it runs from main's
+# copy, never a pull request's, and it is asked of main's push runs alone (a
+# fork's pull request from a branch named main triggers it too). The token
+# reads the runs and the commits, nothing more. workflow_dispatch runs it by
+# hand, through a run named or the newest.
+name: CI shift
+
+on:
+  workflow_run:
+    workflows: ["Fork Checks"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "The Fork Checks run on main to read through (default: the newest completed)"
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  shift:
+    name: A job or step on main that got slower
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: The shifts at this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THROUGH: ${{ github.event.workflow_run.id || inputs.run }}
+        run: bun scripts/ci-step-times.ts --shift --last 40 ${THROUGH:+--through "$THROUGH"}
