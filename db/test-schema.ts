@@ -16009,9 +16009,12 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   assert((await whoText(p3)) === JSON.stringify({ by: "consolidate", agent: null, kind: null }), `a decision with no key carries its name alone, no agent and no kind (${await whoText(p3)})`);
   await review(p4, "reject", null);
   assert((await whoText(p4)) === JSON.stringify({ by: null, agent: null, kind: null }), `a decision with no envelope records none (${await whoText(p4)})`);
-  // An agent_id not in the server's form is no agent, as on the audit row (010's reading); the name's kind still read.
-  await review(p4, "reject", { name: "[101] agent key", agent_id: "not-a-uuid" });
-  assert((await whoText(p4)) === JSON.stringify({ by: "[101] agent key", agent: null, kind: "agent" }), `a malformed agent id is no agent; the name's kind is the registry's (${await whoText(p4)})`);
+  // An agent_id not in the server's form is no agent, as on the audit row (010's reading), and a name alone — anyone's
+  // to write, here a classified key's — lends the decision no kind. The name is kept as the envelope gave it.
+  await review(p4, "reject", { name: "[101] agent key ", agent_id: "not-a-uuid" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[101] agent key ", agent: null, kind: null }), `a malformed agent id is no agent, and a classified key's name alone lends no kind (${await whoText(p4)})`);
+  await review(p4, "reject", { name: "[101] agent key" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[101] agent key", agent: null, kind: null }), `…nor that name exactly, with no agent id (${await whoText(p4)})`);
 
   // Never the statement's values: a write naming the columns is stamped from the envelope present (none here).
   await db.query(`UPDATE supersession_proposals SET reviewed_by = 'forged', reviewed_by_kind = 'operator' WHERE id = $1::uuid`, [p1]);

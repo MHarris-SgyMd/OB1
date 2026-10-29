@@ -7935,20 +7935,26 @@ if (want("16")) {
   assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
 
   // SMD-2608 (113): who decided, on the row — the worker's key on its accept and its reject, said by each and by
-  // --list; a reject run with no key carries 'consolidate' and no agent, said so.
+  // --list; a reject run with no key carries 'consolidate' and no agent, said so; a key classified after it decided
+  // reads the registry's kind now, said so.
   const reviewerOf = async (id: string) =>
     (await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { by: string | null; agent: string | null };
   assert(/decided by: consolidator \(/.test(forced.out) && /decided by: consolidator \(/.test(unforced.out)
       && JSON.stringify(await reviewerOf(directed.id)) === JSON.stringify({ by: "consolidator", agent: agent.id }),
     `the accept and the reject each say who decided, and the row records the worker's key and agent (${unforced.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
   const noKeyReject = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--reject", undirected.id, "--note", "no key"], { env: keyless, cwd: HERE });
-  assert(noKeyReject.code === 0 && /decided by: consolidate, with no key \(no agent id\)/.test(noKeyReject.out)
+  assert(noKeyReject.code === 0 && /decided by: consolidate, no agent id recorded \(run with no key, or a key that did not resolve\)/.test(noKeyReject.out)
       && JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
     `a reject run with no key records 'consolidate' and no agent, and says so (${noKeyReject.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
   const listRejected = await consolidate("--list", "rejected");
   const decidedLines = listRejected.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
-  assert(decidedLines.length === 2 && decidedLines.some((l) => /^decided by: consolidator \(/.test(l)) && decidedLines.includes("decided by: consolidate, with no key (no agent id)"),
+  assert(decidedLines.length === 2 && decidedLines.includes("decided by: consolidator (a key the registry has not classified)") && decidedLines.includes("decided by: consolidate, no agent id recorded (run with no key, or a key that did not resolve)"),
     `--list rejected shows who decided each row (${decidedLines.join(" | ")})`);
+  await sql`UPDATE ob1_agents SET kind = 'operator' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const listClassified = await consolidate("--list", "rejected");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(listClassified.out.includes("decided by: consolidator (operator — classified after it decided)") && listClassified.out.includes("decided by: consolidate, no agent id recorded"),
+    `a key classified after it decided reads the registry's kind now, said so; a decision with no agent lends none (${listClassified.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim()).join(" | ")})`);
   const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
     "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");

@@ -19,16 +19,23 @@
 -- WHAT
 --   1. Three columns on supersession_proposals, the audit row's three
 --      (actor_name, canonical_agent_id, actor_kind): reviewed_by text, the
---      name the decision's actor envelope carried; reviewed_by_agent_id
---      uuid, its agent when the envelope named one in the form the server
---      emits (010's reading); reviewed_by_kind text, the registry's kind for
---      that agent, else that name (046's ob1_registry_kind), when it holds
---      one. A decision with no key — db/consolidate.ts run without
---      OB1_WORKER_KEY — carries the name 'consolidate' and no agent, as its
---      audit row does; a raw call with no envelope carries none of the
---      three. They describe the decision that stands, as reviewed_at and
---      review_note do: a later decision on the row replaces them, and a row
---      back to pending or stale (063's replace, 067's reopen) clears them.
+--      name the decision's actor envelope carried, as the audit row records
+--      it; reviewed_by_agent_id uuid, its agent when the envelope named one
+--      in the form the server emits (010's reading); reviewed_by_kind text,
+--      the registry's kind when the decision was made (046's
+--      ob1_registry_kind: the agent's, else its name's) — read only when an
+--      agent is named, so a name alone, which anyone can put in an envelope,
+--      never lends the decision a kind. A decision with no key —
+--      db/consolidate.ts run without OB1_WORKER_KEY, or with one that did not
+--      resolve — carries the name 'consolidate' and no agent, as its audit row
+--      does, and no kind even when a key of that name is classified; a raw
+--      call with no envelope carries none of the three. The kind is the
+--      decision's: a key classified after it decided reads unclassified
+--      here, and a reader asks the registry for the kind now
+--      (db/consolidate.ts --list does). They describe the decision that
+--      stands, as reviewed_at and review_note do: a later decision on the row
+--      replaces them, and a row back to pending or stale (063's replace,
+--      067's reopen) clears them.
 --
 --   2. ONE WRITER: a BEFORE INSERT OR UPDATE trigger,
 --      supersession_proposals_stamp_reviewer (ob1_stamp_proposal_reviewer),
@@ -37,9 +44,11 @@
 --      clears them; otherwise they are stamped from the envelope present
 --      (ob1.actor, which review_supersession_proposal sets from its p_actor
 --      as the audit trigger reads it), never from the statement's values —
---      050's rule for the actor on a thought. A write that names none of
---      those columns (063's replace of a stale row's verdict, 091's settles
---      trigger) leaves them as they were.
+--      050's rule for the actor on a thought. 063's replace names status and
+--      review_note on a row already unreviewed, so it clears what is already
+--      clear. A write that names none of those columns (a similarity or
+--      fingerprint fix, 091's settles trigger, which writes NEW in place)
+--      leaves them as they were.
 --
 --      Why a trigger and not review_supersession_proposal's own UPDATE: the
 --      review is one of two writers of reviewed_at — 067's reopen in
@@ -70,7 +79,10 @@
 --      superseding_id to the other side. A rejected row: the update on
 --      either side clearing supersedes from the other. Each takes that
 --      row's actor_name, canonical_agent_id and actor_kind, the newest such
---      row (seq) when a transaction holds two. Every other decided row — an
+--      row (seq) when a transaction holds two — so a hand-run transaction
+--      that decided one row twice, a clearing reject then a reject clearing
+--      nothing by another key, is credited to the first; no path in the tree
+--      decides twice in one transaction. Every other decided row — an
 --      accept that found the pointer already set, a reject that cleared
 --      nothing, the pass's settles — has no record of its reviewer, and
 --      stays NULL: nothing is guessed. Run before the trigger exists (it is
@@ -91,12 +103,19 @@
 --   (cannot change return type), so a wider listing is another argument
 --   list and another round of every reader's and preflight's probes.
 --   db/consolidate.ts --list reads the reviewer by the page's ids, as it
---   reads the writers (094). A decision now reads ob1_agents for the kind,
---   as the audit trigger does: the capture group's SELECT on it (046),
---   which every role that decides holds — a consolidation role holds
---   capture, server and worker (db/README.md's grants), the REST core
---   capture — so no grant moves; a reopen clears and reads nothing, and
---   a new pending row neither. An older server or CLI writes
+--   reads the writers (094). A decision under a key now reads ob1_agents for
+--   the kind, as the audit trigger does: the capture group's SELECT on it
+--   (046), which every role db/README.md describes deciding holds — a
+--   consolidation role holds capture, server and worker, the REST core
+--   capture — so no grant moves. A role granted the worker group alone,
+--   which could reject a proposal that clears nothing before this file (and
+--   nothing else of the review: it cannot read thoughts), is refused that
+--   reject under a key ("permission denied for table ob1_agents"); a
+--   decision with no key, a reopen and a new pending row read nothing.
+--   A data-only reload (pg_restore --data-only, a COPY) with this trigger
+--   enabled stamps every row it inserts from the loader's envelope, none,
+--   and so empties every reviewer; a full pg_restore creates the trigger
+--   after the data, as for 091's column. An older server or CLI writes
 --   through the same functions and gets the reviewer stamped. MINOR under
 --   FORK.md's version rules: columns and a trigger added, nothing a caller
 --   passes or reads changed.
@@ -154,7 +173,7 @@ COMMENT ON COLUMN supersession_proposals.reviewed_by IS
 COMMENT ON COLUMN supersession_proposals.reviewed_by_agent_id IS
   'The decision''s agent (ob1_agents.canonical_agent_id) when its envelope named one in the form the server emits; NULL for a decision with no key. Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
 COMMENT ON COLUMN supersession_proposals.reviewed_by_kind IS
-  'The registry''s kind for the decision''s agent, else its name (ob1_registry_kind, read at the decision): operator, agent or ingested — so a person''s decision can be told from a machine''s. NULL when neither is classified. Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
+  'The registry''s kind for the decision''s agent when it decided (ob1_registry_kind: the agent''s, else its name''s), read only when the envelope named an agent: operator, agent or ingested — so a person''s decision can be told from a machine''s. NULL for a decision with no agent, and for a key not classified when it decided (the registry holds its kind now). Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
 
 -- The trigger goes first on a re-apply, so neither the backfill nor the
 -- CHECKs below are restamped from this transaction's empty envelope.
@@ -220,12 +239,14 @@ BEGIN
     actor := ob1_current_actor();
   END IF;
   IF actor IS NOT NULL AND jsonb_typeof(actor) = 'object' THEN
-    v_name  := NULLIF(btrim(actor->>'name'), '');
+    -- The name as the audit row records it (actor->>'name', verbatim).
+    v_name  := actor->>'name';
     v_agent := CASE
       WHEN actor->>'agent_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
       THEN (actor->>'agent_id')::uuid
     END;
-    IF v_agent IS NOT NULL OR v_name IS NOT NULL THEN
+    -- The kind only for a named agent: a name alone is anyone's to write.
+    IF v_agent IS NOT NULL THEN
       v_kind := ob1_registry_kind(v_agent, v_name);
     END IF;
   END IF;
@@ -237,7 +258,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_stamp_proposal_reviewer() IS
-  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 113): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, the registry''s kind for either), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 113 / SMD-2608.';
+  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 113): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 113 / SMD-2608.';
 
 CREATE TRIGGER supersession_proposals_stamp_reviewer
   BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind

@@ -5029,14 +5029,21 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
     t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
   const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
   const OPERATOR = { name: "upgrade-113-operator", via: "consolidate", agent_id: agent };
+  // A second key clears what the first accepted: the backfill must name the clear's own row, by its time.
+  const [{ id: agent2 }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-agent', 'agent') RETURNING canonical_agent_id::text AS id`;
+  const AGENT = { name: "upgrade-113-agent", via: "open-brain-api", agent_id: agent2 };
   const propose = async (o: number, n: number) =>
     String((await sql`SELECT record_supersession_proposal(${t[o]}::uuid, ${t[n]}::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`)[0].id);
-  const review = async (id: string, decision: string) =>
-    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 113', NULL, ${OPERATOR}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
+  const review = async (id: string, decision: string, actor: object = OPERATOR) =>
+    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 113', NULL, ${actor}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
   // Before 113: an accept that writes its pointer, an accept then a clearing reject, a reject that clears nothing.
-  const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5);
-  const decisions = [await review(accepted, "accept"), await review(cleared, "accept"), await review(cleared, "reject"), await review(plain, "reject")];
-  assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false, `the decisions before 113: an accept, a clearing reject, a reject clearing nothing (${JSON.stringify(decisions)})`);
+  // reRejected: cleared by one key, then rejected again by another, clearing nothing — the clear's row is an earlier
+  // decision's, and the standing one has none.
+  const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5), reRejected = await propose(3, 5);
+  const decisions = [await review(accepted, "accept"), await review(cleared, "accept"), await review(cleared, "reject", AGENT), await review(plain, "reject"),
+    await review(reRejected, "accept"), await review(reRejected, "reject", AGENT), await review(reRejected, "reject")];
+  assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false && decisions[5].cleared === true && decisions[6].cleared === false,
+    `the decisions before 113: an accept, a clearing reject, a reject clearing nothing, and a clear then a reject clearing nothing (${JSON.stringify(decisions)})`);
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const decided = async () => JSON.stringify(await sql`SELECT id, status, reviewed_at::text AS r, review_note, superseding_id, pointer_written FROM supersession_proposals ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
@@ -5045,8 +5052,9 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
   const who = async (id: string) => JSON.stringify((await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${id}::uuid`)[0]);
   const named = JSON.stringify({ by: OPERATOR.name, agent, kind: "operator" }), none = JSON.stringify({ by: null, agent: null, kind: null });
-  assert((await who(accepted)) === named && (await who(cleared)) === named && (await who(plain)) === none,
-    `the backfill names the reviewer the audit holds — the accept's write and the clearing reject's — and none for the reject that cleared nothing (${await who(accepted)}, ${await who(cleared)}, ${await who(plain)})`);
+  const namedAgent = JSON.stringify({ by: AGENT.name, agent: agent2, kind: "agent" });
+  assert((await who(accepted)) === named && (await who(cleared)) === namedAgent && (await who(plain)) === none && (await who(reRejected)) === none,
+    `the backfill names the reviewer the audit holds — the accept's write, and the clearing reject's by the other key, not the accept before it — and none for a reject that cleared nothing, after a clear or not (${await who(accepted)}, ${await who(cleared)}, ${await who(plain)}, ${await who(reRejected)})`);
   assert((await rows()) === before.rows && (await decided()) === before.decided && (await audits()) === before.audits,
     "nothing else moved: every thought, every decision and the audit's rows as they were");
   // After it, a reject that clears nothing records its key — the case SMD-2608 found recording nothing.

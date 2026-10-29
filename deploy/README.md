@@ -2155,9 +2155,9 @@ podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps conso
 ```
 
 A decision, accept or reject, is recorded under the agent of the key in
-`OB1_WORKER_KEY` (on the proposal's row since migration 113, and an accept in
-`thought_audit` too), which in this container is the workers' key. To have it
-recorded as yours, give your
+`OB1_WORKER_KEY` — on the proposal's row since migration 113, and in
+`thought_audit` too when it writes or clears a pointer — which in this
+container is the workers' key. To have it recorded as yours, give your
 own key, one `MCP_ACCESS_KEYS` holds, to that one command: set before it on
 the same line, it reaches neither your shell nor the next command, and the
 bare `-e` passes it into the container without putting it on the command
@@ -2173,9 +2173,22 @@ every later compose command in that shell — an `up -d` included — would
 start the followers under your key. Without the prefix, the decision is the
 workers' key's.
 
-The decision then prints `decided by: <your key's name>`, and `--list
-accepted` or `--list rejected` shows it on each row (SMD-2608). Accepting
-unattended waits on a judge that can tell conflicts apart (SMD-1873).
+The decision then prints `decided by: <your key's name> (<its kind>)`, and
+`--list accepted` or `--list rejected` shows the same line on each row
+(SMD-2608); `--list` is the only place that shows it for now — the
+`list_supersession_proposals` tool, `GET /v1/proposals` and the GUI's
+`/dashboard/proposals` do not yet (SMD-3338). The kind is the one the registry
+held for the key when it decided: classify your key and the workers' key first
+(`SELECT set_agent_kind('<key name>', 'operator')`, as `SETUP.md` says, and
+`'agent'` for the workers' key), or the line reads "a key the
+registry has not classified", and a kind given later reads "classified after it
+decided". A decision under the workers' key — yours without the prefix, or the
+pass settling a stale row it no longer finds in conflict (067) — reads
+`decided by: workers (…)` either way; the pass's settle carries a note beginning
+`settled by the pass:`. A row decided before migration 113 reads "not
+recorded" unless its decision wrote or cleared a pointer, whose audit row names
+the key. Accepting unattended waits on a judge that can tell conflicts apart
+(SMD-1873).
 
 ### The `sleep` profile instead
 

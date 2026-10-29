@@ -299,7 +299,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3081 assertions: 3081 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3082 assertions: 3082 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -2171,25 +2171,34 @@ Migration 113 records who decided a proposal, accept and reject alike
 `thought_audit` row, but a reject wrote no row unless it cleared a pointer, so
 who rejected a proposal was recorded nowhere. Three columns on
 `supersession_proposals` mirror the audit row's: `reviewed_by` (the actor's
-name), `reviewed_by_agent_id` and `reviewed_by_kind` (the registry's kind, so a
-person's decision can be told from a machine's). One trigger writes them from
+name, as the audit row records it), `reviewed_by_agent_id` and
+`reviewed_by_kind` (the registry's kind when it decided, so a person's decision
+can be told from a machine's — read only when the decision names an agent, so
+a name alone, which anyone can put in an envelope, lends none). One trigger
+writes them from
 the decision's actor envelope, never from a statement's values (050's rule),
 on any write that names the decision's columns: `review_supersession_proposal`
 sets the envelope from its `p_actor`, so its accept and reject, and 067's settle
 through it, are stamped with the key that decided, and 067's reopen clears them
 with `reviewed_at`. `db/consolidate.ts` run with no key decides as
-`consolidate` with no agent, as its audit row says; a raw call with no envelope
-records none. They describe the decision that stands, as `reviewed_at` and
+`consolidate` with no agent and no kind, as its audit row says, and so does a
+run whose key did not resolve; a raw call with no envelope records none. They describe the decision that stands, as `reviewed_at` and
 `review_note` do. Columns and not a reject event in `thought_audit`, because
 that log is the thoughts' and a reject that clears nothing changes no thought.
 Rows decided before 113 are backfilled from the audit where a decision wrote a
 pointer (an accept that set one, a reject that cleared one); the rest stay
 NULL. Two CHECKs hold a kind to the registry's and an unreviewed row to no
 reviewer. `--list` prints `decided by:` on an accepted or rejected row, read
-beside the listing by the page's ids (the listing is not redefined), and
-`--accept`/`--reject` print it after deciding. Needs 008, 029, 046 and 050; a
-re-apply fills only rows with no reviewer; no grant moves (every role that
-decides holds the capture group's `SELECT` on `ob1_agents`). test-schema [101],
+beside the listing by the page's ids (the listing is not redefined, so the tool,
+`GET /v1/proposals` and the GUI do not show it yet: SMD-3338), with the kind the
+key had when it decided, else the registry's now ("classified after it
+decided"); `--accept`/`--reject` print it after deciding, read in the
+decision's transaction. Needs 008, 029, 046 and 050; a re-apply fills only rows
+with no reviewer. No grant moves: every role this README has decide holds the
+capture group's `SELECT` on `ob1_agents`; a role granted the worker group alone
+is refused a keyed reject it could make before (it could make no other part of
+a review). A data-only reload with the trigger enabled empties every reviewer
+(a full `pg_restore` creates triggers after the data). test-schema [101],
 test-upgrade [20be] (refused without each prerequisite; the backfill onto a
 populated brain at 112), test-live [16] (`--reject` and `--list` with and
 without a key).
@@ -3792,9 +3801,12 @@ rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
-`MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is
-audited under the key's name with the pass key as session. Without it the run
-says so and proceeds unattributed.
+`MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and a decision is
+recorded on the proposal's row under the key's name, agent and kind (113,
+SMD-2608) — an accept, and a reject that clears a pointer, are audited under the
+key's name with the pass key as session too. Without it the run says so and
+proceeds, its proposals carrying no agent id and its decisions recorded as
+`consolidate` with no agent.
 
 **What preflight sees.** `consolidate pass` warns while a pass under any
 `consolidate:` key has rows pending, leased or failed — the counts over the
@@ -5657,9 +5669,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3081 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1760 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1027 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3082 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1761 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1028 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
