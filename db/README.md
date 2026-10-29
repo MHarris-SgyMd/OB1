@@ -5811,14 +5811,16 @@ worker took up its thought, last passed the admit gate or ended a provider
 pause, a worker with no call to abort (at the gate, in a provider pause, in
 the decider's call) passed over — and every one with no argument, and returns
 how many. The thought goes behind every thought queued before it (`setBack`:
-pending, the attempt not counted, `enqueued_at` now; the sleep scheduler
-orders its own stopped thoughts after, PR 1c), or, deleted or no longer this
+pending, the attempt not counted, `enqueued_at` now; the sleep scheduler is to
+order its own stopped thoughts after, PR 1c), or, deleted or no longer this
 worker's meanwhile, is counted so; extraction keeps the windows it has
 answered and counts the stop on it, as a wake's (093); and the worker goes on
 with its next claim, with no restart, no start probe and no pool. A thought
-past its last call when the abort comes finishes as it was. It is inert once
-the pass is stopping. The summary counts the thoughts set back. The sleep
-scheduler is to call it while its gate is closed (SMD-3379 PR 1c, N12).
+past its last call when the abort comes finishes as it was; one aborted
+between its calls is set back at its next window or pair, before the admit
+gate. It is inert once the pass is stopping. The summary counts the thoughts
+set back. The sleep scheduler is to call it while its gate is closed (SMD-3379
+PR 1c, N12).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

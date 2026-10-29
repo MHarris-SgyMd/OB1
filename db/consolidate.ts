@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -1572,8 +1572,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let lost = 0;
   /** Thoughts whose judge call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
   let abortedInHand = 0;
-  /** Each worker's judge call for the thought it holds, for abortInHand (extract-entities.ts's inCall, SMD-3379 PR 1b-2). */
-  const inCall = new Map<string, { abort: AbortController; since: number; waiting: boolean; aborted: boolean }>();
+  /** Each worker's judge call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
   let beats = 0;
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
@@ -1736,6 +1736,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (ADMIT) {
         let through: false | "open" | "waited";
         const call = inCall.get(workerId);
+        // An abort that came between pairs — in a proposal's write — sets the
+        // thought back here, before the wait, not after it (review pass 3).
+        if (call?.aborted) throw new AbortedInHand();
         if (call) call.waiting = true;
         try {
           through = await admitted(ADMIT, gate);
@@ -2034,10 +2037,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
    * back unfinished — and the claims in flight, so two workers cannot each
    * take one on a limit of one. A row a worker hands back unfinished as it
-   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
-   * claimed again; a claim that never answered took nothing; a dead worker's
-   * leases are not this run's until a claim returns them (review pass 3: a
-   * reserved count patched at three sites, each with its own edge).
+   * ends (an outage, a stop), or sets back when its call is aborted
+   * (abortInHand, SMD-3379 PR 1b-2), leaves `taken`, and counts again only if
+   * it is claimed again; a claim that never answered took nothing; a dead
+   * worker's leases are not this run's until a claim returns them (review
+   * pass 3: a reserved count patched at three sites, each with its own edge).
    */
   const taken = new Set<string>();
   let claiming = 0;
@@ -2126,7 +2130,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // and added when the thought is finished — not again for a retry after a pause, nor for one the hard stop abandons.
             // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
-            inCall.set(workerId, { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false });
+            inCall.begin(workerId);
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row, workerId);
@@ -2222,8 +2226,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               }
             }
             if (hardStopped) return;
-            // Not judged: another holds it, or it goes back for its new text (review pass 5).
-            inCall.delete(workerId);
+            inCall.end(workerId);
+            // Not judged: another holds it, it goes back for its new text, or its call was aborted (review passes 5, and 1b-2's).
             if (outcome.outcome !== "lost" && outcome.outcome !== "moved" && outcome.outcome !== "setBack") {
               judged++;
               if (ticketCalls === null) totals.ticketCallsUnread++;
@@ -2350,7 +2354,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         }
       }
     } finally {
-      inCall.delete(workerId);
+      inCall.end(workerId);
       hb.stop();
       beats += hb.beats;
       // Rows still held are handed back unfinished: out of --limit's count
@@ -2408,21 +2412,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   // Through the start: the provider answered its probe, at once or after the wait (SMD-2752).
   opts.onStart?.({ ok: true, provider: "up" });
-  // The judge calls in hand, for the pass's caller (db/lease.ts's InHandAbort,
-  // SMD-3379 PR 1b-2): extract-entities.ts's rule.
-  const abortInHand: InHandAbort = (olderThanMs = 0) => {
-    if (detach.aborted || stopping) return 0;
-    const now = Date.now();
-    let n = 0;
-    for (const c of inCall.values()) {
-      if (c.aborted || c.waiting || now - c.since < olderThanMs) continue;
-      c.aborted = true;
-      c.abort.abort(new AbortedInHand());
-      n++;
-    }
-    return n;
-  };
-  opts.onPass?.(stop, abortInHand);
+  opts.onPass?.(stop, inCall.abortInHand);
 
   /**
    * Workers whose leases could not be returned as they ended — the database

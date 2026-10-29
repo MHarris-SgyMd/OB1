@@ -489,7 +489,7 @@ import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-st
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
@@ -2025,8 +2025,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let lost = 0;
   /** Thoughts whose embedding call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
   let abortedInHand = 0;
-  /** Each worker's embedding call for the thought it holds, for abortInHand (extract-entities.ts's inCall, SMD-3379 PR 1b-2). */
-  const inCall = new Map<string, { abort: AbortController; since: number; waiting: boolean; aborted: boolean }>();
+  /** Each worker's embedding call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
   let beats = 0;
   /** Worker ids with leases possibly outstanding, for a forced exit. */
   const activeWorkers = new Set<string>();
@@ -2270,7 +2270,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           if (!row) {
             outcome = { outcome: "vanished" };
           } else {
-            inCall.set(workerId, { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false });
+            inCall.begin(workerId);
             try {
               outcome = await processRow(row, workerId);
               // An aborted call is no answer from the provider (review pass 2).
@@ -2349,7 +2349,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           // Out of the heartbeat's set before the release goes out, so a beat in
           // flight across the release does not read the released row as lost.
           hb.held.delete(b.thought_id);
-          inCall.delete(workerId);
+          inCall.end(workerId);
           // The pass's caller aborted the call in hand: the thought to the back of
           // the queue, the worker goes on with its next claim; a set-back the
           // database refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
@@ -2430,7 +2430,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         }
       }
     } finally {
-      inCall.delete(workerId);
+      inCall.end(workerId);
       hb.stop();
       beats += hb.beats;
       // Unconditionally: a worker that stops for any reason — an empty pool, a
@@ -2491,21 +2491,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   // Through the start: the provider answered its probe (extract-entities.ts's).
   opts.onStart?.({ ok: true, provider: "up" });
-  // The embedding calls in hand, for the pass's caller (db/lease.ts's
-  // InHandAbort, SMD-3379 PR 1b-2): extract-entities.ts's rule.
-  const abortInHand: InHandAbort = (olderThanMs = 0) => {
-    if (detach.aborted || stopping) return 0;
-    const now = Date.now();
-    let n = 0;
-    for (const c of inCall.values()) {
-      if (c.aborted || c.waiting || now - c.since < olderThanMs) continue;
-      c.aborted = true;
-      c.abort.abort(new AbortedInHand());
-      n++;
-    }
-    return n;
-  };
-  opts.onPass?.(stop, abortInHand);
+  opts.onPass?.(stop, inCall.abortInHand);
 
   say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
   /**
