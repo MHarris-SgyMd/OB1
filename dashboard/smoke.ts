@@ -65,7 +65,10 @@
  *     anywhere but an edit's or a capture's post, a sign-in's signed out among them, and a
  *     thought whose text would post past the edit page's 1,000,000 bytes (its
  *     line breaks sent as CRLF) is offered no form. It prints the thought's
- *     id, for CI to read its audit rows. Each run leaves five changes in the
+ *     id, for CI to read its audit rows. On the workers page (PR 3) the write
+ *     key retries a pool's failed rows and releases its stale leases, each by
+ *     its pool's own form, and a read key is offered neither and refused both:
+ *     CI plants a failed row and a stale lease for it. Each run leaves five changes in the
  *     feed (its thoughts' captures, the edit and the deletes), so a second run
  *     on one brain pushes the driven thought's capture further down: run it on
  *     a fresh brain, as CI does.
@@ -715,6 +718,11 @@ function hidden(html: string, name: string): string | undefined {
   return v?.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 }
 
+/** The pools a page's forms of one kind act on (the workers page's `retry` and `release`), as their hidden fields carry them. */
+function poolsIn(html: string, testid: string): string[] {
+  return [...html.matchAll(new RegExp(`<form[^>]*data-testid="${testid}"[^>]*>[\\s\\S]*?<\\/form>`, "g"))].map((m) => hidden(m[0], "work_type") ?? "");
+}
+
 /**
  * A form post as a browser makes it, to a page's own action — url-encoded, or multipart as the edit page's form
  * posts (`multipart`) — its status, where it sends, its page, and the flash cookie it set, if any.
@@ -837,6 +845,12 @@ async function writesArm() {
     assert(asRead.status === 200 && !asRead.html.includes('data-testid="edit-link"') && !asRead.html.includes('data-testid="delete-link"') && !asRead.html.includes('href="/dashboard/capture"'), `the read key's thought page offers no Edit and no Delete, and its nav no Capture (${asRead.status})`);
     const [readCapturePage, readCapture] = [await get("/capture"), await post("/capture?/capture", { content: "never captured" }, true)];
     assert(readCapturePage.status === 403 && readCapture.status === 403, `…its capture page is a 403, and its capture refused (${readCapturePage.status}, ${readCapture.status})`);
+    // The workers page (PR 3): read, but no pool's form, and a post the form would make refused.
+    const readWorkers = await get("/workers");
+    const plantedPool = /<th scope="row"[^>]*>\s*([^<\s][^<]*?)\s*(?:<|$)/.exec(readWorkers.html)?.[1] ?? "x";
+    const [readRetry, readRelease] = [await post("/workers?/retry", { work_type: plantedPool }), await post("/workers?/release", { work_type: plantedPool })];
+    assert(readWorkers.status === 200 && poolsIn(readWorkers.html, "retry").length === 0 && poolsIn(readWorkers.html, "release").length === 0 && readRetry.status === 403 && readRelease.status === 403,
+      `…its workers page offers no Retry and no Release, and its posts to them are refused (${readWorkers.status}, ${readRetry.status}, ${readRelease.status})`);
     const [editPage, deletePage] = [await get(`/thoughts/${id}/edit`), await get(`/thoughts/${id}/delete`)];
     assert(editPage.status === 403 && deletePage.status === 403, `…and its edit and delete pages are 403s (${editPage.status}, ${deletePage.status})`);
     // Refused either way: the actions' own gates spare the core a call it would refuse, and the load that runs after a
@@ -865,6 +879,32 @@ async function writesArm() {
     assert(tall.status === 200 && tall.html.includes('data-testid="too-large"') && !tall.html.includes('data-testid="edit-form"'), `a thought of 400,000 short lines, 800 kB stored, which a browser posts as 1.2 MB, is offered no edit form, the page saying why (${tall.status})`);
     const gone = await post(`/thoughts/${linesId}/delete?/delete`, {});
     assert(gone.status === 303, `…and is deleted (${gone.status})`);
+  }
+
+  // The worker actions (PR 3): a pool's failed rows retried, its stale leases released, each by its pool's own form.
+  const workersPage = await get("/workers");
+  const [retryPool] = poolsIn(workersPage.html, "retry");
+  const [releasePool] = poolsIn(workersPage.html, "release");
+  if (!retryPool || !releasePool) bad(`the workers page offers the write key a Retry and a Release: --writes needs a pool with a failed row and one with a stale lease, which CI plants (${retryPool ? "retry" : "no retry"}, ${releasePool ? "release" : "no release"})`);
+  else {
+    const unnamed = await post("/workers?/retry", { work_type: " " });
+    assert(unnamed.status === 400 && /data-testid="worker-error"[^>]*>[^<]*Name the pool/.test(unnamed.html), `a retry naming no pool is refused in words (${unnamed.status})`);
+    // Each action answers with a redirect to the page and a flash cookie, so a reload asks the page, not the action again
+    // (review pass 1): the page then says what was done, once, and clears the cookie.
+    const landed = async (posted: { status: number; location: string; setCookies: string[] }) => {
+      const flash = posted.setCookies.find((c) => c.startsWith(`${COOKIE}_workers=`)) ?? "";
+      const r = await fetch(`${BASE}/workers`, { redirect: "manual", headers: { cookie: `${cookie}; ${flash}` } });
+      const cleared = (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${COOKIE}_workers=;`) && /Max-Age=0/i.test(c) && attributesHold(c));
+      return { redirected: posted.status === 303 && posted.location === "/dashboard/workers" && flash !== "", status: r.status, html: await r.text(), cleared };
+    };
+    const retried = await landed(await post("/workers?/retry", { work_type: retryPool }));
+    assert(retried.redirected && retried.cleared && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Requeued [\d,]+ failed rows? of /.test(retried.html) && !poolsIn(retried.html, "retry").includes(retryPool),
+      `the write key retries a pool's failed rows: 303 back to the page, which says how many it requeued, clears its cookie, and offers that pool no Retry after (${retried.status})`);
+    const again = await landed(await post("/workers?/retry", { work_type: retryPool }));
+    assert(again.redirected && /held no failed row: nothing was requeued/.test(again.html), `…and a second retry of it requeues nothing, saying so (${again.status})`);
+    const released = await landed(await post("/workers?/release", { work_type: releasePool }));
+    assert(released.redirected && released.cleared && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Returned [\d,]+ stale leases? of /.test(released.html) && !poolsIn(released.html, "release").includes(releasePool),
+      `the write key releases a pool's stale leases: 303 back to the page, which says how many it returned, clears its cookie, and offers that pool no Release after (${released.status})`);
   }
 
   const confirm = await get(`/thoughts/${id}/delete`);
