@@ -192,13 +192,13 @@ console.log('▸ the session store: every ending of a token session revokes');
 {
 	const ended: string[] = [];
 	session.onTokensEnded((t) => void ended.push(t.refresh));
-	const tokenSession = (refresh: string, name = 'oauth:operator+gui') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, breakglass: false });
+	const tokenSession = (refresh: string, name = 'oauth:operator+gui') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true, operations: ['capture_thought', 'update_thought'], breakglass: false });
 	function tok(refresh: string): Tokens {
 		return { access: 'a', refresh, expiresAt: NOW };
 	}
 	const s1 = tokenSession('closed');
 	assert(session.closeSession(s1) !== null && ended.join() === 'closed', 'a token session closed (sign-out, a refusal) has its refresh token revoked');
-	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false, breakglass: false });
+	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false, operations: ['fetch'], breakglass: false });
 	session.closeSession(k);
 	assert(ended.join() === 'closed', '…a key session nothing');
 	ended.length = 0;

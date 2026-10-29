@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { when } from '$lib/format';
 	import { ingestedNotice } from '../../../../../server-portable/core/filter.ts';
 	import type { PageData } from './$types';
@@ -25,8 +26,23 @@
 			Created {time(data.thought.metadata.created_at)} · updated {time(data.thought.metadata.updated_at)}
 			· <span class="font-mono">{data.thought.id}</span>
 		</div>
+		{#if data.canEdit || data.canDelete}
+			<div class="flex gap-4 text-sm mt-2">
+				{#if data.canEdit}<a class="text-primary-light hover:underline" href="{base}/thoughts/{data.thought.id}/edit" data-testid="edit-link">Edit</a>{/if}
+				{#if data.canDelete}<a class="text-primary-light hover:underline" href="{base}/thoughts/{data.thought.id}/delete" data-testid="delete-link">Delete</a>{/if}
+			</div>
+		{/if}
 	</header>
 
+	{#if data.captured}
+		<p class="text-sm" role="status" data-testid="captured">
+			{#if data.captured.existed}
+				That text was already a thought, so the capture merged into it: its source is now dashboard, and the metadata extracted this time was merged into its own (the audit trail records any change).{#if data.captured.noVector}{' '}This capture wrote no embedding; the thought keeps the one it had, if any.{/if}
+			{:else}
+				Captured.{#if data.captured.noVector}{' '}It was saved without an embedding, so a search by meaning will not find it until it is re-embedded; a search by exact text will.{/if}
+			{/if}
+		</p>
+	{/if}
 	{#if notice}
 		<p class="text-sm text-amber-300" role="note" data-testid="notice">{notice}</p>
 	{/if}

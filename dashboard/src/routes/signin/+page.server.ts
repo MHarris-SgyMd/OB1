@@ -59,7 +59,7 @@ export const actions: Actions = {
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach. This listener's own (locals.session, under its own cookie name).
 		closeSession(locals.session?.id);
-		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought'), breakglass: locals.breakglass });
+		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought'), operations: who.operations, breakglass: locals.breakglass });
 		cookies.set(locals.sessionCookie, id, { ...cookieOptions(url, locals.breakglass), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);
 	},

@@ -20,9 +20,9 @@ const VERDICT = {
 // judged one to outdate or duplicate the other, most confident first, with its
 // verdict, its reason and both thoughts as they are now. Read only: nothing is
 // written to a thought until a reviewer accepts a proposal, which is the CLI's
-// (db/consolidate.ts --accept/--reject, its writer and lineage guards with it)
-// and SMD-2280's later releases'. The page reads the most confident `limit`;
-// the core's cursor (`after`, SMD-3249) is not followed here yet.
+// (db/consolidate.ts --accept/--reject, its writer and lineage guards with it);
+// SMD-3322 brings it here once SMD-3338 gives it a REST-core operation. The
+// page reads the most confident `limit`; the core's cursor (`after`, SMD-3249) is not followed here yet.
 export const load: PageServerLoad = async (event) => {
 	const params = event.url.searchParams;
 	const q = { status: wordIn(params, 'status', STATUSES, 'pending'), lineage: wordIn(params, 'lineage', LINEAGE, 'any'), limit: wholeIn(params, 'limit', 1, 200, 25) };
