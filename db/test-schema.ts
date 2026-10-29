@@ -15966,7 +15966,11 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   const src = readFileSync(join(MIGRATIONS, file), "utf8");
   const AGENT = { name: "claims-agent" }, OTHER = { name: "claims-other" }, OP = { name: "claims-op" };
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('claims-agent', 'agent'), ('claims-other', 'agent'), ('claims-op', 'operator')`);
-  const ans = async (sql: string, params: unknown[]) => (await db.query<{ r: Answer }>(sql, params)).rows[0].r;
+  // A raise is an outcome here, named, so a broken rule fails its own row rather than ending the suite.
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: null, message: null, claim: null, held_by: [] }; }
+  };
   const claim = (issue: string, session: string, actor: object | null, piece: string | null = null, label: string | null = null, lease = 14400) =>
     ans(`SELECT claim_work($1, $2, $3, $4, $5, $6::jsonb) AS r`, [issue, session, piece, label, lease, actor === null ? null : JSON.stringify(actor)]);
   const renew = (id: string, session: string, actor: object) => ans(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [id, session, JSON.stringify(actor)]);
