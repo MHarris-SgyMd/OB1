@@ -11636,8 +11636,12 @@ if (want("25")) {
   let waited = false;
   // Under the pass's 10 s lock_timeout: a poll that outlasted it would see
   // the waiting pass raise 55P03 in place of the `waited` assertion (sixth
-  // review pass).
+  // review pass). Each poll clears `held`'s view first: inside an open
+  // transaction Postgres keeps the sessions and their query text as first
+  // read, only the wait columns live, so a first poll before the second pass
+  // started its query never matched it after (SMD-2742).
   for (let i = 0; i < 100 && !waited; i++) {
+    await held`SELECT pg_stat_clear_snapshot()`;
     const [w] = await held`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT backfill_thought_payloads()%'`;
     waited = Number(w.n) > 0;
     if (!waited) await new Promise((r) => setTimeout(r, 50));
@@ -12591,6 +12595,7 @@ if (want("30")) {
     let waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB is in cA's view already and the wait columns are live; cleared as [25]'s (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
@@ -12721,6 +12726,7 @@ if (want("31")) {
     let waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB first connects with its blocked call, possibly after cA's first read, which would keep the session list without it (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
@@ -12738,6 +12744,7 @@ if (want("31")) {
     waited = 0;
     for (let i = 0; i < 40 && !waited; i++) {
       await Bun.sleep(50);
+      await cA`SELECT pg_stat_clear_snapshot()`;  // cB is in cA's view already and the wait columns are live; cleared as [25]'s (SMD-2742)
       waited = Number((await cA`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`)[0].n);
     }
     await cA`COMMIT`;
@@ -16003,7 +16010,7 @@ if (want("38")) {
 if (want("38r")) {
   console.log("\n[38r] db/sleep.ts: re-embed first — a sleep re-embeds its backlog before the claim passes, and starts no re-embed pass with none; a wake stops it at once and the clock counts it; its provider gone, its key refused, a statement timed out or a throw sets it down for the sleep, extraction running on, and a timeout past the clock starts no claim pass; a model switch, at the start or mid-pass, sets it aside until the record is put right; a one-shot sleep that leaves its pool exits 1; the dry run counts unlabelled and moved rows in its backlog; another process's lease is not its to wait for, and a re-embed follower outside sleep refuses the scheduler (SMD-2679 PR 4b; its own section since SMD-3392)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, capture, claims, beat, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const { EX, CO, EMBED_JOB, modelCalls, embedCalls, sw, env, capture, claims, beat, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
   // The outage schedule from 1 s, as [38]'s cases left it for these until
   // SMD-3392, so their waits stay as they were; they pass on the shipped
   // 5 s too. In a full run [38] leaves the stub's extraction key recorded;
@@ -16424,6 +16431,51 @@ if (want("38r")) {
       await sql`DELETE FROM thoughts WHERE id = ${movedNote}::uuid`;
     }
     assert(/ 1 not yet in the pool/.test(dryMoved), `a finished row whose thought moved since is in re-embed's backlog, as its first pool returns it (${dryMoved.trim()})`);
+
+    // A model name no heartbeat row carries keeps re-embed out of sleep, said once at its start (SMD-3486): it ran,
+    // and every reader of the row read no re-embed. The row — a follower's, as only --follow stamps — carries no key,
+    // the backlog is left for a hand run, and extraction runs on. The brain records that name, so it is no model
+    // switch: re-embed would run but for the name (review pass 2: a switch set it aside under main's rule too).
+    // A hand follower under it is refused, writing no row: neither the scheduler nor preflight would read one.
+    const unfitEnv = { ...env, OB1_EMBEDDING_MODEL: "stub embed" };
+    const unfitOld = await reCapture("An old-model note, under a model name no row carries.", 43);
+    let unfitCode = -9, unfitSaid = -1, unfitLeft = false, unfitJob: unknown = "unread", unfitBeat = false, unfitDry = "", unfitRan = true;
+    let handCode = -9, handSaid = false, handRows = -1;
+    await sql`UPDATE ob1_config SET value = 'stub embed' WHERE key = 'embedding_model'`;
+    try {
+      lines.length = 0;
+      await sleepRun({ quiet: 300, dryRun: true, env: unfitEnv });
+      unfitDry = lines.join(" | ");
+      const unfit = follow({ env: unfitEnv });
+      try {
+        const extracted = await pollUntil(async () => (await exStatus(unfitOld)) === "succeeded", 15_000);
+        const b = await sleepBeat();
+        unfitBeat = b !== null;
+        unfitJob = (b as { reembedJob?: unknown } | null)?.reembedJob;
+        unfitLeft = extracted && (await sql`SELECT embedding_model FROM thoughts WHERE id = ${unfitOld}::uuid`)[0]?.embedding_model === "old-embed";
+      } finally {
+        unfitCode = await unfit.stop();
+      }
+      const handErrs: string[] = [];
+      const handAc = new AbortController();
+      handCode = await bounded(runReembed({ url: URL_!, env: unfitEnv, follow: 1, signal: handAc.signal, writer: { out: () => {}, err: (l) => handErrs.push(l) } }), handAc);
+      handSaid = handErrs.some((l) => /Refusing to follow: this follower's heartbeat row would be one the sleep scheduler and preflight do not read/.test(l));
+      handRows = Number((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key LIKE 'heartbeat:reembed:stub embed%'`)[0].c);
+      unfitSaid = lines.filter((l) => /re-embed: OB1_EMBEDDING_MODEL is no model name this scheduler's row can carry \(ASCII letters, digits and \. _ : @ \/ \+ -, the name and its width at most 120 characters as <name>@<width>\) — re-embed does not run in sleep/.test(l)).length;
+      unfitRan = lines.some((l) => /re-embedding \d+ thought|re-embed first when it has work/.test(l));
+    } finally {
+      await sql`DELETE FROM thoughts WHERE id = ${unfitOld}::uuid`;
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    }
+    assert(handCode === 2 && handSaid && handRows === 0, `a hand re-embed follower under that name is refused, writing no row (exit ${handCode}; said ${handSaid}; ${handRows} row(s))`);
+    // A one-shot run under it, the brain recording another model: the switch it asks for pastes as one word (review pass 3).
+    const shotErrs: string[] = [];
+    const shotAc = new AbortController();
+    const shotCode = await bounded(runReembed({ url: URL_!, env: unfitEnv, signal: shotAc.signal, writer: { out: () => {}, err: (l) => shotErrs.push(l) } }), shotAc);
+    assert(shotCode === 2 && shotErrs.some((l) => l.includes("OB1_EMBEDDING_MODEL='stub embed' bun db/reembed.ts --url … --switch-model")),
+      `a one-shot run under that name, the record another model's, prints its --switch-model with the name quoted (exit ${shotCode}; ${shotErrs.join(" | ").slice(0, 300)})`);
+    assert(unfitCode === 0 && unfitSaid === 1 && !unfitRan && unfitLeft && unfitBeat && unfitJob === undefined && /does not run in sleep/.test(unfitDry) && !/ reembed \(/.test(unfitDry),
+      `a model name no row carries keeps re-embed out of sleep, said once, its row carrying no re-embed key; extraction runs on (exit ${unfitCode}; said ${unfitSaid}; ran ${unfitRan}; left and extracted ${unfitLeft}; row read ${unfitBeat}, its key ${JSON.stringify(unfitJob)}; dry run ${unfitDry.slice(0, 300)})`);
 
     // A re-embed follower running outside sleep does not yield to a live call: the scheduler refuses (2), as for the others.
     const outsideKey = `heartbeat:${EMBED_JOB}`;

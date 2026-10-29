@@ -319,7 +319,7 @@ import { join } from "node:path";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { budgetWords, heldWords, REEMBED_DOWN, shellWord, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type ReembedDown, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
+import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type ReembedDown, type SleepAside, type SleepHeld } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
 import { reembedBacklog, run as runReembed } from "./reembed.ts";
@@ -617,7 +617,7 @@ async function newestLive(sql: SQL, after: Date | number): Promise<{ now: Date; 
  * query, as Postgres reads the same pattern, so no other row takes a place
  * under the read's bound (review pass 2).
  */
-const FOLLOWER_KEY = /^heartbeat:(extract|consolidate|reembed):[A-Za-z0-9._:@/+-]{1,120}$/;
+const FOLLOWER_KEY = new RegExp(`^heartbeat:(extract|consolidate|reembed):${NAME_CHARS}{1,120}$`);
 
 /** The claim followers stamping outside this scheduler, fresh as brain-info.ts reads a heartbeat: they do not yield to a live call. Newest first, so stale rows never hide a fresh one past the bound. */
 async function followersOutside(sql: SQL): Promise<string[]> {
@@ -806,9 +806,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The embedding model and width this stack is configured for, as reembed.ts reads them (config.mjs's embeddingContract). */
   const EMBED = embeddingContract(env);
   const JOBS: Record<PassName, string> = { reembed: reembedKey(EMBED.model, EMBED.dim), extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg) };
-  /** Whether this stack's embedding width forms a key: a width that is no positive whole number keeps re-embed out of sleep, said once (review pass 2: it crashed the first sleep). */
-  const REEMBED_OK = Number.isSafeInteger(EMBED.dim) && EMBED.dim > 0;
-  /** Its re-embed key on its heartbeat row, where its width forms one (review pass 5). */
+  /**
+   * Why this stack's embedding model and width form no re-embed key its row
+   * carries, or null: such a key keeps re-embed out of sleep, said once. A
+   * width that is no positive whole number crashed the first sleep (review
+   * pass 2); a model name outside the readers' alphabet ran re-embed while
+   * every reader of the row read none (SMD-3486).
+   */
+  const REEMBED_UNFIT = reembedKeyUnfit(EMBED.model, EMBED.dim);
+  const REEMBED_OK = REEMBED_UNFIT === null;
+  /** Its re-embed key on its heartbeat row, where it forms one (review pass 5). */
   const REEMBED_JOB = REEMBED_OK ? JOBS.reembed : undefined;
   /** --dump-dir: every consolidation verdict, appended to the pass key's own file (SMD-3203). */
   const DUMP = opts.dumpDir === undefined ? undefined : passDumpFile(opts.dumpDir, JOBS.consolidate);
@@ -931,7 +938,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const asideWord = (): SleepAside | null =>
     reembedAside ? { reembed: { kind: "model-switch", recorded: reembedAside.recorded, configured: EMBED.model } } : reembedDown ? { reembed: { kind: reembedDown } } : null;
 
-  if (!REEMBED_OK) err(`  re-embed: OB1_EMBEDDING_DIM (${EMBED.dim}) is no positive whole number — re-embed does not run in sleep; the server refuses it too`);
+  if (REEMBED_UNFIT === "width") err(`  re-embed: OB1_EMBEDDING_DIM (${EMBED.dim}) is no positive whole number of at most nine digits — re-embed does not run in sleep; the server refuses it too`);
+  // The name not printed: what makes it unfit may be a character a log should not carry either.
+  if (REEMBED_UNFIT === "model") err("  re-embed: OB1_EMBEDDING_MODEL is no model name this scheduler's row can carry (ASCII letters, digits and . _ : @ / + -, the name and its width at most 120 characters as <name>@<width>) — re-embed does not run in sleep; run bun db/reembed.ts by hand when it has work, as preflight says");
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -1578,7 +1587,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       await stopPasses(hardStopped);
       return "stopped";
     };
-    out(`  asleep: no live call for ${QUIET} s — ${sweeps ? "the re-derive sweep, then " : ""}extracting${FOLLOW ? "" : ", then consolidating, until the pools are drained"}, re-embed first when it has work`);
+    out(`  asleep: no live call for ${QUIET} s — ${sweeps ? "the re-derive sweep, then " : ""}extracting${FOLLOW ? "" : ", then consolidating, until the pools are drained"}${REEMBED_OK ? ", re-embed first when it has work" : ""}`);
     sleptUntil = since;
     // An audit row carries its transaction's start: a capture begun before the
     // sleep and committed after it was not visible when the brain fell asleep,
@@ -1782,7 +1791,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // Only when its backlog has work — an empty one starts no pass, so no
     // probe loads the embedding model for nothing — and not while a model
     // switch sets it aside; the record is read again at each sleep. A width
-    // that forms no key keeps re-embed out of sleep whatever the record says.
+    // or model name that forms no key its row carries keeps re-embed out of
+    // sleep whatever the record says (SMD-3486).
     const recorded = await reading(recordedModel);
     if (recorded === null) return stopped();
     if (REEMBED_OK && switched(recorded)) await setReembedAside(recorded);

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { when } from '$lib/format';
 	import { ingestedNotice } from '../../../../../server-portable/core/filter.ts';
 	import type { PageData } from './$types';
@@ -25,6 +26,12 @@
 			Created {time(data.thought.metadata.created_at)} · updated {time(data.thought.metadata.updated_at)}
 			· <span class="font-mono">{data.thought.id}</span>
 		</div>
+		{#if data.canEdit || data.canDelete}
+			<div class="flex gap-4 text-sm mt-2">
+				{#if data.canEdit}<a class="text-primary-light hover:underline" href="{base}/thoughts/{data.thought.id}/edit" data-testid="edit-link">Edit</a>{/if}
+				{#if data.canDelete}<a class="text-primary-light hover:underline" href="{base}/thoughts/{data.thought.id}/delete" data-testid="delete-link">Delete</a>{/if}
+			</div>
+		{/if}
 	</header>
 
 	{#if notice}

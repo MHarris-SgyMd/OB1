@@ -165,17 +165,59 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
+      # The REST client's and the MCP server's installs come before the start
+      # below, since test-server.ts drives an MCP server through both (SMD-2978:
+      # an import into a directory not installed fails). Their imports of
+      # ../server-portable resolve against the install above.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      # Two suites that spend most of their time waiting on a real clock,
+      # started here and run in the background while the job's other steps run
+      # (SMD-3470), as the data layer runs its pair (SMD-3195). One after
+      # another they were ~50 s and ~33 s of a job whose median was ~215–220 s.
+      # - test-server.ts, the real server's suite (SMD-2287 PR 4b and 4c): its
+      #   request lines, its refusals, its mirrors, its stop's count of tool
+      #   calls, and its spans, one trace per tool call. Most of its time is
+      #   children's stop and flush bounds ([13d], [17], [22]).
+      # - test-thoughts.ts, pure logic: the alias table, title truncation,
+      #   citation URLs. No database and no provider; [16]'s provider-state
+      #   probes, on real timers, are most of its time.
+      # Each runs in a subshell that outlives this step (the runner ends a
+      # job's leftover processes only at its end) and writes its log, then its
+      # exit code by a rename, so the last step never reads half of one;
+      # `|| rc=$?` keeps -e from ending the subshell before it writes the code.
+      # Each has its own time limit (a hang ends as 124, or 137 when TERM is
+      # ignored). They share the runner's cores with the steps below, so a
+      # timing assertion that fails here and passes alone is load. The last
+      # step, "The real server's suite and the vocabulary rules (started at the
+      # job's start)", waits on both and prints them.
+      - name: Start the real server's suite and the vocabulary rules, in the background
+        working-directory: server-portable
+        run: |
+          limit_s=300
+          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/portable.started"
+          (
+            rc=0
+            timeout --kill-after=10s "${limit_s}s" bun test-server.ts > "$RUNNER_TEMP/test-server.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-server.rc.part" && mv "$RUNNER_TEMP/test-server.rc.part" "$RUNNER_TEMP/test-server.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+          (
+            rc=0
+            timeout --kill-after=10s "${limit_s}s" bun test-thoughts.ts > "$RUNNER_TEMP/test-thoughts.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-thoughts.rc.part" && mv "$RUNNER_TEMP/test-thoughts.rc.part" "$RUNNER_TEMP/test-thoughts.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+
       # The REST core's surface (SMD-2284) over a stub core: the routes against
       # the manifest, the OpenAPI document, the authorization ladder, the log.
       - name: The REST core's routes and authorization
         working-directory: server-portable
         run: bun test-rest.ts
-
-      # Pure logic — the alias table, title truncation, citation URLs. No database
-      # and no provider, so it runs in the fast job rather than the Postgres one.
-      - name: Thought vocabulary and presentation rules
-        working-directory: server-portable
-        run: bun test-thoughts.ts
 
       # SMD-2273 + SMD-2318. The async job registry in memory: the lifecycle,
       # ownership, the SSE frames, retention and the cap on an injected clock,
@@ -189,24 +231,10 @@ jobs:
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
       # `bun generate.ts` fails here, and every operation through it into the
-      # real REST app over a stub core. Its imports of ../server-portable
-      # resolve against that directory's install above.
-      - name: Install the REST client's pinned packages
-        working-directory: rest-client
-        run: bun install --frozen-lockfile
-
+      # real REST app over a stub core.
       - name: The REST client against the REST core
         working-directory: rest-client
         run: bun test-client.ts
-
-      # The MCP server as a client of the REST core (SMD-2287): its own suite
-      # over the real REST app with a stub core, then server-portable's suites
-      # that drive an MCP server, each through it with the REST core behind it
-      # in process (test-support.ts's mcpUnderTest; SMD-2287 PR 6a retired
-      # their run against index.ts).
-      - name: Install the MCP server's pinned packages
-        working-directory: mcp-server
-        run: bun install --frozen-lockfile
 
       # SMD-2280: the operator GUI (dashboard/), checked as the image builds
       # it: svelte-check over its pages and server code, which import the REST
@@ -231,6 +259,11 @@ jobs:
         working-directory: dashboard
         run: bun test-oauth.ts
 
+      # The MCP server as a client of the REST core (SMD-2287): its own suite
+      # over the real REST app with a stub core. server-portable's suites that
+      # drive an MCP server run each through it, with the REST core behind it
+      # in process (test-support.ts's mcpUnderTest; SMD-2287 PR 6a retired
+      # their run against index.ts).
       - name: The MCP server over the REST core
         working-directory: mcp-server
         run: bun test-mcp.ts
@@ -250,13 +283,6 @@ jobs:
       - name: Plugins in the contract
         working-directory: server-portable
         run: bun test-plugins.ts
-
-      # The real server's suite (SMD-2287 PR 4b and 4c): its request lines,
-      # its refusals, its mirrors, its stop's count of tool calls, and its
-      # spans, one trace per tool call.
-      - name: Test against the real server
-        working-directory: server-portable
-        run: bun test-server.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
@@ -505,6 +531,42 @@ jobs:
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
+
+      # The two suites the job started after the installs (SMD-3470), waited
+      # on up to their limit and the kill after it, and printed as the data
+      # layer prints its pair: a passing log folded, a failing one open, and
+      # the two summary lines last. It runs when a step before it failed too,
+      # so a failure beside one of theirs is seen beside it.
+      - name: The real server's suite and the vocabulary rules (started at the job's start)
+        if: ${{ !cancelled() }}
+        run: |
+          read -r started limit_s < "$RUNNER_TEMP/portable.started" || { echo "::error title=Portable server::the two suites were never started: their start step did not run, or failed before it wrote $RUNNER_TEMP/portable.started"; exit 1; }
+          # The limit, the 10 s kill after it, and 20 s for each suite's subshell to write its code.
+          deadline=$((started + limit_s + 30))
+          while { [ ! -f "$RUNNER_TEMP/test-server.rc" ] || [ ! -f "$RUNNER_TEMP/test-thoughts.rc" ]; } && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+          summaries=""
+          failed=0
+          for suite in test-server test-thoughts; do
+            log="$RUNNER_TEMP/$suite.log"
+            rc=$(cat "$RUNNER_TEMP/$suite.rc" 2> /dev/null) || rc="none, its subshell wrote no code by ${limit_s} s and 30 s"
+            [ "$rc" = 0 ] || failed=1
+            case $rc in
+              124) rc="124, over the ${limit_s} s limit" ;;
+              137) rc="137, killed: over the ${limit_s} s limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$suite.ts — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=Portable server::$suite.ts failed (exit $rc) — its log follows"
+              cat "$log" || true
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
   db-schema:
     name: Schema migrations
@@ -1843,10 +1905,18 @@ jobs:
       # read key; each list's data holding the fields it shows alone; the key
       # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
-      # server. Here, not after the next step: that one configures the
-      # authorization server, and the GUI then offers no key sign-in (review
-      # pass 1). The smoke imports only dashboard/src/lib/browse.ts and
-      # format.ts, which import nothing, so nothing is installed.
+      # server. With --writes (SMD-3322), a thought of the smoke's own,
+      # captured over /mcp, is edited and deleted on its own pages — a stale
+      # edit refused, a read key offered neither — and its audit rows then
+      # read here, in order: the capture, carried by the MCP server (its
+      # forwarder as act), then the one edit saved and the delete, each a
+      # direct call to the REST core with no carrier, as the GUI makes them,
+      # all under the smoke key's name, as Verify asks. The smoke reads its
+      # keys from this job's environment, off its command line. Here, not after the
+      # next step: that one configures the authorization server, and the GUI
+      # then offers no key sign-in (review pass 1). The smoke imports only
+      # dashboard/src/lib/browse.ts and format.ts, which import nothing, so
+      # nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |
@@ -1865,7 +1935,12 @@ jobs:
           # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows --notes off
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
+          written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
+          [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
+          rows=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT string_agg(action || ' ' || origin || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
+          [ "$rows" = "capture open-brain-api true false, update open-brain-api true true, delete open-brain-api true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture carried by the MCP server, then one edit and one delete the GUI made directly, under the smoke key"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
@@ -1891,7 +1966,7 @@ jobs:
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --wait --wait-timeout 120 --force-recreate --no-deps app
-          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --notes on --notes-only)
+          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --notes on --notes-only)
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
 
@@ -3111,16 +3186,23 @@ jobs:
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "the refused up stopped the canary" >&2; exit 1; }
           refused 'one or the other' up --refresh --no-refresh
+          refused 'go with up' down --refresh
           # …and where the canary's Postgres is stopped when the run begins, the
           # guard is asked once it is started, after the writers stop: exit 1,
-          # saying what is stopped, and the next up brings them back.
+          # and the next up brings them back. The coordinator, whose board-sync
+          # pass the --port 8012 up above left running, is stopped with it, and
+          # first, since it depends on Postgres: left running over a stopped
+          # database soon after its pass, board-sync took ~30 s to stop, its
+          # loop's last heartbeat waiting out Bun's connect timeout (SMD-3464):
+          # most of SMD-3155's cost here (SMD-3465; the coordinator's since
+          # SMD-3476).
           cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
-          docker compose -p open-brain-canary -f compose.yaml stop postgres
+          docker compose -p open-brain-canary -f compose.yaml stop coordinator postgres
           rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
           { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
             && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
+          if grep -qF 'canary coordinator stopped for' /tmp/canary-latestamp.out; then echo "the up found the coordinator running over the stopped Postgres: the case's stop missed it" >&2; exit 1; fi
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
-          refused 'go with up' down --refresh
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published
           # when the run began is still named (code review).
