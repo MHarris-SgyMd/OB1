@@ -176,7 +176,7 @@ is Secure only on https. So the server must know the origin a browser sees:
 | `/dashboard/search` | By meaning (`search_thoughts`, a fixed top 1–100, identifiers and quoted spans matched exactly; each hit's similarity and, beside it, "exact match" where it holds one, and the tickets it names that moved since it was written, in the tool's words) or by exact text (`search_thoughts_keyword`, the query sent as typed, spaces kept, a page at a time by offset, with how many thoughts hold it). With the embedding provider refusing, a search by meaning says its hits are exact matches alone (or that nothing held the query exactly); with it silent, the core waits out its own 120 s, so the page answers 504 at its 30 s, naming the provider, with the same query by exact text a link away (the core's short-circuit is SMD-3205). With no query it reads nothing; a search, as through any client, is the visitor's own, logged where `OB1_QUERY_LOG` is on, its query sent in a POST body |
 | `/dashboard/changes` | `thought_changes`: every capture, edit and deletion with who made it, the most recent by default, or forward from a time or a date, Next carrying the page's cursor as `after` (so a new filter starts again), each change once; by the writing key, by kind, leaving out this key's own. The core's fields as they are (an edit's fields moved, its supersession, its sources); the tool's words for an edit's kind (marked, re-captured, reset) are render.ts's. A start the core cannot read is a 400 in words |
 | `/dashboard/proposals` | `list_supersession_proposals`: the pairs the consolidation pass judged, most confident first, by status and lineage — the verdict, confidence and reason (one line), each side's first line, writer (with the ingested notice before an ingested side's text) and what supersedes it, and the review. Read only: accept and reject are `db/consolidate.ts`'s, whose `--list` (and the tool) name the writer flags and the pointers an accept would clear, which this page does not |
-| `/dashboard/workers` | `worker_status` (a pool appears once anything is queued for it): each background-work pool's counts — not queued, waiting, in flight, stale, done, failed — whether it is the active pool, and its oldest stale lease |
+| `/dashboard/workers` | `worker_status` (a pool appears once anything is queued for it): each background-work pool's counts — not queued, waiting, in flight, stale, done, failed — whether it is the active pool, and its oldest stale lease. For a session whose whoami named them (SMD-3322 PR 3), a pool with failed rows offers Retry (`retry_failed`: its failed rows back to pending) and one with stale leases Release (`release_stale_leases`, for its stale leases alone: a live lease, a running worker's, is the CLI's `include_live`, which names its worker); then the page again, by a redirect (a reload asks the page, not the action again), saying from a flash cookie how many it moved. Each logs an action row for each thought it touches under the visitor's key |
 | `/dashboard/query-log` | `list_logged_searches`: the logged searches, most recent first, from a time — each query (one line), its arm, tier, the count it asked for (034's `match_count`, not how many it found) and arguments. Every key's searches, as the tool shows them to any key that can read; empty where `OB1_QUERY_LOG` is off |
 | `/dashboard/status` | `brain_info`, laid out as the core's own rows (`brainInfoRows` in `server-portable/brain-info.ts`, the brain_info tool's words): the server's version, commit and migrations, and the database's ledger, sizes, counts, vectors, proposals, findings and workers' heartbeats |
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212). Links to its edit and delete pages where the session's whoami named `update_thought` and `delete_thought` at sign-in, and says what a capture from the capture page just did (SMD-3322) |
@@ -261,8 +261,9 @@ captures a thought of its own on the capture page (its source `dashboard`, a sec
 its text leading to it), edits it as the
 page's multipart form posts (a 160 kB text saved; an empty text, an altered time and a stale
 read refused in words, the stale time kept in the form) and deletes it on its pages, the list
-saying so once and never for a link. It checks that a read key sees no links and no Capture,
-gets 403 from the three pages and has its posts refused, and it prints the thought's
+saying so once and never for a link. On the workers page it retries a pool's failed rows and
+releases its stale leases by the pool's own forms. It checks that a read key sees no links, no
+Capture and no worker form, gets 403 from the three pages and has its posts refused, and it prints the thought's
 id. Leave it off against a brain you would not write to. Each key may come
 from the environment instead of its flag (`OB1_SMOKE_KEY`, `OB1_SMOKE_READ_KEY`,
 `OB1_SMOKE_CAPTURE_KEY`), off the process list. CI captures three just before the smoke (two
@@ -270,6 +271,8 @@ with no trust, then an ingested one), records a proposal and queues a pool throu
 producers, and runs it in the full-stack job,
 before that job configures the authorization server, with `--notes off --writes`, then reads
 the write arm's thought's audit rows: its capture, then one edit and one delete, each a direct
-call to the REST core labelled `dashboard`, under the smoke key's name. The next step turns
+call to the REST core labelled `dashboard`, under the smoke key's name; and the worker actions'
+rows, one retry and one release by the smoke key (CI plants a failed row and a stale lease in
+its queued pool, through migration 015's claim functions). The next step turns
 the example plugin on and runs `--notes on --notes-only`, then turns it off. After them,
 the job holds key sign-in off.
