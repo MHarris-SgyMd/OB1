@@ -10,8 +10,8 @@
 # has the rule. It blocks nothing: no check waits on it, and the run it reads
 # through is done when it starts. It fails when it cannot read what it needs:
 # the runs' list, the run it reads through, or one of the window's newest 26
-# runs, whose gap could move a shift off the run that makes it (an older one
-# is a warning).
+# runs, not read or being re-run, whose gap could move a shift off the run
+# that makes it (an older one is a warning).
 #
 # workflow_run reads this file from the default branch, so it runs from main's
 # copy, never a pull request's, and it is asked of main's push runs alone (a
