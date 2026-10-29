@@ -33,6 +33,8 @@ held_case() {
   local id=$1 profile=$2 svc=$3 want=$4
   shift 4
   local ct="ci-held-$id-$RANDOM"
+  # A name used again in a later batch reads nothing of its last run.
+  rm -f "$HELD_DIR/$id".*
   printf '%s' "$ct" > "$HELD_DIR/$id.ct"
   printf '%s' "$want" > "$HELD_DIR/$id.want"
   HELD_IDS+=("$id")
