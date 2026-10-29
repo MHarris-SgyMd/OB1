@@ -50,6 +50,9 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
     ok(none.children.length === 0 && none.lines.length === 1 && /names no pass, so none runs/.test(none.lines[0]), `nothing named (${JSON.stringify(raw)}): none runs, and the log says how to name them`);
   }
   ok(planPasses("sleep").lines.length === 0, "a list that holds only passes says nothing of it");
+  const stale = planPasses("", "auth, sleep,board-sync");
+  ok(stale.lines.some((l) => /^coordinator: COMPOSE_PROFILES names sleep and board-sync, a profile no longer \(SMD-3476\) — it starts nothing; the coordinator runs what OB1_PASSES names, so name them there/.test(l)) && planPasses("sleep", "auth,observability").lines.length === 0,
+    `a COMPOSE_PROFILES still naming a retired profile is said, a live profile not (${stale.lines.join(" | ")})`);
   ok(JSON.stringify(PASSES) === JSON.stringify(["sleep", "workers", "board-sync"]), "the three passes");
 }
 
@@ -162,8 +165,8 @@ if (!existsSync(composePath)) {
   ok(JSON.stringify(coordinator?.command) === JSON.stringify(["db/coordinator.ts"]) && coordinator?.profiles === undefined, "its command is the coordinator, and it is a default service");
 
   // The image carries what the passes import: every db/ module in their graph is
-  // a top-level file .dockerignore lets into the server image's context, which
-  // its Dockerfile copies whole (db/*.ts, db/*.mjs, db/*.d.mts).
+  // a top-level file .dockerignore lets into the server image's context and its
+  // Dockerfile copies by name — and it copies no db/ script beyond them.
   const out = mkdtempSync(join(tmpdir(), "ob1-coordinator-graph-"));
   try {
     const entries = ["coordinator.ts", ...new Set(Object.values(CHILDREN).map((c) => c.script))].map((f) => join(import.meta.dir, f));

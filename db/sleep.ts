@@ -657,8 +657,9 @@ async function lastSlept(sql: SQL): Promise<SleepMark | null> {
 /**
  * The line naming followers outside the scheduler: the dry run's, or a run's
  * refusal — at its start, or found later in an awake or asleep poll (review
- * pass 1: a follower started with this, as `COMPOSE_PROFILES=workers,sleep`
- * does, stamps only after its start probe, past the start's check). The keys
+ * pass 1: a follower started beside it — a hand run, an old stack's container,
+ * never the coordinator's — stamps only after its start probe, past the
+ * start's check). The keys
  * are FOLLOWER_KEY's alphabet, so the DELETE it prints is safe to paste.
  */
 function outsideLine(outside: string[], dryRun: boolean): string {

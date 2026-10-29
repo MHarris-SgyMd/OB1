@@ -59,10 +59,10 @@
  */
 
 import type { SQL } from "bun";
-import { lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { StampingWorker } from "./pass-stamp.ts";
 import { supervise, type Supervisor } from "./supervise.ts";
+import { andList, wrapperLine } from "./cli.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 
 const HERE = import.meta.dir;
@@ -75,8 +75,8 @@ export type ChildName = "board-sync" | "extract" | "consolidate" | "sleep";
 
 /** What the coordinator knows of a child: who it runs as, what it owns, its guards and its command line. */
 export type Child = {
+  /** Its name, which is its heartbeat's worker too (db/pass-stamp.ts). */
   name: ChildName;
-  worker: StampingWorker;
   /** Its user and group, when the coordinator runs as root. */
   uid: number;
   /** The settings it alone is handed — with any other child naming the same. */
@@ -103,26 +103,26 @@ const SLEEP_DIGITS = [
 /** The children, by name: uids from 1101, clear of the CI runner's 1001 (a checkout's files' owner there). */
 export const CHILDREN: Record<ChildName, Child> = {
   "board-sync": {
-    name: "board-sync", worker: "board-sync", uid: 1101, script: "sync-linear.ts",
+    name: "board-sync", uid: 1101, script: "sync-linear.ts",
     own: ["LINEAR_API_KEY", "OB1_LINEAR_INITIATIVE", "OB1_BOARD_SYNC_INTERVAL", "LINEAR_COMMENT_API_KEY", "OB1_FINDINGS_POST_CAP"],
     requireKey: false, digits: [],
     // The interval and the findings cap are read and refused by the tool itself.
     args: () => ["--loop"],
   },
   extract: {
-    name: "extract", worker: "extract", uid: 1102, script: "extract-entities.ts",
+    name: "extract", uid: 1102, script: "extract-entities.ts",
     own: [...WORKER_OWN, "OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS"],
     requireKey: true, digits: ["OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS"],
     args: (env) => ["--follow", ...(env.OB1_EXTRACT_FOLLOW ? [env.OB1_EXTRACT_FOLLOW] : []), "--workers", or(env, "OB1_EXTRACT_WORKERS", "1")],
   },
   consolidate: {
-    name: "consolidate", worker: "consolidate", uid: 1103, script: "consolidate.ts",
+    name: "consolidate", uid: 1103, script: "consolidate.ts",
     own: [...WORKER_OWN, "OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS"],
     requireKey: true, digits: ["OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS"],
     args: (env) => ["--follow", ...(env.OB1_CONSOLIDATE_FOLLOW ? [env.OB1_CONSOLIDATE_FOLLOW] : []), "--workers", or(env, "OB1_CONSOLIDATE_WORKERS", "1")],
   },
   sleep: {
-    name: "sleep", worker: "sleep", uid: 1104, script: "sleep.ts",
+    name: "sleep", uid: 1104, script: "sleep.ts",
     own: [...WORKER_OWN, ...SLEEP_DIGITS, "OB1_SLEEP_DUMP_DIR"],
     requireKey: true, digits: SLEEP_DIGITS,
     args: (env) => [
@@ -151,8 +151,8 @@ export type Plan = {
   lines: string[];
 };
 
-/** Read OB1_PASSES: the children it names, each once, `sleep` winning over `workers`. Pure. */
-export function planPasses(raw: string | undefined): Plan {
+/** Read OB1_PASSES: the children it names, each once, `sleep` winning over `workers`; a COMPOSE_PROFILES that still names a retired profile is said. Pure. */
+export function planPasses(raw: string | undefined, profiles?: string): Plan {
   const named = [...new Set((raw ?? "").split(/[\s,]+/).filter(Boolean))];
   const lines: string[] = [];
   for (const name of named.filter((n) => !(PASSES as readonly string[]).includes(n))) {
@@ -168,6 +168,11 @@ export function planPasses(raw: string | undefined): Plan {
   else if (has("workers")) children.push(CHILDREN.extract, CHILDREN.consolidate);
   if (children.length === 0) {
     lines.push(`coordinator: OB1_PASSES names no pass, so none runs — name them in deploy/.env (${PASSES.join(", ")}) and recreate the coordinator (up -d coordinator)`);
+  }
+  // The profiles the passes were before SMD-3476: named there, they now start nothing.
+  const retired = [...new Set((profiles ?? "").split(",").map((p) => p.trim()))].filter((p) => (PASSES as readonly string[]).includes(p));
+  if (retired.length) {
+    lines.push(`coordinator: COMPOSE_PROFILES names ${andList(retired)}, a profile no longer (SMD-3476) — it starts nothing; the coordinator runs what OB1_PASSES names, so name ${retired.length === 1 ? "it" : "them"} there and take ${retired.length === 1 ? "it" : "them"} out of COMPOSE_PROFILES`);
   }
   return { children, lines };
 }
@@ -209,7 +214,11 @@ function kindAt(path: string): Stats | null {
 function handDumpDir(dir: string | undefined, uid: number, err: (line: string) => void): void {
   if (!dir) return;
   const path = resolve(dir);
-  if (dirname(path) !== DUMP_ROOT || !kindAt(path)?.isDirectory()) return;
+  if (dirname(path) !== DUMP_ROOT) {
+    err(`coordinator: ${path} is not a directory directly in ${DUMP_ROOT}, so it stays as it is — sleep, uid ${uid}, can write only one it owns: name ${DUMP_ROOT}/sleep-dumps, the volume, in OB1_SLEEP_DUMP_DIR`);
+    return;
+  }
+  if (!kindAt(path)?.isDirectory()) return;
   try {
     lchownSync(path, uid, uid);
     for (const entry of readdirSync(path)) {
@@ -252,6 +261,8 @@ function makeHome(child: Child, err: (line: string) => void): string {
 function removeHome(home: string, err: (line: string) => void): void {
   const takeBack = (dir: string): void => {
     lchownSync(dir, 0, 0);
+    // Root's now, so root may set its mode: a child's 0000 would bar the readdir (no DAC capability).
+    chmodSync(dir, 0o700);
     for (const entry of readdirSync(dir)) {
       const at = join(dir, entry);
       if (kindAt(at)?.isDirectory()) takeBack(at);
@@ -275,7 +286,7 @@ function removeOldHomes(child: Child, err: (line: string) => void): void {
 }
 
 /** How a child is started: its argv, its environment, its user, the HOME made for it. */
-type Launch = { cmd: string[]; env: Record<string, string>; uid?: number; gid?: number; home?: string };
+type Launch = { cmd: string[]; env: Record<string, string>; /** Its user, its group the same. */ uid?: number; home?: string };
 
 /**
  * What coordinate() and runOnce() both start a child with: as root, a HOME of
@@ -291,7 +302,7 @@ function launch(child: Child, env: Record<string, string | undefined>, args: rea
   return {
     cmd: [process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...argv],
     env: cenv,
-    ...(own ? { uid: child.uid, gid: child.uid } : {}),
+    ...(own ? { uid: child.uid } : {}),
     ...(home !== undefined && home !== NO_HOME ? { home } : {}),
   };
 }
@@ -310,20 +321,20 @@ export type CoordinatorOptions = {
 export function coordinate(opts: CoordinatorOptions): Supervisor {
   const env = opts.env ?? process.env;
   const writer = opts.writer ?? { out: (l: string) => console.log(l), err: (l: string) => console.error(l) };
-  const plan: Plan = opts.children ? { children: [...opts.children], lines: [] } : planPasses(env.OB1_PASSES);
+  const plan: Plan = opts.children ? { children: [...opts.children], lines: [] } : planPasses(env.OB1_PASSES, env.COMPOSE_PROFILES);
   for (const line of plan.lines) writer.err(line);
   const own = opts.asOwnUsers ?? false;
   if (plan.children.length) {
     const who = plan.children.map((c) => (own ? `${c.name} (uid ${c.uid})` : c.name));
-    writer.err(`coordinator: runs ${who.length === 1 ? who[0] : `${who.slice(0, -1).join(", ")} and ${who[who.length - 1]}`}${own ? "" : " — not root, so each as this process's user, not its own"}`);
+    writer.err(`coordinator: runs ${andList(who)}${own ? "" : " — not root, so each as this process's user, not its own"}`);
   }
   const children = plan.children.map((child) => {
     if (own) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, own, writer.err);
     return supervise({
-      worker: child.worker,
+      worker: child.name,
       cmd: l.cmd,
-      ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.gid }),
+      ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,
@@ -361,7 +372,7 @@ export async function runOnce(child: Child, args: string[], opts: { env?: Record
     try {
       p = Bun.spawn(l.cmd, {
         env: l.env,
-        ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.gid }),
+        ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
         stdio: ["inherit", "inherit", "inherit"],
         // Its own process group, as a coordinator's child: a terminal's Ctrl-C is the one signal passed on.
         detached: true,
@@ -384,18 +395,16 @@ if (import.meta.main) {
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => stop(signal));
   // A checkout run's terminal closed: its children, in groups of their own, would not hear the hangup.
   process.on("SIGHUP", () => stop("SIGTERM"));
-  const [verb, name, ...rest] = process.argv.slice(2);
-  if (verb === "run") {
+  // No flags of its own: OB1_PASSES says what it runs. `run <pass> [args…]` hands the rest to that pass's script.
+  const line = wrapperLine("coordinator.ts", {}, "run", { note: USAGE });
+  if ("handed" in line) {
+    const [name, ...rest] = line.handed;
     const child = name !== undefined && Object.hasOwn(CHILDREN, name) ? CHILDREN[name as ChildName] : undefined;
     if (child === undefined) {
       console.error(USAGE);
       process.exit(2);
     }
     process.exit(await runOnce(child, rest, { onSignal: (s) => { stop = s; for (const signal of heard) s(signal); } }));
-  }
-  if (verb !== undefined) {
-    console.error(USAGE);
-    process.exit(2);
   }
   const begin = (sql: SQL | null): Promise<number> => {
     const c = coordinate({ sql, asOwnUsers: process.getuid?.() === 0 });
@@ -409,5 +418,7 @@ if (import.meta.main) {
     process.exit(await begin(null));
   }
   const sql = openSql(url, { max: 1 });
-  await closeThenExit(sql, async () => begin(sql));
+  await closeThenExit(sql, async () => {
+    return begin(sql);
+  });
 }

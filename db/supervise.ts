@@ -64,7 +64,7 @@ import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
-import { consoleWriter, type Writer } from "./cli.ts";
+import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
@@ -98,7 +98,7 @@ export function guardRefusal(worker: string, env: Record<string, string | undefi
   const bad = (opts.digits ?? []).filter((name) => /[^0-9]/.test(env[name] ?? ""));
   if (bad.length) {
     const named = bad.map((name) => `${name} ('${env[name]}')`);
-    const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
+    const list = andList(named);
     return { kind: "usage", line: `${worker}: ${list} ${bad.length === 1 ? "takes" : "take"} digits only` };
   }
   return null;
@@ -299,6 +299,8 @@ if (import.meta.main) {
   // A container from before SMD-3476 runs `bun db/supervise.ts --worker … --run …`
   // from a checkout it mounts. Exiting would have `unless-stopped` restart it
   // in a loop (SMD-3214), so it says why it runs nothing and holds until its stop.
+  // Its old flags are still scanned, so anything else is refused (2) as before.
+  commandLine("supervise.ts", { worker: "one", run: "one", "require-key": "none", digits: "many" } as const, { note: "Retired as a command (SMD-3476): run as the old services did, it holds, running nothing, until its stop." });
   console.error("supervise.ts: retired as a command (SMD-3476) — the coordinator runs every pass now; remove this container: compose up -d --remove-orphans, with the -f files and -p the stack was started with");
   await new Promise<void>((resolve) => {
     for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => resolve());
