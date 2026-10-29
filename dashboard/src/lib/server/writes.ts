@@ -63,11 +63,19 @@ export const deletedCookie = (sessionCookie: string) => `${sessionCookie}_delete
  */
 export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captured`;
 
+/**
+ * The flash cookie the workers page's actions set for the page to say what they did, after their redirect:
+ * `<retry|release>.<rows moved>.<pool, URI-encoded>`. Read and cleared by the page (SMD-3322 PR 3 review pass 1).
+ */
+export const workersCookie = (sessionCookie: string) => `${sessionCookie}_workers`;
+
 /** Each write's words for one that may have been made, and for one that was not (notAnswered). */
 const UNANSWERED = {
 	edit: { maybe: 'the edit may still have been saved. Open the thought to see before editing again', not: 'the edit was not saved' },
 	delete: { maybe: 'the thought may already be deleted. Look for it under Browse before trying again', not: 'the thought was not deleted' },
 	capture: { maybe: 'the thought may still have been captured. Look for it under Browse before capturing it again', not: 'the thought was not captured' },
+	retry: { maybe: 'the failed rows may already be requeued. The pool’s counts below say', not: 'nothing was requeued' },
+	release: { maybe: 'the stale leases may already be released. The pool’s counts below say', not: 'nothing was released' },
 } as const;
 
 /**
@@ -83,6 +91,14 @@ export function notAnswered(code: string | undefined, verb: keyof typeof UNANSWE
 	return undefined;
 }
 
+/** What each write is, for a session that may not make it. */
+const VERBS = {
+	edit: 'edit thoughts: editing',
+	delete: 'delete thoughts: deleting',
+	capture: 'capture thoughts: capturing',
+	retry: 'retry a pool’s failed work: retrying',
+	release: 'release a pool’s stale leases: releasing them',
+} as const;
+
 /** What a session that may not write is told: by key or by the operator's sign-in, it is the session that may not. */
-export const notYours = (verb: 'edit' | 'delete' | 'capture') =>
-	`This session cannot ${verb} thoughts: ${{ edit: 'editing', delete: 'deleting', capture: 'capturing' }[verb]} is a write key’s, or the operator’s through the authorization server.`;
+export const notYours = (verb: keyof typeof VERBS) => `This session cannot ${VERBS[verb]} is a write key’s, or the operator’s through the authorization server.`;
