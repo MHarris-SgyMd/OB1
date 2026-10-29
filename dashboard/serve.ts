@@ -77,9 +77,9 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     }, deadlineMs).unref();
   });
 }
-// The largest body the GUI takes is a thought's edited text (SMD-3322), posted as multipart so its text is not
+// The largest body the GUI takes is a thought's text, edited or captured (SMD-3322), posted as multipart so its text is not
 // percent-encoded (three bytes a byte for anything not ASCII): 1 MB, which the edit page holds a thought's text under
-// as a browser posts it (EDIT_MAX_BYTES, postedBytes), saying so of a thought past it rather than letting its Save
+// as a browser posts it (TEXT_MAX_BYTES, postedBytes), saying so of a thought past it rather than letting its Save
 // fail. Every other request — the sign-in form's key, signed out, among them — is held to 64 kB by its declared
 // length in hooks.server.ts, as all were before.
 env.BODY_SIZE_LIMIT = "1M";

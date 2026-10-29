@@ -1271,7 +1271,9 @@ jobs:
       # the supervisor holds that too, to run it again in a minute. Each case
       # is still running once its line is logged — the container does not
       # exit, so `unless-stopped` has nothing to restart in a loop — and a
-      # stop ends it promptly with 0.
+      # stop ends it promptly with 0. The eight cases share nothing but
+      # heartbeat rows nothing here reads, so they run side by side
+      # (.github/ci/held-cases.sh, SMD-3365).
       - name: The workers profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
@@ -1280,37 +1282,21 @@ jobs:
           docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
           before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
-          # Bounded: each case waits up to 60 s for its line, then is stopped.
-          held() {
-            local svc=$1 want=$2; shift 2
-            local ct="ci-held-$svc-$RANDOM"
-            docker compose -f compose.yaml --profile workers run -d --no-deps --name "$ct" "$@" "$svc" > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
-          held extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          also 'supervise: extract is held, not started'
-          held consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          held extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          held consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          source ../.github/ci/held-cases.sh
+          held_case x-nokey workers extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case c-nokey workers consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case x-follow workers extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held_case c-workers workers consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
           # …and each setting is checked, not only the pair's first.
-          held consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          held extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          held extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
-          also 'it runs again at'
-          held consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_case c-follow workers consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held_case x-both workers extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held_case x-probe workers extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          held_case c-probe workers consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_wait
+          held_also x-nokey 'supervise: extract is held, not started'
+          held_also x-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_also x-probe 'it runs again at'
+          held_also c-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
             printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
@@ -1325,53 +1311,42 @@ jobs:
       # fresh heartbeat in this stack's database, beside which it will not
       # sleep (the two profiles are alternatives), which also proves it
       # reaches the database on the server's environment — each held, to run
-      # again in a minute.
+      # again in a minute. Each writes heartbeat:sleep, which two cases read,
+      # so those two run as batches of their own and the seven between them
+      # side by side (.github/ci/held-cases.sh, SMD-3365).
       - name: The sleep profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          held() {
-            local want=$1; shift
-            local ct="ci-held-sleep-$RANDOM"
-            docker compose -f compose.yaml --profile sleep run -d --no-deps --name "$ct" "$@" sleep > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          source ../.github/ci/held-cases.sh
           row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
-          held 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case nokey sleep sleep 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_wait
           stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           # concat_ws skips the null in_s: held for a recreate, no next try.
           [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
-          held "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          held "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
-          also 'supervise: sleep exited 2'
+          held_case quiet sleep sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held_case poll sleep sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held_case workers sleep sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held_case poll61 sleep sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
           # the path one argument with its space, and one it cannot write is
           # the scheduler's own refusal, before it reads the database.
-          held '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
+          held_case dumpdir sleep sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
-          held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          held "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
-          held '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_case budget sleep sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held_case mwm sleep sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held_case budget-max sleep sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_wait
+          held_also poll61 'supervise: sleep exited 2'
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_case outside sleep sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_wait
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
-          also 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          held_also outside 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
           # The refusal ends heartbeat:sleep on a failure, and the supervisor
           # adds its next try, so preflight's sleep row says it is held and
           # names the followers keeping it down; then the row goes, leaving
@@ -1889,12 +1864,14 @@ jobs:
       # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
       # server. With --writes (SMD-3322), a thought of the smoke's own,
-      # captured over /mcp, is edited and deleted on its own pages — a stale
-      # edit refused, a read key offered neither — and its audit rows then
-      # read here, in order: the capture, carried by the MCP server (its
-      # forwarder as act), then the one edit saved and the delete, each a
-      # direct call to the REST core with no carrier, as the GUI makes them,
-      # all under the smoke key's name, as Verify asks. The smoke reads its
+      # captured on the GUI's capture page, is edited and deleted on its own
+      # pages — a stale edit refused, a read key offered none of them — and
+      # its audit rows then read here, in order: the capture, the one edit
+      # saved and the delete (a second capture of the same text, from the same
+      # key and source, changes nothing and writes none),
+      # each labelled with the GUI's source, `dashboard`, each a direct call
+      # to the REST core with no carrier, as the GUI makes them, all under the
+      # smoke key's name, as Verify asks. The smoke reads its
       # keys from this job's environment, off its command line. Here, not after the
       # next step: that one configures the authorization server, and the GUI
       # then offers no key sign-in (review pass 1). The smoke imports only
@@ -1922,8 +1899,8 @@ jobs:
           written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
           [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
           rows=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
-            "SELECT string_agg(action || ' ' || origin || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
-          [ "$rows" = "capture open-brain-api true false, update open-brain-api true true, delete open-brain-api true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture carried by the MCP server, then one edit and one delete the GUI made directly, under the smoke key"; exit 1; }
+            "SELECT string_agg(action || ' ' || origin || ' ' || coalesce(source, '-') || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
+          [ "$rows" = "capture open-brain-api dashboard true true, update open-brain-api dashboard true true, delete open-brain-api dashboard true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture, one edit and one delete the GUI made directly, labelled dashboard, under the smoke key"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
