@@ -17,9 +17,9 @@
 		{ href: `${base}/query-log`, label: 'Query log' },
 		{ href: `${base}/status`, label: 'Status' },
 	];
-	// After the brain's own views: the page of grants where the session may use it (SMD-3307 PR 3), then the enabled
-	// plugins' pages (SMD-2280 PR 3), as the registry labels them.
-	// Capture beside the overview, for a session that may capture (SMD-3322): the one view that writes.
+	// The brain's own views, Capture beside the overview for a session that may capture (SMD-3322: the one view that
+	// writes); then the page of grants where the session may use it (SMD-3307 PR 3), then the enabled plugins' pages
+	// (SMD-2280 PR 3), as the registry labels them.
 	const views = $derived([
 		nav[0],
 		...(data.canCapture ? [{ href: `${base}/capture`, label: 'Capture' }] : []),

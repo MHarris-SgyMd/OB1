@@ -41,11 +41,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 		event.cookies.delete(event.locals.sessionCookie, cookieOptions(event.url, breakglass));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);
-	// The body limit is an edit's or a capture's 1 MB (serve.ts); every other request — a sign-in, signed out, among them — is held to
-	// 64 kB, as the GUI held them all before (SMD-3322 review pass 2), by the length it declares. A body that declares
-	// none (sent chunked) is refused there too, since it could be read to serve.ts's limit; a browser declares a form
-	// post's length (review pass 3). Answered here, with this answer's headers, not thrown: SvelteKit's page for an
-	// error thrown from `handle` carries none of them (review pass 3).
+	// The body limit is an edit's or a capture's 1 MB (serve.ts); every other request — a sign-in, signed out, among
+	// them — is held to 64 kB, as the GUI held them all before (SMD-3322 review pass 2), by the length it declares. A
+	// body that declares none (sent chunked) is refused there too, since it could be read to serve.ts's limit; a
+	// browser declares a form post's length (review pass 3). Answered here, with this answer's headers, not thrown:
+	// SvelteKit's page for an error thrown from `handle` carries none of them (review pass 3).
 	if (!(session && LARGE_BODY_PATH.test(event.url.pathname))) {
 		const declared = event.request.headers.get('content-length');
 		if (declared === null ? event.request.body !== null : Number(declared) > SMALL_BODY_BYTES) {

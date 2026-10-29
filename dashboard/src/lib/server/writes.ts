@@ -3,13 +3,20 @@
 import { base } from '$app/paths';
 
 /**
- * The most text the edit and capture pages save, in the bytes a browser posts it as —
- * its UTF-8, each line break sent as CRLF (postedBytes) — under serve.ts's
- * 1 MB body limit with room for the multipart form's boundaries and its other
- * field. The page says so of a thought past it, rather than offer a Save the
- * server would refuse unread.
+ * The most text the edit and capture pages save, in the bytes a browser posts
+ * it as — its UTF-8, each line break sent as CRLF (postedBytes) — under
+ * serve.ts's 1 MB body limit with room for the multipart form's boundaries and
+ * its other field. The edit page says so of a thought past it, rather than
+ * offer a Save the server would refuse unread.
  */
-export const EDIT_MAX_BYTES = 1_000_000;
+export const TEXT_MAX_BYTES = 1_000_000;
+
+/** What a text past TEXT_MAX_BYTES is told, on the page that would save it, and where it can go instead. */
+export const tooLarge = (bytes: number, operation: 'update_thought' | 'capture_thought', verb: 'Edit' | 'Capture') =>
+	`This text posts as ${bytes.toLocaleString('en-US')} bytes, past the ${TEXT_MAX_BYTES.toLocaleString('en-US')} this page saves. ${verb} it through ${operation} over the MCP server or the REST core instead.`;
+
+/** A field's text as it was typed: a browser sends a textarea's line breaks as CRLF, each saved as one break (the plugin pin's rule). */
+export const typed = (value: FormDataEntryValue | null) => String(value ?? '').replace(/\r\n?/g, '\n');
 
 /**
  * A text's size as a browser posts it from a field: its UTF-8 bytes, each line break — LF, CRLF or a lone CR,
@@ -18,7 +25,11 @@ export const EDIT_MAX_BYTES = 1_000_000;
  */
 export const postedBytes = (text: string) => Buffer.byteLength(text.replace(/\r\n|\r|\n/g, '\r\n'), 'utf8');
 
-/** The body every request but an edit's or a capture's is held to, by its declared length, a body declaring none refused: serve.ts's limit is theirs, 1 MB, and a sign-in or any other form is far smaller (review passes 2 and 3). */
+/**
+ * The body every request but an edit's or a capture's is held to, by its
+ * declared length, a body declaring none refused: serve.ts's limit is theirs,
+ * 1 MB, and a sign-in or any other form is far smaller (review passes 2 and 3).
+ */
 export const SMALL_BODY_BYTES = 64 * 1024;
 
 /** The edit and capture pages' paths, whose posts alone, from a live session, may carry the larger body. */
@@ -33,16 +44,17 @@ export const CAPTURE_SOURCE = 'dashboard';
 /** A thought id's shape, as the core names one (and as a client_key is), for a value the GUI says back. */
 export const THOUGHT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** How long a flash cookie lives: the redirect's time and more. */
+export const FLASH_MAX_AGE = 60;
+
 /**
  * The flash cookie the delete page sets for the list to say what it deleted:
  * read and cleared there, so the notice is the delete's own, and a link
  * cannot make the list say a thought was deleted. Named after the listener's
  * session cookie (listener.ts sessionCookieName), so the break-glass port's
- * and the origin's stay apart, as their sessions do. A minute is the
- * redirect's time and more.
+ * and the origin's stay apart, as their sessions do.
  */
 export const deletedCookie = (sessionCookie: string) => `${sessionCookie}_deleted`;
-export const FLASH_MAX_AGE = 60;
 
 /**
  * The flash cookie the capture page sets for the thought's page to say what the capture did: `<id>.new`, or

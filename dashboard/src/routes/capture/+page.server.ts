@@ -3,7 +3,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { base } from '$app/paths';
 import { codeOf, may, write } from '$lib/server/rest';
 import { cookieOptions } from '$lib/server/session';
-import { CAPTURE_SOURCE, capturedCookie, EDIT_MAX_BYTES, FLASH_MAX_AGE, notAnswered, notYours, postedBytes, THOUGHT_ID } from '$lib/server/writes';
+import { CAPTURE_SOURCE, capturedCookie, FLASH_MAX_AGE, notAnswered, notYours, postedBytes, TEXT_MAX_BYTES, THOUGHT_ID, tooLarge, typed } from '$lib/server/writes';
 
 // A thought captured from the GUI (SMD-3322): capture_thought under the
 // visitor's credential, naming the GUI's own source, `dashboard`, so its
@@ -13,14 +13,11 @@ import { CAPTURE_SOURCE, capturedCookie, EDIT_MAX_BYTES, FLASH_MAX_AGE, notAnswe
 // did from a flash cookie: a new thought, or the one that already held this
 // text — into which the core merges this capture, its source now `dashboard`
 // and the metadata extracted merged in (review pass 1) — and whether this
-// capture wrote no embedding.
-// The form posts as multipart, held to EDIT_MAX_BYTES as the edit page is. A
-// session whose whoami named no capture_thought is offered no page here.
+// capture wrote no embedding. The form posts as multipart, held to
+// TEXT_MAX_BYTES as the edit page is. A session whose whoami named no
+// capture_thought is offered no page here.
 
 export const csr = false;
-
-const tooLarge = (n: number) =>
-	`This text posts as ${n.toLocaleString('en-US')} bytes, past the ${EDIT_MAX_BYTES.toLocaleString('en-US')} this page saves. Capture it through capture_thought over the MCP server or the REST core instead.`;
 
 export const load: PageServerLoad = async (event) => {
 	if (!may(event.locals.session, 'capture_thought')) error(403, notYours('capture'));
@@ -33,13 +30,12 @@ export const actions: Actions = {
 		// Before anything the post says, as the load: no call the core would only refuse (the load's 403 answers the page).
 		if (!may(session, 'capture_thought')) return fail(403, { content: '', error: notYours('capture') });
 		const form = await event.request.formData();
-		// A browser sends a textarea's line breaks as CRLF: saved as they were typed, as the edit page saves them.
-		const content = String(form.get('content') ?? '').replace(/\r\n?/g, '\n');
+		const content = typed(form.get('content'));
 		const kept = { content };
 		if (!content.trim()) return fail(400, { ...kept, error: 'Write the thought first.' });
 		// No Postgres text holds a NUL: the core's 500 (SMD-2534). Refused here, not stripped, since the text is the visitor's words.
 		if (content.includes('\0')) return fail(400, { ...kept, error: 'A thought cannot hold a NUL character.' });
-		if (postedBytes(content) > EDIT_MAX_BYTES) return fail(413, { ...kept, error: tooLarge(postedBytes(content)) });
+		if (postedBytes(content) > TEXT_MAX_BYTES) return fail(413, { ...kept, error: tooLarge(postedBytes(content), 'capture_thought', 'Capture') });
 		const answer = await write(event, session, 'capture_thought', { content, source: CAPTURE_SOURCE });
 		const body = answer.body as { id?: unknown; existed?: unknown; embeddingAttached?: unknown } | null;
 		if (answer.ok && typeof body?.id === 'string' && THOUGHT_ID.test(body.id)) {
