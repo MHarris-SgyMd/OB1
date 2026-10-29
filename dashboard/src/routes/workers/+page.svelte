@@ -1,15 +1,23 @@
 <script lang="ts">
 	import { when } from '$lib/format';
-	import type { PageData } from './$types';
+	import type { ActionData, PageData } from './$types';
 
-	let { data }: { data: PageData } = $props();
+	let { data, form }: { data: PageData; form: ActionData } = $props();
 	const n = (v: number) => v.toLocaleString();
+	/** Whether a pool's row has anything this session may act on (SMD-3322 PR 3). */
+	const actable = (p: { failed: number; stale: number }) => (data.canRetry && p.failed > 0) || (data.canRelease && p.stale > 0);
+	const acting = $derived(data.pools.some(actable));
 </script>
 
 <svelte:head><title>Workers · Open Brain</title></svelte:head>
 
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Workers</h1>
+	{#if form?.error}
+		<p class="text-sm text-amber-300" role="alert" data-testid="worker-error">{form.error}</p>
+	{:else if data.done}
+		<p class="text-sm" role="status" data-testid="worker-done">{data.done}</p>
+	{/if}
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5 space-y-3">
 		{#if data.pools.length === 0}
 			<p class="text-sm text-text-muted" data-testid="empty">No work has been queued: a pool appears once anything is queued for it.</p>
@@ -31,6 +39,7 @@
 							<th scope="col" class="py-1 pr-4 font-normal text-right">Stale</th>
 							<th scope="col" class="py-1 pr-4 font-normal text-right">Done</th>
 							<th scope="col" class="py-1 font-normal text-right">Failed</th>
+							{#if acting}<th scope="col" class="py-1 pl-4 font-normal text-left">Act</th>{/if}
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-white/5">
@@ -46,6 +55,25 @@
 								<td class="py-1 pr-4 text-right {p.stale ? 'text-amber-300' : ''}">{n(p.stale)}</td>
 								<td class="py-1 pr-4 text-right">{n(p.succeeded)}</td>
 								<td class="py-1 text-right {p.failed ? 'text-amber-300' : ''}">{n(p.failed)}</td>
+								{#if acting}
+									<!-- Each pool's own forms, its name whole in them as the core wrote it (the cell shows it cut). -->
+									<td class="py-1 pl-4">
+										<div class="flex flex-wrap gap-2">
+											{#if data.canRetry && p.failed > 0}
+												<form method="POST" action="?/retry" data-testid="retry">
+													<input type="hidden" name="work_type" value={p.name} />
+													<button type="submit" class="button text-xs" aria-label="Retry {n(p.failed)} failed in {p.workType}">Retry {n(p.failed)} failed</button>
+												</form>
+											{/if}
+											{#if data.canRelease && p.stale > 0}
+												<form method="POST" action="?/release" data-testid="release">
+													<input type="hidden" name="work_type" value={p.name} />
+													<button type="submit" class="button text-xs" aria-label="Release {n(p.stale)} stale in {p.workType}">Release {n(p.stale)} stale</button>
+												</form>
+											{/if}
+										</div>
+									</td>
+								{/if}
 							</tr>
 						{/each}
 					</tbody>

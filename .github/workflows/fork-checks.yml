@@ -1908,15 +1908,22 @@ jobs:
           grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
           # One proposal and one work pool, each through the brain's own producer — record_supersession_proposal writes
           # the lineage row preflight asks of every proposal (SMD-1731), enqueue_thoughts the pool's pending claims — so
-          # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
+          # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1). In the pool,
+          # through migration 015's own claim functions, one failed row (claimed, then released as failed) and one stale
+          # lease (claimed for a second), for the smoke's write arm to retry and release (SMD-3322 PR 3).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
-            "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
+            "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts)); SELECT release_thought(c.thought_id, 'extract:gui-smoke@ci', 'ci-gui-smoke-fails', 'failed', 'The operator GUI smoke''s failed row (SMD-3322).') FROM claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-fails', 1) c; SELECT claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-gone', 1, 1);") > /dev/null
           bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
           written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
           [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
           rows=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
             "SELECT string_agg(action || ' ' || origin || ' ' || coalesce(source, '-') || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
           [ "$rows" = "capture open-brain-api dashboard true true, update open-brain-api dashboard true true, delete open-brain-api dashboard true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture, one edit and one delete the GUI made directly, labelled dashboard, under the smoke key"; exit 1; }
+          # The worker actions write no thought_audit row; each logs an action row for each thought it touches, under its key
+          # (core/workers.ts): one retried, one released, by the smoke key's agent (its capture's). The second retry requeued none.
+          acts=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT string_agg(tool || ' ' || n, ', ' ORDER BY tool) FROM (SELECT tool, count(*) AS n FROM query_log WHERE kind = 'action' AND tool IN ('retry_failed', 'release_stale_leases') AND agent_id = (SELECT canonical_agent_id FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture') GROUP BY tool) t")
+          [ "$acts" = "release_stale_leases 1, retry_failed 1" ] || { echo "the worker actions' rows read \"$acts\", not one release and one retry under the smoke key"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
