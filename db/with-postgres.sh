@@ -8,9 +8,10 @@
 # is what this project's authors run. The container is named distinctly and removed
 # on exit, so it will not collide with or outlive anything else you have running.
 #
-# The host port is picked at random in 20000–29999, below the kernels' ranges
-# for port 0, and a start that loses it anyway is retried on another, up to five
-# starts (SMD-3592); OB1_PG_PORT=<port> names the port instead, without a retry.
+# The host port is picked at random in 10000–19999, below the kernels' default
+# ranges for port 0, and a start that loses it anyway is retried on another, up
+# to five starts (SMD-3592); OB1_PG_PORT=<port> names the port instead, without
+# a retry.
 #
 #   OB1_PG_KEEP=<name> ./with-postgres.sh bun bench-hnsw.ts
 #
@@ -41,25 +42,30 @@ if [ -n "$KEEP" ]; then NAME="ob1-pg-keep-$KEEP"; else NAME="ob1-test-pg-$$"; fi
 # interrupted run would otherwise fail every later run with "address already in
 # use", and two suites cannot run at once.
 #
-# The pick is in 20000–29999, as the suites' quietPort picks (SMD-3296): below
-# the kernels' default ranges for port 0 (Linux 32768–60999, macOS
-# 49152–65535). The runtime binds the port only at `start`, and until then any
-# process binding port 0 could be handed it — macOS hands port 0 out from one
-# cursor every process shares — so a start inside that range failed "address
-# already in use" in 5 of 20 runs under load (SMD-3592). A port is free when a
-# connect to 127.0.0.1 at it, the address DATABASE_URL dials, is refused: on
-# macOS podman's bind on every address succeeds beside a listener on 127.0.0.1
-# or 0.0.0.0 alone, which would then take DATABASE_URL's connections
-# (reproduced: the command's connect timed out on it). A listener on :: fails
-# the start instead, and the start is retried (below).
+# The pick is in 10000–19999: below the kernels' default ranges for port 0
+# (Linux 32768–60999, macOS 49152–65535), and apart from the suites' quietPort
+# (20000–29999, SMD-3296), whose ports must refuse while a suite runs. The
+# runtime binds the port only at `start`, and until then any process binding
+# port 0 could be handed it — macOS hands port 0 out from one cursor every
+# process shares — so a start inside that range failed "address already in
+# use" in 5 of 20 runs under load (SMD-3592). The number comes from
+# /dev/urandom, not $RANDOM: bash 3.2 seeds $RANDOM from the time and the pid,
+# and two runs launched together picked the same port in 3 of 20 pairs.
+#
+# A port is free when a connect to 127.0.0.1 at it, the address DATABASE_URL
+# dials, is refused: on macOS podman's bind on every address succeeds beside a
+# listener on 127.0.0.1 or 0.0.0.0 alone, which would then take DATABASE_URL's
+# connections (reproduced: the command's connect timed out on it). A listener
+# that does fail the start (one on :: that no 127.0.0.1 connect reaches, or one
+# bound after the pick) is retried past (below).
 pick_port() {
   if [ -n "${OB1_PG_PORT:-}" ]; then echo "$OB1_PG_PORT"; return; fi
   for _ in $(seq 1 50); do
-    p=$(( 20000 + RANDOM % 10000 ))
+    p=$(( 10000 + $(od -An -N2 -tu2 /dev/urandom) % 10000 ))
     if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then echo "$p"; return; fi
     exec 3>&- 2>/dev/null || true
   done
-  echo 25432
+  echo 15432
 }
 PORT="$(pick_port)"
 PASSWORD="ob1test"
@@ -132,7 +138,10 @@ cleanup() {
     fi
     "$RUNTIME" stop -t "$STOP_TIMEOUT" "$CID" >/dev/null 2>&1 || true
     discard "$CID"
-    [ "$STARTED" = 1 ] && echo "— done"
+    # An `if`, not `&&`: as cleanup's last command a false test would make
+    # the EXIT trap, under `set -e`, exit 1 in place of the status given to
+    # `exit` (review pass, reproduced: a failed start under OB1_PG_KEEP).
+    if [ "$STARTED" = 1 ]; then echo "— done"; fi
   else
     discard "$CID"
   fi
@@ -242,9 +251,10 @@ fi
 # starts in all: between the pick and the bind, a process binding that port by
 # number (another with-postgres.sh starting at once) can still take it
 # (SMD-3592). Only that failure is retried, known by the runtime's words for it
-# (podman's "address already in use", docker's "port is already allocated"),
-# and only on a picked port: a start on OB1_PG_PORT's fails as before. Each
-# loser is removed by its ID before the next `create` takes the name.
+# ("address already in use", or docker's "port is already allocated"), and
+# only on a picked port: a start on OB1_PG_PORT's fails as before. Each loser
+# is removed by its ID before the next `create` takes the name. What a start
+# prints on stderr is printed, whether it fails or not (a podman WARN line).
 START_TRIES=5
 for try in $(seq 1 "$START_TRIES"); do
   echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
@@ -258,8 +268,8 @@ for try in $(seq 1 "$START_TRIES"); do
     ${PG_ARGS[@]+"${PG_ARGS[@]}"})"
   START_STATUS=0
   START_ERR="$("$RUNTIME" start "$CID" 2>&1 >/dev/null)" || START_STATUS=$?
+  [ -z "$START_ERR" ] || echo "$START_ERR" >&2
   if [ "$START_STATUS" = 0 ]; then STARTED=1; break; fi
-  echo "$START_ERR" >&2
   if [ -n "${OB1_PG_PORT:-}" ] || [ "$try" = "$START_TRIES" ] \
     || ! grep -qiE 'address already in use|port is already allocated' <<< "$START_ERR"; then
     exit "$START_STATUS"
