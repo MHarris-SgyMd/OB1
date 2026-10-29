@@ -1468,10 +1468,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
    * back unfinished — and the claims in flight, so two workers cannot each
    * take one on a limit of one. A row a worker hands back unfinished as it
-   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
-   * claimed again; a claim that never answered took nothing; a dead worker's
-   * leases are not this run's until a claim returns them (review pass 3: a
-   * reserved count patched at three sites, each with its own edge).
+   * ends (an outage, a stop), or sets back when its call is aborted
+   * (abortInHand, SMD-3379 PR 1b-2), leaves `taken`, and counts again only if
+   * it is claimed again; a claim that never answered took nothing; a dead
+   * worker's leases are not this run's until a claim returns them (review
+   * pass 3: a reserved count patched at three sites, each with its own edge).
    */
   const taken = new Set<string>();
   let claiming = 0;
@@ -1579,7 +1580,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // count finds none to count again (review pass 1).
                   const held = inHand.get(workerId);
                   inHand.delete(workerId);
-                  await noteStop(workerId, held);
+                  // The hard stop's release waits for this count, as for its own (review pass 2).
+                  const counting = noteStop(workerId, held);
+                  stopNotes.set(workerId, counting);
+                  await counting;
+                  if (hardStopped) return;
                   hb.held.delete(b.thought_id);
                   let back: boolean;
                   try {

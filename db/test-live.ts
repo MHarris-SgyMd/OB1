@@ -6372,7 +6372,7 @@ if (want("10")) {
   slowMs = 0;
   const goneAbortCode = await goneAbortRun;
   const goneAbortSummary = goneAbortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
-  assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary),
+  assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary) && goneAbortLines.some((l) => l.includes(`${vanishing}: deleted while it was leased`)),
          `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
 
   model.stop(true);

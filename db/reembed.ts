@@ -2273,7 +2273,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             inCall.set(workerId, { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false });
             try {
               outcome = await processRow(row, workerId);
-              probed = true;
+              // An aborted call is no answer from the provider (review pass 2).
+              if (outcome.outcome !== "setBack") probed = true;
             } catch (e) {
               if (e instanceof WriterThrow) throw e.error;
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
