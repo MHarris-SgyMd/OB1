@@ -44,6 +44,8 @@ export type Session = {
 	scope: string;
 	/** Whether whoami named capture_thought among the holder's operations — false for a read key. */
 	canCapture: boolean;
+	/** The operations whoami named at sign-in: a page offers a write only where they list it (SMD-3322); the REST core still decides each call. */
+	operations: readonly string[];
 	/** Whether it was signed in on the break-glass listener (SMD-3307): it opens pages there alone (hooks.server.ts). */
 	breakglass: boolean;
 };
@@ -129,7 +131,7 @@ export function readSession(id: string | undefined): Session | null {
 	if (!held) return null;
 	// An expired session is left for the caller to close (hooks.server.ts), which revokes its tokens (review pass 2).
 	if (held.exp <= Date.now()) return null;
-	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture, breakglass: held.breakglass };
+	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture, operations: held.operations, breakglass: held.breakglass };
 }
 
 /** A renewal's new tokens, written back to the session that holds them; false, and the tokens revoked, when the session has ended meanwhile. */

@@ -74,7 +74,7 @@ export const GET: RequestHandler = async ({ cookies, url, request, locals }) => 
 	}
 	// A sign-in over a live session replaces it, as a key's does; it, and any the store ends for room, have their tokens revoked (session.ts onTokensEnded).
 	closeSession(locals.session?.id);
-	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought'), breakglass: false });
+	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought'), operations: who!.operations, breakglass: false });
 	cookies.set(locals.sessionCookie, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 	throw redirect(303, HOME);
 };
