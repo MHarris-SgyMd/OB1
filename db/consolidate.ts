@@ -1723,7 +1723,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // No early exit on `stopping` here: a thought is at most --k calls, bounded
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
-    for (const [at, c] of candidates.entries()) {
+    for (const [pairIndex, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
       // here, its claim and lease kept.
@@ -1747,7 +1747,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // through its proposals) or its metadata, which the egress gate reads
           // (review pass 6): the worker puts it back in the pool.
           if (claim === "moved") return { outcome: "moved" };
-          const rest = candidates.slice(at).map((x) => x.older_id);
+          const rest = candidates.slice(pairIndex).map((x) => x.older_id);
           const fresh = (await sql`
             SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector FROM thoughts
             WHERE id = ANY(${sql.array(rest, "TEXT")}::uuid[])`.catch(() => null)) as Row[] | null;

@@ -6091,6 +6091,8 @@ if (want("10")) {
     return { lines, done };
   };
   const statusOf = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  /** A long note of six paragraphs, each naming the ledger, past the 300-token window: the gate's window cases, one text each. */
+  const ledgerOf = (lead: string, verb: string) => Array.from({ length: 6 }, (_, p) => `The ${lead} ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita ${verb} point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n");
   const othersPending = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
   // The cases below count calls and asks: the pool must hold their thoughts alone (review pass 6).
   assert(othersPending === 0, `the gate's cases start on an empty pool (${othersPending} row(s) pending or claimed)`);
@@ -6127,7 +6129,7 @@ if (want("10")) {
   // second: the worker waits between windows, its claim kept, and a stop
   // while it waits ends the thought there — its first window kept, no stop
   // counted, the claim back in the pool.
-  const windowNote = await seed(Array.from({ length: 6 }, (_, p) => `The gated ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita gated point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const windowNote = await seed(ledgerOf("gated", "gated"));
   const atWindow = heldGate(3);
   const windowStop = new AbortController();
   const windowFrom = calls;
@@ -6148,7 +6150,7 @@ if (want("10")) {
   // pause past the floor stalls nothing (review pass 1). A fresh long note,
   // the only one pending: the gate closed before its first window.
   await sql`SELECT delete_thought(${windowNote}::uuid, NULL::jsonb)`;
-  const pausedNote = await seed(Array.from({ length: 6 }, (_, p) => `The paused ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita paused point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const pausedNote = await seed(ledgerOf("paused", "paused"));
   const atPause = heldGate(2);
   const gateStop = new AbortController();
   let gateHard: PassStop | undefined;
@@ -6183,7 +6185,7 @@ if (want("10")) {
   await sql`SELECT delete_thought(${refusalNote}::uuid, NULL::jsonb)`;
   // A gate that rejects with no stop, mid-thought, is the caller's error: run()
   // rejects with it, and the thought is not recorded failed (review pass 1).
-  const brokenNote = await seed(Array.from({ length: 6 }, (_, p) => `The broken-gate ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita broke point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const brokenNote = await seed(ledgerOf("broken-gate", "broke"));
   let brokenAsks = 0;
   const brokenOutcome = await runExtract({ url: URL_!, env, workers: 1, admit: () => (++brokenAsks === 3 ? Promise.reject(new Error("the gate broke")) : Promise.resolve()), writer: { out: () => {}, err: () => {} } })
     .then((c) => `exit ${c}`, (e: Error) => e.message);
@@ -6194,7 +6196,7 @@ if (want("10")) {
   // A long note deleted while its worker waits at the gate between windows:
   // the live write that closes the gate, so nothing more of it is sent once
   // the gate opens (review pass 3).
-  const goneNote = await seed(Array.from({ length: 6 }, (_, p) => `The deleted ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita deleted point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const goneNote = await seed(ledgerOf("deleted", "deleted"));
   const atGone = heldGate(3);
   const goneFrom = calls;
   const goneLines: string[] = [];
@@ -6211,7 +6213,7 @@ if (want("10")) {
   // for the edit alone — so the claim is still the worker's: nothing more of
   // the old text is sent, and the thought goes back to the pool for its new
   // text, which the run then extracts (review pass 4).
-  const editedNote = await seed(Array.from({ length: 6 }, (_, p) => `The edited ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita edited point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const editedNote = await seed(ledgerOf("edited", "edited"));
   const atEdited = heldGate(3);
   const editedFrom = ledgerCalls;
   const editedRun = runExtract({ url: URL_!, env, workers: 1, admit: atEdited.admit, writer: { out: () => {}, err: () => {} } });
@@ -6232,7 +6234,7 @@ if (want("10")) {
   // …and one edited under the key the trigger follows, which requeues it: no
   // more of its old text sent, counted edited, not lost, and extracted again
   // at its new text (review pass 5).
-  const requeuedNote = await seed(Array.from({ length: 6 }, (_, p) => `The requeued ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita requeued point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const requeuedNote = await seed(ledgerOf("requeued", "requeued"));
   const atRequeued = heldGate(3);
   const requeuedFrom = ledgerCalls;
   const requeuedLines: string[] = [];
@@ -6248,7 +6250,7 @@ if (want("10")) {
   // …and one whose metadata alone is edited then, which the egress gate
   // reads: no more of it is sent under the old tags, and it goes back to the
   // pool, extracted again under the new (review pass 6).
-  const retaggedNote = await seed(Array.from({ length: 6 }, (_, p) => `The retagged ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita retagged point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const retaggedNote = await seed(ledgerOf("retagged", "retagged"));
   const atRetagged = heldGate(3);
   const retaggedFrom = ledgerCalls;
   const retaggedLines: string[] = [];
@@ -6265,7 +6267,7 @@ if (want("10")) {
   // …and an untouched one whose metadata holds an integer past 2^53, which
   // JavaScript cannot hold: read again as a hash in SQL, it is not moved, and
   // carries on in the same claim (review pass 7).
-  const wideNote = await seed(Array.from({ length: 6 }, (_, p) => `The wide ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita widened point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const wideNote = await seed(ledgerOf("wide", "widened"));
   await sql`UPDATE thoughts SET metadata = metadata || '{"n": 12345678901234567890}'::jsonb WHERE id = ${wideNote}::uuid`;
   const atWide = heldGate(3);
   const wideLines: string[] = [];
@@ -6280,7 +6282,7 @@ if (want("10")) {
   // A pause moves the thought's time held on (N17): a hard stop while the
   // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
   // and stalls nothing (review pass 3).
-  const movedNote = await seed(Array.from({ length: 6 }, (_, p) => `The moved ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita moved point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  const movedNote = await seed(ledgerOf("moved", "moved"));
   const atMoved = heldGate(2);
   const movedStop = new AbortController();
   let movedHard: PassStop | undefined;
@@ -9610,7 +9612,7 @@ if (want("16")) {
   const othersPendingC = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
   assert(othersPendingC === 0, `the consolidation gate's cases start on an empty pool (${othersPendingC} row(s) pending or claimed)`);
   const gatedNewer = await seed("[16g] The gatehouse opens at eleven now.", 30, 0, ["gatehouse"]);
-  const gatedStatus = async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${gatedNewer}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  const claimStatus = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
   const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => runConsolidate({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: () => {}, err: () => {} } });
   // Open for the pass, the claim and the first pair; closed before the second.
   const atPair = heldGate(3);
@@ -9619,26 +9621,26 @@ if (want("16")) {
   const pairRun = gatedRun(atPair, pairStop.signal);
   const pairWaiting = await pollUntil(async () => atPair.waiting === 1, 10_000);
   await Bun.sleep(300);
-  const pairHeld = await gatedStatus();
+  const pairHeld = await claimStatus(gatedNewer);
   const pairCalls = calls - pairFrom;
   const pairAt = Date.now();
   pairStop.abort();
   const pairCode = await pairRun;
   const pairMs = Date.now() - pairAt;
-  assert(pairWaiting && pairHeld === "claimed" && pairCalls === 1 && pairCode === 130 && pairMs < 1500 && (await gatedStatus()) === "pending" && calls - pairFrom === 1,
-         `a consolidation gate closed before a thought's second pair waits there with the claim kept, and a stop while it waits ends the run at once, the thought back in the pool unrecorded (${pairHeld} while closed after ${pairCalls} call(s); exit ${pairCode} in ${pairMs} ms; ${await gatedStatus()})`);
+  assert(pairWaiting && pairHeld === "claimed" && pairCalls === 1 && pairCode === 130 && pairMs < 1500 && (await claimStatus(gatedNewer)) === "pending" && calls - pairFrom === 1,
+         `a consolidation gate closed before a thought's second pair waits there with the claim kept, and a stop while it waits ends the run at once, the thought back in the pool unrecorded (${pairHeld} while closed after ${pairCalls} call(s); exit ${pairCode} in ${pairMs} ms; ${await claimStatus(gatedNewer)})`);
   // Open for the pass, closed at the claim: the pool written, no claim held; opened, both pairs judged.
   const atClaimC = heldGate(1);
   const claimFromC = calls;
   const claimRunC = gatedRun(atClaimC, new AbortController().signal);
   const claimWaitingC = await pollUntil(async () => atClaimC.waiting === 1, 10_000);
   await Bun.sleep(300);
-  const claimHeldC = await gatedStatus();
+  const claimHeldC = await claimStatus(gatedNewer);
   const claimCallsC = calls - claimFromC;
   atClaimC.open();
   const claimCodeC = await claimRunC;
-  assert(claimWaitingC && claimHeldC === "pending" && claimCallsC === 0 && claimCodeC <= 1 && (await gatedStatus()) === "succeeded" && calls - claimFromC === 2,
-         `…closed at the claim, it waits holding none, and judges both pairs once the gate opens (${claimHeldC} while closed, ${claimCallsC} call(s); exit ${claimCodeC}, ${await gatedStatus()}, ${calls - claimFromC} call(s))`);
+  assert(claimWaitingC && claimHeldC === "pending" && claimCallsC === 0 && claimCodeC <= 1 && (await claimStatus(gatedNewer)) === "succeeded" && calls - claimFromC === 2,
+         `…closed at the claim, it waits holding none, and judges both pairs once the gate opens (${claimHeldC} while closed, ${claimCallsC} call(s); exit ${claimCodeC}, ${await claimStatus(gatedNewer)}, ${calls - claimFromC} call(s))`);
   // The newer side deleted while its worker waits before its second pair:
   // nothing more of it goes to the judge once the gate opens (review pass 3).
   const goneNewer = await seed("[16g] The gatehouse opens at noon now.", 30, 0, ["gatehouse"]);
@@ -9659,7 +9661,6 @@ if (want("16")) {
   for (const [hour, days] of [["nine", 3], ["ten", 2], ["eleven", 1]] as const) await seed(`[16g] The watchtower opens at ${hour}.`, 31, days, ["watchtower"]);
   await consolidateInProcess({ workers: 1 });
   const watched = await seed("[16g] The watchtower opens at noon.", 31, 0, ["watchtower"]);
-  const watchedStatus = async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${watched}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
   const atMovedC = heldGate(3);
   const movedFromC = seen.length;
   const movedRunC = gatedRun(atMovedC, new AbortController().signal);
@@ -9667,7 +9668,7 @@ if (want("16")) {
   await sql`UPDATE thoughts SET content = '[16g] The watchtower opens at one now.' WHERE id = ${watched}::uuid`;
   atMovedC.open();
   const movedCodeC = await movedRunC;
-  const movedAfterC = await watchedStatus();
+  const movedAfterC = await claimStatus(watched);
   const movedSeen = seen.slice(movedFromC).map((p) => (p.b.includes("at noon") ? "old" : p.b.includes("at one now") ? "new" : "other"));
   assert(movedWaitingC && movedSeen.join(",") === "old,new,new,new" && movedAfterC === "succeeded" && movedCodeC <= 1,
          `…a thought edited while its worker waits before its second pair, still its claim, goes back to the pool: the judge sees its old text no more, and its pairs are judged at its new text (${movedSeen.join(",")}; ${movedAfterC}, exit ${movedCodeC})`);
@@ -9676,7 +9677,6 @@ if (want("16")) {
   // newer thought of its own, four older sides behind it.
   const latest = await seed("[16g] The watchtower opens at two now.", 31, 0, ["watchtower"]);
   const olders = ((await sql`SELECT id FROM thoughts WHERE content LIKE '[16g] The watchtower opens at %' AND id <> ${latest}::uuid`) as { id: string }[]).map((r) => r.id);
-  const latestStatus = async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${latest}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
   const atOlders = heldGate(3);
   const oldersFrom = calls;
   const oldersRun = gatedRun(atOlders, new AbortController().signal);
@@ -9684,7 +9684,7 @@ if (want("16")) {
   for (const id of olders) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
   atOlders.open();
   const oldersCode = await oldersRun;
-  const oldersAfter = await latestStatus();
+  const oldersAfter = await claimStatus(latest);
   assert(oldersWaiting && olders.length === 4 && calls - oldersFrom === 1 && oldersAfter === "succeeded" && oldersCode <= 1,
          `…its older sides deleted while it waits before its second pair, none of their texts is judged once the gate opens, and the thought is finished (${olders.length} older side(s), ${calls - oldersFrom} call(s), ${oldersAfter}, exit ${oldersCode})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
