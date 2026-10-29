@@ -3160,16 +3160,21 @@ jobs:
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "the refused up stopped the canary" >&2; exit 1; }
           refused 'one or the other' up --refresh --no-refresh
+          refused 'go with up' down --refresh
           # …and where the canary's Postgres is stopped when the run begins, the
           # guard is asked once it is started, after the writers stop: exit 1,
-          # saying what is stopped, and the next up brings them back.
+          # and the next up brings them back. Board-sync is stopped with it,
+          # and first, since it depends on Postgres: left running over a stopped
+          # database soon after its pass, as the --port 8012 up above leaves it,
+          # it took ~30 s to stop, its loop's last heartbeat waiting out Bun's
+          # connect timeout (SMD-3464): most of SMD-3155's cost here (SMD-3465).
           cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
-          docker compose -p open-brain-canary -f compose.yaml stop postgres
+          docker compose -p open-brain-canary -f compose.yaml --profile board-sync stop board-sync postgres
           rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
           { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
             && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
+          if grep -qF 'canary board-sync stopped for' /tmp/canary-latestamp.out; then echo "the up found board-sync running over the stopped Postgres: the case's stop missed it" >&2; exit 1; fi
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
-          refused 'go with up' down --refresh
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published
           # when the run began is still named (code review).
