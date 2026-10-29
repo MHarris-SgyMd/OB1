@@ -102,14 +102,17 @@ BEGIN
     WHEN to_regprocedure('requeue_thought_work(text, uuid)') IS NULL THEN '016 (requeue_thought_work)'
     WHEN to_regprocedure('record_thought_subject(uuid, text, text, text, uuid, text, jsonb)') IS NULL THEN '111 (record_thought_subject)'
   END;
-  -- ob1_filed_ticket trims what JavaScript trims, a BOM and the ideographic
-  -- space among it, all of which only UTF8 holds: another encoding is
-  -- refused here, by name (review pass 6: it failed on the escapes, SQL_ASCII's
-  -- conversion error; SMD-3349 tracks non-UTF8 brains).
+  -- ob1_filed_ticket trims what JavaScript trims, a set ob1_js_space builds
+  -- with chr(), which in an encoding other than UTF8 refuses some of it (a
+  -- code point past ASCII in a multibyte one, past 255 in a single-byte
+  -- one): another encoding is refused here, by name (review pass 6: it failed
+  -- on the escapes, SQL_ASCII's conversion error; review pass 8: not for what
+  -- the encoding holds, LATIN1 a no-break space and EUC_JP the ideographic
+  -- space; SMD-3349 tracks non-UTF8 brains).
   IF current_setting('server_encoding') <> 'UTF8' THEN
     RAISE EXCEPTION USING
       MESSAGE = format('migration 113 needs a UTF8 database; this one''s encoding is %s', current_setting('server_encoding')),
-      HINT = 'ob1_filed_ticket trims what JavaScript trims (a BOM and the ideographic space among it), all of which only UTF8 holds. SMD-3349 tracks non-UTF8 brains.',
+      HINT = 'ob1_filed_ticket trims what JavaScript trims, a set built with chr(), which takes a code point past ASCII only in a UTF8 database. SMD-3349 tracks non-UTF8 brains.',
       ERRCODE = 'feature_not_supported';
   END IF;
   IF v_missing IS NOT NULL THEN

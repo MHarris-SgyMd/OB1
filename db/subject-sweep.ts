@@ -32,14 +32,16 @@
  * asked again; a claim records no fingerprint, so a switch to another key and back asks again, too, those the model
  * named nothing for. The pooling is marked finished in ob1_config.subject_pool_filled once it commits, so one that
  * broke off (a thought deleted under it, a lost connection) is pooled again by the next run (review pass 1: the pool
- * stood named and its backlog was never pooled). Before it pools, a naming waits for the transactions writing thoughts
- * as it named the pool, whose triggers may have read the pool before, so the pooling sees what they capture; and the
- * pooling waits for one holding a claim it requeues. Neither wait has an end of its own: each says which pids it
- * waits on, again every NAMING_WAIT.sayMs, until they end (review pass 7: past a bound, every run pooled again and
- * asked again what the model had named nothing for, for as long as the writer stayed open). A signal during the
- * naming and pooling ends the CLI at once, the stop not yet handed out, and a caller's stop ends an in-process run's
- * waits, 130; either way the pooling, one statement, runs on to its end on the server if it began, holding the pool's
- * lock, and its end unmarked, the next run pools again. The first naming is refused while a login role that can capture (it
+ * stood named and its backlog was never pooled). The naming's write of the name waits for each write in flight under
+ * the pool named; before it pools, a naming waits for the transactions writing thoughts as it named the pool, whose
+ * triggers may have read the pool before, so the pooling sees what they capture; and the pooling waits for whatever
+ * holds a lock it needs, a claim an edit's trigger wrote among them. No wait has an end of its own: each says which
+ * pids it waits on — the writers it read, or for a statement those the server says hold it up — again every
+ * NAMING_WAIT.sayMs, until they end (review passes 7 and 8: past a bound, every run pooled again and asked again what
+ * the model had named nothing for, for as long as the writer stayed open). A signal during the naming and pooling ends
+ * the CLI at once, the stop not yet handed out, the pooling, one statement, running on to its end on the server if it
+ * began, holding the pool's lock, its end unmarked; a caller's stop ends an in-process run's waits, a statement among
+ * them cancelled, 130. Either way the next run pools again. The first naming is refused while a login role that can capture (it
  * reads ob1_config, without which 016's trigger refuses it already) cannot write the claims 113's trigger writes as
  * it, which would fail its every capture.
  *
@@ -71,9 +73,10 @@
  * hold (a naming leaves a live lease to its run; an edit pools its thought again), and whatever the claims, the door
  * locks the thought and checks the text's fingerprint and, since 113, the ticket it is filed under (PR 5's review
  * pass 5: a subject read before the ticket moved landed after another pass recorded the ticket's, and stood). A run
- * whose pool another run names away from it claims and writes nothing more, and stops, exit 2: each write first locks
- * the pool's name FOR SHARE and reads it (review pass 7: a run under the key before a switch replaced the subject the
- * new pool's run had recorded and finished).
+ * whose pool another run names away from it records and closes no subject more: each write and close first locks the
+ * pool's name FOR SHARE and reads it, so a naming waits for one in flight, and the run reads the name before each
+ * claim; it stops, exit 2, at the first that finds it moved, the claim in hand at most asked first (review pass 7: a
+ * run under the key before a switch replaced the subject the new pool's run had recorded and finished).
  * `--subjects rules` stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * The question is asked with the judge model's reasoning on unless OB1_SUBJECT_REASONING says off (PR 4: Verify item 1
@@ -111,12 +114,15 @@ export const POOL_GRANTS = "SELECT, INSERT and UPDATE on thought_work_claims, an
 export const LEASE_MARGIN_S = 300;
 
 /**
- * The naming's waits: how often a wait for the transactions holding up its pooling says again which pids it waits on,
- * and how long the pooling waits on a lock at a time before it looks for who holds it. Neither ends a wait: the
- * transactions' ends do, or the caller's stop (review pass 7). Read as the run goes, so a test shortens them, as
- * OUTAGE_MS is.
+ * The naming's waits: how often a wait says again which pids it waits on (`sayMs`), how long a statement is held up
+ * before it first says so (`quietMs`), and how often a held-up statement's watcher asks who holds it up (`pollMs`).
+ * None ends a wait: the transactions' ends do, or the caller's stop (review passes 7 and 8). Read as the run goes, so a
+ * test shortens them, as OUTAGE_MS is.
  */
-export const NAMING_WAIT = { sayMs: 30_000, lockMs: 2_000 };
+export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
+
+/** What a watched statement answers when the caller's stop cancelled it. */
+const STOPPED = Symbol("stopped");
 
 /** The least thought id: a cursor before every page. */
 const NIL_ID = "00000000-0000-0000-0000-000000000000";
@@ -351,22 +357,85 @@ async function sweep(
   // The pool's name, its naming and its pooling, one run at a time: a run takes the pool's lock, a session advisory lock
   // on a connection of its own, before it reads the name, so two runs at a key's change do not both pool, the second
   // requeueing what the first had claimed or finished (review pass 1). A dry run takes none. Each statement here runs
-  // on that connection, which a caller's client of one connection lends whole. Each wait here is a poll, which hears
-  // the caller's stop (review pass 7: the stop, handed out as the thoughts begin, waited out each one, and a query
-  // waiting on the server is not cancelled by Bun's client).
+  // on that connection, which a caller's client of one connection lends whole. Each wait here hears the caller's stop
+  // and says what it waits on (review pass 7: the stop, handed out as the thoughts begin, waited out each one): the
+  // pool's lock and the writers' transactions are polled, and a statement that waits on the server — the naming's
+  // write of the name, the pooling — is watched from a connection of the run's own, which names the pids the server says
+  // hold it up and cancels it on a stop (review pass 8: a lock timeout's retry read its holders off pg_locks, which
+  // missed a request queued ahead of it and a prepared transaction, spinning without a word or the stop, and counted
+  // transactions that held nothing up; the naming's write waited on writes in flight unsaid; Bun's client does not
+  // cancel a query waiting on the server).
   let named: string | null = null, filled: string | null = null, newPool = false;
   const pin = DRY_RUN ? null : await sql.reserve();
   const db: SQL = pin ?? sql;
   let locked = false;
-  /** A wait's pause; true, said, when the caller's stop came: `pool` is the pool named, or null before its lock. */
-  const stopped = async (ms: number, pool: string | null) => {
+  /** The connection a watched statement is watched from, opened at the first on the run's url. */
+  let side: SQL | null = null;
+  /** The line a stop ends the naming with: before the pool's lock, before the name is written, or before the pooling. */
+  const stopLine = (stage: "lock" | "naming" | "pooling") => stage === "lock"
+    ? "\n  stopped waiting for the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed"
+    : stage === "naming"
+      ? `\n  stopped before pool ${POOL} was named: the caller's signal was aborted; nothing was named, pooled or claimed`
+      : `\n  stopped before pool ${POOL} was pooled: the caller's signal was aborted; the pool is named, its pooling unfinished, nothing claimed, and the next run pools it`;
+  /** A wait's pause; true, said, when the caller's stop came. */
+  const stopped = async (ms: number, stage: "lock" | "pooling") => {
     if (o.signal) await sleepUnless(ms, o.signal);
     else await Bun.sleep(ms);
     if (!o.signal?.aborted) return false;
-    err(pool === null
-      ? "\n  stopped waiting for the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed"
-      : `\n  stopped before pool ${pool} was pooled: the caller's signal was aborted; the pool is named, nothing was pooled or claimed, and the next run pools it`);
+    err(stopLine(stage));
     return true;
+  };
+  /**
+   * Runs `q`, a statement on the pin that can wait on a lock, watched from the run's own connection: held up past
+   * NAMING_WAIT.quietMs, it says which pids hold it up — pg_blocking_pids, those whose locks it waits on and those
+   * queued ahead of it, a prepared transaction as 0 — and again every NAMING_WAIT.sayMs; the caller's stop cancels it,
+   * STOPPED, said. Nothing more is sent on the pin until the cancel has been: a cancel reaching it idle is dropped, so
+   * none lands on a later statement. A caller that lends a client and no url has it run unwatched.
+   */
+  const watched = async <T>(stage: "naming" | "pooling", q: () => Promise<T>): Promise<T | typeof STOPPED> => {
+    if (side === null && o.url) side = openSql(o.url, { max: 1 });
+    const watcher = side;
+    if (watcher === null) return await q();
+    const [{ pid }] = (await db`SELECT pg_backend_pid() AS pid`) as { pid: number }[];
+    const done = new AbortController();
+    const wake = o.signal ? AbortSignal.any([done.signal, o.signal]) : done.signal;
+    let cancelled = false;
+    const watching = (async () => {
+      let heldSince = 0, saidAt = 0;
+      for (;;) {
+        await sleepUnless(NAMING_WAIT.pollMs, wake);
+        if (done.signal.aborted) return;
+        if (o.signal?.aborted) {
+          cancelled = true;
+          await watcher`SELECT pg_cancel_backend(${pid}::int)`.catch(() => {});
+          return;
+        }
+        // Rows, not the int4[]: a bound query's comes back an Int32Array, whose map coerces.
+        const by = ((await watcher`SELECT p FROM unnest(pg_blocking_pids(${pid}::int)) AS p ORDER BY p`.catch(() => [])) as { p: number }[]).map((r) => r.p);
+        if (by.length === 0) {
+          heldSince = 0;
+          continue;
+        }
+        heldSince ||= Date.now();
+        if (Date.now() - heldSince >= NAMING_WAIT.quietMs && Date.now() - saidAt >= NAMING_WAIT.sayMs) {
+          const who = by.map((p) => (p === 0 ? "a prepared transaction" : `pid ${p}`)).join(", ");
+          out(`  ${saidAt === 0 ? "waiting" : `still waiting, after ${Math.round((Date.now() - heldSince) / 1000)} s,`} for ${by.length} transaction(s) the ${stage === "naming" ? `naming of pool ${POOL} waits on (${who}): writes in flight under the pool named lock its name; a stop leaves it named as it was` : `pooling waits on (${who}); a stop leaves the pooling to the next run`}`);
+          saidAt = Date.now();
+        }
+      }
+    })();
+    // Cancelled before it ended: said, STOPPED. One that ended first ran whole, and the next check hears the stop.
+    let r: T | typeof STOPPED = STOPPED;
+    try {
+      r = await q();
+    } catch (e) {
+      if (!cancelled || sqlState(e) !== "57014") throw e;
+    } finally {
+      done.abort();
+      await watching;
+    }
+    if (r === STOPPED) err(stopLine(stage));
+    return r;
   };
   /**
    * Waits until none of the virtual transactions `vxids` is open, saying which pids hold them, at once and again
@@ -382,7 +451,7 @@ async function sweep(
         out(`  ${saidAt === 0 ? "waiting" : `still waiting, after ${Math.round((Date.now() - since) / 1000)} s,`} for ${open.length} transaction(s) ${what} (pid ${open.map((r) => r.pid).join(", ")}); a stop leaves the pooling to the next run`);
         saidAt = Date.now();
       }
-      if (await stopped(100, POOL)) return false;
+      if (await stopped(100, "pooling")) return false;
     }
     return true;
   };
@@ -393,7 +462,12 @@ async function sweep(
         if (locked) break;
         // Said when another run holds it, naming and pooling (review pass 2: the run waited without a word).
         if (!told) out("  waiting for another run holding the subject pool's lock (reading its name, or naming and pooling it)");
-        if (await stopped(250, null)) return 130;
+        if (await stopped(250, "lock")) return 130;
+      }
+      // A stop that came as the lock was won names nothing.
+      if (o.signal?.aborted) {
+        err(stopLine("naming"));
+        return 130;
       }
     }
     // The pool: the one ob1_config.subject_pool_key names, into which 113's trigger puts new and edited thoughts, and
@@ -462,8 +536,10 @@ async function sweep(
       // thoughts with no current subject, each requeued (MATERIALIZED: every row's call is made, whatever the count reads
       // of it); then the pooling marked finished, so one that broke off is pooled again by the next run (review pass 1:
       // the pool stood named and its backlog was never pooled).
-      await db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL}), ('subject_pool_filled', '')
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      // Watched: it waits for each write in flight under the pool named, which locks the name FOR SHARE.
+      const naming = await watched("naming", () => db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL}), ('subject_pool_filled', '')
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`);
+      if (naming === STOPPED) return 130;
       // A capture whose transaction was open as the pool was named may have read no pool, or the one before, in its
       // trigger, and the pooling cannot see it until it commits: each transaction holding a write lock on thoughts in
       // this database as the pool was named is waited for first, by its virtual transaction id (review pass 5: such a
@@ -477,7 +553,9 @@ async function sweep(
       // was left unfinished, and while the writer stayed open every run waited, pooled again and asked again each
       // thought the model had named nothing for and each failed one). A capture under REPEATABLE READ or
       // SERIALIZABLE, whose trigger reads its transaction's snapshot, can predate the naming and is not waited for:
-      // preflight refuses the first as the writers' default and warns of the second (068).
+      // preflight refuses the first as the writers' default and warns of the second (068), and sees neither a client
+      // opens itself (review pass 8, run-it: every such capture in flight missed). Blanking subject_pool_filled has the
+      // next run pool again.
       const [{ vxids }] = (await db`
         SELECT COALESCE(array_agg(DISTINCT l.virtualtransaction), '{}')::text[] AS vxids FROM pg_locks l
          WHERE l.locktype = 'relation' AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
@@ -485,55 +563,35 @@ async function sweep(
            AND EXISTS (SELECT 1 FROM pg_locks x WHERE x.locktype = 'transactionid' AND x.granted AND x.virtualtransaction = l.virtualtransaction)`) as { vxids: string[] }[];
       if (!(await waitOut(vxids, "writing thoughts as the pool was named, so the pooling sees what they capture"))) return 130;
       let pooled = -1;
-      const [{ was }] = (await db`SELECT current_setting('lock_timeout') AS was`) as { was: string }[];
-      try {
-        // Each lock the pooling waits on, at most NAMING_WAIT.lockMs a time: a transaction that edited a thought with
-        // no current subject since the naming holds the claim its trigger wrote, which the pooling requeues, until it
-        // ends (review pass 7: the pooling waited on it without a word or an end, the pool's lock held).
-        await db`SELECT set_config('lock_timeout', ${`${NAMING_WAIT.lockMs}ms`}, false)`;
-        for (let retries = 0; pooled < 0;) {
-          try {
-            // A thought whose claim under the key a live run holds is left to it, its lease running (review pass 5:
-            // the pooling set it pending, and another run asked the same text again while the first still had it).
-            [{ n: pooled }] = (await db`
-              WITH pooled AS MATERIALIZED (
-                SELECT requeue_thought_work(${POOL}, t.id) FROM thoughts t
-                 WHERE ${noCurrentSubject(db)}
-                   AND NOT EXISTS (SELECT 1 FROM thought_work_claims c
-                                    WHERE c.thought_id = t.id AND c.work_type = ${POOL} AND c.status = 'claimed' AND c.ttl_expires_at >= now()))
-              SELECT count(*)::int AS n FROM pooled`) as { n: number }[];
-          } catch (e) {
-            // A lock waited on past NAMING_WAIT.lockMs: the transactions then holding more than a reader's lock on a
-            // table the pooling reads or writes — an edit's trigger writing a claim, a delete cascading to its claims,
-            // a migration's DDL — are waited out, as the writers are, and the pooling runs again. A thought deleted
-            // under the pooling fails its claim's key (23503), and a deadlock is the server's to break: each pooled
-            // again, three times at most. Anything else ends the run, the pool named and its pooling unfinished.
-            const state = sqlState(e);
-            if (state === "55P03") {
-              // A writer's lock counts while its transaction holds an xid, which a row it locks or writes takes; a lock
-              // that conflicts with the pooling's own, whatever the xid.
-              const [{ holders }] = (await db`
-                SELECT COALESCE(array_agg(DISTINCT l.virtualtransaction), '{}')::text[] AS holders FROM pg_locks l
-                 WHERE l.locktype = 'relation' AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
-                   AND l.relation IN ('thought_work_claims'::regclass, 'thoughts'::regclass, 'thought_facets'::regclass, 'derivations'::regclass)
-                   AND l.mode <> 'AccessShareLock' AND l.granted AND l.pid IS DISTINCT FROM pg_backend_pid()
-                   AND (l.mode IN ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
-                        OR EXISTS (SELECT 1 FROM pg_locks x WHERE x.locktype = 'transactionid' AND x.granted AND x.virtualtransaction = l.virtualtransaction))`) as { holders: string[] }[];
-              if (!(await waitOut(holders, "holding locks on the tables the pooling reads and writes, which it waits on"))) return 130;
-              continue;
-            }
-            if ((state === "23503" || state === "40P01") && ++retries < 3) continue;
-            if (databaseUnavailable(e)) throw e;
-            if (state === "42501") {
-              err(`\n  This role cannot pool the thoughts (${String((e as Error)?.message ?? e).slice(0, 300)}): the pool needs ${POOL_GRANTS}. Pool ${POOL} is named, and a run as a role that holds them pools them.`);
-              return 2;
-            }
-            err(`\n  Pooling the thoughts with no current subject broke off (${String((e as Error)?.message ?? e).slice(0, 300)}): pool ${POOL} is named, and the next run pools them; run it again.`);
-            return 1;
+      for (let retries = 0; pooled < 0;) {
+        try {
+          // A thought whose claim under the key a live run holds is left to it, its lease running (review pass 5: the
+          // pooling set it pending, and another run asked the same text again while the first still had it). Watched:
+          // an edit since the naming holds the claim its trigger wrote, a delete its thought, until it ends.
+          const r = await watched("pooling", () => db`
+            WITH pooled AS MATERIALIZED (
+              SELECT requeue_thought_work(${POOL}, t.id) FROM thoughts t
+               WHERE ${noCurrentSubject(db)}
+                 AND NOT EXISTS (SELECT 1 FROM thought_work_claims c
+                                  WHERE c.thought_id = t.id AND c.work_type = ${POOL} AND c.status = 'claimed' AND c.ttl_expires_at >= now()))
+            SELECT count(*)::int AS n FROM pooled`);
+          if (r === STOPPED) return 130;
+          [{ n: pooled }] = r as { n: number }[];
+        } catch (e) {
+          // A thought deleted under the pooling fails its claim's key (23503), and a deadlock is the server's to break:
+          // each pooled again, three times at most. A deadlock with a transaction editing two thoughts the pooling
+          // requeues fails whichever waited first, the edit among them, 40P01, the caller's to retry (review pass 8,
+          // run-it). Anything else ends the run, the pool named and its pooling unfinished.
+          const state = sqlState(e);
+          if ((state === "23503" || state === "40P01") && ++retries < 3) continue;
+          if (databaseUnavailable(e)) throw e;
+          if (state === "42501") {
+            err(`\n  This role cannot pool the thoughts (${String((e as Error)?.message ?? e).slice(0, 300)}): the pool needs ${POOL_GRANTS}. Pool ${POOL} is named, and a run as a role that holds them pools them.`);
+            return 2;
           }
+          err(`\n  Pooling the thoughts with no current subject broke off (${String((e as Error)?.message ?? e).slice(0, 300)}): pool ${POOL} is named, and the next run pools them; run it again.`);
+          return 1;
         }
-      } finally {
-        await db`SELECT set_config('lock_timeout', ${was}, false)`.catch(() => {});
       }
       await db`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_filled', ${POOL})
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -546,6 +604,7 @@ async function sweep(
       if (locked) await pin`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`.catch(() => {});
       pin.release();
     }
+    if (side !== null) await (side as SQL).close().catch(() => {});
   }
   if (RETRY_FAILED && !DRY_RUN) {
     // extract-entities.ts's --retry-failed statement, under the pool's key.
@@ -606,7 +665,7 @@ async function sweep(
   /**
    * Null while ob1_config names this run's pool; else the line the run stops with, exit 2. Read before each claim,
    * and, its row locked FOR SHARE, first in the transaction of each write, which a naming's update of it waits for: a
-   * run under a key no longer named claims and writes nothing more, so a subject recorded under the pool named stands
+   * run under a key no longer named records and closes no subject more, so a subject recorded under the pool named stands
    * (review pass 7: a run under the key before a switch replaced, its call later, the subject the new pool's run had
    * recorded, whose claim was finished).
    */
@@ -615,7 +674,8 @@ async function sweep(
       ? await c`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`
       : await c`SELECT value FROM ob1_config WHERE key = 'subject_pool_key'`) as { value: string }[];
     if (k?.value === POOL) return null;
-    return `\n  The subject pool is ${k?.value ? `now ${k.value}` : "no longer named"}: another run named another while this one ran, so this run, under ${POOL}, stops here and writes nothing more; what it holds goes back to its pool.`;
+    const now = k?.value ? `now ${k.value}: another run named it while this one ran` : "no longer named: ob1_config.subject_pool_key was removed or blanked while this run ran";
+    return `\n  The subject pool is ${now}, so this run, under ${POOL}, records no subject more and stops here; what it holds goes back to its pool.`;
   };
 
   // The stop, as the pass's (db/lease.ts's PassStop): the first after the thought in hand; the second the call in hand
@@ -773,34 +833,44 @@ async function sweep(
         // check and the claim's end are one transaction under the door's lock on the thought, so a subject written
         // after the check waits for it (review pass 7: one landing between them was finished over), and the claim is
         // handed back only while this run holds it (review pass 7, run-it: requeue_thought_work set pending a claim
-        // another run had finished, or took the live lease another run held, which asked again).
+        // another run had finished, or took the live lease another run held, which asked again). The thought is read
+        // first, locked as the door locks it: a text or a filed ticket moved since the read is edited mid-sweep, its
+        // claim handed back while this run holds it, and a thought gone is gone (review pass 8: with no subject standing
+        // the finish read neither, and across a switch to another pool and back during the call, an edit made while
+        // the other was named left this run's claim, which finished at the old text).
         if (hardStop.signal.aborted) return false;
         type Close = { action: string; stale?: boolean; gone?: boolean; moved?: boolean };
-        let fin: string | { c: Close | null; written: boolean; held: boolean };
+        let fin: string | { c: Close | null; stale: boolean; gone: boolean; written: boolean; held: boolean };
         try {
           fin = await sql.begin(async (tx: SQL) => {
             const moved = await poolMoved(tx, true);
             if (moved !== null) return moved;
             await tx`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${row.id}::uuid::text, 0))`;
+            const back = async () => ((await tx`
+              WITH back AS (
+                UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL,
+                                               finished_at = NULL, enqueued_at = now(), worker_id = NULL
+                 WHERE thought_id = ${row.id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed' RETURNING 1)
+              SELECT EXISTS (SELECT 1 FROM back) AS held`) as { held: boolean }[])[0].held;
+            const [now] = (await tx`
+              SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) = ${row.fingerprint}
+                     AND ob1_filed_ticket(t.metadata) IS NOT DISTINCT FROM ob1_filed_ticket(${row.metadata ?? {}}::jsonb) AS same
+                FROM thoughts t WHERE t.id = ${row.id}::uuid FOR KEY SHARE`) as { same: boolean }[];
+            if (now === undefined) return { c: null, stale: false, gone: true, written: false, held: false };
+            if (!now.same) return { c: null, stale: true, gone: false, written: false, held: await back() };
             let c: Close | null = null, written: boolean;
             if (row.standing_id !== null) {
               [{ c }] = (await tx`SELECT close_thought_subject(${row.id}::uuid, ${row.standing_id}::uuid, ${row.fingerprint}) AS c`) as { c: Close }[];
-              // The text moved since it was read, or the thought is gone: the trigger has it again, or its claim went.
-              if (c.stale || c.gone) return { c, written: false, held: false };
+              if (c.stale || c.gone) return { c, stale: c.stale === true, gone: c.gone === true, written: false, held: false };
               written = c.moved === true;
             } else {
               [{ written }] = (await tx`
                 SELECT EXISTS (SELECT 1 FROM thought_facets WHERE thought_id = ${row.id}::uuid AND kind = 'subject' AND valid_until IS NULL) AS written`) as { written: boolean }[];
             }
-            const [{ held }] = (written
-              ? await tx`
-                  WITH back AS (
-                    UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL,
-                                                   finished_at = NULL, enqueued_at = now(), worker_id = NULL
-                     WHERE thought_id = ${row.id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed' RETURNING 1)
-                  SELECT EXISTS (SELECT 1 FROM back) AS held`
-              : await tx`SELECT release_thought(${row.id}::uuid, ${POOL}, ${workerId}, 'succeeded', NULL) AS held`) as { held: boolean }[];
-            return { c, written, held };
+            const held = written
+              ? await back()
+              : ((await tx`SELECT release_thought(${row.id}::uuid, ${POOL}, ${workerId}, 'succeeded', NULL) AS held`) as { held: boolean }[])[0].held;
+            return { c, stale: false, gone: false, written, held };
           });
         } catch (e) {
           if (sqlState(e) === "42501") {
@@ -817,8 +887,8 @@ async function sweep(
           endedBy = { code: 2, line: fin };
           return false;
         }
-        if (fin.c?.stale) n.stale++;
-        else if (fin.c?.gone) n.gone++;
+        if (fin.stale) n.stale++;
+        else if (fin.gone) n.gone++;
         else {
           // Its end is this transaction's: the claim no longer this run's is counted as a release that found it so.
           if (!fin.held) n.lost++;
