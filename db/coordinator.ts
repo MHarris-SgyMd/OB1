@@ -29,8 +29,9 @@
  * by /proc/<pid>/environ, another's environment. The coordinator itself
  * holds them all (the record's "Credentials" names that cost). Run as anyone
  * else, from a checkout, each child runs as that user, and the log says so.
- * The `sleep-dumps` volume (OB1_SLEEP_DUMP_DIR under /var/lib/ob1) is handed
- * to sleep's user, the dumps a root-run scheduler left there included.
+ * Each HOME is made afresh (makeHome), and OB1_SLEEP_DUMP_DIR, a directory
+ * directly in /var/lib/ob1 — the `sleep-dumps` volume — is handed to sleep's
+ * user, the dumps a root-run scheduler left there included (handDumpDir).
  *
  * Output. Each child's lines go to this process's, after `[<name>] `.
  *
@@ -62,7 +63,7 @@ import type { SQL } from "bun";
 import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { supervise, type Supervisor } from "./supervise.ts";
-import { andList, wrapperLine } from "./cli.ts";
+import { andList, consoleWriter, wrapperLine, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 
 const HERE = import.meta.dir;
@@ -194,7 +195,7 @@ export function childHome(child: Child): string {
 }
 
 /** A child's HOME when its own cannot be made: a path nothing makes, so no config is read from a directory another child can write (the shared /tmp). */
-export const NO_HOME = "/nonexistent/ob1-home";
+const NO_HOME = "/nonexistent/ob1-home";
 
 /** The dump volume's mount point: OB1_SLEEP_DUMP_DIR is handed to sleep's user only as a directory directly in it. */
 const DUMP_ROOT = "/var/lib/ob1";
@@ -289,20 +290,21 @@ function removeOldHomes(child: Child, err: (line: string) => void): void {
 type Launch = { cmd: string[]; env: Record<string, string>; /** Its user, its group the same. */ uid?: number; home?: string };
 
 /**
- * What coordinate() and runOnce() both start a child with: as root, a HOME of
- * its own and (sleep) its dump directory handed over, from its command line's
- * --dump-dir or OB1_SLEEP_DUMP_DIR; its settings alone; `args`, or the pass's
- * own from those settings; no .env read, no install.
+ * What coordinate() and runOnce() both start a child with: as root
+ * (`asRoot`), a HOME of its own and (sleep) its dump directory handed over,
+ * from its command line's --dump-dir or OB1_SLEEP_DUMP_DIR; its settings
+ * alone; `args`, or the pass's own from those settings; no .env read, no
+ * install.
  */
-function launch(child: Child, env: Record<string, string | undefined>, args: readonly string[] | null, own: boolean, say: (line: string) => void): Launch {
-  const home = own ? makeHome(child, say) : undefined;
+function launch(child: Child, env: Record<string, string | undefined>, args: readonly string[] | null, asRoot: boolean, say: (line: string) => void): Launch {
+  const home = asRoot ? makeHome(child, say) : undefined;
   const cenv = childEnv(child, env, home === undefined ? {} : { HOME: home });
   const argv = args ?? child.args(cenv);
-  if (own && child.name === "sleep") for (const dir of new Set([dumpDirArg(argv), env.OB1_SLEEP_DUMP_DIR])) handDumpDir(dir, child.uid, say);
+  if (asRoot && child.name === "sleep") for (const dir of new Set([dumpDirArg(argv), env.OB1_SLEEP_DUMP_DIR])) handDumpDir(dir, child.uid, say);
   return {
     cmd: [process.execPath, "--no-install", "--no-env-file", resolve(HERE, child.script), ...argv],
     env: cenv,
-    ...(own ? { uid: child.uid } : {}),
+    ...(asRoot ? { uid: child.uid } : {}),
     ...(home !== undefined && home !== NO_HOME ? { home } : {}),
   };
 }
@@ -314,23 +316,23 @@ export type CoordinatorOptions = {
   asOwnUsers?: boolean;
   /** The children to run in place of OB1_PASSES's: db/test-coordinator.ts's planted pair. */
   children?: readonly Child[];
-  writer?: { out: (line: string) => void; err: (line: string) => void };
+  writer?: Writer;
 };
 
 /** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all. */
 export function coordinate(opts: CoordinatorOptions): Supervisor {
   const env = opts.env ?? process.env;
-  const writer = opts.writer ?? { out: (l: string) => console.log(l), err: (l: string) => console.error(l) };
+  const writer = opts.writer ?? consoleWriter;
   const plan: Plan = opts.children ? { children: [...opts.children], lines: [] } : planPasses(env.OB1_PASSES, env.COMPOSE_PROFILES);
   for (const line of plan.lines) writer.err(line);
-  const own = opts.asOwnUsers ?? false;
+  const asRoot = opts.asOwnUsers ?? false;
   if (plan.children.length) {
-    const who = plan.children.map((c) => (own ? `${c.name} (uid ${c.uid})` : c.name));
-    writer.err(`coordinator: runs ${andList(who)}${own ? "" : " — not root, so each as this process's user, not its own"}`);
+    const who = plan.children.map((c) => (asRoot ? `${c.name} (uid ${c.uid})` : c.name));
+    writer.err(`coordinator: runs ${andList(who)}${asRoot ? "" : " — not root, so each as this process's user, not its own"}`);
   }
   const children = plan.children.map((child) => {
-    if (own) removeOldHomes(child, writer.err);
-    const l = launch(child, env, null, own, writer.err);
+    if (asRoot) removeOldHomes(child, writer.err);
+    const l = launch(child, env, null, asRoot, writer.err);
     return supervise({
       worker: child.name,
       cmd: l.cmd,
@@ -365,8 +367,8 @@ const USAGE = `coordinator.ts takes no arguments — OB1_PASSES names the passes
  */
 export async function runOnce(child: Child, args: string[], opts: { env?: Record<string, string | undefined>; onSignal?: (stop: (signal: "SIGTERM" | "SIGINT") => void) => void } = {}): Promise<number> {
   const say = (l: string) => console.error(l);
-  const own = process.getuid?.() === 0;
-  const l = launch(child, opts.env ?? process.env, args, own, say);
+  const asRoot = process.getuid?.() === 0;
+  const l = launch(child, opts.env ?? process.env, args, asRoot, say);
   try {
     let p: ReturnType<typeof Bun.spawn>;
     try {
@@ -378,7 +380,7 @@ export async function runOnce(child: Child, args: string[], opts: { env?: Record
         detached: true,
       });
     } catch (e) {
-      say(`coordinator: ${child.name} could not be started${own ? ` as uid ${child.uid}` : ""} (${(e as Error).message})`);
+      say(`coordinator: ${child.name} could not be started${asRoot ? ` as uid ${child.uid}` : ""} (${(e as Error).message})`);
       return 127;
     }
     opts.onSignal?.((signal) => { if (p.exitCode === null && p.signalCode === null) p.kill(signal); });

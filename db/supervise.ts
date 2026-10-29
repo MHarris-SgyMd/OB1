@@ -20,8 +20,10 @@
  * The run. `cmd` is the follower's argv, run with no shell — its settings
  * already read by the coordinator, so nothing in them is parsed again — as
  * `uid`/`gid` when given (the coordinator runs each pass as its own user, so
- * none reads another's environment) and its output said line by line under
- * `label`. A follower that ends on its own — a refusal (2), a throw (1),
+ * none reads another's environment), in a process group of its own, and its
+ * output said line by line under `label`. A spawn that throws is an end of
+ * the follower (127), never this process's exit. A follower that ends on its
+ * own — a refusal (2), a throw (1),
  * anything but a stop asked for — is run again after RESTART_MS's first wait,
  * doubled at each end in a row to its cap: 1, 2, 4, 8, then every 15
  * minutes. One that ran RESTART_MS.reset or longer before it ended starts the
@@ -55,6 +57,9 @@
  * A stop. Each stop() goes on to the follower, whose own rules apply (the
  * first SIGTERM stops it after the work in hand, the second hard); once it
  * has ended, `done` settles with 0. Waiting or held, it settles at once.
+ *
+ * As a command it is retired (its foot): a container from before SMD-3476
+ * that runs it holds, running nothing, rather than restart in a loop.
  */
 
 import type { SQL } from "bun";
