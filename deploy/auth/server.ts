@@ -14,7 +14,10 @@
  *   server signed for that client's MCP resource (so never an exchanged one,
  *   whose audience is a REST core); the result is a token for the same tier's
  *   REST core with the same subject,
- *   no wider scope, no later expiry, and `act: { sub: <the MCP client> }`;
+ *   no wider scope, no later expiry, and `act: { sub: <the MCP client>, act:
+ *   { sub: <the subject token's client> } }` (RFC 8693 §4.1): the MCP service
+ *   that carried it, and the connector that signed in, which the REST core
+ *   makes a principal of its own (SMD-3064);
  * - `getResourceServerInfo`, which the library says MUST be replaced: a
  *   resource outside the layout, or outside the client's allowance, is
  *   `invalid_target`. A request that names no resource is refused before
@@ -105,7 +108,7 @@ import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
-import { ACCESS_TOKEN_TYPE, chainRotates, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { ACCESS_TOKEN_TYPE, chainRotates, clientNameable, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { ADMIN_PORT, adminRoute, basicCredentials, isGuiClient } from "./admin.ts";
@@ -193,6 +196,9 @@ function detailOf(error: unknown): { error_detail?: string } {
   return text ? { error_detail: text } : {};
 }
 
+/** The client each exchange's subject token was issued to, by the request that is saving the exchanged token: what extraTokenClaims nests in its `act`. */
+const exchangedFor = new WeakMap<object, string>();
+
 function resourceInfo(resource: string): ResourceServer {
   return { scope: SCOPES.join(" "), audience: resource, accessTokenTTL: ACCESS_TTL, accessTokenFormat: "jwt", jwt: { sign: { alg: "ES256" } } };
 }
@@ -247,6 +253,14 @@ const provider = new Provider(L.issuer, {
       if (key !== "ob1_third_party_rule") return;
       delete (metadata as Record<string, unknown>)[key];
       if (Object.hasOwn(L.clients, String(metadata.client_id))) return;
+      // A client whose id the REST core cannot name (layout.ts clientNameable)
+      // would sign in and be refused at every call. Refused here, it is no
+      // client at all: not at its authorization, its refresh or its exchange
+      // (SMD-3064 review pass 2). A registered client's id is the library's
+      // own, always nameable; a metadata document's URL may not be.
+      if (!clientNameable(String(metadata.client_id))) {
+        throw new errors.InvalidClientMetadata("the brain names each client it serves, and cannot name this client id: an id of letters, digits and . _ ~ -, at most 128 characters, or a metadata document URL of https:// in lower case, a host, an optional port and a path of those characters and / %, at most 180 characters in all");
+      }
       const declared = metadata.grant_types as unknown;
       if (declared !== undefined && (!Array.isArray(declared) || declared.some((g) => typeof g !== "string"))) {
         throw new errors.InvalidClientMetadata("grant_types must be an array of strings");
@@ -288,10 +302,13 @@ const provider = new Provider(L.issuer, {
     clientIdMetadataDocument: { enabled: true, ack: "draft-02" },
   },
   fetch: guardedFetch(),
-  // The actor of an exchange is the client that authenticated to make it.
+  // The actor of an exchange is the client that authenticated to make it, and
+  // the actor before it the client the subject token was issued to (SMD-3064).
   async extraTokenClaims(ctx, token) {
     if ((token as { gty?: string }).gty !== "token_exchange" || ctx?.oidc.params?.grant_type !== TOKEN_EXCHANGE) return undefined;
-    return { act: { sub: ctx.oidc.client!.clientId } };
+    const connector = exchangedFor.get(ctx);
+    if (!connector) throw new Error("an exchanged token was saved with no subject token's client recorded");
+    return { act: { sub: ctx.oidc.client!.clientId, act: { sub: connector } } };
   },
   async renderError(ctx, out, error) {
     ctx.type = "json";
@@ -351,7 +368,7 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   if (params.audience) throw new errors.InvalidRequest("name the target with resource, not audience");
   if (params.resource !== policy.to) throw new errors.InvalidTarget(`this client exchanges for ${policy.to} only`);
 
-  let claims: { sub?: string; scope?: string; exp?: number; act?: unknown };
+  let claims: { sub?: string; scope?: string; exp?: number; act?: unknown; client_id?: unknown };
   try {
     ({ payload: claims } = await jwtVerify(params.subject_token, ownKeys, { issuer: L.issuer, audience: policy.from, algorithms: ["ES256"], typ: "at+jwt" }));
   } catch (cause) {
@@ -361,6 +378,13 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   }
   // No `act` check: an exchanged token's audience is a REST core, which the audience rule above already refuses.
   if (claims.sub !== OPERATOR) throw new errors.InvalidGrant("subject_token names no known account");
+  // The library writes client_id into every access token it signs (RFC 9068 §2.2); one without it was not signed here.
+  if (typeof claims.client_id !== "string" || !claims.client_id) throw new errors.InvalidGrant("subject_token names no client");
+  // The client validator refuses such a client wherever it is loaded
+  // (extraClientMetadata, above), but never sees the subject token's client
+  // here: an /mcp token issued to one before this rule, still within its ten
+  // minutes, is refused at this line (SMD-3064).
+  if (!clientNameable(claims.client_id)) throw new errors.InvalidGrant("subject_token's client has an id the REST core cannot name");
 
   const held = new Set((claims.scope ?? "").split(" ").filter(Boolean));
   const asked = params.scope ? params.scope.split(" ").filter(Boolean) : [...held];
@@ -381,6 +405,7 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   const token = new provider.AccessToken(fields as typeof fields & { grantId: string });
   token.resourceServer = new provider.ResourceServer(policy.to, resourceInfo(policy.to));
   token.exp = exp;
+  exchangedFor.set(ctx, claims.client_id);
   ctx.oidc.entity("AccessToken", token);
   const value = await token.save();
   ctx.body = { access_token: value, issued_token_type: ACCESS_TOKEN_TYPE, token_type: "Bearer", expires_in: exp - now, scope: token.scope };

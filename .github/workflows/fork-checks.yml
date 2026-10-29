@@ -165,17 +165,59 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
+      # The REST client's and the MCP server's installs come before the start
+      # below, since test-server.ts drives an MCP server through both (SMD-2978:
+      # an import into a directory not installed fails). Their imports of
+      # ../server-portable resolve against the install above.
+      - name: Install the REST client's pinned packages
+        working-directory: rest-client
+        run: bun install --frozen-lockfile
+
+      - name: Install the MCP server's pinned packages
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
+
+      # Two suites that spend most of their time waiting on a real clock,
+      # started here and run in the background while the job's other steps run
+      # (SMD-3470), as the data layer runs its pair (SMD-3195). One after
+      # another they were ~50 s and ~33 s of a job whose median was ~215–220 s.
+      # - test-server.ts, the real server's suite (SMD-2287 PR 4b and 4c): its
+      #   request lines, its refusals, its mirrors, its stop's count of tool
+      #   calls, and its spans, one trace per tool call. Most of its time is
+      #   children's stop and flush bounds ([13d], [17], [22]).
+      # - test-thoughts.ts, pure logic: the alias table, title truncation,
+      #   citation URLs. No database and no provider; [16]'s provider-state
+      #   probes, on real timers, are most of its time.
+      # Each runs in a subshell that outlives this step (the runner ends a
+      # job's leftover processes only at its end) and writes its log, then its
+      # exit code by a rename, so the last step never reads half of one;
+      # `|| rc=$?` keeps -e from ending the subshell before it writes the code.
+      # Each has its own time limit (a hang ends as 124, or 137 when TERM is
+      # ignored). They share the runner's cores with the steps below, so a
+      # timing assertion that fails here and passes alone is load. The last
+      # step, "The real server's suite and the vocabulary rules (started at the
+      # job's start)", waits on both and prints them.
+      - name: Start the real server's suite and the vocabulary rules, in the background
+        working-directory: server-portable
+        run: |
+          limit_s=300
+          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/portable.started"
+          (
+            rc=0
+            timeout --kill-after=10s "${limit_s}s" bun test-server.ts > "$RUNNER_TEMP/test-server.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-server.rc.part" && mv "$RUNNER_TEMP/test-server.rc.part" "$RUNNER_TEMP/test-server.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+          (
+            rc=0
+            timeout --kill-after=10s "${limit_s}s" bun test-thoughts.ts > "$RUNNER_TEMP/test-thoughts.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-thoughts.rc.part" && mv "$RUNNER_TEMP/test-thoughts.rc.part" "$RUNNER_TEMP/test-thoughts.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+
       # The REST core's surface (SMD-2284) over a stub core: the routes against
       # the manifest, the OpenAPI document, the authorization ladder, the log.
       - name: The REST core's routes and authorization
         working-directory: server-portable
         run: bun test-rest.ts
-
-      # Pure logic — the alias table, title truncation, citation URLs. No database
-      # and no provider, so it runs in the fast job rather than the Postgres one.
-      - name: Thought vocabulary and presentation rules
-        working-directory: server-portable
-        run: bun test-thoughts.ts
 
       # SMD-2273 + SMD-2318. The async job registry in memory: the lifecycle,
       # ownership, the SSE frames, retention and the cap on an injected clock,
@@ -189,24 +231,10 @@ jobs:
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
       # `bun generate.ts` fails here, and every operation through it into the
-      # real REST app over a stub core. Its imports of ../server-portable
-      # resolve against that directory's install above.
-      - name: Install the REST client's pinned packages
-        working-directory: rest-client
-        run: bun install --frozen-lockfile
-
+      # real REST app over a stub core.
       - name: The REST client against the REST core
         working-directory: rest-client
         run: bun test-client.ts
-
-      # The MCP server as a client of the REST core (SMD-2287): its own suite
-      # over the real REST app with a stub core, then server-portable's suites
-      # that drive an MCP server, each through it with the REST core behind it
-      # in process (test-support.ts's mcpUnderTest; SMD-2287 PR 6a retired
-      # their run against index.ts).
-      - name: Install the MCP server's pinned packages
-        working-directory: mcp-server
-        run: bun install --frozen-lockfile
 
       # SMD-2280: the operator GUI (dashboard/), checked as the image builds
       # it: svelte-check over its pages and server code, which import the REST
@@ -231,6 +259,11 @@ jobs:
         working-directory: dashboard
         run: bun test-oauth.ts
 
+      # The MCP server as a client of the REST core (SMD-2287): its own suite
+      # over the real REST app with a stub core. server-portable's suites that
+      # drive an MCP server run each through it, with the REST core behind it
+      # in process (test-support.ts's mcpUnderTest; SMD-2287 PR 6a retired
+      # their run against index.ts).
       - name: The MCP server over the REST core
         working-directory: mcp-server
         run: bun test-mcp.ts
@@ -250,13 +283,6 @@ jobs:
       - name: Plugins in the contract
         working-directory: server-portable
         run: bun test-plugins.ts
-
-      # The real server's suite (SMD-2287 PR 4b and 4c): its request lines,
-      # its refusals, its mirrors, its stop's count of tool calls, and its
-      # spans, one trace per tool call.
-      - name: Test against the real server
-        working-directory: server-portable
-        run: bun test-server.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
       # break when a shared signature moves, and until SMD-1932 nothing compiled
@@ -505,6 +531,42 @@ jobs:
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
+
+      # The two suites the job started after the installs (SMD-3470), waited
+      # on up to their limit and the kill after it, and printed as the data
+      # layer prints its pair: a passing log folded, a failing one open, and
+      # the two summary lines last. It runs when a step before it failed too,
+      # so a failure beside one of theirs is seen beside it.
+      - name: The real server's suite and the vocabulary rules (started at the job's start)
+        if: ${{ !cancelled() }}
+        run: |
+          read -r started limit_s < "$RUNNER_TEMP/portable.started" || { echo "::error title=Portable server::the two suites were never started: their start step did not run, or failed before it wrote $RUNNER_TEMP/portable.started"; exit 1; }
+          # The limit, the 10 s kill after it, and 20 s for each suite's subshell to write its code.
+          deadline=$((started + limit_s + 30))
+          while { [ ! -f "$RUNNER_TEMP/test-server.rc" ] || [ ! -f "$RUNNER_TEMP/test-thoughts.rc" ]; } && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+          summaries=""
+          failed=0
+          for suite in test-server test-thoughts; do
+            log="$RUNNER_TEMP/$suite.log"
+            rc=$(cat "$RUNNER_TEMP/$suite.rc" 2> /dev/null) || rc="none, its subshell wrote no code by ${limit_s} s and 30 s"
+            [ "$rc" = 0 ] || failed=1
+            case $rc in
+              124) rc="124, over the ${limit_s} s limit" ;;
+              137) rc="137, killed: over the ${limit_s} s limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$suite.ts — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=Portable server::$suite.ts failed (exit $rc) — its log follows"
+              cat "$log" || true
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
   db-schema:
     name: Schema migrations
@@ -1209,7 +1271,9 @@ jobs:
       # the supervisor holds that too, to run it again in a minute. Each case
       # is still running once its line is logged — the container does not
       # exit, so `unless-stopped` has nothing to restart in a loop — and a
-      # stop ends it promptly with 0.
+      # stop ends it promptly with 0. The eight cases share nothing but
+      # heartbeat rows nothing here reads, so they run side by side
+      # (.github/ci/held-cases.sh, SMD-3365).
       - name: The workers profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
@@ -1218,37 +1282,21 @@ jobs:
           docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
           before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
-          # Bounded: each case waits up to 60 s for its line, then is stopped.
-          held() {
-            local svc=$1 want=$2; shift 2
-            local ct="ci-held-$svc-$RANDOM"
-            docker compose -f compose.yaml --profile workers run -d --no-deps --name "$ct" "$@" "$svc" > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
-          held extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          also 'supervise: extract is held, not started'
-          held consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          held extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          held consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          source ../.github/ci/held-cases.sh
+          held_case x-nokey workers extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case c-nokey workers consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case x-follow workers extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held_case c-workers workers consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
           # …and each setting is checked, not only the pair's first.
-          held consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          held extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          held extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
-          also 'it runs again at'
-          held consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
-          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_case c-follow workers consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held_case x-both workers extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held_case x-probe workers extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          held_case c-probe workers consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_wait
+          held_also x-nokey 'supervise: extract is held, not started'
+          held_also x-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_also x-probe 'it runs again at'
+          held_also c-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
             printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
@@ -1263,53 +1311,42 @@ jobs:
       # fresh heartbeat in this stack's database, beside which it will not
       # sleep (the two profiles are alternatives), which also proves it
       # reaches the database on the server's environment — each held, to run
-      # again in a minute.
+      # again in a minute. Each writes heartbeat:sleep, which two cases read,
+      # so those two run as batches of their own and the seven between them
+      # side by side (.github/ci/held-cases.sh, SMD-3365).
       - name: The sleep profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          held() {
-            local want=$1; shift
-            local ct="ci-held-sleep-$RANDOM"
-            docker compose -f compose.yaml --profile sleep run -d --no-deps --name "$ct" "$@" sleep > /dev/null
-            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
-            sleep 2
-            docker logs "$ct" > /tmp/held.out 2>&1
-            local running took code
-            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
-            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
-            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
-            docker rm "$ct" > /dev/null
-            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
-              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
-            fi
-          }
-          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          source ../.github/ci/held-cases.sh
           row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
-          held 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case nokey sleep sleep 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_wait
           stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           # concat_ws skips the null in_s: held for a recreate, no next try.
           [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
-          held "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          held "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
-          also 'supervise: sleep exited 2'
+          held_case quiet sleep sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held_case poll sleep sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held_case workers sleep sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held_case poll61 sleep sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
           # the path one argument with its space, and one it cannot write is
           # the scheduler's own refusal, before it reads the database.
-          held '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
+          held_case dumpdir sleep sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
-          held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          held "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
-          held '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_case budget sleep sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held_case mwm sleep sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held_case budget-max sleep sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_wait
+          held_also poll61 'supervise: sleep exited 2'
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_case outside sleep sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_wait
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
-          also 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          held_also outside 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
           # The refusal ends heartbeat:sleep on a failure, and the supervisor
           # adds its next try, so preflight's sleep row says it is held and
           # names the followers keeping it down; then the row goes, leaving
@@ -1826,10 +1863,20 @@ jobs:
       # read key; each list's data holding the fields it shows alone; the key
       # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
-      # server. Here, not after the next step: that one configures the
-      # authorization server, and the GUI then offers no key sign-in (review
-      # pass 1). The smoke imports only dashboard/src/lib/browse.ts and
-      # format.ts, which import nothing, so nothing is installed.
+      # server. With --writes (SMD-3322), a thought of the smoke's own,
+      # captured on the GUI's capture page, is edited and deleted on its own
+      # pages — a stale edit refused, a read key offered none of them — and
+      # its audit rows then read here, in order: the capture, the one edit
+      # saved and the delete (a second capture of the same text, from the same
+      # key and source, changes nothing and writes none),
+      # each labelled with the GUI's source, `dashboard`, each a direct call
+      # to the REST core with no carrier, as the GUI makes them, all under the
+      # smoke key's name, as Verify asks. The smoke reads its
+      # keys from this job's environment, off its command line. Here, not after the
+      # next step: that one configures the authorization server, and the GUI
+      # then offers no key sign-in (review pass 1). The smoke imports only
+      # dashboard/src/lib/browse.ts and format.ts, which import nothing, so
+      # nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |
@@ -1848,7 +1895,12 @@ jobs:
           # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows --notes off
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
+          written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
+          [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
+          rows=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT string_agg(action || ' ' || origin || ' ' || coalesce(source, '-') || ' ' || (actor_name = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (actor_context->'act' IS NULL)::text, ', ' ORDER BY seq) FROM thought_audit WHERE thought_id = '$written'::uuid")
+          [ "$rows" = "capture open-brain-api dashboard true true, update open-brain-api dashboard true true, delete open-brain-api dashboard true true" ] || { echo "the write arm's thought's audit rows read \"$rows\", not its capture, one edit and one delete the GUI made directly, labelled dashboard, under the smoke key"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
@@ -1874,7 +1926,7 @@ jobs:
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --wait --wait-timeout 120 --force-recreate --no-deps app
-          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --notes on --notes-only)
+          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --notes on --notes-only)
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
 
@@ -3085,16 +3137,21 @@ jobs:
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           jq -e '.tier == "canary"' <<<"$(health 8012/mcp)" > /dev/null || { echo "the refused up stopped the canary" >&2; exit 1; }
           refused 'one or the other' up --refresh --no-refresh
+          refused 'go with up' down --refresh
           # …and where the canary's Postgres is stopped when the run begins, the
           # guard is asked once it is started, after the writers stop: exit 1,
-          # saying what is stopped, and the next up brings them back.
+          # and the next up brings them back. Board-sync is stopped with it,
+          # and first, since it depends on Postgres: left running over a stopped
+          # database soon after its pass, as the --port 8012 up above leaves it,
+          # it took ~30 s to stop, its loop's last heartbeat waiting out Bun's
+          # connect timeout (SMD-3464): most of SMD-3155's cost here (SMD-3465).
           cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
-          docker compose -p open-brain-canary -f compose.yaml stop postgres
+          docker compose -p open-brain-canary -f compose.yaml --profile board-sync stop board-sync postgres
           rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
           { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
             && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
+          if grep -qF 'canary board-sync stopped for' /tmp/canary-latestamp.out; then echo "the up found board-sync running over the stopped Postgres: the case's stop missed it" >&2; exit 1; fi
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
-          refused 'go with up' down --refresh
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published
           # when the run began is still named (code review).
@@ -3581,13 +3638,16 @@ jobs:
       # SMD-2286 step 1: the REST core accepts the authorization server's
       # tokens, and only its own. A real sign-in and consent (restart-check.ts
       # --tokens) gives an /mcp token, exchanged as the MCP service for a REST
-      # core one, as the MCP server does at the hop. The REST core, recreated
-      # to read the configured .env and asked on its own port inside its
-      # container (it is published only by an overlay), names the caller
-      # oauth:operator with the MCP service as act, refuses the /mcp token
-      # (Verify: the MCP-audience token sent straight to it) and a read token's
-      # capture (Verify), and a write token's capture writes an audit row
-      # naming both. The authorization server stopped, the keys it read are
+      # core one, as the MCP server does at the hop. Each sign-in registers a
+      # client of its own, a connector. The REST core, recreated to read the
+      # configured .env and asked on its own port inside its container (it is
+      # published only by an overlay), names the caller by the operator and
+      # its connector, oauth:operator+<client> (SMD-3064: the exchange nests
+      # the connector in act), with the MCP service as act, refuses the /mcp
+      # token (Verify: the MCP-audience token sent straight to it) and a read
+      # token's capture (Verify), and two connectors' write tokens each write
+      # an audit row naming its own connector and the MCP service (SMD-3064's
+      # Verify 1). The authorization server stopped, the keys it read are
       # still used; read none (the REST core recreated), a token is a 503 with
       # Retry-After 30, never let through. And through the proxy's /mcp at the
       # origin's Host, where the MCP server built on the REST core trades each
@@ -3599,7 +3659,7 @@ jobs:
         run: |
           auth() { docker compose -f compose.yaml --profile auth "$@"; }
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          # The step above filled the store's cap of 3 (its volume stays); the two
+          # The step above filled the store's cap of 3 (its volume stays); the three
           # sign-ins here register a client each, so this start's cap is higher
           # (the shell's value is compose's over .env's).
           OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
@@ -3613,18 +3673,26 @@ jobs:
           export OB1_AUTH_OPERATOR_PASSWORD
           read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:read)
           write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
+          write2_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens brain:write)
           # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer, cut at 15 s.
           at_api() { T="$2" auth exec -T -e P="$1" -e T -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined, signal: AbortSignal.timeout(15000) }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
           check() { local got="$1" want="$2" filter="$3" what="$4"; if ! { [ "${got%% *}" = "$want" ] && jq -e "$filter" <<<"$(cut -d' ' -f3- <<<"$got")" > /dev/null; }; then echo "$what answered \"${got:0:300}\""; exit 1; fi; }
           api_w=$(jq -r .api <<<"$write_t")
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator" and .scope == "write" and .act == {"name": "oauth:mcp"}' "whoami with an exchanged write token"
+          who_w="oauth:operator+$(jq -r .client <<<"$write_t")"
+          who_w2="oauth:operator+$(jq -r .client <<<"$write2_t")"
+          [ "$who_w" != "$who_w2" ] || { echo "two sign-ins registered one client, $who_w"; exit 1; }
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\" and .scope == \"write\" and .act == {\"name\": \"oauth:mcp\"}" "whoami with an exchanged write token"
           check "$(at_api /v1/whoami "$(jq -r .mcp <<<"$read_t")")" 401 '.code == "UNAUTHORIZED" and .credential == "token"' "whoami with the /mcp token"
           check "$(at_api /v1/thoughts "$(jq -r .api <<<"$read_t")" POST '{"content":"SMD-2286: a read token may not capture"}')" 403 '.code == "FORBIDDEN" and .needs == "capture"' "a capture with an exchanged read token"
-          got=$(at_api /v1/thoughts "$api_w" POST '{"content":"SMD-2286: captured with an exchanged token"}')
-          check "$got" 201 '.id | type == "string"' "a capture with an exchanged write token"
-          id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
-          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
-          [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
+          for t in "$write_t" "$write2_t"; do
+            who="oauth:operator+$(jq -r .client <<<"$t")"
+            # Each connector's own text: a capture of text the brain holds answers with the thought it has, and its audit row.
+            got=$(at_api /v1/thoughts "$(jq -r .api <<<"$t")" POST "{\"content\":\"SMD-2286: captured with $who's exchanged token\"}")
+            check "$got" 201 '.id | type == "string"' "a capture with $who's exchanged write token"
+            id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
+            row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture'")
+            [ "$row" = "$who oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not \"$who\" and the MCP service as act"; exit 1; }
+          done
           # The JSON-RPC answer to a POST to the proxy's /mcp at the origin's Host with this /mcp token, its bearer
           # read from a file (curl -H @file), never a command line; an event stream's data line, or the JSON body.
           # Read to its end (tail, not head): a tools/list line is some 22 KB, and a reader that leaves early
@@ -3641,7 +3709,7 @@ jobs:
           jq -e '(.result.isError // false) == false and (.result.content[0].text | contains("Total thoughts: "))' <<<"$stats" > /dev/null || { echo "a read token's thought_stats through /mcp answered \"${stats:0:300}\""; exit 1; }
           rm -f "$bearer_file"
           auth stop auth
-          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator"' "whoami, the authorization server stopped and its keys already read,"
+          check "$(at_api /v1/whoami "$api_w")" 200 ".name == \"$who_w\"" "whoami, the authorization server stopped and its keys already read,"
           auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
           got=$(at_api /v1/whoami "$api_w")
           check "$got" 503 '.code == "BUSY" and .credential == "token"' "whoami, the authorization server stopped and no keys read,"

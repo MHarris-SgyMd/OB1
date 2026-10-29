@@ -2302,7 +2302,10 @@ new key — waits for the brain to go quiet. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
 so, and once it has, a sleep re-embeds whatever the switch left unfinished
-(SMD-2679).
+(SMD-2679) — unless the new name is one its heartbeat row cannot carry (ASCII
+letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
+which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
+(SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
 once, before its first quiet — not re-embed's, which each sleep with work
@@ -3625,28 +3628,35 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   key, `brain:capture` as a capture key; the consent page words them so. A
   token holding none of them, or `brain:read` with `brain:capture` and no
   `brain:write`, is answered 403 `insufficient_scope`.
-- **The caller** is `oauth:operator` for a sign-in, `oauth:<id>` for a
-  service. That name is what egress terms (`actor:oauth:operator` in
-  `OB1_EGRESS_ALLOW` or `OB1_EGRESS_DENY`), the search tools' actor filter
-  and the audit row see; an exchanged token's audit row names the MCP
-  service as `act`. Every client signed in as the operator shares this one
-  name for now (SMD-3064).
-- **Classify it** as you would a key, or its writes carry no kind and a
-  `said_by` filter misses them:
-  `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator', 'agent')"`,
+- **The caller** is the operator and the client it signed in through,
+  one name per client (SMD-3064): `oauth:operator+gui` for the operator
+  GUI, `oauth:operator+<client>` for a connector reached through `/mcp`
+  (a registered client's id, or a metadata document's URL, such as
+  `oauth:operator+https://claude.ai/oauth/claude-code-client-metadata`),
+  and `oauth:<id>` alone for a service. That name is what egress terms
+  (`actor:oauth:operator+gui` in `OB1_EGRESS_ALLOW` or `OB1_EGRESS_DENY`),
+  the search tools' actor filter and the audit row see; an exchanged
+  token's audit row names the MCP service as `act`. The registry lists the
+  names it has seen: `SELECT label, kind FROM ob1_agents WHERE label LIKE
+  'oauth:%'`.
+- **Classify each** as you would a key, or its writes carry no kind and a
+  `said_by` filter misses them. The GUI is you; a connector is usually an
+  agent:
+  `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator+gui', 'operator'), set_agent_kind('oauth:operator+<client>', 'agent')"`,
   then `SELECT backfill_thought_actors()` so the thoughts it wrote before
   carry the kind `said_by` reads (and `SELECT backfill_thought_audit_events()`
-  for their audit rows).
-  `agent` is the cautious kind while every connector shares the name:
-  `operator` would give every connector the operator signs in the
-  operator's trust.
-- **Revoking it in the registry bans the subject for good.** Its digest is
-  fixed, so no new sign-in escapes it: every token of it is refused 401
-  `REVOKED` (`credential: "token"`), and there is no function to undo it. (The
-  digest is of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives the
-  subject a new one, and lifts the ban with it.) To ban one on purpose, by
-  its label: `SELECT revoke_agent_key(k.key_hash, 'why') FROM ob1_agent_keys k
-  JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
+  for their audit rows). A name can be classified before its first sign-in.
+  A client registered afresh is a new name, unclassified until you classify
+  it.
+- **Revoking one in the registry bans that client for good.** Its digest
+  is fixed, so no new sign-in through that client escapes it: every token
+  of it is refused 401 `REVOKED` (`credential: "token"`), and there is no
+  function to undo it. The GUI and the other clients go on. (The digest is
+  of the issuer too, so changing `OB1_PUBLIC_ORIGIN` gives each name a new
+  one, and lifts the ban with it.) To ban one on purpose, by its label:
+  `SELECT revoke_agent_key(k.key_hash, 'why') FROM ob1_agent_keys k JOIN
+  ob1_agents a USING (canonical_agent_id) WHERE a.label =
+  'oauth:operator+<client>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
@@ -3655,6 +3665,18 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   tokens are refused at once, and the access token it holds lapses within
   ten minutes (the maintainer's choice of 2026-10-26: no revocation list).
   The compromise steps under "Custody and backups" below end every grant.
+- **Upgrading past SMD-3064:** the one name `oauth:operator` is gone, and
+  nothing that named it binds a client now. A ban on it in the registry no
+  longer refuses anyone: ban each client by its own name. An egress term
+  naming it no longer matches, so name each client in its place: an
+  `OB1_EGRESS_DENY` term `actor:oauth:operator` stops refusing, and an
+  `OB1_EGRESS_ALLOW` term stops admitting, so text the GUI and connectors
+  send no longer leaves for a provider that the allow list gated.
+  A classification of it, and a search's `actor` filter, match only the
+  rows written before. A connector named by a metadata document URL the
+  brain cannot name (a query, `HTTPS://`, `+` or `:` in its path, no path,
+  over 180 characters) is refused from now on, at its sign-in and its
+  refresh.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,

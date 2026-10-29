@@ -2549,7 +2549,7 @@ bun reembed.ts --url … --dry-run             # what a run would do; writes not
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model (keep the reembed: prefix — preflight reports by it)
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
-bun reembed.ts --url … --follow [SECONDS]    # then poll every SECONDS (15 bare), pooling again at each, until a signal (SMD-2679)
+bun reembed.ts --url … --follow [SECONDS]    # then poll every SECONDS (15 bare), pooling again at each, until a signal (SMD-2679); refused, exit 2, under a model name or --job its heartbeat row cannot carry — run it once instead (SMD-3486)
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
 ```
 
@@ -4149,7 +4149,10 @@ above). Since SMD-2679's PR 4b its `waiting` and `waitingMidPass` name
 which preflight reads whose key it is from, not from its own environment; a
 row without one is read as a scheduler that runs no re-embed — v1.9.0's, one
 whose width forms no key, or one whose model name falls outside a model
-name's alphabet — and a stopped one by the configuration its restart takes),
+name's alphabet (ASCII letters, digits and `. _ : @ / + -`, with
+`<name>@<width>` at most 120 characters, a hand follower's key), which keeps
+re-embed out of sleep and says so once at its start (SMD-3486) — and a
+stopped one by the configuration its restart takes),
 and `aside` carries re-embed set aside on a model switch —
 `{ reembed: { kind: "model-switch", recorded, configured } }`, the model the
 brain records and the stack's — until the record is put right (read at each
@@ -5627,10 +5630,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1774 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1777 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 280 assertions
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 351 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

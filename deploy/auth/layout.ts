@@ -62,6 +62,22 @@ export const noKeysScope = (scopes: readonly string[]) => keyScopeOf(scopes) ===
 /** The one account, whose `sub` every signed-in token carries; a service's tokens carry its client id, so no service may be named this. */
 export const OPERATOR = "operator";
 
+/**
+ * Whether the REST core can name a client the operator signs in through
+ * (SMD-3064). It names the caller `oauth:operator+<client>` and refuses a
+ * token whose client it cannot carry on a log line, in an egress term or in
+ * the search tools' 200-character `actor` filter: an id of a subject's
+ * characters, or a metadata document's https URL of a host, an optional port
+ * and a path alone, at most 180 characters. server-portable/oauth-token.ts
+ * holds the same rule (`clientNameable`), and the REST suite holds the two
+ * equal. This server's client metadata validator refuses such a client
+ * wherever the library loads it, and the exchange refuses a token issued to
+ * one before that, so it issues no token the REST core would refuse.
+ */
+export function clientNameable(id: string): boolean {
+  return id.length <= 180 && /^(?:[A-Za-z0-9._~-]{1,128}|https:\/\/[A-Za-z0-9.-]{1,100}(?::[0-9]{1,5})?\/[A-Za-z0-9._~\/%-]{0,170})$/.test(id);
+}
+
 /** A grant's whole life, which no refresh token outlives: 30 days from the consent. */
 export const GRANT_TTL_S = 30 * 86_400;
 /** How long a refresh token lasts unused: each refresh rotates it, and the new one has this long again, within the grant's life. */

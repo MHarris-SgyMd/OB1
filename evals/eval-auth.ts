@@ -72,7 +72,7 @@
  *     resource is refused before any page, and by POST from a signed-in,
  *     consented browser gets no code. Every token issued for a resource with
  *     no brain scope is refused where presented, with `insufficient_scope`.
- *   X (1, token exchange): through /mcp, the REST core sees `oauth:operator`
+ *   X (1, token exchange): through /mcp, the stand-in REST core sees `oauth:operator`
  *     with the MCP service as actor. Done directly, the exchange keeps the
  *     subject, adds `act`, narrows but never widens scope, and never outlives
  *     the subject token. It is refused across tiers, for a foreign target, to
@@ -916,7 +916,7 @@ async function exchange(c: Ctx, cimd: SdkRun | undefined, guiToken: string | und
 
   const subject = cimd?.accessToken;
   if (!subject) {
-    row("X2 the exchange keeps the subject, adds act, never widens or outlives", false, "no /mcp token: R1 failed");
+    row("X2 the exchange keeps the subject, adds act (the subject token's client nested in it, SMD-3064), never widens or outlives", false, "no /mcp token: R1 failed");
     row("X3 the exchange is refused wherever it should be", false, "no /mcp token: R1 failed");
     row("X4 an exchanged token works only at its own REST core", false, "no /mcp token: R1 failed");
     return;
@@ -933,8 +933,8 @@ async function exchange(c: Ctx, cimd: SdkRun | undefined, guiToken: string | und
   const xc = claimsOf(x.body.access_token);
   const narrow = await te(subject, { scope: "brain:read" });
   const nc = claimsOf(narrow.body.access_token);
-  const x2 = x.status === 200 && x.body.issued_token_type === ACCESS_TOKEN_TYPE && xc.sub === sc.sub && xc.act?.sub === "mcp" && oneAud(xc, L.api("")) && xc.scope === sc.scope && (xc.exp ?? Infinity) <= (sc.exp ?? 0) && narrow.status === 200 && nc.scope === "brain:read" && oneAud(nc, L.api(""));
-  row("X2 the exchange keeps the subject, adds act, never widens or outlives", x2, `${x.status} sub ${xc.sub} act ${JSON.stringify(xc.act)} aud ${audOf(xc)} scope "${xc.scope}" (subject "${sc.scope}") exp ${xc.exp} ≤ ${sc.exp}; narrowed to "${nc.scope}" for ${audOf(nc)}`);
+  const x2 = x.status === 200 && x.body.issued_token_type === ACCESS_TOKEN_TYPE && xc.sub === sc.sub && xc.act?.sub === "mcp" && typeof sc.client_id === "string" && xc.act?.act?.sub === sc.client_id && xc.act.act.act === undefined && oneAud(xc, L.api("")) && xc.scope === sc.scope && (xc.exp ?? Infinity) <= (sc.exp ?? 0) && narrow.status === 200 && nc.scope === "brain:read" && oneAud(nc, L.api(""));
+  row("X2 the exchange keeps the subject, adds act (the subject token's client nested in it, SMD-3064), never widens or outlives", x2, `${x.status} sub ${xc.sub} act ${JSON.stringify(xc.act)} aud ${audOf(xc)} scope "${xc.scope}" (subject "${sc.scope}") exp ${xc.exp} ≤ ${sc.exp}; narrowed to "${nc.scope}" for ${audOf(nc)}`);
 
   // A /mcp token with brain:read alone, to ask for more than it holds.
   const readOnly = await register(meta).then((id) => publicCode(c, id, L.mcp(""), "brain:read")).catch(failed);
