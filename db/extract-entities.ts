@@ -1124,7 +1124,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     );
   }
 
-  type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null };
+  type Row = { id: string; content: string; fingerprint: string | null; metadata: Record<string, unknown> | null; metadata_hash: string | null };
   type Outcome =
     /** `caveat` is set for a thought extracted in part: 028's caveat, released on the succeeded row (SMD-2240); `leftOut`, how many of its windows were left out as malformed (SMD-2260). */
     | { outcome: "succeeded"; caveat?: string; leftOut?: number }
@@ -1324,7 +1324,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // must not go to the provider after it (review passes 3 and 4). A read
       // that fails goes on, as before.
       if (through === "waited") {
-        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true, row.metadata).catch(() => "ours" as const);
+        const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, true, row.metadata_hash).catch(() => "ours" as const);
         if (claim !== "ours") throw new ClaimGoneAtGate(claim);
       }
     } : undefined;
@@ -1500,7 +1500,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           const rows = (await sql`
-            SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata
+            SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {

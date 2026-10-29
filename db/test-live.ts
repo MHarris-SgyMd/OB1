@@ -6262,6 +6262,21 @@ if (want("10")) {
   assert(retaggedWaiting && /, 1 edited mid-extraction and re-queued/.test(retaggedSummary) && retaggedWindows > 1 && (await statusOf(retaggedNote)) === "succeeded" && retaggedCode <= 1,
          `…one whose metadata alone is edited then goes back to the pool and is extracted again under its new metadata, counted edited (${retaggedWindows} window(s) sent in all, exit ${retaggedCode}: ${retaggedSummary.trim().slice(0, 140)})`);
   await sql`SELECT delete_thought(${retaggedNote}::uuid, NULL::jsonb)`;
+  // …and an untouched one whose metadata holds an integer past 2^53, which
+  // JavaScript cannot hold: read again as a hash in SQL, it is not moved, and
+  // carries on in the same claim (review pass 7).
+  const wideNote = await seed(Array.from({ length: 6 }, (_, p) => `The wide ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita widened point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n"));
+  await sql`UPDATE thoughts SET metadata = metadata || '{"n": 12345678901234567890}'::jsonb WHERE id = ${wideNote}::uuid`;
+  const atWide = heldGate(3);
+  const wideLines: string[] = [];
+  const wideRun = runExtract({ url: URL_!, env, workers: 1, admit: atWide.admit, writer: { out: (l) => wideLines.push(l), err: (l) => wideLines.push(l) } });
+  const wideWaiting = await pollUntil(async () => atWide.waiting === 1, 10_000);
+  atWide.open();
+  const wideCode = await wideRun;
+  const wideSummary = wideLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(wideWaiting && /, 0 edited mid-extraction and re-queued/.test(wideSummary) && /^\s*1 extracted/.test(wideSummary) && (await statusOf(wideNote)) === "succeeded" && wideCode <= 1,
+         `…an untouched one whose metadata holds an integer past 2^53 is not read as moved, and is extracted in the same claim (exit ${wideCode}: ${wideSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${wideNote}::uuid, NULL::jsonb)`;
   // A pause moves the thought's time held on (N17): a hard stop while the
   // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
   // and stalls nothing (review pass 3).

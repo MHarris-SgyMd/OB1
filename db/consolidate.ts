@@ -1608,7 +1608,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-  type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean };
+  /** `metadata_hash`, `md5(metadata::text)`, is read for the thought a worker claims (claimAfterWait), not for an older side. */
+  type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean; metadata_hash?: string | null };
   type Candidate = { older_id: string; similarity: number; shared_entities: number };
   type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
@@ -1739,7 +1740,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // any older side still to judge, whose text must not go to the judge
         // after it (review passes 3 and 4). A read that fails goes on, as before.
         if (through === "waited") {
-          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false, row.metadata).catch(() => "ours" as const);
+          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false, row.metadata_hash ?? null).catch(() => "ours" as const);
           if (claim === "deleted") return { outcome: "vanished" };
           if (claim === "lost" || claim === "requeued") return { outcome: "lost" };
           // Still ours, its text moved (063 requeues a judged thought only
@@ -2076,7 +2077,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           const rows = (await sql`
-            SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector
+            SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {

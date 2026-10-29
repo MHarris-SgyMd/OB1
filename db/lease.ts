@@ -344,16 +344,19 @@ export class AdmitThrow extends Error {
  * the pool's again (an edit's requeue under the key 016 follows); "lost",
  * another's or settled (a reap); "moved", still this worker's but its text
  * changed (an edit under a key nothing requeues) or its metadata, which the
- * egress gate reads (review pass 6). `fingerprint` and `metadata` are the
- * claim's as the worker read them, the fingerprint by the engine's own rule:
- * `coalesced` reads the stored key first, as extraction does, else the text's.
+ * egress gate reads (review pass 6). `fingerprint` and `metadataHash` are the
+ * claim's as the worker read them: the fingerprint by the engine's own rule —
+ * `coalesced` reads the stored key first, as extraction does, else the text's
+ * — and the metadata as `md5(metadata::text)`, compared in SQL, since a value
+ * decoded to JavaScript and bound back can differ from the stored one (an
+ * integer past 2^53, a jsonb null; review pass 7).
  */
-export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean, metadata: Record<string, unknown> | null): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean, metadataHash: string | null): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
   const [r] = (await sql`
     SELECT t.fingerprint, t.retagged, c.status, c.worker_id
       FROM (SELECT 1) one
       LEFT JOIN (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END AS fingerprint,
-                        metadata IS DISTINCT FROM ${metadata}::jsonb AS retagged
+                        md5(metadata::text) IS DISTINCT FROM ${metadataHash}::text AS retagged
                    FROM thoughts WHERE id = ${id}::uuid) t ON true
       LEFT JOIN thought_work_claims c ON c.thought_id = ${id}::uuid AND c.work_type = ${job}`) as { fingerprint: string | null; retagged: boolean | null; status: string | null; worker_id: string | null }[];
   if (r.fingerprint === null) return "deleted";
