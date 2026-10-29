@@ -417,6 +417,43 @@ export async function admitted(admit: Admit, signal: AbortSignal): Promise<false
 export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;
 
 /**
+ * The calls a pass has in hand (SMD-3379 PR 1b-2), handed to the caller
+ * beside the pass's stop: abort(olderThanMs) aborts each worker's model call
+ * that has run at least that long — since the worker took up its thought or
+ * last passed the admit gate — and every one with no argument. The thought
+ * goes to the back of the queue (setBack), extraction keeping the windows it
+ * has answered and counting the stop on it, as a wake's (093); and the worker
+ * carries on with its next claim — no restart, no start probe, no pool.
+ * Returns how many it aborted. Inert once the pass is stopping or the run has
+ * returned. The sleep scheduler is to call it while its gate is closed
+ * (SMD-3379 PR 1c, N12).
+ */
+export type InHandAbort = (olderThanMs?: number) => number;
+
+/** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */
+export class AbortedInHand extends Error {
+  constructor() {
+    super("the call in hand was aborted by the pass's caller; the thought goes to the back of the queue");
+    this.name = "AbortedInHand";
+  }
+}
+
+/**
+ * Put a thought this worker holds at the back of the queue (InHandAbort): its
+ * claim back to pending, its attempt not counted — release_claims_for_worker's
+ * rule for a thought a worker did not finish — and its enqueued_at now, which
+ * claim_thoughts orders by. True when it was this worker's to put back.
+ */
+export async function setBack(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
+  const rows = (await sql`
+    UPDATE thought_work_claims c
+       SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0), enqueued_at = now()
+     WHERE c.thought_id = ${id}::uuid AND c.work_type = ${job} AND c.worker_id = ${workerId} AND c.status = 'claimed'
+    RETURNING 1 AS ok`) as { ok: number }[];
+  return rows.length > 0;
+}
+
+/**
  * The CLI's signals for a claim worker's pass: SIGINT and SIGTERM call the
  * pass's stop, and a stop that returns a release ends the process with 130
  * once the leases are returned, or after `graceMs` if they are not — leases
