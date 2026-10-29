@@ -121,8 +121,10 @@ EOF
 # The pulled services are those with no build of their own whose image no
 # service builds. mcp and app run api's image: `pull`, even with
 # --ignore-buildable, asks the registry for it and is refused, so they are
-# left out, as up leaves them out. The pull is quiet; a failed one fails the
-# step at its wait, and a failed build takes the pull down with it.
+# left out, as up leaves them out. --quiet keeps the pull's progress out of
+# the build's log (each service's Pulling and Pulled lines and any error
+# still show); a failed pull fails the step at its wait, after the build, and
+# a failed build takes the pull down with it.
 mapfile -t pulled < <(docker compose -f compose.yaml config --format json | jq -r '
   [.services[] | select(.build) | .image] as $built
   | .services | to_entries[] | select(.value.build == null)
@@ -132,6 +134,6 @@ docker compose -f compose.yaml pull --quiet "${pulled[@]}" &
 pull_pid=$!
 trap 'kill "$pull_pid" 2> /dev/null || true' EXIT
 docker compose -f compose.yaml build
-wait "$pull_pid"
 trap - EXIT
+wait "$pull_pid"
 docker compose -f compose.yaml up -d --no-build --wait --wait-timeout 240
