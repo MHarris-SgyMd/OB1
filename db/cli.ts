@@ -160,9 +160,14 @@ export function blankProblem<K extends string>(spec: FlagSpec<K>, values: Partia
   return null;
 }
 
+/** "a", "a and b", "a, b and c". */
+export function andList(items: readonly (string | number)[]): string {
+  return items.length === 1 ? `${items[0]}` : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 /** "3", "3 and 5", "3, 5 and 6". */
 function positionsOf(ns: readonly number[]): string {
-  return ns.length === 1 ? `${ns[0]}` : `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`;
+  return andList(ns);
 }
 
 /**
@@ -300,6 +305,18 @@ function answerHelp(argv: readonly string[], text: string): void {
  * `spec`, print the refusal with the flag list and the note and exit 2, or
  * print them for `--help` and exit 0. `script` names the file.
  */
+/**
+ * A wrapper's command line (db/coordinator.ts's `run`): argv starting with
+ * `verb` hands everything after it on unread — the wrapped script's own
+ * command line, which that script scans — and anything else is the wrapper's
+ * own, scanned and refused as commandLine does. The one other place a script's
+ * argv is read, kept here.
+ */
+export function wrapperLine<K extends string>(script: string, spec: FlagSpec<K>, verb: string, options: ScanOptions<K> & { note?: string } = {}, argv: readonly string[] = process.argv.slice(2)): { own: CommandLine<K> } | { handed: string[] } {
+  if (argv[0] === verb) return { handed: argv.slice(1) };
+  return { own: commandLine(script, spec, options, argv) };
+}
+
 export function commandLine<K extends string>(script: string, spec: FlagSpec<K>, options: ScanOptions<K> & { note?: string } = {}, argv: readonly string[] = process.argv.slice(2)): CommandLine<K> {
   const list = `${flagList(spec, options.hints)}${options.note ? `\n  ${options.note}` : ""}`;
   answerHelp(argv, `usage: bun db/${script} [flags]\n${list}\n  The header of db/${script} says what each does.`);

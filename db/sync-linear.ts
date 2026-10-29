@@ -1204,14 +1204,14 @@ export function importClosure(entry: string, root: string): string[] {
   return [...seen].map((f) => relative(root, f)).sort();
 }
 
-/** The directories deploy/compose.yaml mounts into the board-sync container — everything this file loads must be under one of them. */
+/** The directories the coordinator's image takes its files from (db/ by name, which db/test-coordinator.ts holds to the passes' graph, and server-portable/) — everything this file loads must be under one of them. */
 export const CONTAINER_MOUNTS = ["db/", "server-portable/"] as const;
 
 function selfCheck(): Promise<number> {
   let bad = 0;
   const ok = (cond: boolean, label: string) => { if (!cond) { console.error(`FAIL ${label}`); bad++; } };
 
-  // The container's mount is the boundary: every file this tool loads,
+  // The image's directories are the boundary: every file this tool loads,
   // transitively, sits under db/ or server-portable/ (third review pass — an
   // import of ingest-records.ts reached evals/ and scripts/, which the
   // container does not mount, and the sync would have failed at load).
@@ -1220,7 +1220,7 @@ function selfCheck(): Promise<number> {
     const root = resolve(here, "..");
     const closure = importClosure(resolve(here, "sync-linear.ts"), root);
     const outside = closure.filter((f) => !CONTAINER_MOUNTS.some((m) => f.startsWith(m)));
-    ok(closure.length > 10 && outside.length === 0, `every file the sync loads is under ${CONTAINER_MOUNTS.join(" or ")} — the board-sync container's mounts (${closure.length} files; outside: ${outside.join(", ") || "none"})`);
+    ok(closure.length > 10 && outside.length === 0, `every file the sync loads is under ${CONTAINER_MOUNTS.join(" or ")} — the directories the coordinator's image takes from (${closure.length} files; outside: ${outside.join(", ") || "none"})`);
     // The walker sees through: the ingester's closure DOES reach evals/ and
     // scripts/, so a sync that imported it would fail the line above.
     const ingester = importClosure(resolve(here, "ingest-records.ts"), root);

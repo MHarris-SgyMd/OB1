@@ -14566,7 +14566,7 @@ if (want("37")) {
 }
 
 if (want("37b")) {
-  console.log("\n[37b] db/supervise.ts: a compose follower run again after it ends on its own, on a clock of minutes, its heartbeat ended with the next try — its guards held, a stop passed on, nothing exiting for the runtime to restart in a loop (SMD-3214)");
+  console.log("\n[37b] db/supervise.ts and db/coordinator.ts: a core pass run again after it ends on its own, on a clock of minutes, its heartbeat ended with the next try — its guards held, a stop passed on, nothing exiting for the runtime to restart in a loop (SMD-3214, SMD-3476)");
   const ssql = new SQL({ url: URL_!, max: 2 });
   const row = async (key: string) => {
     const [r] = await ssql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
@@ -14634,7 +14634,7 @@ if (want("37b")) {
     // ends it at once with 0.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     said.length = 0;
-    const looping = supervise({ worker: "board-sync", run: "echo ran >&2; exit 3", sql: ssql as never, waits: fast, writer });
+    const looping = supervise({ worker: "board-sync", cmd: ["sh", "-c", "echo ran >&2; exit 3"], sql: ssql as never, waits: fast, writer });
     await pollUntil(async () => ((await row("heartbeat:board-sync"))?.restart?.tries ?? 0) >= 3, 10_000);
     const mid = await row("heartbeat:board-sync");
     const stopAt = Date.now();
@@ -14645,7 +14645,7 @@ if (want("37b")) {
       `a follower ending on its own runs again on the clock, each end on the log and the row, and a stop in the wait ends it at once with 0 (code ${loopCode}, ${ends.length} ends said, row ${JSON.stringify(mid?.restart)})`);
     // The count starts again after a run of `reset` or longer: here every run counts as long.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    const resetting = supervise({ worker: "board-sync", run: "sleep 0.15; exit 2", sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
+    const resetting = supervise({ worker: "board-sync", cmd: ["sh", "-c", "sleep 0.15; exit 2"], sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
     await pollUntil(async () => (await row("heartbeat:board-sync")) !== null, 5000);
     await Bun.sleep(600);
     const reset = await row("heartbeat:board-sync");
@@ -14657,7 +14657,7 @@ if (want("37b")) {
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const marker = join(tmpdir(), `ob1-supervise-${process.pid}`);
     rmSync(marker, { force: true });
-    const passing = supervise({ worker: "sleep", run: `exec sh -c 'trap "echo stopped-by-term > ${marker}; exit 0" TERM; echo up > ${marker}; while :; do sleep 0.05; done'`, sql: ssql as never, waits: fast, writer });
+    const passing = supervise({ worker: "sleep", cmd: ["sh", "-c", `trap "echo stopped-by-term > ${marker}; exit 0" TERM; echo up > ${marker}; while :; do sleep 0.05; done`], sql: ssql as never, waits: fast, writer });
     await pollUntil(async () => existsSync(marker), 5000);
     passing.stop("SIGTERM");
     const passCode = await within(passing.done, 3000);
@@ -14668,7 +14668,7 @@ if (want("37b")) {
 
     // The guard: held, never started, its row the refusal with no next try — the supervisor settles only on a stop.
     said.length = 0;
-    const guarded = supervise({ worker: "extract", run: "echo started >&2", requireKey: true, env: {}, sql: ssql as never, writer });
+    const guarded = supervise({ worker: "extract", cmd: ["sh", "-c", "echo started >&2"], requireKey: true, env: {}, sql: ssql as never, writer });
     await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 5000);
     const guardRow = await row(EXTRACT_KEY);
     const stillHeld = await within(guarded.done, 300);
@@ -14676,35 +14676,47 @@ if (want("37b")) {
     assert(stillHeld === "pending" && (await within(guarded.done, 1000)) === 0 && guardRow?.ended === true && guardRow.restart?.in_s === null && guardRow.restart.code === 2
         && said[0]?.startsWith("extract: OB1_WORKER_KEY is not set in deploy/.env") && /^supervise: extract is held, not started/.test(said[1] ?? "") && !said.includes("started"),
       `no key holds the follower unstarted, its row refused (identity) with no next try, until a stop ends it with 0 (${JSON.stringify(guardRow?.restart)})`);
+    // A label: the follower's lines go to the writer after it, stdout's and stderr's, a last line with no newline included.
+    said.length = 0;
+    const labelled = supervise({ worker: "board-sync", cmd: ["sh", "-c", "echo one; echo two >&2; printf three; exit 3"], label: "[board-sync] ", sql: null, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer });
+    await pollUntil(async () => said.some((l) => /^supervise: board-sync exited 3/.test(l)), 5000);
+    labelled.stop("SIGTERM");
+    assert((await within(labelled.done, 1000)) === 0 && ["[board-sync] one", "[board-sync] two", "[board-sync] three"].every((l) => said.includes(l)),
+      `a labelled follower's every line reaches the writer after its label (${said.filter((l) => l.startsWith("[")).join(" | ")})`);
     // No database to write to: the supervisor runs and holds the same, the row left alone.
-    const unstamped = supervise({ worker: "sleep", run: "exit 2", sql: null, waits: fast, writer });
+    const unstamped = supervise({ worker: "sleep", cmd: ["sh", "-c", "exit 2"], sql: null, waits: fast, writer });
     await Bun.sleep(200);
     unstamped.stop("SIGTERM");
     assert((await within(unstamped.done, 1000)) === 0 && (await row("heartbeat:sleep")) === null, "with no database the supervisor still runs the follower again and stops on a signal, the row left alone");
 
-    // The CLI, for real: as the compose service runs it — its handlers its
-    // own, the door closing its client — a SIGTERM in a wait or a hold ends it
-    // at once with 0, and its row says so.
+    // The coordinator's CLI, for real (SMD-3476): as the compose service runs
+    // it — its handlers its own, the door closing its client, here as this
+    // user, so each child as this user too — a child's refusal is run again
+    // in a minute, its row saying so; a guard holds a child unstarted; and a
+    // SIGTERM in a wait or a hold ends it at once with 0.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const cliEnv = { ...process.env, DATABASE_URL: URL_!, OB1_ENV_FILES: "off" } as Record<string, string>;
     delete cliEnv.OB1_WORKER_KEY;
-    const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "board-sync", "--run", "echo refused >&2; exit 2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
+    delete cliEnv.LINEAR_API_KEY;
+    const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "board-sync" }, stdout: "pipe", stderr: "pipe" });
     await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 15_000);
     const t0 = Date.now();
     cli.kill("SIGTERM");
     const cliCode = await cli.exited;
     const cliErr = await new Response(cli.stderr).text();
-    assert(cliCode === 0 && Date.now() - t0 < 2000 && /^refused$/m.test(cliErr) && /supervise: board-sync exited 2 after \d+ s — a refusal, its lines above say why; it runs again at .* \(in 60 s, end 1 in a row\), heartbeat:board-sync says so/.test(cliErr),
-      `the CLI waits a minute after its follower's refusal, and a SIGTERM then ends it with 0 at once (exit ${cliCode} after ${Date.now() - t0} ms)`);
-    const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "--run", "echo started >&2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
-    await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 15_000);
+    assert(cliCode === 0 && Date.now() - t0 < 2000 && /^coordinator: runs board-sync — not root, so each as this process's user, not its own$/m.test(cliErr)
+        && /^\[board-sync\] .*LINEAR_API_KEY/m.test(cliErr) && /supervise: board-sync exited 2 after \d+ s — a refusal, its lines above say why; it runs again at .* \(in 60 s, end 1 in a row\), heartbeat:board-sync says so/.test(cliErr),
+      `the coordinator runs board-sync, waits a minute after its refusal, and a SIGTERM then ends it with 0 at once (exit ${cliCode} after ${Date.now() - t0} ms)`);
+    const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "workers,sleep" }, stdout: "pipe", stderr: "pipe" });
+    await pollUntil(async () => (await row("heartbeat:sleep"))?.refused === "identity", 15_000);
     await Bun.sleep(200);
     const guardRunning = cliGuard.exitCode === null;
     cliGuard.kill("SIGTERM");
     const guardCode = await cliGuard.exited;
     const guardErr = await new Response(cliGuard.stderr).text();
-    assert(guardRunning && guardCode === 0 && !/^started$/m.test(guardErr) && /^extract: OB1_WORKER_KEY is not set in deploy\/\.env/m.test(guardErr),
-      `the CLI's guard holds with the follower unstarted, and a SIGTERM ends it with 0 (exit ${guardCode})`);
+    assert(guardRunning && guardCode === 0 && /names both sleep and workers, which never run together — sleep runs/.test(guardErr) && /^sleep: OB1_WORKER_KEY is not set in deploy\/\.env/m.test(guardErr)
+        && !/^extract: /m.test(guardErr) && (await row(EXTRACT_KEY)) === null,
+      `sleep and workers named together: sleep alone, held by its guard with the scheduler unstarted, the followers never started, and a SIGTERM ends it with 0 (exit ${guardCode})`);
   } finally {
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await ssql.close();
@@ -14994,7 +15006,7 @@ if (want("38")) {
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
     assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
       `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
-    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
+    assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*Sleep and the workers are alternatives/.test(besideText) && !/asleep:/.test(besideText)
         && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && !("reads" in refusedBeat) && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
         && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
         && endedDry === 0 && !/outside sleep/.test(endedDryText),
@@ -16846,7 +16858,7 @@ if (want("38r")) {
     } finally {
       await sql`DELETE FROM ob1_config WHERE key = ${outsideKey}`;
     }
-    assert(outsideCode === 2 && lines.some((l) => /refused: a re-embed follower is running outside sleep[^:]*: heartbeat:reembed:stub-embed@\S+ — a reembed\.ts --follow run by hand: stop it/.test(l)) && !lines.some((l) => /--profile workers stop/.test(l)),
+    assert(outsideCode === 2 && lines.some((l) => /refused: a re-embed follower is running outside sleep[^:]*: heartbeat:reembed:stub-embed@\S+ — a reembed\.ts --follow run by hand: stop it/.test(l)) && !lines.some((l) => /--remove-orphans/.test(l)),
       `a re-embed follower running outside sleep refuses the scheduler, as the claim followers do, its words saying it is a hand run to stop (exit ${outsideCode})`);
   } finally {
     await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;

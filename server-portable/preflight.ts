@@ -264,7 +264,7 @@ const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the clai
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
 /**
  * The fresh followers a sleep scheduler refuses beside, ending at its next
- * poll, as sleep.ts's followersOutside reads them: the workers profile's, and
+ * poll, as sleep.ts's followersOutside reads them: claim followers outside it, and
  * a re-embed follower run by hand beside one whose row carries a re-embed key
  * — or this version kept out of re-embed by its model name, which refuses
  * beside one all the same (SMD-3486); v1.9.0's does not (SMD-3485 review pass 2).
@@ -280,10 +280,10 @@ const besideFix = (beside: readonly WorkerHeartbeat[]) =>
 const fixOf = (...parts: string[]) => parts.map((p) => p.trim()).filter((p) => p !== "").join(" ");
 /**
  * What mends a follower db/supervise.ts holds (SMD-3214), null for a row it
- * did not end: the cause first — "start it again" is wrong for a service
- * that runs it again on its own — then when it tries again, and the
- * recreate a fix in deploy/.env needs. Long past its try with nothing
- * stamped, the supervisor is taken for gone.
+ * did not end: the cause first — "start it again" is wrong for a pass the
+ * coordinator runs again on its own (SMD-3476) — then when it tries again,
+ * and the recreate a fix in deploy/.env needs. Long past its try with
+ * nothing stamped, the supervisor is taken for gone.
  */
 function heldFix(h: WorkerHeartbeat, name: string): string | null {
   const r = h.restart;
@@ -292,8 +292,8 @@ function heldFix(h: WorkerHeartbeat, name: string): string | null {
   const recreate = restartCommand(h.worker, h.job);
   if (r.inS === null) return `${name} is held by its supervisor, never started: ${remedy}. That is deploy/.env's to mend, so recreate it then — ${recreate}.`;
   const left = r.inS - h.ageS;
-  if (left > -RESTART_OVERDUE_S) return `${name} is held: ${remedy}. Its supervisor runs it again on its own ${left > 0 ? `in ${ago(left)}` : "now"}, then every 15 min at most while it keeps ending, so a fix outside deploy/.env (a model pulled, the migrations applied) is met at a try; one in deploy/.env needs the service recreated — ${recreate}.`;
-  return `${name}'s supervisor was due to run it again ${ago(-left)} ago, and nothing has stamped since: if its container is gone, start it — ${recreate}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`;
+  if (left > -RESTART_OVERDUE_S) return `${name} is held: ${remedy}. Its supervisor runs it again on its own ${left > 0 ? `in ${ago(left)}` : "now"}, then every 15 min at most while it keeps ending, so a fix outside deploy/.env (a model pulled, the migrations applied) is met at a try; one in deploy/.env needs the coordinator recreated — ${recreate}.`;
+  return `${name}'s supervisor was due to run it again ${ago(-left)} ago, and nothing has stamped since: if the coordinator is gone, start it — ${recreate}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`;
 }
 
 /** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
@@ -4524,7 +4524,7 @@ if (configFailed) {
               // runs now between its sleeps — its followers stamp through
               // heartbeat:sleep, and awake it holds no lease. The row is its, with
               // no remedy that starts a worker beside it, where it would read
-              // stopped (an old workers-profile row included). A dead worker's
+              // stopped (an old workers-pass row included). A dead worker's
               // expired leases are its work too — it reclaims them when it next
               // works the key — so they add a clause and the reclaim, not "finish
               // it" beside it (SMD-3485; SMD-1794's review pass 2 had left them
@@ -4891,7 +4891,7 @@ if (configFailed) {
                   const when = ownRunner.by === "aside" && ownRunner.beat.aside?.reembed.kind === "model-switch" ? " once its model switch is settled (the sleep row)" : sleepRuns ? "" : " once it is started again (the sleep row)";
                   return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead${when}, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.${backfill}`;
                 }
-                if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: the coordinator runs no follower beside it, so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
                 if (held !== null) return held;
@@ -4912,7 +4912,7 @@ if (configFailed) {
           }
         }
 
-        // The sleep scheduler (SMD-1794; the compose `sleep` profile, SMD-2678):
+        // The sleep scheduler (SMD-1794; a coordinator's pass, SMD-2678, SMD-3476):
         // its heartbeat, its current or last sleep (the row's `slept`), and
         // what wakes it — a live write; a search does not (SMD-3315). A
         // scheduler that never ran says so and passes.
@@ -4923,7 +4923,7 @@ if (configFailed) {
             if ("workers" in facts.unread) add("sleep", "warn", `could not verify: ${facts.unread.workers.message}`, "The check reads ob1_config's heartbeat:sleep row.");
             else add("sleep", "skip", "no ob1_config — migration 006 is not applied.");
           } else if (h === undefined) {
-            add("sleep", "skip", "the sleep scheduler has not run on this brain — `--profile sleep` runs it, as an alternative to `--profile workers` (deploy/README.md, SMD-2678).");
+            add("sleep", "skip", "the sleep scheduler has not run on this brain — the coordinator runs it when deploy/.env's OB1_PASSES names sleep, as an alternative to workers (deploy/README.md, SMD-2678, SMD-3476).");
           } else {
             const wakes = "a live write wakes it; a search does not";
             const s = h.slept;
@@ -5041,7 +5041,7 @@ if (configFailed) {
             } else if (down && followers.length) {
               // Beside the workers' followers, named too: their fix alone would leave the scheduler refusing (review pass 4).
               if (handFollowers.length) fixes.push(`${handFix}.`);
-              fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              fixes.push(`Followers run here outside the scheduler (${followers.map((b) => b.job ?? b.worker).join(", ")}), and it will not run beside them — the coordinator never runs both, so they are a stack's from before SMD-3476 (podman compose -f deploy/compose.yaml up -d --remove-orphans, with the -f files and -p the stack was started with, removes its extract and consolidate) or run by hand (Ctrl-C). For sleep, stop them, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, name workers and not sleep in deploy/.env's OB1_PASSES, recreate the coordinator (up -d coordinator) and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
             } else if (h.restart) {
               fixes.push(heldFix(h, "sleep") as string);
             } else if (refusedBy) {
@@ -5089,7 +5089,7 @@ if (configFailed) {
               // to its 120 s grace, and may leave the lease; and a checkout
               // reaches the stack's Postgres only through host-ports.
               const it = one ? "it" : "them";
-              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler just after a live call, when its passes have returned their leases (podman compose -f deploy/compose.yaml --profile sleep stop sleep, with the -f files and -p the stack was started with — stopped asleep, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no wake stops and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
+              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler just after a live call, when its passes have returned their leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped asleep, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no wake stops and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
             }
             add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
           }

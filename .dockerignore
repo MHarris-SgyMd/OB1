@@ -62,6 +62,20 @@ db/*.ts
 !db/lease.ts
 !db/pass-stamp.ts
 !evals/linear-corpus.ts
+# ...and the coordinator's (SMD-3476): the server image carries db/coordinator.ts
+# and the core passes it runs, with their import graph — db/test-coordinator.ts
+# holds this list to it.
+!db/coordinator.ts
+!db/supervise.ts
+!db/sleep.ts
+!db/extract-entities.ts
+!db/consolidate.ts
+!db/sync-linear.ts
+!db/board-findings.ts
+!db/linear-api.ts
+!db/subject-sweep.ts
+!db/rebuild.ts
+!db/env.ts
 # ...and the emitters its pipelines.json names (SMD-2493), let back into a
 # context that otherwise keeps recipes/ out.
 !recipes/grok-export-import/import-grok.mjs
