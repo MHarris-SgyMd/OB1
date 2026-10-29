@@ -420,13 +420,16 @@ export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;
  * The calls a pass has in hand (SMD-3379 PR 1b-2), handed to the caller
  * beside the pass's stop: abort(olderThanMs) aborts each worker's model call
  * that has run at least that long — since the worker took up its thought or
- * last passed the admit gate — and every one with no argument. The thought
- * goes to the back of the queue (setBack), extraction keeping the windows it
- * has answered and counting the stop on it, as a wake's (093); and the worker
- * carries on with its next claim — no restart, no start probe, no pool.
- * Returns how many it aborted. Inert once the pass is stopping or the run has
- * returned. The sleep scheduler is to call it while its gate is closed
- * (SMD-3379 PR 1c, N12).
+ * last passed the admit gate, a worker with no call to abort (at the gate, in
+ * a provider pause, in the decider's call) passed over — and every one with
+ * no argument. The thought goes behind every thought queued before it
+ * (setBack) — the sleep scheduler orders its own stopped thoughts after (PR
+ * 1c) — or, deleted or no longer this worker's meanwhile, is counted so;
+ * extraction keeps the windows it has answered and counts the stop on it, as
+ * a wake's (093); and the worker carries on with its next claim — no restart,
+ * no start probe, no pool. Returns how many it aborted. Inert once the pass
+ * is stopping or the run has returned. The sleep scheduler is to call it
+ * while its gate is closed (SMD-3379 PR 1c, N12).
  */
 export type InHandAbort = (olderThanMs?: number) => number;
 
@@ -442,7 +445,8 @@ export class AbortedInHand extends Error {
  * Put a thought this worker holds at the back of the queue (InHandAbort): its
  * claim back to pending, its attempt not counted — release_claims_for_worker's
  * rule for a thought a worker did not finish — and its enqueued_at now, which
- * claim_thoughts orders by. True when it was this worker's to put back.
+ * claim_thoughts orders by. True when it was this worker's to put back; a
+ * database error is thrown.
  */
 export async function setBack(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
   const rows = (await sql`

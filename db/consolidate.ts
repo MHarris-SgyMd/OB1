@@ -1622,8 +1622,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     | { outcome: "lost" }
     /** Edited while its worker waited at the admit gate, still its claim: the worker puts it back in the pool for the new text, nothing more judged (review passes 4 and 5). */
     | { outcome: "moved" }
-    /** Its judge call in hand aborted by the pass's caller (abortInHand): set back in the queue, its proposals so far standing (SMD-3379 PR 1b-2). */
-    | { outcome: "setBack" };
+    /** Its judge call in hand aborted by the pass's caller (abortInHand): set back in the queue, its proposals so far standing (SMD-3379 PR 1b-2); `gone`, found deleted or another's instead, and said so (reportLost). */
+    | { outcome: "setBack"; gone?: "deleted" | "lost" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
@@ -2142,8 +2142,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 // refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
                 if (e instanceof AbortedInHand) {
                   hb.held.delete(b.thought_id);
-                  if (!(await setBack(sql, JOB, workerId, b.thought_id).catch(() => false))) hb.held.add(b.thought_id);
-                  outcome = { outcome: "setBack" };
+                  let back: boolean;
+                  try {
+                    back = await setBack(sql, JOB, workerId, b.thought_id);
+                  } catch (re) {
+                    hb.held.add(b.thought_id);
+                    err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its judge call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+                    return;
+                  }
+                  // Not ours to set back: deleted, or edited or reaped meanwhile, and said so (review pass 1).
+                  if (back && LIMIT > 0) taken.delete(b.thought_id);
+                  outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
                   continue;
                 }
                 // The database went away under the pairs: not the thought's, so
@@ -2197,7 +2206,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // the same way: main slept the pause out, called again, and
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
+                  // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
+                  const pausing = inCall.get(workerId);
+                  if (pausing) pausing.waiting = true;
                   await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  if (pausing) {
+                    pausing.waiting = false;
+                    pausing.since = Date.now();
+                  }
                   if (stopping || outage.reason !== null) return;
                 } else {
                   outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
@@ -2269,7 +2285,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             continue;
           }
           if (outcome.outcome === "setBack") {
-            abortedInHand++;
+            if (outcome.gone === "deleted") vanished++;
+            else if (outcome.gone === "lost") lost++;
+            else abortedInHand++;
             continue;
           }
           if (outcome.outcome === "moved") {

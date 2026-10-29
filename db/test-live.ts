@@ -6357,6 +6357,23 @@ if (want("10")) {
   assert(abortCode <= 1 && (await statusOf(firstNote)) === "succeeded" && (await statusOf(behindNote)) === "succeeded" && /, 1 set back in the queue, the call in hand aborted by the pass's caller/.test(abortSummary),
          `…and the worker goes on in the same run: both notes extracted, the summary counting the one set back (exit ${abortCode}: ${abortSummary.trim().slice(0, 200)})`);
   for (const id of [firstNote, behindNote]) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // …and one deleted while its call is in hand, then aborted: not the
+  // worker's to set back, so counted deleted, not set back (review pass 1).
+  const vanishing = await seed(ledgerOf("vanishing", "vanished"));
+  let abortGone: InHandAbort | undefined;
+  const goneAbortLines: string[] = [];
+  slowMs = 3000;
+  const goneAbortFrom = calls;
+  const goneAbortRun = runExtract({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortGone = a; }, writer: { out: (l) => goneAbortLines.push(l), err: (l) => goneAbortLines.push(l) } });
+  let goneInFlight = false;
+  for (let i = 0; i < 500 && !goneInFlight; i++) { goneInFlight = calls > goneAbortFrom; if (!goneInFlight) await Bun.sleep(20); }
+  await sql`SELECT delete_thought(${vanishing}::uuid, NULL::jsonb)`;
+  const goneAborted = abortGone?.() ?? -1;
+  slowMs = 0;
+  const goneAbortCode = await goneAbortRun;
+  const goneAbortSummary = goneAbortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary),
+         `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -9742,8 +9759,9 @@ if (want("16")) {
   assert(oldersWaiting && olders.length === 4 && calls - oldersFrom === 1 && oldersAfter === "succeeded" && oldersCode <= 1,
          `…its older sides deleted while it waits before its second pair, none of their texts is judged once the gate opens, and the thought is finished (${olders.length} older side(s), ${calls - oldersFrom} call(s), ${oldersAfter}, exit ${oldersCode})`);
   // abortInHand (SMD-3379 PR 1b-2): the judge call in hand aborted, the
-  // thought set back, and the worker goes on — the thought, alone in the pool,
-  // claimed again and judged in the same run.
+  // thought set back, and the worker goes on — the thought claimed again and
+  // judged in the same run (its older seed, pooled beside it, has no older
+  // side of its own to judge).
   const abortNewer = await seed("[16g] The watchtower opens at three now.", 31, 0, ["watchtower"]);
   await seed("[16g] The watchtower opened at nine once.", 31, 2, ["watchtower"]);
   let abortJudge: InHandAbort | undefined;

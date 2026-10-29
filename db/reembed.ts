@@ -2353,8 +2353,18 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           // the queue, the worker goes on with its next claim; a set-back the
           // database refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
           if (outcome.outcome === "setBack") {
-            if (!(await setBack(sql, JOB, workerId, b.thought_id).catch(() => false))) hb.held.add(b.thought_id);
-            abortedInHand++;
+            let back: boolean;
+            try {
+              back = await setBack(sql, JOB, workerId, b.thought_id);
+            } catch (re) {
+              hb.held.add(b.thought_id);
+              err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its embedding call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+              return;
+            }
+            // Not ours to set back: deleted, or edited or reaped meanwhile, and said so (review pass 1).
+            if (back) abortedInHand++;
+            else if ((await reportLost(sql, JOB, workerId, b.thought_id, err)) === "deleted") vanished++;
+            else lost++;
             continue;
           }
           if (outcome.outcome === "vanished") {
