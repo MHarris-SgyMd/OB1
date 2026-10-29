@@ -25,6 +25,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
+import { consolidateKey } from "./consolidate.ts";
+import { consolidatePassKey } from "./consolidate-decide.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
@@ -1528,6 +1530,56 @@ else {
   assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
       && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
          `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
+  // A dead worker's expired lease on the scheduler's key is its work, which its next sleep with work reclaims: named,
+  // with the reclaim, no "finish it" beside it (SMD-3485). A record unlike this configuration keeps the record's words.
+  await claims`SELECT claim_thoughts(${KEY}, 'preflight-dead-beside-sleep', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${KEY} AND status = 'claimed'`;
+  let schedDied: { out: string } = { out: "" }, schedDiedSwitch = "", schedDiedAlone = "", setAside = 0;
+  let schedDiedDown: { out: string } = { out: "" }, schedDiedConflict: { out: string } = { out: "" }, schedDiedWorkers: { out: string } = { out: "" }, schedDiedDownWorkers: { out: string } = { out: "" };
+  const [{ value: recordedNow }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+  try {
+    schedDied = await run(SQL_ENV);
+    // Set down for the sleep, or beside a hand follower: the cause first, the reclaim once it is mended (review pass 1).
+    await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } } });
+    schedDiedDown = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true });
+    await hb(`heartbeat:${KEY}:ctx`, { job: `${KEY}:ctx`, running: true });
+    schedDiedConflict = await run(SQL_ENV);
+    await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${KEY}:ctx`}`;
+    // A workers-profile follower beside it ends it too: the reclaim waits on it, named in the fix (review pass 2);
+    // set down as well, both conditions, the follower named after the set-down's remedy (review pass 3).
+    await hb("heartbeat:extract:beside@p2", { job: "extract:beside@p2", running: true });
+    schedDiedWorkers = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } } });
+    schedDiedDownWorkers = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true });
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:beside@p2'`;
+    // With no failed row beside it, the expired claim alone makes the warning (the failed row set aside, by a mark, and put back).
+    setAside = ((await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = 'preflight-set-aside' WHERE work_type = ${KEY} AND status = 'failed' RETURNING thought_id`) as unknown[]).length;
+    schedDiedAlone = row((await run(SQL_ENV)).out, "re-embed pass");
+    await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL WHERE work_type = ${KEY} AND worker_id = 'preflight-set-aside'`;
+    await claims`UPDATE ob1_config SET value = 'another-recorded-model' WHERE key = 'embedding_model'`;
+    schedDiedSwitch = row((await run(SQL_ENV)).out, "re-embed pass");
+  } finally {
+    await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${KEY}:ctx`}, 'heartbeat:extract:beside@p2')`;
+    await claims`UPDATE ob1_config SET value = ${recordedNow} WHERE key = 'embedding_model'`;
+    await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL WHERE work_type = ${KEY} AND worker_id = 'preflight-set-aside'`;
+    await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${KEY} AND status = 'claimed'`;
+  }
+  assert(new RegExp(`!\\s+re-embed pass\\s+${rx(KEY)}: .* — the sleep scheduler runs this key, .*; 1 left by a worker that died, which the scheduler reclaims when it next works this key$`).test(row(schedDied.out, "re-embed pass"))
+      && /the release_stale_leases tool \(work_type \S+\) returns them now/.test(fix(schedDied.out, "re-embed pass")) && !/Finish it/.test(fix(schedDied.out, "re-embed pass"))
+      && /no longer the recorded model \(another-recorded-model/.test(schedDiedSwitch) && !/the sleep scheduler runs this key/.test(schedDiedSwitch)
+      && setAside > 0 && /^\s*!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*\); 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(schedDiedAlone),
+         `a dead worker's expired lease on the scheduler's key is its to reclaim, with no "finish it"; under a record that differs, the record's words (${row(schedDied.out, "re-embed pass")} | ${fix(schedDied.out, "re-embed pass")} | ${schedDiedSwitch} | ${schedDiedAlone})`);
+  assert(/\(provider\); 1 failed row\(s\) it will not retry; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once re-embed runs again$/.test(row(schedDiedDown.out, "re-embed pass"))
+      && /^\s*→ The provider refused .* returns them now\.$/.test(fix(schedDiedDown.out, "re-embed pass"))
+      && /runs beside it \(\S+:ctx\), so it refuses at its next poll and ends; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(schedDiedConflict.out, "re-embed pass"))
+      && /Stop that follower first, as the sleep row says, or the scheduler ends\. The next pass reclaims the expired claims/.test(fix(schedDiedConflict.out, "re-embed pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(schedDiedWorkers.out, "re-embed pass"))
+      && /Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims the expired claims/.test(fix(schedDiedWorkers.out, "re-embed pass"))
+      && /\(provider\); 1 failed row\(s\) it will not retry; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once re-embed runs again and the follower\(s\) beside it stop$/.test(row(schedDiedDownWorkers.out, "re-embed pass"))
+      && /^\s*→ The provider refused .*Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims .* returns them now\.$/.test(fix(schedDiedDownWorkers.out, "re-embed pass")),
+         `set down, or beside a hand follower, the cause comes first and the reclaim waits on it (${row(schedDiedDown.out, "re-embed pass")} | ${fix(schedDiedDown.out, "re-embed pass")} | ${row(schedDiedConflict.out, "re-embed pass")} | ${fix(schedDiedConflict.out, "re-embed pass")} | ${row(schedDiedWorkers.out, "re-embed pass")} | ${fix(schedDiedWorkers.out, "re-embed pass")} | ${row(schedDiedDownWorkers.out, "re-embed pass")} | ${fix(schedDiedDownWorkers.out, "re-embed pass")})`);
   // v1.9.0's scheduler runs no re-embed and writes no key: the pass is not its, "finish it" as main's (review pass 6: credited, a pass hidden).
   await hb("heartbeat:sleep", { running: true, reembedJob: undefined });
   const oldScheduler = await run(SQL_ENV);
@@ -1785,7 +1837,8 @@ else {
    * the oldest waits past OB1_PROPOSALS_WARN_DAYS — the pass proposes, a
    * reviewer decides. Before 015 or 029 there is nothing to read.
    */
-  const CONS = "consolidate:other-judge@p1";
+  // This judge's key at the current prompt version: the one the sleep scheduler runs (SMD-3485 review pass 2: @p1 read as its).
+  const CONS = consolidateKey("other-judge");
   assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out) && /✓\s+proposals\s+none pending\s*$/m.test(noRecord.out),
          `with no consolidation rows and no proposals both checks are ok and say so (${row(noRecord.out, "proposals")})`);
   // The pool's universe is thoughts with entities AND a vector; give three a vector for the count.
@@ -1815,18 +1868,25 @@ else {
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
   // Decide mode (SMD-3115): under a decider, the judge's key's remedy clears it, the judge's model being this
   // server's own, and a decide key's names its decider and writer, each the configuration that pools under that
-  // key; a decide key of this server's own models needs neither.
-  const DCONS = "consolidate:h2o-x+writer-y@p4d1";
+  // key; a decide key of this server's own models needs neither. One of an earlier decide version is no
+  // worker's — consolidate.ts runs the current key — so it reads so, with no "Finish it" (SMD-3485 review pass 3).
+  const DCONS = consolidatePassKey({ decider: "h2o-x", judgeModel: "writer-y" });
+  const DCONS_OLD = "consolidate:h2o-x+writer-y@p4d1";
   await claims.unsafe(`SELECT enqueue_thoughts('${DCONS}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  await claims.unsafe(`SELECT enqueue_thoughts('${DCONS_OLD}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
   const consDecide = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-z", OB1_JUDGE_MODEL: "other-judge" });
   const consDecideOwn = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-x", OB1_JUDGE_MODEL: "writer-y" });
-  await claims`DELETE FROM thought_work_claims WHERE work_type = ${DCONS}`;
+  await claims`DELETE FROM thought_work_claims WHERE work_type IN (${DCONS}, ${DCONS_OLD})`;
   const finishes = (out: string) => out.split("\n").filter((l) => /Finish it/.test(l)).map((l) => l.trim().slice(0, 110)).join(" | ");
   assert(/Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out)
       && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out),
          `under a decider the judge's key's remedy clears it, though its model is this server's judge, and a decide key's names its decider and writer (${finishes(consDecide.out)})`);
   assert(/Finish it: cd db && bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecideOwn.out) && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun/.test(consDecideOwn.out),
          `…and a decide key of this server's own decider and writer needs no knob (${finishes(consDecideOwn.out)})`);
+  const oldDecideRow = consDecideOwn.out.split("\n").find((l) => /consolidate pass/.test(l) && l.includes(`${DCONS_OLD}:`)) ?? "";
+  assert(DCONS !== DCONS_OLD && /✓\s+consolidate pass\s+\S+: .* — an earlier prompt or decide version's pool, which no worker runs any more: consolidate\.ts and the sleep scheduler judge these thoughts under \S+, nothing here to finish or retry$/.test(oldDecideRow)
+      && !consDecideOwn.out.includes(`${DCONS_OLD} --`) && !/Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y/.test(consDecideOwn.out),
+         `…and its earlier decide version's key, with no scheduler, is no worker's, with no "Finish it" (${oldDecideRow})`);
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   // A worker holding the pending row's live lease: running, ok, no remedy, the
@@ -1887,7 +1947,7 @@ else {
   await followerBeat(600, { running: true });
   const consKilled = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* — its follower is not running \(the workers row says so\), and 1 claim\(s\) it held keep live leases until \d\d:\d\d UTC\s*$/m.test(consKilled.out)
-      && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p1, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
+      && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p\d+, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
          `a follower whose heartbeat went stale while its claim's lease is live reads not running, pointing to the restart (${row(consKilled.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   await followerBeat(20);
@@ -1896,7 +1956,7 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND status = 'pending'`;
   const consFollowFailed = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry\s*$/m.test(consFollowFailed.out)
-      && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p1\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
+      && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p\d+\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
          `a follower beside a failed row warns, naming it and the retry (${row(consFollowFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${CONS} AND last_error = 'stub: not JSON'`;
   await followerBeat(600);
@@ -1916,13 +1976,60 @@ else {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   const consSlept = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   const consOtherJudge = await run(SQL_ENV);
-  // Only the stopped case is the scheduler's (review pass 2): a dead worker's
-  // expired lease keeps its warning and remedy beside a fresh heartbeat:sleep,
-  // and a scheduler whose last pass failed warns, with no second worker.
+  // A dead worker's expired lease beside a fresh heartbeat:sleep is the
+  // scheduler's work on the key it runs now — this judge at the current prompt
+  // version — which it reclaims when it next works the key: named, with the
+  // reclaim, no second worker (SMD-3485), a failed last pass's too. An earlier
+  // version's key, which no worker runs any more, is said so, with nothing to
+  // do (review passes 1 and 2). A scheduler whose last pass failed warns, with
+  // no second worker.
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead-beside-sleep', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consSleptDied = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Its last pass failed, the claim still expired: the clause, and the reclaim after the cause.
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptDiedFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // A workers-profile follower beside it, which ends the scheduler at its next poll: the reclaim waits on it (review pass 2).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:extract:beside@p2', ${JSON.stringify({ v: 1, job: "extract:beside@p2", every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')`;
+  const consSleptDiedBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:beside@p2'`;
+  // A hand re-embed follower beside this row, which carries no re-embed key — v1.9.0's, which does not refuse beside one: no condition.
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:reembed:beside@1024', ${JSON.stringify({ v: 1, job: "reembed:beside@1024", every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')`;
+  const consSleptDiedOldBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // …the same row under a model name no row carries is this version's, kept out of re-embed, which refuses beside one (SMD-3486).
+  const consSleptDiedUnfitBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge", OB1_EMBEDDING_MODEL: "my embed model" });
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:beside@1024'`;
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  // Decide mode with a `+` in the judge's model name: the parse splits it wrongly, the current key still the scheduler's (review pass 2).
+  const PLUS_ENV = { ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-walk", OB1_JUDGE_MODEL: "walk+judge" };
+  const PLUS = consolidatePassKey({ decider: "h2o-walk", judgeModel: "walk+judge" });
+  let consPlus = "";
+  try {
+    const [{ thought_id: plusThought }] = (await claims`SELECT thought_id FROM thought_work_claims WHERE work_type = ${CONS} LIMIT 1`) as { thought_id: string }[];
+    await claims`SELECT enqueue_thoughts(${PLUS}, ARRAY[${plusThought}::uuid])`;
+    consPlus = (await run(PLUS_ENV)).out.split("\n").find((l) => /consolidate pass/.test(l) && l.includes(`${PLUS}:`)) ?? "";
+  } finally {
+    await claims`DELETE FROM thought_work_claims WHERE work_type = ${PLUS}`;
+  }
+  // An earlier prompt version of this judge's key: no worker runs it any more (review passes 1 and 2).
+  const OLD = "consolidate:other-judge@p1";
+  const consRowOf = (out: string) => {
+    const ls = out.split("\n");
+    const i = ls.findIndex((l) => /consolidate pass/.test(l) && l.includes(`${OLD}:`));
+    return { row: ls[i] ?? "", fix: /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : "" };
+  };
+  let consOld = { row: "", fix: "" }, consOldDied = { row: "", fix: "" };
+  try {
+    const [{ thought_id: oldThought }] = (await claims`SELECT thought_id FROM thought_work_claims WHERE work_type = ${CONS} LIMIT 1`) as { thought_id: string }[];
+    await claims`SELECT enqueue_thoughts(${OLD}, ARRAY[${oldThought}::uuid])`;
+    consOld = consRowOf((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out);
+    await claims`SELECT claim_thoughts(${OLD}, 'preflight-dead-beside-sleep', 1)`;
+    await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${OLD} AND status = 'claimed'`;
+    consOldDied = consRowOf((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out);
+  } finally {
+    await claims`DELETE FROM thought_work_claims WHERE work_type = ${OLD}`;
+  }
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   // Asleep with its pass waiting for the provider at its start, the row says
@@ -1953,9 +2060,19 @@ else {
   assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\)\s*$/m.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
-  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(consSleptDied.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptDied.out, "consolidate pass"))
+  assert(/!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped .*\); 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDied.out, "consolidate pass"))
+      && /^\s*→ The next pass reclaims the expired claims .* returns them now\.$/.test(fix(consSleptDied.out, "consolidate pass"))
+      && /, and its last pass failed; 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDiedFailed.out, "consolidate pass"))
+      && /^\s*→ The scheduler's log says why .* returns them now\.$/.test(fix(consSleptDiedFailed.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(consSleptDiedBeside.out, "consolidate pass"))
+      && /^\s*→ Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims/.test(fix(consSleptDiedBeside.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDiedOldBeside.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(consSleptDiedUnfitBeside.out, "consolidate pass"))
+      && /✓\s+consolidate pass\s+consolidate:other-judge@p1: .* — an earlier prompt or decide version's pool, which no worker runs any more: consolidate\.ts and the sleep scheduler judge these thoughts under consolidate:other-judge@p\d+, nothing here to finish or retry$/.test(consOld.row)
+      && /an earlier prompt or decide version's pool, .*; 1 claim\(s\) left by a worker that died, which nothing takes up$/.test(consOldDied.row) && consOldDied.fix === "" && !/Finish it/.test(consOldDied.row)
+      && PLUS.includes("walk+judge") && /— the sleep scheduler runs this key/.test(consPlus)
       && /!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key .*, and its last pass failed/.test(consSleptFailed.out) && !/Finish it|Start it again/.test(fix(consSleptFailed.out, "consolidate pass")),
-         `…but a dead worker's expired lease keeps its warning beside it, and a failed last pass warns with no second worker (${row(consSleptDied.out, "consolidate pass")} | ${row(consSleptFailed.out, "consolidate pass")})`);
+         `…and a dead worker's expired lease on the key it runs now is the scheduler's to reclaim, with no second worker — a failed last pass's too, and beside a follower once it stops; an earlier version's key is no worker's (${row(consSleptDied.out, "consolidate pass")} | ${fix(consSleptDied.out, "consolidate pass")} | ${row(consSleptDiedFailed.out, "consolidate pass")} | ${row(consSleptDiedBeside.out, "consolidate pass")} | ${fix(consSleptDiedBeside.out, "consolidate pass")} | ${consOld.row} | ${consOldDied.row} | ${consPlus} | ${row(consSleptFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
