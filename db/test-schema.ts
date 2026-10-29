@@ -15957,6 +15957,183 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
+console.log("\n[101] Migration 113: work claims — a ticket or one piece of it held under a lease by a key and a session, stamped from the envelope; another holder refused by an answer naming the holder, a whole ticket and its pieces the same work, two pieces not; the holder's own claim renewed; a lapsed claim free and taken over; renew and release the holder's own, an operator's forced release with a reason; READ COMMITTED alone; the claims grant group; a re-apply a no-op (SMD-3597)");
+{
+  type Claim = { id: string; issue: string; piece: string | null; holder: string; holder_kind: string | null; holder_agent_id: string | null; session: string; label: string | null; claimed_at: string; renewed_at: string | null; expires_at: string; released_at: string | null; released_by: string | null; released_by_kind: string | null; release_reason: string | null; state: string };
+  type Answer = { outcome: string; code: string | null; message: string | null; claim: Claim | null; held_by: Claim[] };
+  // By the whole name: "_work_claims.sql" alone also ends 015's file.
+  const file = files.find((f) => /^\d{3}_work_claims\.sql$/.test(f)) ?? "no NNN_work_claims.sql";
+  const src = readFileSync(join(MIGRATIONS, file), "utf8");
+  const AGENT = { name: "claims-agent" }, OTHER = { name: "claims-other" }, OP = { name: "claims-op" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('claims-agent', 'agent'), ('claims-other', 'agent'), ('claims-op', 'operator')`);
+  const ans = async (sql: string, params: unknown[]) => (await db.query<{ r: Answer }>(sql, params)).rows[0].r;
+  const claim = (issue: string, session: string, actor: object | null, piece: string | null = null, label: string | null = null, lease = 14400) =>
+    ans(`SELECT claim_work($1, $2, $3, $4, $5, $6::jsonb) AS r`, [issue, session, piece, label, lease, actor === null ? null : JSON.stringify(actor)]);
+  const renew = (id: string, session: string, actor: object) => ans(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [id, session, JSON.stringify(actor)]);
+  const release = (id: string, session: string | null, actor: object, reason: string | null = null, force = false) =>
+    ans(`SELECT release_work_claim($1::uuid, $2, $3, $4, $5::jsonb) AS r`, [id, session, reason, force, JSON.stringify(actor)]);
+  const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message }; } };
+  const epoch = (t: string | null) => (t === null ? NaN : new Date(t).getTime());
+
+  // The shape: the table and its comment, the one-per-work index, the sentinels.
+  const idx = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claims_one_unreleased')) AS d`)).rows[0].d ?? "";
+  const tc = (await db.query<{ c: string | null }>(`SELECT obj_description('work_claims'::regclass, 'pg_class') AS c`)).rows[0].c ?? "";
+  assert(/^CREATE UNIQUE INDEX work_claims_one_unreleased ON public\.work_claims USING btree \(issue, piece_key\) WHERE \(released_at IS NULL\)$/.test(idx) && /Migration 113 \/ SMD-3597/.test(tc)
+    && /ob1:work-claim-holder-from-the-envelope/.test(src) && /ob1:work-claim-one-per-work/.test(src),
+    `work_claims stands, its comment naming the migration, with one unreleased claim per ticket and piece, and the file's two sentinels (${idx || "no index"})`);
+
+  // A claim: the key normalised, the holder from the envelope, the default lease.
+  const a = await claim(" smd-9001 ", "session-1", AGENT, null, "claude-code on the mac");
+  assert(a.outcome === "claimed" && a.code === null && a.claim!.issue === "SMD-9001" && a.claim!.piece === null && a.claim!.holder === "claims-agent" && a.claim!.holder_kind === "agent"
+    && a.claim!.session === "session-1" && a.claim!.state === "live" && epoch(a.claim!.expires_at) - epoch(a.claim!.claimed_at) === 14400_000,
+    `a claim on " smd-9001 " is SMD-9001, held by the envelope's key and its kind, for four hours by default (${JSON.stringify(a).slice(0, 200)})`);
+  // The same key in another session is another holder: refused, by an answer naming the first.
+  const sameKey = await claim("SMD-9001", "session-2", AGENT, "PR 1");
+  assert(sameKey.outcome === "refused" && sameKey.code === "WORK_CLAIMED" && /^SMD-9001 is held by claims-agent \(session-1\) since \d{4}-\d\d-\d\d \d\d:\d\dZ; claude-code on the mac, until /.test(sameKey.message ?? "")
+    && sameKey.claim === null && sameKey.held_by.length === 1 && sameKey.held_by[0].id === a.claim!.id,
+    `a piece of a held ticket, claimed by the same key in another session: refused, naming the holder, its session and label, with the claim in the way (${sameKey.message})`);
+  // The holder's own claim again — any case — is renewed, not refused.
+  const again = await claim("smd-9001", "session-1", AGENT);
+  assert(again.outcome === "renewed" && again.claim!.id === a.claim!.id && again.claim!.renewed_at !== null && again.claim!.label === "claude-code on the mac"
+    && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9001'`)).rows[0].n === 1,
+    `the holder's own claim again is renewed in place: one row, its label kept (${again.outcome})`);
+
+  // Pieces: two pieces of one ticket are not the same work; a piece compared case-folded with its spaces collapsed is; the whole ticket covers every piece.
+  const p1 = await claim("SMD-9002", "s-b", OTHER, "PR 1");
+  const p1b = await claim("SMD-9002", "s-c", AGENT, "  pr   1 ");
+  const p2 = await claim("SMD-9002", "s-c", AGENT, "PR 2");
+  const whole = await claim("SMD-9002", "s-d", OP);
+  assert(p1.outcome === "claimed" && p1.claim!.piece === "PR 1" && p1b.outcome === "refused" && p1b.held_by.length === 1 && p1b.held_by[0].id === p1.claim!.id
+    && p2.outcome === "claimed" && whole.outcome === "refused" && whole.held_by.length === 2 && /^SMD-9002 PR 1 is held by claims-other \(s-b\)/.test(whole.message ?? ""),
+    `"PR 1" and "  pr   1 " are one piece and refused; "PR 2" is another and claimed; the whole ticket is refused with both pieces in the way (${p1b.outcome}, ${p2.outcome}, ${whole.held_by.length})`);
+  const wholeFirst = await claim("SMD-9003", "s-a", AGENT);
+  const pieceAfter = await claim("SMD-9003", "s-b", OTHER, "PR 3");
+  assert(wholeFirst.outcome === "claimed" && pieceAfter.outcome === "refused" && pieceAfter.held_by[0].id === wholeFirst.claim!.id, `…and a piece of a ticket held whole is refused (${pieceAfter.outcome})`);
+
+  // The holder comes from the envelope or nowhere; malformed arguments raise.
+  const nobody = await raised(`SELECT claim_work('SMD-9004', 's')`);
+  const badKey = await raised(`SELECT claim_work('SMD-03379', 's', NULL, NULL, 14400, $1::jsonb)`, [JSON.stringify(AGENT)]);
+  const noDash = await raised(`SELECT claim_work('smd3379', 's', NULL, NULL, 14400, $1::jsonb)`, [JSON.stringify(AGENT)]);
+  const blank = await raised(`SELECT claim_work('SMD-9004', '  ', NULL, NULL, 14400, $1::jsonb)`, [JSON.stringify(AGENT)]);
+  const short = await raised(`SELECT claim_work('SMD-9004', 's', NULL, NULL, 59, $1::jsonb)`, [JSON.stringify(AGENT)]);
+  const long = await raised(`SELECT claim_work('SMD-9004', 's', NULL, NULL, 604801, $1::jsonb)`, [JSON.stringify(AGENT)]);
+  assert(nobody.code === "42501" && /claim_work needs a holder: no actor envelope names one/.test(nobody.message)
+    && badKey.code === "22023" && /not a ticket key: 'SMD-03379'/.test(badKey.message) && noDash.code === "22023"
+    && blank.code === "22023" && /a claim needs a session/.test(blank.message)
+    && short.code === "22023" && long.code === "22023" && /a lease is 60 to 604800 seconds/.test(long.message)
+    && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9004'`)).rows[0].n === 0,
+    `no envelope: refused as no holder; a key with a leading zero or no hyphen, a blank session, a lease of 59 or 604801 seconds: each raised by name, and nothing written (${nobody.code} ${badKey.code} ${blank.code} ${short.code} ${long.code})`);
+
+  // A lapsed claim is free: not listed, and the next claim on the work takes it over. Aged by construction, not by the clock.
+  const old = await claim("SMD-9005", "s-a", AGENT);
+  await db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [old.claim!.id]);
+  const liveList = (await db.query<{ id: string }>(`SELECT id FROM list_work_claims(ARRAY['smd-9005'])`)).rows;
+  const endedList = (await db.query<{ id: string; state: string }>(`SELECT id, state FROM list_work_claims(ARRAY['SMD-9005'], NULL, true)`)).rows;
+  const taker = await claim("SMD-9005", "s-b", OTHER);
+  const closed = (await db.query<Claim>(`SELECT * FROM list_work_claims(ARRAY['SMD-9005'], NULL, true) WHERE id = $1::uuid`, [old.claim!.id])).rows[0];
+  const oldRenew = await renew(old.claim!.id, "s-a", AGENT);
+  assert(liveList.length === 0 && endedList.length === 1 && endedList[0].state === "lapsed" && taker.outcome === "claimed"
+    && closed.state === "released" && closed.released_by === "claims-other" && closed.release_reason === "lapsed; taken over"
+    && oldRenew.outcome === "refused" && oldRenew.code === "CLAIM_RELEASED",
+    `a lapsed claim lists only with the ended ones, as lapsed; another holder's claim takes it over and closes it, naming the taker; its old holder's renew is refused as released (${closed?.state}, ${oldRenew.code})`);
+  // A lapsed claim nobody took is renewed; one another holder's piece now covers is not.
+  const idle = await claim("SMD-9006", "s-a", AGENT);
+  await db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [idle.claim!.id]);
+  const revived = await renew(idle.claim!.id, "s-a", AGENT);
+  const covered = await claim("SMD-9007", "s-a", AGENT);
+  await db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [covered.claim!.id]);
+  const coverer = await claim("SMD-9007", "s-b", OTHER, "PR 1");
+  const coveredRenew = await renew(covered.claim!.id, "s-a", AGENT);
+  assert(revived.outcome === "renewed" && revived.claim!.state === "live" && coverer.outcome === "claimed" && coveredRenew.outcome === "refused" && coveredRenew.code === "WORK_CLAIMED" && coveredRenew.held_by[0].id === coverer.claim!.id,
+    `a lapsed claim nobody covers is renewed live; a lapsed whole-ticket claim another holder's piece now covers is refused, naming it (${revived.outcome}, ${coveredRenew.code})`);
+
+  // Renew and release are the holder's own: the key and the session.
+  const mine = await claim("SMD-9008", "s-a", AGENT);
+  const otherKey = await renew(mine.claim!.id, "s-a", OTHER);
+  const otherSession = await release(mine.claim!.id, "s-z", AGENT);
+  const nf = await renew("00000000-0000-4000-8000-000000000000", "s-a", AGENT);
+  const notForced = await release(mine.claim!.id, "s-b", OTHER, "stuck");
+  const agentForce = await release(mine.claim!.id, null, OTHER, "stuck", true);
+  const noReason = await raised(`SELECT release_work_claim($1::uuid, NULL, NULL, true, $2::jsonb)`, [mine.claim!.id, JSON.stringify(OP)]);
+  assert(otherKey.code === "CLAIM_NOT_YOURS" && otherSession.code === "CLAIM_NOT_YOURS" && nf.code === "CLAIM_NOT_FOUND" && notForced.code === "CLAIM_NOT_YOURS"
+    && agentForce.code === "CLAIM_NOT_YOURS" && /only an operator key may release another holder's claim; claims-other is agent/.test(agentForce.message ?? "")
+    && noReason.code === "22023" && /needs a reason/.test(noReason.message),
+    `another key renewing, the same key in another session releasing, an unknown id, another key releasing unforced, an agent key forcing, and an operator forcing with no reason: each refused or raised by name (${[otherKey.code, otherSession.code, nf.code, notForced.code, agentForce.code, noReason.code].join(" ")})`);
+  const forced = await release(mine.claim!.id, null, OP, "the session died with its PR merged", true);
+  const twice = await release(mine.claim!.id, null, OP, "again", true);
+  const own = await claim("SMD-9009", "s-a", AGENT);
+  const ownRel = await release(own.claim!.id, "s-a", AGENT);
+  const reclaim = await claim("SMD-9008", "s-b", OTHER);
+  assert(forced.outcome === "released" && forced.claim!.released_by === "claims-op" && forced.claim!.released_by_kind === "operator" && forced.claim!.release_reason === "the session died with its PR merged"
+    && twice.outcome === "already_released" && twice.claim!.release_reason === "the session died with its PR merged"
+    && ownRel.outcome === "released" && ownRel.claim!.release_reason === "released" && reclaim.outcome === "claimed",
+    `an operator's forced release records who and why; releasing again is already_released and moves nothing; the holder's own release needs no reason; the work is then free (${forced.outcome}, ${twice.outcome}, ${ownRel.outcome}, ${reclaim.outcome})`);
+
+  // A key the call names by its agent id is another key from one named by its name alone — never NULL read as "own" (the first draft's release took it as own).
+  const AGENT_ID = { name: "claims-agent", agent_id: "1f0e2d3c-4b5a-4968-8778-695a4b3c2d1e" };
+  const byName = await claim("SMD-9010", "s-a", AGENT);
+  const idRel = await release(byName.claim!.id, "s-a", AGENT_ID);
+  const idClaim = await claim("SMD-9010", "s-a", AGENT_ID, "PR 1");
+  assert(idRel.outcome === "refused" && idRel.code === "CLAIM_NOT_YOURS" && idClaim.outcome === "refused",
+    `a claim made by name alone is not the same holder as a call carrying an agent id under that name: release and claim are refused (${idRel.outcome}, ${idClaim.outcome})`);
+
+  // READ COMMITTED alone; the index holds the exact-work rule for a write made without the lock.
+  let iso = { code: "", message: "" };
+  try {
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+      await tx.query(`SELECT claim_work('SMD-9011', 's', NULL, NULL, 14400, $1::jsonb)`, [JSON.stringify(AGENT)]);
+    });
+  } catch (e) { iso = { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message }; }
+  const dup = await raised(`INSERT INTO work_claims (issue, piece, holder_name, session, claimed_at, expires_at) VALUES ('SMD-9002', 'pr 1', 'raw', 'raw', now(), now() + interval '1 hour')`);
+  assert(iso.code === "0A000" && /claim_work must run under READ COMMITTED; this transaction is REPEATABLE READ/.test(iso.message) && dup.code === "23505" && /work_claims_one_unreleased/.test(dup.message),
+    `a claim under REPEATABLE READ is refused by name; a raw second unreleased row on one ticket and piece is refused by the index (${iso.code}, ${dup.code})`);
+
+  // list_work_claims: by ticket (normalised), by holder, live only by default, in order.
+  const listed = (await db.query<{ issue: string; piece: string | null; holder: string; state: string }>(`SELECT issue, piece, holder, state FROM list_work_claims(ARRAY[' smd-9002 ', 'SMD-9001'])`)).rows;
+  const byHolder = (await db.query<{ issue: string }>(`SELECT issue FROM list_work_claims(NULL, 'claims-other')`)).rows.map((r) => r.issue);
+  const capped = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM list_work_claims(NULL, NULL, true, 2)`)).rows[0].n;
+  assert(JSON.stringify(listed.map((r) => `${r.issue}/${r.piece}/${r.holder}/${r.state}`)) === JSON.stringify(["SMD-9001/null/claims-agent/live", "SMD-9002/PR 1/claims-other/live", "SMD-9002/PR 2/claims-agent/live"])
+    && JSON.stringify(byHolder) === JSON.stringify(["SMD-9002", "SMD-9005", "SMD-9007", "SMD-9008"]) && capped === 2,
+    `the list reads the tickets named, upper-cased and trimmed, live only, by ticket and piece; by a holder's key name; and to its limit (${JSON.stringify(listed)}, ${byHolder})`);
+
+  // The claims grant group: with it a role claims; without it, refused naming the table.
+  const ROLE = "ob1_test_claims";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "claims"] })]) await db.exec(st);
+  const asRole = async (issue: string): Promise<{ code: string; message: string; r?: Answer }> => {
+    try {
+      let r: Answer | undefined;
+      await db.transaction(async (tx) => {
+        await tx.exec(`SET LOCAL ROLE ${ROLE}`);
+        r = (await tx.query<{ r: Answer }>(`SELECT claim_work($1, 's-role', NULL, NULL, 14400, $2::jsonb) AS r`, [issue, JSON.stringify(AGENT)])).rows[0].r;
+        await tx.query(`SELECT * FROM list_work_claims(ARRAY[$1])`, [issue]);
+        await tx.query(`SELECT release_work_claim($1::uuid, 's-role', NULL, false, $2::jsonb)`, [r!.claim!.id, JSON.stringify(AGENT)]);
+      });
+      return { code: "", message: "", r };
+    } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleGranted = await asRole("SMD-9012");
+  let delRow = { code: "" };
+  try { await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); await tx.exec(`DELETE FROM work_claims WHERE false`); }); }
+  catch (e) { delRow = { code: String((e as { code?: string }).code ?? "?") }; }
+  await db.exec(`REVOKE ALL ON work_claims FROM ${ROLE}`);
+  const roleWithout = await asRole("SMD-9013");
+  assert(roleGranted.code === "" && roleGranted.r?.outcome === "claimed" && delRow.code === "42501" && roleWithout.code === "42501" && /permission denied for table work_claims/.test(roleWithout.message),
+    `a role granted capture, server and claims claims, lists and releases, and may not DELETE (no history is removed); without the group it is refused naming the table (${roleGranted.message.slice(0, 80)}, ${delRow.code}, ${roleWithout.message.slice(0, 80)})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // Re-applied: the claims stand, one of each call.
+  const before = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
+  await reapply(file);
+  const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
+  const ones = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
+  assert(after === before && ones.every((n) => n === 1), `113 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
+
+  await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op')`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

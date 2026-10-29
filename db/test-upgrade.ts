@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, quoteIdent, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantStatements, quoteIdent, reembedKey } from "./config.mjs";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -699,13 +699,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]) — all
+  // refusing by name rows that share one ([20bd]); 113 adds work claims —
+  // a table, its index and thirteen functions — refusing by name without
+  // 008, 046 or 061 ([20be]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 83, `030 is among the last eighty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 84, `030 is among the last eighty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5000,6 +5002,43 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   assert(/^client_key is set once: thought /.test(moved), `…and the caller's key, kept from before, is set once: a write moving it refused (${moved.slice(0, 80)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
   assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
+  await sql.close();
+}
+
+console.log("\n[20be] Migration 113: onto a populated brain at the file before it — thoughts and their audit standing as they were; refused by name without 061's ob1_actor_agent_id, nothing created; then applied: a claim taken, another holder refused, the claims grant group issued by --grant; a re-apply a no-op, the claims kept (SMD-3597)");
+{
+  const the113 = MIGRATIONS.find((f) => /^\d{3}_work_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number ("_work_claims.sql" alone also ends 015's)
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "laptop", via: "open-brain" };
+  for (const i of [0, 1, 2])
+    await sql`SELECT upsert_thought(${`upgrade 113: thought ${i} about SMD-9201`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const table = async () => String((await sql`SELECT to_regclass('work_claims')::text AS t`)[0].t ?? "");
+
+  // Without 061's agent reader: refused by name, nothing created.
+  await sql`ALTER FUNCTION ob1_actor_agent_id() RENAME TO ob1_actor_agent_id_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_actor_agent_id_away() RENAME TO ob1_actor_agent_id`;
+  assert(/^migration 113 needs 061 \(ob1_actor_agent_id\); this schema lacks it/.test(without) && (await table()) === "",
+    `without 061's ob1_actor_agent_id: refused by name, no table created (${without.slice(0, 80)})`);
+
+  const before = await rows(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  type Answer = { outcome: string; code: string | null; claim: { id: string; holder: string } | null };
+  const claimed = ((await sql`SELECT claim_work('smd-9201', 'session-1', NULL, NULL, 14400, ${actor}::jsonb) AS r`)[0] as { r: Answer }).r;
+  const other = ((await sql`SELECT claim_work('SMD-9201', 'session-2', 'PR 1', NULL, 14400, ${{ name: "desktop" }}::jsonb) AS r`)[0] as { r: Answer }).r;
+  assert((await rows()) === before && (await audits()) === auditBefore && claimed.outcome === "claimed" && claimed.claim?.holder === "laptop" && other.outcome === "refused" && other.code === "WORK_CLAIMED",
+    `applied, the file moves no thought nor audit row; a claim is taken under the envelope's key, and another holder's piece of it refused (${claimed.outcome}, ${other.code})`);
+  const grants = grantStatements("ob1_upgrade_probe", { groups: ["claims"] });
+  assert(grants.length === 1 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]),
+    `--grant's claims group is SELECT, INSERT and UPDATE on work_claims, no DELETE (${grants.join("; ")})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  const kept = Number((await sql`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9201'])`)[0].n);
+  assert((await rows()) === before && kept === 1, `a re-apply is a no-op: the thoughts as they were, the claim kept (${kept})`);
   await sql.close();
 }
 

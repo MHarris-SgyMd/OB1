@@ -70,6 +70,10 @@ const TABLES = [
   // 069's durable async job registry (SMD-2318): no foreign key either way — a
   // job's record outlives the agent or thoughts it names — so its place is free.
   "jobs",
+  // 113's work claims (SMD-3597): no foreign key either way — a claim names a
+  // ticket by its key, not a thought — so its place is free. Its CASCADE takes
+  // the helpers whose arguments are its row type.
+  "work_claims",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -361,6 +365,21 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
+  // 113 (SMD-3597): work claims — the four calls and their helpers (the two
+  // taking work_claims' row type go with its CASCADE, and are named anyway).
+  "claim_work(text, text, text, text, integer, jsonb)",
+  "renew_work_claim(uuid, text, integer, jsonb)",
+  "release_work_claim(uuid, text, text, boolean, jsonb)",
+  "list_work_claims(text[], text, boolean, integer)",
+  "ob1_work_claim_issue(text)",
+  "ob1_work_claim_piece(text)",
+  "ob1_work_claim_session(text)",
+  "ob1_work_claim_lease(integer)",
+  "ob1_work_claim_json(work_claims, timestamp with time zone)",
+  "ob1_work_claim_actor(jsonb, text)",
+  "ob1_work_claim_lock(text, text)",
+  "ob1_work_claim_is_holder(work_claims, text, uuid, text)",
+  "ob1_work_claims_in_the_way(text, text, text, uuid, text, timestamp with time zone)",
 ];
 
 /**

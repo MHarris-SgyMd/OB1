@@ -2557,6 +2557,15 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "064" }),
     Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "064" }),
   ]),
+  // Work claims (113, SMD-3597): who holds a ticket, or one piece of it, under
+  // a lease. Written only through claim_work, renew_work_claim and
+  // release_work_claim (SECURITY INVOKER, PUBLIC's EXECUTE), read through
+  // list_work_claims. No DELETE: an ended claim stays as history. The holder's
+  // kind is read from ob1_agents, the capture group's SELECT. Soft: a role
+  // without it is refused the claim calls, naming the table, and nothing else.
+  claims: Object.freeze([
+    Object.freeze({ table: "work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "113" }),
+  ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
   // (and enabled RLS with a policy for it) — a role that does not exist on plain
@@ -2736,7 +2745,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
      AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "community", "extensions", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read
