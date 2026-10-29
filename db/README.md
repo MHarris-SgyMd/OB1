@@ -3574,7 +3574,7 @@ or no vector yet when the newer side is judged:
   two or more, the earlier can still be held.
 - **A backlog.** A first run or a `--switch-key` pools every thought at one
   instant, claimed in no order, so drain it before consolidating (the
-  `workers` compose profile, `deploy/README.md`, SMD-2424).
+  coordinator's `workers` pass, `deploy/README.md`, SMD-2424, SMD-3476).
 - **A failed extraction.** `--retry-failed` extracts it, but the newer
   thoughts already judged are not judged again.
 - **A failed embedding.** A candidate needs a vector; the servers' vector
@@ -4006,22 +4006,23 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
-**Running it.** On the compose stack, as its own service: `--profile sleep`
-runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
+**Running it.** On the compose stack, as a pass of the coordinator: `sleep`
+in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
+(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
 and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
-`deploy/README.md`, "The `sleep` profile instead", has the first start, the
-move from the `workers` profile and the dump's volume):
+`deploy/README.md`, "The `sleep` pass instead", has the first start, the
+move from the `workers` pass and the dump's volume):
 
 ```bash
-podman compose -f deploy/compose.yaml --profile sleep up -d sleep
+podman compose -f deploy/compose.yaml up -d coordinator
 ```
 
-The service mounts the checkout and carries the server's model settings,
-`MCP_ACCESS_KEYS`, the owner's `DATABASE_URL` and `OB1_WORKER_KEY`, and
-refuses to start without the key (exit 2). Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
+The coordinator runs it from the server image and hands it the server's
+model settings, `MCP_ACCESS_KEYS`, the owner's `DATABASE_URL` and
+`OB1_WORKER_KEY`, and holds it, never started, without the key. Elsewhere it needs the same: the server's model settings (`OB1_METADATA_MODEL`,
 `OB1_JUDGE_MODEL`, the endpoint and its egress declaration — or the passes work
 another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
@@ -4311,25 +4312,26 @@ scheduler working the current judge's key, its pass's start wait said there
 too, rather than asking for a second worker.
 Retiring it: `DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`.
 
-**From the `workers` profile.** Its followers do not yield, so the two are
-alternatives: a run refuses (exit 2) while any of their heartbeats is fresh —
-at its start, and when an awake or asleep poll finds one (a follower brought
-up beside it stamps only after its start probe) — and `--dry-run` names them.
-Stop them (`podman compose -f deploy/compose.yaml --profile workers stop
-extract consolidate`) — a clean stop marks a row ended, which lifts the
-refusal; one killed past its grace stays fresh for up to three intervals —
-stop starting them (take `workers` out of
-`COMPOSE_PROFILES` in `deploy/.env`, and out of any `--profile workers up`),
-and delete their `heartbeat:extract:…` and `heartbeat:consolidate:…` rows,
-or preflight's `workers` row asks for them back. Under `--follow` a refusal
-ends `heartbeat:sleep` on a failure, so preflight's `sleep` row names the
-followers keeping it down and asks for a choice of profile, rather than a
+**From the `workers` pass.** Its followers do not yield, so the two are
+alternatives: the coordinator never runs both (`OB1_PASSES` naming both runs
+`sleep`), and a run refuses (exit 2) while any follower's heartbeat is fresh
+— one run by hand, or an old stack's container — at its start, and when an
+awake or asleep poll finds one (a follower brought up beside it stamps only
+after its start probe), and `--dry-run` names them. Name `sleep` in place of
+`workers` and recreate the coordinator (`podman compose -f
+deploy/compose.yaml up -d coordinator`) — a clean stop marks a row ended,
+which lifts the refusal; one killed past its grace stays fresh for up to
+three intervals — and delete their `heartbeat:extract:…` and
+`heartbeat:consolidate:…` rows, or preflight's `workers` row asks for them
+back. Under `--follow` a refusal ends `heartbeat:sleep` on a failure, so
+preflight's `sleep` row names the followers keeping it down and asks for a
+choice of pass, rather than a
 restart that would refuse again; while the scheduler runs, the `workers` row
 asks for a stopped follower's row to be retired, not started again.
 
 **A database not answering at its start** is waited out, as one mid-sleep
 is (SMD-2599's schedule), so the service started beside a restarting Postgres
-does not end and wait on its supervisor's clock (SMD-3214). A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the SIGTERM the compose service's supervisor passes on).
+does not end and wait on its supervisor's clock (SMD-3214). A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the SIGTERM the coordinator's supervisor passes on).
 So does each pass's start at every sleep: a follower waits out every statement
 up to its first claim — the tables check, the worker key's lookup, extraction's
 key, 079's check, the relations grants; not an operator's `--retry-*` — where it
@@ -4450,10 +4452,10 @@ Captures are real writes:
   query log their ids, until the brain's next refresh.
 - **The other brain on the same model server:** each brain's sleep yields only to
   its own traffic (SMD-3034). Stop the other brain's sleep for the run
-  (`podman compose -p <project> --profile sleep stop sleep`, and start it after).
-  Or check that its pools are empty with the `workers` profile's one-off container:
-  `podman compose <its -f files and --env-file> -p <project> --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status`,
-  and the same with `consolidate` and `db/consolidate.ts`. Afterwards, read Ollama's
+  (`podman compose -p <project> stop coordinator`, and start it after).
+  Or check that its pools are empty with a one-off container of the coordinator's:
+  `podman compose <its -f files and --env-file> -p <project> run --rm --no-deps coordinator db/coordinator.ts run extract --status`,
+  and the same with `run consolidate`. Afterwards, read Ollama's
   log (`/private/tmp/ollama-serve.log` on this Mac, where `ollama serve` writes
   it). Every request in it comes from 127.0.0.1, the harness's direct calls and
   both brains' servers alike, so requests are told apart only by count, prompt
@@ -5370,8 +5372,8 @@ goes on: a heartbeat is reporting, never a reason to stop.
 `ingest-records.ts` above loads the Linear board from a corpus dump, once, for a
 rebuild. The fork's running brain needs the board **continuously**: a ticket filed
 while a session works should be findable in the next, and one that moves to Done
-should read Done. `sync-linear.ts` is that sweep, and `deploy/compose.yaml`'s
-`board-sync` profile runs it on a schedule:
+should read Done. `sync-linear.ts` is that sweep, and the coordinator's
+`board-sync` pass (`OB1_PASSES`, SMD-3476) runs it on a schedule:
 
 ```bash
 bun sync-linear.ts --url postgres://…                # one pass
@@ -5746,14 +5748,15 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3086 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1844 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1845 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 418 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 419 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
+bun test-coordinator.ts                     # the coordinator's passes, each one's settings and command line — no database; as root, its planted /proc check
 bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database

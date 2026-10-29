@@ -118,8 +118,8 @@ OB1_FORWARDER_KEY=$FORWARD_KEY
 EOF
 # The pull beside the build (SMD-3466), where `up --build` pulled its images
 # and only then built. The pull skips the default services compose.yaml marks
-# `pull_policy: never` (api and migrate, and mcp and app, which run api's
-# image), so it fetches what up fetched; one without that line is asked of
+# `pull_policy: never` (api and migrate, and mcp, app and the coordinator,
+# which run api's image, SMD-3476), so it fetches what up fetched; one without that line is asked of
 # the registry, refused, and fails the step. --quiet keeps its progress out of
 # the build's log (each service's Pulling and Pulled lines and any error still
 # show). A failed pull fails the step at its wait, after the build; a failed

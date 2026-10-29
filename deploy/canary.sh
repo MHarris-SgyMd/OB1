@@ -120,12 +120,15 @@
 #      keeps the database or refuses: on a canary with no database to keep it
 #      is refused before anything changes, where a plain `up` would stand one
 #      up from stable. Either way the canary's writers are stopped first, before its
-#      Postgres is touched: its servers, a running sleep worker, which
-#      comes back on the new build once the servers answer, unless its env
-#      file holds no OB1_WORKER_KEY (then it is left stopped and `up` exits
-#      1, said), and a running board-sync (step 6). A running service of
-#      another profile (the workers) is refused before anything changes:
-#      stop it first;
+#      Postgres is touched: its servers, and a running coordinator, which
+#      comes back on the new build in step 6 (SMD-3476). A container of a
+#      service the coordinator replaced (sleep, board-sync, extract,
+#      consolidate), left by a canary stood up before it, is stopped and
+#      removed, said; where the canary's env file names no OB1_PASSES, the
+#      passes those containers were running are written there once, so the
+#      coordinator runs them on. A running service of another profile (the
+#      import runner, the database monitor) is refused before anything
+#      changes: stop it first;
 #   4. builds the server image from this checkout (as `api`) and (re)creates
 #      the REST core, so its pool opens on the migrated or refreshed database. Standing servers are stopped before the change, so
 #      nothing serves or writes a half-restored copy. The canary's own proxy
@@ -138,16 +141,19 @@
 #      return that thought first at 50% or more, for one of up to five
 #      candidates. A canary with no thought to probe is not checked, unless
 #      stable had one: then its vectors were emptied, and the smoke fails;
-#   6. (re)starts board-sync on the new build when the canary's env file holds
-#      a LINEAR_API_KEY of its own, so the canary keeps its own copy of the
+#   6. (re)creates the coordinator on the new build (SMD-3476), running the
+#      passes the canary's env file names in OB1_PASSES — its own, never
+#      stable's: the file never gets stable's — handed to compose in the
+#      shell. board-sync among them keeps the canary's own copy of the
 #      board: it is upgraded in place and no longer refreshed, and a refresh
-#      was what brought stable's ticket rows (SMD-3312). The key is the
-#      canary's alone, a Linear personal API key made with Read access: the
-#      file never gets stable's, and step 2 clears stable's, and every other
-#      Linear key, where the file holds one. canary_compose holds
-#      LINEAR_COMMENT_API_KEY empty besides, so a canary never posts a finding
-#      to the board. Without a key of its own, board-sync is left off and the
-#      run says so;
+#      was what brought stable's ticket rows (SMD-3312). It runs only with a
+#      LINEAR_API_KEY of the canary's own, a Linear personal API key made with
+#      Read access: step 2 clears stable's, and every other Linear key, where
+#      the file holds one, and canary_compose holds LINEAR_COMMENT_API_KEY
+#      empty besides, so a canary never posts a finding to the board. Without
+#      a key of its own, board-sync is left out and the run says so. sleep or
+#      the workers with no OB1_WORKER_KEY in the file are held by the
+#      coordinator, running nothing, and `up` exits 1, said;
 #   7. with --connect, registers the Claude Code connector (user scope) under
 #      its own key, OB1_CANARY_KEY, at http://127.0.0.1:<port>/mcp; without it, names a
 #      connector left at another of the canary's ports, at its port's root
@@ -164,9 +170,8 @@
 # marked by a refresh, or holds nothing (a first refresh that died before its
 # mark); a refusal puts its Postgres back as it was. With no canary volume
 # there is nothing to delete, and nothing is created to find out. Its sleep
-# worker's dumps go with it (the `sleep-dumps` volume, SMD-3203): the down
-# names the sleep profile, so compose counts that service and its volume, and
-# the board-sync profile, so its board-sync goes too (SMD-3312).
+# dumps go with it (the `sleep-dumps` volume, SMD-3203), the coordinator's,
+# a default service's since SMD-3476.
 # A canary proxy's port is read from the container that publishes it — its
 # forwarder since SMD-2583, its proxy before — running or stopped, and from
 # the canary's env file.
@@ -231,26 +236,26 @@ CANARY_TMP=""
 # own (a Postgres that does not come back healthy, a build, a psql), says what
 # it left stopped and how to go on, in the run's own form (SMD-3154).
 WRITERS_STOPPED=""
-SLEEP_PENDING=""
-BOARD_PENDING=""
+COORD_PENDING=""
 ADVISED=""
+# The passes canary_compose hands the coordinator (SMD-3476): none until step 6
+# sets the canary's own, so an OB1_PASSES exported in the operator's shell
+# (stable's) never reaches the canary.
+CANARY_PASSES=""
 cleanup() {
   local rc=$?
   rm -f ${CONFIG_ERR:+"$CONFIG_ERR"} ${CANARY_TMP:+"$CANARY_TMP"}
   [ -z "$CANARY_TMP" ] || rm -f "$CANARY_TMP".*.tmp
   if [ "$rc" != 0 ] && [ -z "$ADVISED" ]; then
-    # Board-sync left stopped with no key of the canary's own: how to give it one.
+    # The coordinator left stopped, its board-sync with no key of the canary's own: how to give it one.
     local board_more=""
-    if [ -n "$BOARD_PENDING" ] && [ -z "${BOARD_KEY:-}" ]; then board_more=" Board-sync has no key of the canary's own to run on: ${BOARD_ADD:-}."; fi
+    if [ -n "$COORD_PENDING" ] && [ -n "${BOARD_NAMED:-}" ] && [ -z "${BOARD_KEY:-}" ]; then board_more=" Board-sync has no key of the canary's own to run on: ${BOARD_ADD:-}."; fi
     if [ -n "$WRITERS_STOPPED" ]; then
       local which="servers"
-      if [ -n "$SLEEP_PENDING" ] && [ -n "$BOARD_PENDING" ]; then which="servers, sleep worker and board-sync"
-      elif [ -n "$SLEEP_PENDING" ]; then which="servers and sleep worker"
-      elif [ -n "$BOARD_PENDING" ]; then which="servers and board-sync"
-      fi
+      [ -z "$COORD_PENDING" ] || which="servers and coordinator"
       echo "up stopped (exit $rc) with the canary's $which stopped: fix the cause above and re-run ${RERUN:-up}.$board_more" >&2
-    elif [ -n "$SLEEP_PENDING$BOARD_PENDING" ]; then
-      echo "up stopped (exit $rc) with the canary's${SLEEP_PENDING:+ sleep worker}${SLEEP_PENDING:+${BOARD_PENDING:+ and}}${BOARD_PENDING:+ board-sync} stopped: fix the cause above and re-run ${RERUN:-up}${SLEEP_PENDING:+, or start the sleep worker with ${SLEEP_START:-its compose --profile sleep up -d sleep}}.$board_more" >&2
+    elif [ -n "$COORD_PENDING" ]; then
+      echo "up stopped (exit $rc) with the canary's coordinator stopped: fix the cause above and re-run ${RERUN:-up}, which starts it again with the canary's own passes and keys (a compose command of your own would read the shell's settings, stable's among them, over the canary's file).$board_more" >&2
     fi
   fi
   return 0
@@ -329,7 +334,7 @@ unset POSTGRES_PASSWORD
 # …and so are its keys and the secrets that go with them (SMD-2874 PR 2): a
 # shell holding stable's settings (`set -a; . deploy/.env`) would otherwise
 # hand the canary's servers stable's MCP_ACCESS_KEYS over the canary's own
-# (review pass 1). The sleep worker's key too, and every Linear key, in any
+# (review pass 1). The worker key too (sleep's and the workers'), and every Linear key, in any
 # letter case (SMD-3312 review pass 2): compose reads ${LINEAR_API_KEY} from the
 # shell over the canary's file, so a shell exporting stable's would run the
 # canary's board-sync on it, while step 6, reading the file, said the canary's.
@@ -425,12 +430,14 @@ OWN_KEYS=""
 # SMD-2681), and a canary's board-sync never does: the file never gets the key
 # (CANARY_DROPPED), every `up` clears one pasted in (env_file own-fix), and
 # this holds it empty for every compose call canary.sh makes besides (SMD-3312).
+# And OB1_PASSES, the coordinator's (SMD-3476): CANARY_PASSES, empty but in
+# step 6, so the shell's never reaches the canary.
 canary_compose() {
   local env="$ENV_FILE" fwd=()
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
   [ -n "$OWN_KEYS" ] || grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
     || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
-  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_PUBLIC_ORIGIN="" OB1_GIT_SHA="$GIT_SHA" LINEAR_COMMENT_API_KEY="" \
+  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_PUBLIC_ORIGIN="" OB1_GIT_SHA="$GIT_SHA" LINEAR_COMMENT_API_KEY="" OB1_PASSES="$CANARY_PASSES" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
 }
 
@@ -447,14 +454,16 @@ canary_compose() {
 # clears stable's, and any other Linear key, from the canary's file. Stable's
 # COMPOSE_PROJECT_NAME never reads as a setting here, since every read is under
 # the canary's -p, which compose reports as the name; the file names the
-# canary's own project instead (SMD-2873, env_file write).
+# canary's own project instead (SMD-2873, env_file write). OB1_PASSES, the
+# passes the coordinator runs (SMD-3476), is the canary's own choice too, so a
+# canary runs neither stable's sleep nor its board-sync unless its file says.
 #
 # …and stable's keys and the secrets that go with them (SMD-2874 PR 2,
 # SMD-3032): its access keys (MCP_ACCESS_KEYS, the legacy MCP_ACCESS_KEY),
 # the forwarder's key, the plugins' webhook secrets and their role's database
 # password. The canary's own are written in their place (env_file own-fix),
 # so they are no drift either.
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY|OB1_PASSES'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift. The file is written with the canary's own
 # values of these (env_file write), OB1_GIT_SHA aside, a build's, and
@@ -1218,11 +1227,11 @@ if [ "$CMD" = down ]; then
   elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then CONN_ACTION=other-scope
   elif [ -n "$CONN_SCOPE" ]; then CONN_ACTION=foreign
   fi
-  # With the sleep profile named: canary_compose clears COMPOSE_PROFILES, and a
-  # down without the profile counts neither the sleep worker nor its dump
-  # volume, which --volumes then left behind (SMD-3203). And board-sync's, so
-  # its container goes with the rest (SMD-3312).
-  canary_compose --profile sleep --profile board-sync down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
+  # The coordinator and its dump volume are default services' since
+  # SMD-3476, so a down with no profile counts both; --remove-orphans takes a
+  # container of a service it replaced (sleep, board-sync, extract,
+  # consolidate) left by a canary from before it.
+  canary_compose down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
   # A canary from before SMD-2583 made a default network, which compose.yaml
   # no longer names, so `down` leaves it: removed here when compose made it
   # for this project and nothing is on it.
@@ -1360,13 +1369,14 @@ fi
 # the checks below where it was stopped.
 [ $KEPT_BY_DEFAULT = 0 ] || [ -z "$HELD" ] || say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
 [ $REFRESH = 0 ] || RERUN="up --refresh"
-# The writers `up` stops are its servers, a sleep worker and board-sync
-# (SMD-3312); one of another profile (the workers) would write through the
-# refresh or the migration, so it is refused here, before anything changes
-# (SMD-3154).
+# The writers `up` stops are its servers and its coordinator (SMD-3476), and
+# it removes the containers of the services the coordinator replaced; one of
+# another profile (the import runner, the database monitor) would write
+# through the refresh or the migration, so it is refused here, before
+# anything changes (SMD-3154).
 running="$("$RUNTIME" ps --filter "label=com.docker.compose.project=$CANARY" --format '{{.Label "com.docker.compose.service"}}')" \
   || { echo "$RUNTIME ps failed, so up cannot tell which of the canary's services write — re-run $RERUN once it answers." >&2; exit 2; }
-others="$(grep -xE 'extract|consolidate|orchestration-runner|orchestration-runner-role|pg-monitor-role' <<<"$running" | sort -u | tr '\n' ' ')" || others=""
+others="$(grep -xE 'orchestration-runner|orchestration-runner-role|pg-monitor-role' <<<"$running" | sort -u | tr '\n' ' ')" || others=""
 [ -z "${others// /}" ] || { echo "the canary runs ${others% }, which would write while up changes its database — stop it first ($RUNTIME compose -p $CANARY stop ${others% }), then re-run $RERUN." >&2; exit 2; }
 STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
 [ -n "$STABLE_DB_NET" ] || [ $REFRESH = 0 ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
@@ -1470,7 +1480,7 @@ fi
 # A standing canary's servers would serve the copy mid-restore (through the
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; both are
-# recreated below either way. They, and a running sleep worker, stop before
+# recreated below either way. They, and a running coordinator, stop before
 # the canary's Postgres is touched: compose recreates it when its own
 # configuration changed, and a writer's transaction then dies mid-flight
 # (SMD-3154).
@@ -1489,7 +1499,7 @@ WRITERS_STOPPED=1
 # stack, an orphan holding connections to the canary's database. Found by its
 # project's and service's labels, running or stopped; stopped first, within the
 # canary's own grace (OB1_STOP_GRACE in its env file, 10 unless set; passed
-# explicitly, as the sleep worker's is below, rather than trusted to the
+# explicitly, as the coordinator's is below, rather than trusted to the
 # runtime's reading of compose's StopTimeout, which podman's is not measured
 # here), so a call in flight drains and its stop writes its own jobs lost
 # (review passes 6b·4 to 6b·6), then removed.
@@ -1507,41 +1517,74 @@ if [ -n "$(container_of "$CANARY" api)" ]; then
   canary_compose stop api >/dev/null
   STOPPED_API=1
 fi
-# A sleep worker writes as it runs, so it stops too, and comes back on the
-# new build below (SMD-3154). Stopped as the container it is, by name, with
-# the service's 120 s grace: compose's own stop finds only a container this
-# compose file made, and a canary's worker may come from another (a path-mode
-# canary's, from compose.canary.yaml beside it; CI's caught one left running).
-STOPPED_SLEEP=""
-SLEEP_CT="$(container_of "$CANARY" sleep)"
-if [ -n "$SLEEP_CT" ]; then
-  say "canary sleep worker stopped for $FOR"
-  "$RUNTIME" stop -t 120 "$SLEEP_CT" >/dev/null
-  STOPPED_SLEEP=1
-  SLEEP_PENDING=1
+# The coordinator writes as its passes run (sleep, the workers, board-sync),
+# so it stops too, and step 6 brings it back on the new build once the smoke
+# has passed (SMD-3476; the sleep worker's rule, SMD-3154, and board-sync's,
+# SMD-3312). Stopped as the containers they are, by name, within the
+# service's 120 s grace: compose's own stop finds only a container this
+# compose file made. Every running one, not the first alone: a second (a
+# `compose run`) would write through the change too (SMD-3312 review pass 3).
+COORD_RUNNING="$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=coordinator")"
+COORD_SAID=""
+if [ -n "$COORD_RUNNING" ]; then
+  say "canary coordinator stopped for $FOR"
+  printf '%s\n' "$COORD_RUNNING" | xargs "$RUNTIME" stop -t 120 >/dev/null
+  COORD_PENDING=1
 fi
-SLEEP_START="$RUNTIME compose -p $CANARY --env-file $CANARY_ENV -f $HERE/compose.yaml --profile sleep up -d --no-deps sleep"
-SLEEP_SAID=""
-[ -z "$STOPPED_SLEEP" ] || SLEEP_SAID=" The sleep worker is stopped too: start it with $SLEEP_START, or re-run $RERUN."
-# Board-sync writes ticket rows as it runs, so it stops too, as the sleep
-# worker does, by name, within its service's 60 s grace, and step 6 brings it
-# back on the new build once the smoke has passed (SMD-3312). A failed run
-# leaves it stopped, said: by BOARD_SAID in the messages that advise (and so
-# silence the EXIT trap), by the trap otherwise.
-# Every running one, not the first alone: a second (a `compose run`) would
-# write through the change too (review pass 3).
-BOARD_RUNNING="$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=board-sync")"
-BOARD_SAID=""
-if [ -n "$BOARD_RUNNING" ]; then
-  say "canary board-sync stopped for $FOR"
-  printf '%s\n' "$BOARD_RUNNING" | xargs "$RUNTIME" stop -t 60 >/dev/null
-  BOARD_PENDING=1
-  if [ -n "$BOARD_KEY" ]; then
-    BOARD_SAID=" Board-sync is stopped too: the next run that passes starts it again."
-  else
-    BOARD_SAID=" Board-sync is stopped too, and the canary has no key of its own to run it on: $BOARD_ADD."
+# The services the coordinator replaced (SMD-3476): a canary stood up before
+# it keeps their containers, which this compose.yaml no longer names, so
+# compose would leave them beside the stack, writing. Each, running or
+# stopped, is stopped within the longest grace and removed, said, as the
+# retired `server` is above; which ones were running is kept for OB1_PASSES.
+RETIRED_RAN=""
+RETIRED_IDLE=""
+for retired_svc in sleep board-sync extract consolidate; do
+  retired_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$retired_svc")"
+  [ -n "$retired_cts" ] || continue
+  if [ -n "$("$RUNTIME" ps -q --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=$retired_svc")" ]; then RETIRED_RAN="$RETIRED_RAN $retired_svc"; else RETIRED_IDLE="$RETIRED_IDLE $retired_svc"; fi
+  printf '%s\n' "$retired_cts" | xargs "$RUNTIME" stop -t 120 >/dev/null 2>&1 || true
+  printf '%s\n' "$retired_cts" | xargs "$RUNTIME" rm -f >/dev/null
+  say "the canary's $retired_svc container, retired in SMD-3476 (the coordinator runs its pass), removed"
+done
+# Once, for a canary from before the coordinator: the passes its retired
+# containers were running, written to its env file where it names none, so
+# the coordinator runs them on (deploy/env-file.ts, the value on stdin).
+# A stopped one is not carried — it may be stopped on purpose — but said, so its pass is not lost unseen.
+[ -z "$RETIRED_IDLE" ] || say "note: the canary's${RETIRED_IDLE} container(s) were stopped, so their passes are not carried into OB1_PASSES: name them in $CANARY_ENV's OB1_PASSES to run them"
+# The file's OB1_PASSES, read once: here when the carry-over needs it, below otherwise.
+PASSES_RAW=""
+PASSES_READ=""
+if [ -n "$RETIRED_RAN" ]; then
+  COORD_PENDING=1
+  # Read first, a failed read stopping the run: in the test's own substitution it would read as none and overwrite the line.
+  passes_now=""
+  if ! passes_now="$(env_file value "$CANARY_ENV" OB1_PASSES)"; then
+    echo "could not read OB1_PASSES from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
+    exit 1
+  fi
+  PASSES_RAW="$passes_now"
+  PASSES_READ=1
+  if [ -z "$(printf '%s' "$passes_now" | tr -d '[:space:]')" ]; then
+    carried=""
+    case " $RETIRED_RAN " in *" sleep "*) carried="sleep" ;; *" extract "*|*" consolidate "*) carried="workers" ;; esac
+    case " $RETIRED_RAN " in *" board-sync "*) carried="${carried:+$carried,}board-sync" ;; esac
+    if [ -n "$carried" ]; then
+      printf '{"OB1_PASSES": "%s"}' "$carried" | bun --no-env-file "$HERE/env-file.ts" set "$CANARY_ENV" >/dev/null \
+        || { echo "could not write OB1_PASSES=$carried to $CANARY_ENV: set it there yourself and re-run $RERUN." >&2; exit 1; }
+      say "wrote to the canary's env file, $CANARY_ENV: OB1_PASSES=\"$carried\" (the passes its retired containers were running, which the coordinator runs now)"
+      PASSES_RAW="$carried"
+    fi
   fi
 fi
+[ -z "$COORD_PENDING" ] || COORD_SAID=" The coordinator is stopped too: the next run that passes starts it again."
+# The canary's passes as its file now holds them, board-sync's among them
+# read here, the file final now, for the advice of a run that fails.
+if [ -z "$PASSES_READ" ] && ! PASSES_RAW="$(env_file value "$CANARY_ENV" OB1_PASSES)"; then
+  echo "could not read OB1_PASSES from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
+  exit 1
+fi
+BOARD_NAMED=""
+case ",$(printf '%s' "$PASSES_RAW" | tr -s ' \t' ',,')," in *,board-sync,*) BOARD_NAMED=1 ;; esac
 
 say "canary Postgres"
 canary_compose up -d --wait postgres
@@ -1552,12 +1595,12 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # stopped when the run began.
 if [ $REFRESH = 0 ] && [ "$(relations_in "$CANARY_PG")" = 0 ]; then
   ADVISED=1
-  echo "the canary's database ($CANARY_PG) holds no relations, so there is nothing to keep — run up --refresh, which stands one up from stable.$SLEEP_SAID$BOARD_SAID" >&2
+  echo "the canary's database ($CANARY_PG) holds no relations, so there is nothing to keep — run up --refresh, which stands one up from stable.$COORD_SAID" >&2
   exit 1
 fi
 if [ $REFRESH = 0 ] && [ "$(stamp_of "$CANARY_PG")" != canary ]; then
   ADVISED=1
-  echo "the canary's database ($CANARY_PG) is stamped '$(stamp_of "$CANARY_PG")', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one.$SLEEP_SAID$BOARD_SAID" >&2
+  echo "the canary's database ($CANARY_PG) is stamped '$(stamp_of "$CANARY_PG")', not canary — a refresh that died before its last step leaves stable's copy, and migrating it in place would keep that as the canary's. Run up --refresh to finish one.$COORD_SAID" >&2
   exit 1
 fi
 [ $KEPT_BY_DEFAULT = 0 ] || [ -n "$HELD" ] || say "the canary's database is kept and migrated in place, its own rows with it (--refresh replaces it with stable's)"
@@ -1586,13 +1629,12 @@ if [ $REFRESH = 1 ]; then
     # before anything changed" — stable may be stamped by now, a server stopped.
     ADVISED=1
     [ -z "$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
-    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run $RERUN once that is fixed: the canary carries the refresh mark, so the retry resets it; a plain up refuses the copy it left.$SLEEP_SAID$BOARD_SAID" >&2
+    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run $RERUN once that is fixed: the canary carries the refresh mark, so the retry resets it; a plain up refuses the copy it left.$COORD_SAID" >&2
     exit 1
   fi
   # The copy is stamped canary now: a later failure's re-run keeps it, and
   # another refresh would lose what was written since (review pass 1).
   RERUN="up"
-  [ -z "$STOPPED_SLEEP" ] || SLEEP_SAID=" The sleep worker is stopped too: start it with $SLEEP_START, or re-run $RERUN."
 else
   # In place (SMD-3154): this checkout's migrate on the canary's own database,
   # its rows kept. A one-shot run, not `up`, which would stay attached.
@@ -1602,8 +1644,8 @@ else
   if [ "$migrate_rc" != 0 ]; then
     ADVISED=1
     left=""
-    [ -z "$STOPPED_SLEEP" ] || left=" The sleep worker is stopped too: leave it so until a run succeeds, since this checkout's worker expects the new schema."
-    echo "the canary's migration failed (exit $migrate_rc), and its servers are stopped: fix the cause above and re-run $RERUN.$left$BOARD_SAID" >&2
+    [ -z "$COORD_PENDING" ] || left=" The coordinator is stopped too: leave it so until a run succeeds, since this checkout's passes expect the new schema."
+    echo "the canary's migration failed (exit $migrate_rc), and its servers are stopped: fix the cause above and re-run $RERUN.$left" >&2
     exit 1
   fi
 fi
@@ -1644,7 +1686,7 @@ if ! ready; then
   # of times a minute under podman), and a registered connector points at them.
   canary_compose stop api mcp app >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID$BOARD_SAID" >&2
+  echo "the canary's REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$COORD_SAID" >&2
   exit 1
 fi
 
@@ -1764,63 +1806,62 @@ except Exception as e:
   fi
 fi
 
-# The sleep worker back on the new build once the canary has passed its
-# smoke, so a canary the smoke rejects is not written to (SMD-3154).
-SLEEP_LEFT=""
-if [ -n "$STOPPED_SLEEP" ]; then
-  if [ -n "$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)" ]; then
-    say "canary sleep worker, on the new build"
-    # The stopped container goes first, so compose makes its own under the
-    # name rather than colliding with one it did not make.
-    "$RUNTIME" rm "$SLEEP_CT" >/dev/null
-    canary_compose --profile sleep up -d --no-deps --force-recreate sleep
-    SLEEP_PENDING=""
-  else
-    # Started with no key its supervisor holds it, running and sleeping
-    # nothing, until a recreate (SMD-3214), so it is left stopped and the run
-    # says so at its end (SMD-3154).
-    SLEEP_LEFT=1
-    ADVISED=1
-    say "canary sleep worker LEFT STOPPED: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-sleep --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then: $SLEEP_START"
-  fi
-elif [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=sleep" --filter status=exited | head -n 1)" ]; then
-  # A worker an earlier run stopped and did not bring back (it failed after
-  # the stop) is not running now, so this run does not restart it: said.
-  say "note: the canary's sleep worker is stopped — start it with $SLEEP_START"
+# Step 6: the coordinator on the new build, after the smoke, so a canary the
+# smoke rejects is not written to (SMD-3476; the sleep worker's rule,
+# SMD-3154, and board-sync's, SMD-3312). Its passes are the canary file's
+# OB1_PASSES, handed through canary_compose's shell: board-sync among them
+# only with a key of the canary's own (BOARD_KEY, read above, after step 2
+# cleared stable's), since a canary upgraded in place has no other way to keep
+# its board current, and with LINEAR_COMMENT_API_KEY held empty, so it never
+# posts. Recreated, running before this run or not, so it runs the server
+# image step 4 built from this checkout, with the file as it is now; every
+# coordinator container of the canary's project goes first (one compose did
+# not make, by hand, would collide with the name). A start that then fails
+# says so itself, since an earlier advice silences the trap.
+read -ra named_passes <<<"$(printf '%s' "$PASSES_RAW" | tr ',' ' ')"
+CANARY_PASSES=""
+for pass in ${named_passes[@]+"${named_passes[@]}"}; do
+  [ "$pass" != board-sync ] || [ -n "$BOARD_KEY" ] || continue
+  CANARY_PASSES="${CANARY_PASSES:+$CANARY_PASSES,}$pass"
+done
+coord_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=coordinator")"
+say "canary coordinator, on the new build (OB1_PASSES: ${CANARY_PASSES:-none}; the passes run from the canary's server image)"
+[ -z "$coord_cts" ] || printf '%s\n' "$coord_cts" | xargs "$RUNTIME" rm -f >/dev/null
+if ! canary_compose up -d --no-deps --force-recreate coordinator; then
+  ADVISED=1
+  echo "the canary's coordinator did not start (above)${coord_cts:+, and its old container is removed}: fix the cause and re-run $RERUN." >&2
+  exit 1
 fi
-
-# Step 6: board-sync on the new build, after the smoke, as the sleep worker
-# (SMD-3312). Started whenever the canary has a key of its own (BOARD_KEY,
-# read above, after step 2 cleared stable's), running before this run or not,
-# since a canary upgraded in place has no other way to keep its board current;
-# recreated so it runs this checkout's db/ (it bind-mounts it, as the sleep
-# worker does) with the file as it is now. canary_compose holds
-# LINEAR_COMMENT_API_KEY empty, so it never posts. Every board-sync container of
-# the canary's project goes first (one compose did not make, by hand, would
-# collide with the name); a start that then fails says so itself, since an
-# earlier advice (the sleep worker's) silences the trap. With no key, one this
-# run stopped is removed, so a canary turned off stays off past a reboot
-# (review pass 2).
-board_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=board-sync")"
-if [ -n "$BOARD_KEY" ]; then
-  say "canary board-sync, on the new build (its own copy of the board; it reads Linear with the canary's key and never comments; it runs $REPO/db, so keep that tree while the canary runs it)"
-  [ -z "$board_cts" ] || printf '%s\n' "$board_cts" | xargs "$RUNTIME" rm -f >/dev/null
-  if ! canary_compose --profile board-sync up -d --no-deps --force-recreate board-sync; then
-    ADVISED=1
-    echo "the canary's board-sync did not start (above)${board_cts:+, and its old container is removed}: fix the cause and re-run $RERUN." >&2
+COORD_PENDING=""
+if [ -n "$BOARD_NAMED" ] && [ -n "$BOARD_KEY" ]; then
+  say "canary board-sync, on the new build (its own copy of the board; it reads Linear with the canary's key and never comments)"
+elif [ -n "$BOARD_NAMED" ]; then
+  say "canary board-sync off, left out of the coordinator's passes: $CANARY_ENV holds no LINEAR_API_KEY of the canary's own — $BOARD_ADD to run it again"
+elif [ -n "$BOARD_KEY" ]; then
+  say "note: the canary runs no board-sync (its OB1_PASSES does not name it), so its copy of the board stays as of its last refresh or sync — add board-sync to OB1_PASSES in $CANARY_ENV and re-run $RERUN to keep it current (SMD-3312)"
+else
+  say "note: the canary runs no board-sync, so its copy of the board stays as of its last refresh or sync — add board-sync to OB1_PASSES in $CANARY_ENV and $BOARD_ADD to keep it current (SMD-3312)"
+fi
+# sleep, or the workers, name themselves by OB1_WORKER_KEY: with none in the
+# file the coordinator holds the pass, running nothing until a recreate
+# (SMD-3214), so the run says so and exits 1 at its end.
+HELD_PASS=""
+case ",$CANARY_PASSES," in
+  *,sleep,*) HELD_PASS="sleep" ;;
+  *,workers,*) HELD_PASS="workers" ;;
+esac
+if [ -n "$HELD_PASS" ]; then
+  worker_key=""
+  if ! worker_key="$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)"; then
+    echo "could not read OB1_WORKER_KEY from $CANARY_ENV through compose, so whether the coordinator holds $HELD_PASS is unknown: fix the file, then re-run $RERUN." >&2
     exit 1
   fi
-  BOARD_PENDING=""
-elif [ -n "$board_cts" ]; then
-  # No key of the canary's own (step 2 cleared stable's, or it was taken out),
-  # and a board-sync container stands: one stopped above, or one already
-  # stopped (a failed run's, one started by hand), which holds the key it was
-  # made with. Every one is removed, said (review pass 3).
-  printf '%s\n' "$board_cts" | xargs "$RUNTIME" rm -f >/dev/null
-  BOARD_PENDING=""
-  say "canary board-sync off, its container removed: $CANARY_ENV holds no LINEAR_API_KEY of the canary's own — $BOARD_ADD to run it again"
-else
-  say "note: the canary runs no board-sync, so its copy of the board stays as of its last refresh or sync — $BOARD_ADD to keep it current (SMD-3312)"
+  [ -z "$worker_key" ] || HELD_PASS=""
+  worker_key=""
+fi
+if [ -n "$HELD_PASS" ]; then
+  ADVISED=1
+  say "canary $HELD_PASS held by the coordinator, running nothing: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then re-run $RERUN"
 fi
 
 if [ $CONNECT = 1 ]; then
@@ -1877,4 +1918,4 @@ if [ $REFRESH = 1 ]; then
 else
   say "canary up: $BASE, tier canary, migrated in place (its own rows kept)"
 fi
-[ -z "$SLEEP_LEFT" ] || { echo "the canary's sleep worker is left stopped: it has no OB1_WORKER_KEY (above)." >&2; exit 1; }
+[ -z "$HELD_PASS" ] || { echo "the canary's coordinator holds $HELD_PASS: it has no OB1_WORKER_KEY (above)." >&2; exit 1; }
