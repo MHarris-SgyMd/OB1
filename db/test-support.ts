@@ -1033,6 +1033,41 @@ export function probePacedOutage(): { arm(n: number): void; clear(): void; down(
   };
 }
 
+/**
+ * An engine's admit gate the suite holds (db/lease.ts's Admit, SMD-3379 PR
+ * 1b): open for its first `openFor` asks, then closed until open() — a closed
+ * ask waits, and is rejected when its signal aborts; close() closes it from
+ * the next ask. `asked` counts the asks and `waiting` those waiting now.
+ */
+export function heldGate(openFor: number): { admit: (signal: AbortSignal) => Promise<void>; open(): void; close(): void; readonly asked: number; readonly waiting: number } {
+  let asked = 0;
+  let isOpen = false;
+  const waiting = new Set<() => void>();
+  return {
+    admit(signal) {
+      asked++;
+      if (isOpen || asked <= openFor) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const stop = () => { waiting.delete(go); reject(new Error("stopped at the gate")); };
+        const go = () => { signal.removeEventListener("abort", stop); waiting.delete(go); resolve(); };
+        if (signal.aborted) return stop();
+        waiting.add(go);
+        signal.addEventListener("abort", stop, { once: true });
+      });
+    },
+    open() {
+      isOpen = true;
+      for (const go of [...waiting]) go();
+    },
+    close() {
+      isOpen = false;
+      openFor = asked;
+    },
+    get asked() { return asked; },
+    get waiting() { return waiting.size; },
+  };
+}
+
 /** Poll `cond` every 250 ms for up to `ms`: true as soon as it holds, else its last answer. */
 export async function pollUntil(cond: () => Promise<boolean>, ms: number): Promise<boolean> {
   for (const until = Date.now() + ms; Date.now() < until;) {

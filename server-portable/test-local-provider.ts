@@ -1508,6 +1508,56 @@ console.log("\n[10] A long thought is extracted in windows of the metadata model
   reqs.length = 0;
   const oneOfMany = await extractEntities(long, cfgCap("1"), undefined, { kind: "extraction" }, undefined, undefined, countsSaves);
   assert(reqs.length === 1 && oneOfMany.parts?.length === 1 && lone === 0, `a prefix of one window is sent and not kept (${reqs.length} sent, ${lone} saved)`);
+
+  // SMD-3379 PR 1b: the worker's admit gate is awaited before each window
+  // sent — not before a kept one, nor for a thought sent in one call — and
+  // its rejection rejects the extraction there, the windows before it kept.
+  const { StoppedBetweenWindows: Stopped } = await import("./entities.ts");
+  const gates: number[] = [];
+  let open: (() => void) | null = null;
+  /** Set once the case opens the gate: an ask after it goes through, so a slow runner fails a row rather than hangs (review pass 6). */
+  let released = false;
+  const closedAt = (n: number, reject = false) => (): Promise<void> => {
+    gates.push(reqs.length);
+    if (gates.length !== n || (released && !reject)) return Promise.resolve();
+    return reject ? Promise.reject(new Stopped()) : new Promise<void>((resolve) => { open = resolve; });
+  };
+  store.clear();
+  reqs.length = 0;
+  const waiting = extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD, closedAt(2));
+  for (let i = 0; i < 250 && open === null; i++) await Bun.sleep(20);
+  await Bun.sleep(100);
+  const sentWhileClosed = reqs.length;
+  released = true;
+  (open as (() => void) | null)?.();
+  const throughGate = await waiting;
+  assert(sentWhileClosed === 1 && gates.join(",") === Array.from({ length: all }, (_, i) => i).join(",") && reqs.length === all && JSON.stringify(throughGate.entities) === JSON.stringify(unbroken.entities),
+         `a gate closed before the second window holds it unsent until it opens, and is asked once before each window sent (${sentWhileClosed} sent while closed; asked with ${gates.join(",")} sent)`);
+  store.clear();
+  reqs.length = 0;
+  gates.length = 0;
+  let gateRefused: unknown = null;
+  try { await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD, closedAt(3, true)); } catch (e) { gateRefused = e; }
+  assert(gateRefused instanceof Stopped && reqs.length === 2 && madeBy(gateRefused) === 2 && [...store.keys()].join(",") === "0,1",
+         `a gate that rejects before the third window rejects the extraction there, two windows sent and kept (${(gateRefused as Error | null)?.name}, ${reqs.length} sent, kept ${[...store.keys()].join(",")})`);
+  reqs.length = 0;
+  gates.length = 0;
+  await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, progressD, closedAt(0));
+  assert(reqs.length === all - 2 && gates.length === all - 2, `the next claim asks the gate before each window it sends, not the two kept (${gates.length} asked, ${reqs.length} sent)`);
+  gates.length = 0;
+  await extractEntities(short, cfgD, undefined, { kind: "extraction" }, undefined, undefined, undefined, closedAt(0));
+  assert(gates.length === 0, `a thought sent in one call never asks the gate: the worker's claim did (${gates.length} asked)`);
+  // A first stop that comes while the gate holds a window, the gate then
+  // opening: the window is not sent, as a first stop's rule says.
+  const firstStop = new AbortController();
+  store.clear();
+  reqs.length = 0;
+  let lateStop: unknown = null;
+  try {
+    await extractEntities(long, cfgD, undefined, { kind: "extraction" }, undefined, undefined, { ...progressD, between: firstStop.signal }, async () => { if (reqs.length === 1) firstStop.abort(); });
+  } catch (e) { lateStop = e; }
+  assert(lateStop instanceof Stopped && reqs.length === 1 && store.size === 1,
+         `a first stop that comes while the gate holds the second window ends the thought there once the gate opens, the first window kept (${(lateStop as Error | null)?.name}, ${reqs.length} sent, ${store.size} kept)`);
   providerD.stop();
 }
 

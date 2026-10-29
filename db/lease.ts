@@ -301,6 +301,102 @@ export function sleepUnless(ms: number, wake: AbortSignal): Promise<void> {
 export const MAX_TIMER_MS = 2147483647;
 
 /**
+ * A claim worker's admit gate (SMD-3379 PR 1b), an engine option: awaited,
+ * with the pass's stop signal, wherever the pass would start new work —
+ * before each claim, at the start of each pass (its pool and counts;
+ * re-embed's start before its drain), before each window of a long thought
+ * and before each pair of a thought's consolidation. Resolved, the work goes
+ * on; pending, the worker waits, its claim and lease kept mid-thought and none
+ * held between thoughts; rejected once the signal has aborted, the worker
+ * stops as a stop finds it there. An open gate resolves whatever its signal
+ * says, and should answer with a promise already settled (a plain `async`
+ * function with no await does), since one that is not reads as a wait and
+ * costs the claim's read again (`admitted`'s "waited") at every window and
+ * pair; so a gate that never closes runs as none. One a worker waits at must
+ * reject, never resolve, once its signal aborts, and must take its listener
+ * off the signal when it resolves — the engine's signal lives the whole pass.
+ * The engine's signal also aborts when the pass ends for a reason of its own —
+ * another worker's outage, the provider's refusal, a worker's throw — and a
+ * rejection before it aborts ends the pass with the caller's error. The sleep
+ * scheduler is to close it while its brain is live (SMD-3379 PR 1c). An engine
+ * given none runs as before.
+ */
+export type Admit = (signal: AbortSignal) => Promise<void>;
+
+/**
+ * A rejection of the admit gate that was no stop, carried out of a thought in
+ * hand so the worker ends the pass with the caller's error, not record the
+ * thought failed with it (SMD-3379 PR 1b-1, review pass 1).
+ */
+export class AdmitThrow extends Error {
+  constructor(readonly error: unknown) {
+    super(`the admit gate rejected: ${error instanceof Error ? error.message : String(error)}`);
+    this.name = "AdmitThrow";
+  }
+}
+
+/**
+ * Whether the claim on the thought in hand is still this worker's, read after
+ * the admit gate held its worker mid-thought (SMD-3379 PR 1b-1, review passes
+ * 3 and 4): a live write is what closes the gate, so a delete or an edit of
+ * that thought lands while its worker waits, and its text must not go to the
+ * provider after. "ours"; "deleted", the thought gone; "requeued", the claim
+ * the pool's again (an edit's requeue under the key 016 follows); "lost",
+ * another's or settled (a reap); "moved", still this worker's but its text
+ * changed (an edit under a key nothing requeues) or its metadata, which the
+ * egress gate reads (review pass 6). `fingerprint` and `metadataHash` are the
+ * claim's as the worker read them: the fingerprint by the engine's own rule —
+ * `coalesced` reads the stored key first, as extraction does, else the text's
+ * — and the metadata as `md5(metadata::text)`, compared in SQL, since a value
+ * decoded to JavaScript and bound back can differ from the stored one (an
+ * integer past 2^53, a jsonb null; review pass 7).
+ */
+export async function claimAfterWait(sql: SQL, job: string, workerId: string, id: string, fingerprint: string | null, coalesced: boolean, metadataHash: string | null): Promise<"ours" | "deleted" | "requeued" | "lost" | "moved"> {
+  const [r] = (await sql`
+    SELECT t.fingerprint, t.retagged, c.status, c.worker_id
+      FROM (SELECT 1) one
+      LEFT JOIN (SELECT CASE WHEN ${coalesced} THEN COALESCE(content_fingerprint, content_fingerprint_of(content)) ELSE content_fingerprint_of(content) END AS fingerprint,
+                        md5(metadata::text) IS DISTINCT FROM ${metadataHash}::text AS retagged
+                   FROM thoughts WHERE id = ${id}::uuid) t ON true
+      LEFT JOIN thought_work_claims c ON c.thought_id = ${id}::uuid AND c.work_type = ${job}`) as { fingerprint: string | null; retagged: boolean | null; status: string | null; worker_id: string | null }[];
+  if (r.fingerprint === null) return "deleted";
+  if (r.status === "pending") return "requeued";
+  if (r.status !== "claimed" || r.worker_id !== workerId) return "lost";
+  return (fingerprint === null || r.fingerprint === fingerprint) && !r.retagged ? "ours" : "moved";
+}
+
+/** The claim on the thought in hand found not this worker's to go on with after the admit gate held it (claimAfterWait): nothing more of it is sent. */
+export class ClaimGoneAtGate extends Error {
+  constructor(readonly claim: "deleted" | "requeued" | "lost" | "moved") {
+    super(`the thought was ${claim === "deleted" ? "deleted" : claim === "lost" ? "reaped" : claim === "requeued" ? "requeued (an edit, or its lease returned by hand)" : "edited"} while its worker waited at the admit gate`);
+    this.name = "ClaimGoneAtGate";
+  }
+}
+
+/** Raced against the gate's answer: an answer already given beats it, one still to come does not (admitted). */
+const PENDING = Symbol("pending");
+
+/**
+ * Wait at the admit gate: "open" when it let the work through at once,
+ * "waited" when it held the worker first — its promise still pending when
+ * asked, which a worker mid-thought reads its claim again after
+ * (claimAfterWait) — and false when it rejected after `signal` aborted: a stop
+ * reaching a waiting worker, or the pass ending for a reason of its own. Any
+ * other rejection is the caller's, and is thrown.
+ */
+export async function admitted(admit: Admit, signal: AbortSignal): Promise<false | "open" | "waited"> {
+  try {
+    const answer = admit(signal);
+    if ((await Promise.race([answer, Promise.resolve(PENDING)])) !== PENDING) return "open";
+    await answer;
+    return "waited";
+  } catch (e) {
+    if (signal.aborted) return false;
+    throw e;
+  }
+}
+
+/**
  * A pass's stop, as a claim worker's engine hands it to its caller when the
  * pass begins (SMD-2304). The first call asks every worker to stop after the
  * thought in hand, their unfinished claims going back to the pool, and returns
