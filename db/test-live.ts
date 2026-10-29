@@ -40,7 +40,7 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
@@ -4651,6 +4651,38 @@ if (want("9f")) {
     } finally {
       await relay.close();
     }
+
+    // The admit gate (SMD-3379 PR 1b): a follower given one claims a thought
+    // at a time, waits at it before each claim and before each poll's pool,
+    // and a stop while it waits ends it there. The start's pool is made
+    // before the pass's stop exists, and is not gated.
+    const gatedA = await newThought("a thought the gate holds back, the first");
+    const gatedB = await newThought("a thought the gate holds back, the second");
+    const atClaimR = heldGate(1);
+    const heldR = liveFollower({ batch: undefined, admit: atClaimR.admit });
+    const claimWaitingR = await pollUntil(async () => atClaimR.waiting === 1, 15_000);
+    await Bun.sleep(300);
+    const heldClaimsR = [(await claimOf(gatedA))?.status, (await claimOf(gatedB))?.status];
+    const perClaim = heldR.lines.find((l) => /per claim/.test(l)) ?? "";
+    const heldAt = Date.now();
+    const heldExitR = await heldR.stop();
+    const heldMs = Date.now() - heldAt;
+    assert(claimWaitingR && /\b1 per claim/.test(perClaim) && heldClaimsR.every((st) => st === "pending") && heldExitR === "exit 0" && heldMs < 1500 && !(await atModel(gatedA)) && (await claimOf(gatedA))?.status === "pending",
+      `a re-embed follower given a gate claims one thought at a time, waits before its claim holding none, the start's pool written, and a stop while it waits ends it at once (${perClaim.trim()}; ${heldClaimsR.join(", ")} while closed; ${heldExitR} in ${heldMs} ms)`);
+    // Open through its drain, then closed: it waits before its next poll's pool.
+    const atPoll = heldGate(Number.POSITIVE_INFINITY);
+    const polled = liveFollower({ admit: atPoll.admit });
+    const drained = (await polled.idle()) && (await atModel(gatedA)) && (await atModel(gatedB));
+    atPoll.close();
+    const pollWaiting = await pollUntil(async () => atPoll.waiting === 1, 15_000);
+    const gatedC = await newThought("a thought a closed poll does not pool");
+    await Bun.sleep(1500);
+    const unpooledC = (await claimOf(gatedC)) === undefined && !(await atModel(gatedC));
+    atPoll.open();
+    const pooledC = await pollUntil(() => atModel(gatedC), 15_000);
+    const pollExit = await polled.stop();
+    assert(drained && pollWaiting && unpooledC && pooledC && pollExit === "exit 0",
+      `…closed before a poll, it waits before the pool — a new thought not pooled while it waits — and pools and re-embeds it once the gate opens (drained ${drained}, waiting ${pollWaiting}, unpooled ${unpooledC}, re-embedded ${pooledC}; ${pollExit})`);
   } finally {
     restoreOutage();
     providerDown503 = false;
@@ -6048,6 +6080,229 @@ if (want("10")) {
   const limitedBeat = (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0];
   assert(JSON.parse(limitedBeat?.value ?? "{}").malformed?.alarm === true, `a follower stopped at its --limit carries the final judgement's block on its row (${limitedBeat?.value})`);
   proseKeys.delete("reference-list page");
+
+  // The admit gate (SMD-3379 PR 1b): a run given one waits at it before the
+  // pass's pool and counts, before each claim and before each window sent,
+  // and a stop while it waits ends the run there. Its lines are read as it
+  // writes them.
+  const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => {
+    const lines: string[] = [];
+    const done = runExtract({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    return { lines, done };
+  };
+  const statusOf = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  /** A long note of six paragraphs, each naming the ledger, past the 300-token window: the gate's window cases, one text each. */
+  const ledgerOf = (lead: string, verb: string) => Array.from({ length: 6 }, (_, p) => `The ${lead} ledger, part ${p}. ${Array.from({ length: 24 }, (__, i) => `Anita ${verb} point ${p}.${i} about the ledger.`).join(" ")}`).join("\n\n");
+  const othersPending = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
+  // The cases below count calls and asks: the pool must hold their thoughts alone (review pass 6).
+  assert(othersPending === 0, `the gate's cases start on an empty pool (${othersPending} row(s) pending or claimed)`);
+  const gatedNote = await seed("Kenji tuned the gated cache warmers.");
+  // Closed from the first ask: the pass waits before its pool and counts.
+  const atPass = heldGate(0);
+  const passStop = new AbortController();
+  const passFrom = calls;
+  const passRun = gatedRun(atPass, passStop.signal);
+  const passWaiting = await pollUntil(async () => atPass.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const passAt = Date.now();
+  passStop.abort();
+  const passCode = await passRun.done;
+  const passMs = Date.now() - passAt;
+  const passLines = passRun.lines.join("\n");
+  assert(passWaiting && atPass.asked === 1 && !passLines.includes("pool:") && calls === passFrom && passCode === 130 && passMs < 1500 && (await statusOf(gatedNote)) !== "claimed",
+         `a run whose gate is closed from the start waits before the pass's pool and counts, and a stop while it waits ends the run at once, 130, nothing pooled or claimed (asked ${atPass.asked}, exit ${passCode} in ${passMs} ms, ${calls - passFrom} call(s), ${othersPending} other row(s) waiting)`);
+  // Open for the pass, closed at the claim: the pool is written and counted,
+  // and the worker waits holding no claim; opened, it extracts the note.
+  const atClaim = heldGate(1);
+  const claimFrom = calls;
+  const claimRun = gatedRun(atClaim, new AbortController().signal);
+  const claimWaiting = await pollUntil(async () => atClaim.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const heldLines = claimRun.lines.join("\n");
+  const heldStatus = await statusOf(gatedNote);
+  const heldCalls = calls - claimFrom;
+  atClaim.open();
+  const claimCode = await claimRun.done;
+  assert(claimWaiting && heldLines.includes("pool:") && heldStatus === "pending" && heldCalls === 0 && claimCode <= 1 && (await statusOf(gatedNote)) === "succeeded" && calls - claimFrom === 1,
+         `…open for the pass and closed at the claim, it writes the pool and waits holding no claim, then extracts the note once the gate opens (${heldStatus} while closed, ${heldCalls} call(s); exit ${claimCode}, ${await statusOf(gatedNote)}, ${calls - claimFrom} call(s))`);
+  // Open for the pass, the claim and the first window, closed before the
+  // second: the worker waits between windows, its claim kept, and a stop
+  // while it waits ends the thought there — its first window kept, no stop
+  // counted, the claim back in the pool.
+  const windowNote = await seed(ledgerOf("gated", "gated"));
+  const atWindow = heldGate(3);
+  const windowStop = new AbortController();
+  const windowFrom = calls;
+  const windowRun = gatedRun(atWindow, windowStop.signal);
+  const windowWaiting = await pollUntil(async () => atWindow.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const windowHeld = await statusOf(windowNote);
+  const windowCalls = calls - windowFrom;
+  const windowAt = Date.now();
+  windowStop.abort();
+  const windowCode = await windowRun.done;
+  const windowMs = Date.now() - windowAt;
+  const [windowAfter] = (await sql`SELECT c.status, p.stops, p.parts FROM thought_work_claims c LEFT JOIN extraction_progress p USING (thought_id, work_type) WHERE c.thought_id = ${windowNote}::uuid AND c.work_type = ${KEY}`) as { status: string; stops: number | null; parts: Record<string, unknown> | null }[];
+  assert(windowWaiting && windowHeld === "claimed" && windowCalls === 1 && windowCode === 130 && windowMs < 1500 && windowAfter?.status === "pending" && windowAfter.stops === 0 && Object.keys(windowAfter.parts ?? {}).length === 1,
+         `…closed before a long thought's second window, it waits there with the claim kept, and a stop while it waits ends the thought at once: its first window kept, no stop counted, the claim back in the pool (${windowHeld} while closed after ${windowCalls} call(s); exit ${windowCode} in ${windowMs} ms; ${JSON.stringify(windowAfter)})`);
+  // A hard stop at the window gate — a wake's: the first stop and the second
+  // call in one tick — counts the stop up to the wait, not through it, so a
+  // pause past the floor stalls nothing (review pass 1). A fresh long note,
+  // the only one pending: the gate closed before its first window.
+  await sql`SELECT delete_thought(${windowNote}::uuid, NULL::jsonb)`;
+  const pausedNote = await seed(ledgerOf("paused", "paused"));
+  const atPause = heldGate(2);
+  const gateStop = new AbortController();
+  let gateHard: PassStop | undefined;
+  const gateRun = runExtract({ url: URL_!, env, workers: 1, admit: atPause.admit, signal: gateStop.signal, stallFloorMs: 300, onPass: (st) => { gateHard = st; }, writer: { out: () => {}, err: () => {} } });
+  const gateWaiting = await pollUntil(async () => atPause.waiting === 1, 10_000);
+  await Bun.sleep(900);
+  gateStop.abort();
+  const gateRelease = gateHard?.();
+  await gateRelease;
+  const gateCode = await gateRun;
+  const [gateRow] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${pausedNote}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number }[];
+  assert(gateWaiting && gateRelease instanceof Promise && gateCode === 130 && gateRow?.stops === 1 && gateRow.stalled === 0 && (await statusOf(pausedNote)) === "pending",
+         `…and a hard stop there after a 900 ms wait, past a 300 ms floor, counts its stop short — the wait is not the thought's time held — so nothing is stalled (exit ${gateCode}; ${JSON.stringify(gateRow)}; ${await statusOf(pausedNote)})`);
+  // Another worker's end of the pass reaches a worker waiting at the gate:
+  // two workers, the gate open for the pass and one claim, the provider
+  // refusing that claim's call — the run ends 2 at once, the gate never
+  // opened (review pass 1). A one-call note alone in the pool, so the open
+  // worker asks the gate nothing more.
+  await sql`SELECT delete_thought(${pausedNote}::uuid, NULL::jsonb)`;
+  const refusalNote = await seed("Kenji's warmer note, which the provider refuses.");
+  const atRefusal = heldGate(2);
+  refuseCalls = 1;
+  const refusedBefore = refused;
+  const refusalAt = Date.now();
+  const refusalRun = runExtract({ url: URL_!, env, workers: 2, admit: atRefusal.admit, writer: { out: () => {}, err: () => {} } });
+  const refusalCode = await Promise.race([refusalRun, Bun.sleep(10_000).then(() => "still waiting" as const)]);
+  const refusalMs = Date.now() - refusalAt;
+  refuseCalls = 0;
+  if (refusalCode === "still waiting") { atRefusal.open(); await refusalRun; }
+  assert(refusalCode === 2 && refused === refusedBefore + 1 && refusalMs < 5000,
+         `…a worker waiting at the gate wakes when another worker's call meets the provider's refusal: the run ends 2 at once, the gate never opened (${refusalCode} after ${refusalMs} ms, ${refused - refusedBefore} refused)`);
+  await sql`SELECT delete_thought(${refusalNote}::uuid, NULL::jsonb)`;
+  // A gate that rejects with no stop, mid-thought, is the caller's error: run()
+  // rejects with it, and the thought is not recorded failed (review pass 1).
+  const brokenNote = await seed(ledgerOf("broken-gate", "broke"));
+  let brokenAsks = 0;
+  const brokenOutcome = await runExtract({ url: URL_!, env, workers: 1, admit: () => (++brokenAsks === 3 ? Promise.reject(new Error("the gate broke")) : Promise.resolve()), writer: { out: () => {}, err: () => {} } })
+    .then((c) => `exit ${c}`, (e: Error) => e.message);
+  const brokenStatus = await statusOf(brokenNote);
+  assert(brokenOutcome === "the gate broke" && brokenStatus === "pending",
+         `…a gate that rejects with no stop before a window rejects run() with its error, the thought not recorded failed (${brokenOutcome}; ${brokenStatus})`);
+  await sql`SELECT delete_thought(${brokenNote}::uuid, NULL::jsonb)`;
+  // A long note deleted while its worker waits at the gate between windows:
+  // the live write that closes the gate, so nothing more of it is sent once
+  // the gate opens (review pass 3).
+  const goneNote = await seed(ledgerOf("deleted", "deleted"));
+  const atGone = heldGate(3);
+  const goneFrom = calls;
+  const goneLines: string[] = [];
+  const goneRun = runExtract({ url: URL_!, env, workers: 1, admit: atGone.admit, writer: { out: (l) => goneLines.push(l), err: (l) => goneLines.push(l) } });
+  const goneWaiting = await pollUntil(async () => atGone.waiting === 1, 10_000);
+  await sql`SELECT delete_thought(${goneNote}::uuid, NULL::jsonb)`;
+  atGone.open();
+  const goneCode = await goneRun;
+  const goneSummary = goneLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(goneWaiting && calls - goneFrom === 1 && goneCode <= 1 && /, 1 deleted mid-pass/.test(goneSummary),
+         `…a long note deleted while its worker waits before its second window has nothing more sent once the gate opens, and is counted deleted (${calls - goneFrom} call(s), exit ${goneCode}: ${goneSummary.trim().slice(0, 160)})`);
+  // A long note edited while its worker waits before its second window,
+  // under a key the trigger does not requeue — ob1_config pointed elsewhere
+  // for the edit alone — so the claim is still the worker's: nothing more of
+  // the old text is sent, and the thought goes back to the pool for its new
+  // text, which the run then extracts (review pass 4).
+  const editedNote = await seed(ledgerOf("edited", "edited"));
+  const atEdited = heldGate(3);
+  const editedFrom = ledgerCalls;
+  const editedRun = runExtract({ url: URL_!, env, workers: 1, admit: atEdited.admit, writer: { out: () => {}, err: () => {} } });
+  const editedWaiting = await pollUntil(async () => atEdited.waiting === 1, 10_000);
+  await sql`UPDATE ob1_config SET value = 'extract:elsewhere@p0' WHERE key = 'entity_extraction_key'`;
+  try {
+    await sql`SELECT update_thought(${editedNote}::uuid, 'Kenji rewrote the registry notes.', NULL, NULL::vector)`;
+  } finally {
+    await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
+  }
+  atEdited.open();
+  const editedCode = await editedRun;
+  const editedAfter = await statusOf(editedNote);
+  assert(editedWaiting && ledgerCalls - editedFrom === 1 && editedAfter === "succeeded" && editedCode <= 1,
+         `…a long note edited while its worker waits, still its claim, has no more of its old text sent and is extracted again at its new text (${ledgerCalls - editedFrom} old window(s) sent, ${editedAfter}, exit ${editedCode})`);
+  await sql`DELETE FROM thought_work_claims WHERE work_type = 'extract:elsewhere@p0'`;
+  await sql`SELECT delete_thought(${editedNote}::uuid, NULL::jsonb)`;
+  // …and one edited under the key the trigger follows, which requeues it: no
+  // more of its old text sent, counted edited, not lost, and extracted again
+  // at its new text (review pass 5).
+  const requeuedNote = await seed(ledgerOf("requeued", "requeued"));
+  const atRequeued = heldGate(3);
+  const requeuedFrom = ledgerCalls;
+  const requeuedLines: string[] = [];
+  const requeuedRun = runExtract({ url: URL_!, env, workers: 1, admit: atRequeued.admit, writer: { out: (l) => requeuedLines.push(l), err: (l) => requeuedLines.push(l) } });
+  const requeuedWaiting = await pollUntil(async () => atRequeued.waiting === 1, 10_000);
+  await sql`SELECT update_thought(${requeuedNote}::uuid, 'Kenji rewrote the requeued registry notes.', NULL, NULL::vector)`;
+  atRequeued.open();
+  const requeuedCode = await requeuedRun;
+  const requeuedSummary = requeuedLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(requeuedWaiting && ledgerCalls - requeuedFrom === 1 && /, 1 edited mid-extraction and re-queued/.test(requeuedSummary) && !/no longer this worker's/.test(requeuedSummary) && (await statusOf(requeuedNote)) === "succeeded" && requeuedCode <= 1,
+         `…one edited under the key the trigger follows has no more of its old text sent, is counted edited, and is extracted at its new text (${ledgerCalls - requeuedFrom} old window(s) sent, exit ${requeuedCode}: ${requeuedSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${requeuedNote}::uuid, NULL::jsonb)`;
+  // …and one whose metadata alone is edited then, which the egress gate
+  // reads: no more of it is sent under the old tags, and it goes back to the
+  // pool, extracted again under the new (review pass 6).
+  const retaggedNote = await seed(ledgerOf("retagged", "retagged"));
+  const atRetagged = heldGate(3);
+  const retaggedFrom = ledgerCalls;
+  const retaggedLines: string[] = [];
+  const retaggedRun = runExtract({ url: URL_!, env, workers: 1, admit: atRetagged.admit, writer: { out: (l) => retaggedLines.push(l), err: (l) => retaggedLines.push(l) } });
+  const retaggedWaiting = await pollUntil(async () => atRetagged.waiting === 1, 10_000);
+  await sql`UPDATE thoughts SET metadata = metadata || '{"topics": ["private"]}'::jsonb WHERE id = ${retaggedNote}::uuid`;
+  atRetagged.open();
+  const retaggedCode = await retaggedRun;
+  const retaggedSummary = retaggedLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  const retaggedWindows = ledgerCalls - retaggedFrom;
+  assert(retaggedWaiting && /, 1 edited mid-extraction and re-queued/.test(retaggedSummary) && retaggedWindows > 1 && (await statusOf(retaggedNote)) === "succeeded" && retaggedCode <= 1,
+         `…one whose metadata alone is edited then goes back to the pool and is extracted again under its new metadata, counted edited (${retaggedWindows} window(s) sent in all, exit ${retaggedCode}: ${retaggedSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${retaggedNote}::uuid, NULL::jsonb)`;
+  // …and an untouched one whose metadata holds an integer past 2^53, which
+  // JavaScript cannot hold: read again as a hash in SQL, it is not moved, and
+  // carries on in the same claim (review pass 7).
+  const wideNote = await seed(ledgerOf("wide", "widened"));
+  await sql`UPDATE thoughts SET metadata = metadata || '{"n": 12345678901234567890}'::jsonb WHERE id = ${wideNote}::uuid`;
+  const atWide = heldGate(3);
+  const wideLines: string[] = [];
+  const wideRun = runExtract({ url: URL_!, env, workers: 1, admit: atWide.admit, writer: { out: (l) => wideLines.push(l), err: (l) => wideLines.push(l) } });
+  const wideWaiting = await pollUntil(async () => atWide.waiting === 1, 10_000);
+  atWide.open();
+  const wideCode = await wideRun;
+  const wideSummary = wideLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(wideWaiting && /, 0 edited mid-extraction and re-queued/.test(wideSummary) && /^\s*1 extracted/.test(wideSummary) && (await statusOf(wideNote)) === "succeeded" && wideCode <= 1,
+         `…an untouched one whose metadata holds an integer past 2^53 is not read as moved, and is extracted in the same claim (exit ${wideCode}: ${wideSummary.trim().slice(0, 140)})`);
+  await sql`SELECT delete_thought(${wideNote}::uuid, NULL::jsonb)`;
+  // A pause moves the thought's time held on (N17): a hard stop while the
+  // window after a 1,500 ms wait is in hand, past a 1,000 ms floor, is short,
+  // and stalls nothing (review pass 3).
+  const movedNote = await seed(ledgerOf("moved", "moved"));
+  const atMoved = heldGate(2);
+  const movedStop = new AbortController();
+  let movedHard: PassStop | undefined;
+  const movedRun = runExtract({ url: URL_!, env, workers: 1, admit: atMoved.admit, signal: movedStop.signal, stallFloorMs: 1000, onPass: (st) => { movedHard = st; }, writer: { out: () => {}, err: () => {} } });
+  const movedWaiting = await pollUntil(async () => atMoved.waiting === 1, 10_000);
+  await Bun.sleep(1500);
+  slowMs = 3000;
+  const movedFrom = calls;
+  atMoved.open();
+  let movedInHand = false;
+  for (let i = 0; i < 250 && !movedInHand; i++) { movedInHand = calls > movedFrom; if (!movedInHand) await Bun.sleep(20); }
+  await Bun.sleep(100);
+  movedStop.abort();
+  await movedHard?.();
+  const movedCode = await movedRun;
+  slowMs = 0;
+  const [movedRow] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${movedNote}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number }[];
+  assert(movedWaiting && movedInHand && movedCode === 130 && movedRow?.stops === 1 && movedRow.stalled === 0,
+         `…a hard stop while the window after a 1,500 ms wait is in hand counts the thought's time from the wait's end, so a 1,000 ms floor stalls nothing (exit ${movedCode}; ${JSON.stringify(movedRow)})`);
+  await sql`SELECT delete_thought(${movedNote}::uuid, NULL::jsonb)`;
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -10641,6 +10896,95 @@ if (want("16")) {
     await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
   }
 
+  // The admit gate (SMD-3379 PR 1b): consolidation waits at it before each
+  // claim and before each pair of a thought, and a stop while it waits
+  // between pairs sends the thought back to the pool unrecorded. Two older
+  // thoughts settled first, so the newer one is the pool's only work and has
+  // two pairs.
+  await seed("[16g] The gatehouse opens at nine.", 30, 3, ["gatehouse"]);
+  await seed("[16g] The gatehouse opens at ten.", 30, 2, ["gatehouse"]);
+  await consolidateInProcess({ workers: 1 });
+  // The cases below count calls and asks: the pool must hold their thoughts alone (review pass 6).
+  const othersPendingC = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status IN ('pending', 'claimed')`)[0].c);
+  assert(othersPendingC === 0, `the consolidation gate's cases start on an empty pool (${othersPendingC} row(s) pending or claimed)`);
+  const gatedNewer = await seed("[16g] The gatehouse opens at eleven now.", 30, 0, ["gatehouse"]);
+  const claimStatus = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0]?.status as string | undefined;
+  const gatedRun = (gate: ReturnType<typeof heldGate>, signal: AbortSignal) => runConsolidate({ url: URL_!, env, workers: 1, admit: gate.admit, signal, writer: { out: () => {}, err: () => {} } });
+  // Open for the pass, the claim and the first pair; closed before the second.
+  const atPair = heldGate(3);
+  const pairStop = new AbortController();
+  const pairFrom = calls;
+  const pairRun = gatedRun(atPair, pairStop.signal);
+  const pairWaiting = await pollUntil(async () => atPair.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const pairHeld = await claimStatus(gatedNewer);
+  const pairCalls = calls - pairFrom;
+  const pairAt = Date.now();
+  pairStop.abort();
+  const pairCode = await pairRun;
+  const pairMs = Date.now() - pairAt;
+  assert(pairWaiting && pairHeld === "claimed" && pairCalls === 1 && pairCode === 130 && pairMs < 1500 && (await claimStatus(gatedNewer)) === "pending" && calls - pairFrom === 1,
+         `a consolidation gate closed before a thought's second pair waits there with the claim kept, and a stop while it waits ends the run at once, the thought back in the pool unrecorded (${pairHeld} while closed after ${pairCalls} call(s); exit ${pairCode} in ${pairMs} ms; ${await claimStatus(gatedNewer)})`);
+  // Open for the pass, closed at the claim: the pool written, no claim held; opened, both pairs judged.
+  const atClaimC = heldGate(1);
+  const claimFromC = calls;
+  const claimRunC = gatedRun(atClaimC, new AbortController().signal);
+  const claimWaitingC = await pollUntil(async () => atClaimC.waiting === 1, 10_000);
+  await Bun.sleep(300);
+  const claimHeldC = await claimStatus(gatedNewer);
+  const claimCallsC = calls - claimFromC;
+  atClaimC.open();
+  const claimCodeC = await claimRunC;
+  assert(claimWaitingC && claimHeldC === "pending" && claimCallsC === 0 && claimCodeC <= 1 && (await claimStatus(gatedNewer)) === "succeeded" && calls - claimFromC === 2,
+         `…closed at the claim, it waits holding none, and judges both pairs once the gate opens (${claimHeldC} while closed, ${claimCallsC} call(s); exit ${claimCodeC}, ${await claimStatus(gatedNewer)}, ${calls - claimFromC} call(s))`);
+  // The newer side deleted while its worker waits before its second pair:
+  // nothing more of it goes to the judge once the gate opens (review pass 3).
+  const goneNewer = await seed("[16g] The gatehouse opens at noon now.", 30, 0, ["gatehouse"]);
+  const atGoneC = heldGate(3);
+  const goneFromC = calls;
+  const goneRunC = gatedRun(atGoneC, new AbortController().signal);
+  const goneWaitingC = await pollUntil(async () => atGoneC.waiting === 1, 10_000);
+  await sql`SELECT delete_thought(${goneNewer}::uuid, NULL::jsonb)`;
+  atGoneC.open();
+  const goneCodeC = await goneRunC;
+  assert(goneWaitingC && calls - goneFromC === 1 && goneCodeC <= 1,
+         `…a thought deleted while its worker waits before its second pair has nothing more judged once the gate opens (${calls - goneFromC} call(s), exit ${goneCodeC})`);
+  // The newer side edited while its worker waits before its second pair:
+  // still its claim (063 requeues a judged thought only through its
+  // proposals), so it goes back to the pool for its new text — the run, its
+  // gate open again, takes it up there — and its old text goes to the judge
+  // no more (review pass 4). Three older sides settled first.
+  for (const [hour, days] of [["nine", 3], ["ten", 2], ["eleven", 1]] as const) await seed(`[16g] The watchtower opens at ${hour}.`, 31, days, ["watchtower"]);
+  await consolidateInProcess({ workers: 1 });
+  const watched = await seed("[16g] The watchtower opens at noon.", 31, 0, ["watchtower"]);
+  const atMovedC = heldGate(3);
+  const movedFromC = seen.length;
+  const movedRunC = gatedRun(atMovedC, new AbortController().signal);
+  const movedWaitingC = await pollUntil(async () => atMovedC.waiting === 1, 10_000);
+  await sql`UPDATE thoughts SET content = '[16g] The watchtower opens at one now.' WHERE id = ${watched}::uuid`;
+  atMovedC.open();
+  const movedCodeC = await movedRunC;
+  const movedAfterC = await claimStatus(watched);
+  const movedSeen = seen.slice(movedFromC).map((p) => (p.b.includes("at noon") ? "old" : p.b.includes("at one now") ? "new" : "other"));
+  assert(movedWaitingC && movedSeen.join(",") === "old,new,new,new" && movedAfterC === "succeeded" && movedCodeC <= 1,
+         `…a thought edited while its worker waits before its second pair, still its claim, goes back to the pool: the judge sees its old text no more, and its pairs are judged at its new text (${movedSeen.join(",")}; ${movedAfterC}, exit ${movedCodeC})`);
+  // Every older side still to judge deleted while its worker waits before its
+  // second pair: none of their texts goes to the judge (review pass 4). A
+  // newer thought of its own, four older sides behind it.
+  const latest = await seed("[16g] The watchtower opens at two now.", 31, 0, ["watchtower"]);
+  const olders = ((await sql`SELECT id FROM thoughts WHERE content LIKE '[16g] The watchtower opens at %' AND id <> ${latest}::uuid`) as { id: string }[]).map((r) => r.id);
+  const atOlders = heldGate(3);
+  const oldersFrom = calls;
+  const oldersRun = gatedRun(atOlders, new AbortController().signal);
+  const oldersWaiting = await pollUntil(async () => atOlders.waiting === 1, 10_000);
+  for (const id of olders) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  atOlders.open();
+  const oldersCode = await oldersRun;
+  const oldersAfter = await claimStatus(latest);
+  assert(oldersWaiting && olders.length === 4 && calls - oldersFrom === 1 && oldersAfter === "succeeded" && oldersCode <= 1,
+         `…its older sides deleted while it waits before its second pair, none of their texts is judged once the gate opens, and the thought is finished (${olders.length} older side(s), ${calls - oldersFrom} call(s), ${oldersAfter}, exit ${oldersCode})`);
+  await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
+
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
@@ -14077,6 +14421,33 @@ if (want("32")) {
     const secOf = async (key: string) => (await sql`SELECT origin, body_md, pending_body_md AS pending FROM page_sections WHERE page_id = ${P}::uuid AND section_key = ${key}`)[0] as Sec | undefined;
     const revisions = async (key: string) => Number((await sql`SELECT count(*)::int AS c FROM page_section_revisions r JOIN page_sections s ON s.id = r.section_id WHERE s.page_id = ${P}::uuid AND s.section_key = ${key}`)[0].c);
     const consistent = async () => { const [x] = await sql`SELECT render_page(${P}::uuid) = (SELECT content FROM thoughts WHERE id = ${P}::uuid) AS same`; return x.same === true; };
+    // The slug races below are held, not timed: A creates inside an open
+    // transaction, B's create is dispatched, and A commits only once B is seen
+    // waiting on A's lock, or after 100 polls (about 5 s). Timed, A could commit
+    // before B looked the slug up, and B took the update path: neither refused,
+    // about 1 run in 5 under ci-parity on 10-02 (SMD-2475). Watched by B's pid
+    // from `sql`, which holds no transaction, so its view of pg_stat_activity is
+    // current (SMD-2742); `waitedOn` is the lock's wait_event, which each race
+    // pins.
+    const heldRace = async <T,>(run: (c: SQL) => Promise<T>): Promise<{ a: T; b: T; waitedOn: string }> => {
+      const bPid = Number((await cB`SELECT pg_backend_pid() AS p`)[0].p);
+      await cA`BEGIN`;
+      let a: T, pb: Promise<T>, waitedOn = "";
+      try {
+        a = await run(cA);
+        pb = run(cB);
+        for (let i = 0; i < 100 && !waitedOn; i++) {
+          const w = (await sql`SELECT wait_event_type AS t, wait_event AS e FROM pg_stat_activity WHERE pid = ${bPid}`)[0] as { t: string | null; e: string | null } | undefined;
+          if (w?.t === "Lock") waitedOn = w.e ?? "Lock";
+          else await Bun.sleep(50);
+        }
+      } finally {
+        await cA`COMMIT`;
+      }
+      return { a: a!, b: await pb!, waitedOn };
+    };
+    // A's outcome, for a failure message: a failed A leaves B nothing to wait on.
+    const said = (x: { ok: R | null; err: string }) => x.err.split("\n")[0].slice(0, 80) || (x.ok?.created ? "created" : "updated");
 
     // Two first writes of one key, at once: the page lock and the unique key
     // serialise them — one created, the other falls through to the
@@ -14136,16 +14507,15 @@ if (want("32")) {
     const pagesLeft = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug LIKE 'raced-delete-%'`)[0].c);
     assert(deadlocks === 0 && noPage + landed === 12 && pagesLeft === 0, `twelve section writes racing delete_thought of their page: no deadlock, each write landed first or found no page, every page gone (landed ${landed}, no page ${noPage}, deadlocks ${deadlocks})`);
 
-    // Two creates of one slug, at once: one page, the other refused by name —
+    // Two creates of one slug, held: one page, the other refused by name —
     // the loser's capture waits on 033's fingerprint lock, merges into the
     // winner's thought, and is refused before it can take the slug.
     const create = async (c: SQL) => { try { return { ok: ((await c`SELECT upsert_page('raced', 'A raced page') AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
-    const [ra, rb] = await Promise.all([create(cA), create(cB)]);
-    const created = [ra, rb].filter((x) => x.ok?.created === true), refusedOne = [ra, rb].filter((x) => x.ok === null);
+    const { a: ra, b: rb, waitedOn: rWaited } = await heldRace(create);
     const pagesRaced = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug = 'raced'`)[0].c);
     const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
-    assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
-      `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    assert(rWaited === "advisory" && ra.ok?.created === true && rb.ok === null && /another writer created with this text meanwhile/.test(rb.err) && pagesRaced === 1 && thoughtsRaced === 1,
+      `two creates of one slug: B waited on A's fingerprint lock, one page, one thought, B refused by name (waited on ${rWaited || "nothing"}; A ${said(ra)}; B ${rb.err.split("\n")[0].slice(0, 110) || "not refused"})`);
     // Two pages superseding each other at once, and a supersede racing its
     // target's delete: upsert_page takes 029's supersession lock before any
     // row, as delete_thought does — the loser of the loop is WOULD_CYCLE by
@@ -14176,12 +14546,11 @@ if (want("32")) {
     assert(supDeadlocks === 0 && recreated + updated === 8, `a supersede racing its own page's delete, eight rounds: no deadlock — the page updated before the delete took it, or created anew after (${updated} updated, ${recreated} created anew)`);
     // …and under two titles the slug's own unique index is what the loser meets,
     // said by name rather than as the constraint's error (run-it, first review pass).
-    const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
-    const [ta, tb] = await Promise.all([createTitled(cA, "Title A"), createTitled(cB, "Title B")]);
-    const titledOk = [ta, tb].filter((x) => x.ok?.created === true), titledNo = [ta, tb].filter((x) => x.ok === null);
+    const createTitled = async (c: SQL) => { const title = c === cA ? "Title A" : "Title B"; try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const { a: ta, b: tb, waitedOn: tWaited } = await heldRace(createTitled);
     const titledThoughts = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content IN ('# Title A', '# Title B')`)[0].c);
-    assert(titledOk.length === 1 && titledNo.length === 1 && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(titledNo[0].err) && titledThoughts === 1,
-      `two creates of one slug under two titles: one page, the loser refused by name and its thought rolled back (${titledNo[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    assert(tWaited === "transactionid" && ta.ok?.created === true && tb.ok === null && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(tb.err) && titledThoughts === 1,
+      `two creates of one slug under two titles: B waited on the slug's unique index (A's transaction), one page, B refused by name and its thought rolled back (waited on ${tWaited || "nothing"}; A ${said(ta)}; B ${tb.err.split("\n")[0].slice(0, 110) || "not refused"})`);
   } finally {
     await cA.close();
     await cB.close();
