@@ -23,9 +23,9 @@
 --      it; reviewed_by_agent_id uuid, its agent when the envelope named one
 --      in the form the server emits (010's reading); reviewed_by_kind text,
 --      the registry's kind when the decision was made (046's
---      ob1_registry_kind: the agent's, else its name's) — read only when an
---      agent is named, so a name alone, which anyone can put in an envelope,
---      never lends the decision a kind. A decision with no key —
+--      ob1_registry_kind: the agent's, else its name's, as the audit trigger
+--      reads it) — read only when an agent is named, so an envelope naming no
+--      agent, which anyone can write, gets no kind. A decision with no key —
 --      db/consolidate.ts run without OB1_WORKER_KEY, or with one that did not
 --      resolve — carries the name 'consolidate' and no agent, as its audit row
 --      does, and no kind even when a key of that name is classified; a raw
@@ -85,11 +85,12 @@
 --      (055), and 046's backfill fills one in later, neither of which is the
 --      kind of a key when it decided — so a keyless decision stays kindless
 --      here too, and a key classified since reads the registry's kind now.
---      The newest such
---      row (seq) when a transaction holds two — so a hand-run transaction
---      that decided one row twice, a clearing reject then a reject clearing
---      nothing by another key, is credited to the first; no path in the tree
---      decides twice in one transaction. Every other decided row — an
+--      Where two writes in the decision's transaction qualify, the newer
+--      (seq) is taken. A decision that wrote nothing has no row at all, so a
+--      hand-run transaction that decided one row twice — a clearing reject,
+--      then a reject clearing nothing by another key — is credited to the
+--      clear's key; no path in the tree decides twice in one transaction.
+--      Every other decided row — an
 --      accept that found the pointer already set, a reject that cleared
 --      nothing, the pass's settles — has no record of its reviewer, and
 --      stays NULL: nothing is guessed. Run before the trigger exists (it is
@@ -126,8 +127,9 @@
 --   through the same functions and gets the reviewer stamped. MINOR under
 --   FORK.md's version rules: columns and a trigger added, nothing a caller
 --   passes or reads changed.
---   test-schema [101], test-upgrade [20be], test-live [16] (--reject and
---   --list under a key).
+--   test-schema [101], test-upgrade [20be], test-live [16] (--accept,
+--   --reject and --list with a key and without, a key classified before and
+--   after it decided, and a brain short of 113).
 --
 -- Prerequisites
 --   008 (ob1_current_actor), 029 (supersession_proposals), 046

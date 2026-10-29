@@ -7958,6 +7958,10 @@ if (want("16")) {
   const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
     "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
+  const listAccepted = await consolidate("--list", "accepted");
+  const acceptedLines = listAccepted.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  assert(listAccepted.code === 0 && acceptedLines.length === 1 && acceptedLines[0] === "decided by: consolidator (a key the registry has not classified)",
+    `--list accepted shows who decided the accepted row (${acceptedLines.join(" | ")})`);
   // A key classified before it decides: its kind at the decision, with no "since" (the reject clears nothing).
   await sql`UPDATE ob1_agents SET kind = 'agent' WHERE canonical_agent_id = ${agent.id}::uuid`;
   const classifiedReject = await consolidate("--reject", directed.id, "--note", "classified first");

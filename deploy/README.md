@@ -2184,7 +2184,7 @@ held for the key when it decided: classify your key and the workers' key first
 registry has not classified", and a kind given later reads "classified after it
 decided". A decision under the workers' key — yours without the prefix, or the
 pass settling a stale row it no longer finds in conflict (067) — reads
-`decided by: workers (…)` either way; the pass's settle carries a note beginning
+`decided by: <the workers' key's name> (…)` either way; the pass's settle carries a note beginning
 `settled by the pass:`. A row decided before migration 113 reads "not
 recorded" unless its decision wrote or cleared a pointer, whose audit row names
 the key. Accepting unattended waits on a judge that can tell conflicts apart
