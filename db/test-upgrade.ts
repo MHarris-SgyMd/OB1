@@ -32,6 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, quoteIdent, reembedKey } from "./config.mjs";
+import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -5087,6 +5088,45 @@ console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; on
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
   assert((await rows()) === after && (await facets()) === facetsAfter && (await claims()) === claimsAfter, "a re-apply is a no-op: every thought, facet and claim as it was");
   await sql.close();
+  // A naming waits for the writers of this database's thoughts alone: a template copy of the brain, its thoughts the
+  // same relation by oid, a capture open in it, holds up no naming here (review pass 7, run-it: without the lock read's
+  // database filter it listed that writer, and the wait, which has no end of its own, would wait on it). Bounded by a
+  // stop, should it wait.
+  {
+    // A brain of its own, at 113, whose copy is made with no session on it: the suite's database has the earlier
+    // sections' sessions on it.
+    const pg = new URL(URL_), brain = new URL(URL_), copy = new URL(URL_);
+    pg.pathname = "/postgres";
+    brain.pathname = "/ob1_up113_brain";
+    copy.pathname = "/ob1_up113_copy";
+    const admin = new SQL({ url: pg.toString(), max: 1 });
+    const copyClient = new SQL({ url: copy.toString(), max: 1 });
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy");
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain");
+      await admin.unsafe("CREATE DATABASE ob1_up113_brain");
+      await applyMigrations(brain.toString(), OPTS);
+      await admin.unsafe("CREATE DATABASE ob1_up113_copy TEMPLATE ob1_up113_brain");
+      const w = await copyClient.reserve();
+      await w`BEGIN`;
+      await w`SELECT upsert_thought('upgrade 113: a capture open in a copy of the brain'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(5)}::vector)`;
+      const bound = new AbortController();
+      const timer = setTimeout(() => bound.abort(), 10_000);
+      const lines: string[] = [];
+      const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_JUDGE_MODEL: "stub-judge" };
+      const code = await sweepSubjects({ url: brain.toString(), env, model: false, switchKey: true, signal: bound.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .finally(() => clearTimeout(timer));
+      await w`ROLLBACK`;
+      w.release();
+      assert(code === 0 && !lines.some((l) => /waiting for/.test(l)),
+        `a capture open in a template copy of the brain holds up no naming here (exit ${code}: ${lines.find((l) => /waiting|stopped/.test(l))?.trim().slice(0, 100) ?? "no wait"})`);
+    } finally {
+      await copyClient.close({ timeout: 5 });
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy").catch(() => {});
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain").catch(() => {});
+      await admin.close();
+    }
+  }
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of the fork's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

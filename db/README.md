@@ -2198,8 +2198,9 @@ UPDATE` on `thought_work_claims`, which preflight checks (below). The sweep's
 place in sleep is SMD-3306 PR 6. test-schema [101] (the trigger, a blank key,
 the ticket filed later, each action of the close and its refusals, the door's
 refusals by the ticket a thought is filed under, `ob1_filed_ticket`'s values),
-test-upgrade [20be] (refused without each prerequisite; onto a populated brain
-at 112, nothing moved, no pool until one is named, the redefined door), test-live
+test-upgrade [20be] (refused without each prerequisite and on a SQL_ASCII
+database; onto a populated brain at 112, nothing moved, no pool until one is
+named, the redefined door), test-live
 [10h] (the sweep from the pool),
 `server-portable/test-preflight.ts`.
 
@@ -3208,11 +3209,13 @@ its finished claims, and the pooling is marked finished in
 `ob1_config.subject_pool_filled` once it commits, so one that broke off (a thought
 deleted under it, a lost connection) is pooled again by the next run; a signal
 during it ends the CLI at once, and the pooling, one statement, runs on to its end
-on the server, holding the lock below, unmarked. A naming waits, at most 30 s,
-for the transactions writing thoughts as it named the pool, so what they capture
-is pooled; past that it leaves the pooling unfinished, and the next run pools
-again — every thought with no current subject, those the model named nothing for
-since among them. One run
+on the server, holding the lock below, unmarked. A naming waits for the
+transactions writing thoughts as it named the pool, so what they capture is
+pooled, and the pooling for one holding a claim it requeues. Neither wait has an
+end of its own: each names the pids it waits on, again every 30 s, until they
+end, and a caller's stop ends it, 130, the pooling left to the next run (a bound
+past which the pooling was left unfinished had every run after it pool again, and
+ask again what the model had named nothing for, while the writer stayed open). One run
 names and pools at a time, under a session advisory lock, a run that waits for
 another saying so. The first naming is
 refused while a login role that can capture — it reads `ob1_config`, without
@@ -3226,14 +3229,18 @@ the next claim, which the pool line counts and a run says, exit 1. Within one ke
 hold — a naming leaves a live lease to its run, though an edit pools its thought
 again — and whatever the claims, the door's lock, its fingerprint check and its
 check of the ticket a thought is filed under make a sweep beside the pass, or
-beside another sweep, safe. A claim
+beside another sweep, safe; a run whose pool another run names away from it
+claims and writes nothing more, and stops, exit 2, since each write first locks
+the pool's name and reads it. A claim
 finished is the record that the thought was asked at its text: one the model
 named nothing for is not asked again until its text, the ticket it is filed
 under, or the pool's key changes
 (a switch to another key and back pools it again: a claim records no
 fingerprint), and an out-of-date subject standing on it is closed through 113's
 `close_thought_subject`, which closes it only while it is still the one read at
-the text read, so a subject a pass wrote since stands. A thought the pass gave a
+the text read, so a subject a pass wrote since stands; a thought given a subject
+elsewhere while the model was asked goes back to the pool, if the run still holds
+its claim, and the run reads what stands when it comes up. A thought the pass gave a
 current subject after it was pooled is finished unasked, so long as the rules
 agree now: a ticket filed on it since a model keyed it, another ticket than the
 one a rule read, or none where one was, is read again. A subject the ticket a
@@ -5725,11 +5732,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3086 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1802 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1813 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 382 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 393 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

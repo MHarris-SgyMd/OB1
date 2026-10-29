@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, recordSubject, sweepSubjects, WRITERS_WAIT, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -7330,9 +7330,16 @@ if (want("10h")) {
           `…and without SELECT on the claims, refused too, before any question (exit ${noClaimSelect.code})`);
         await sql.unsafe(`REVOKE SELECT ON ob1_config FROM ${SROLE}`);
         const noConfigRead = await sweep({ dryRun: true }, sEnv, sUrl);
+        // …and rebuild.ts --status as it, a subject pool's line saying the role cannot read which pool is named, the
+        // rest standing (review pass 7, run-it: the read's refusal, rethrown, lived).
+        await sql`INSERT INTO thought_work_claims (thought_id, work_type) VALUES (${release}::uuid, 'subjects:r0') ON CONFLICT DO NOTHING`;
+        const noConfigStatus = await runScript(["bun", join(HERE, "rebuild.ts"), "--url", sUrl, "--status"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: HERE });
+        await sql`DELETE FROM thought_work_claims WHERE thought_id = ${release}::uuid AND work_type = 'subjects:r0'`;
         await sql.unsafe(`GRANT SELECT ON ob1_config TO ${SROLE}`);
         assert(noConfigRead.code === 2 && /This role cannot read the subject pool's name/.test(noConfigRead.stderr),
           `…and one that cannot read ob1_config is refused, naming it, even dry (exit ${noConfigRead.code})`);
+        assert(noConfigStatus.code === 0 && noConfigStatus.out.includes("    subjects:r0  →  (--subjects, if ob1_config.subject_pool_key names it: this role cannot read which it names)\n"),
+          `…and rebuild.ts --status as it says a subject pool's drainer is unknown to it, exit 0 (exit ${noConfigStatus.code}: ${(noConfigStatus.stdout + noConfigStatus.stderr).split("\n").filter((l) => /subjects:r0|error|denied/i.test(l)).map((l) => l.trim().slice(0, 100)).join(" | ")})`);
         await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
         try {
           // A rejection read as the run's result, so an error escaping the sweep fails this case rather than the suite.
@@ -7623,9 +7630,59 @@ if (want("10h")) {
     };
     const meanRun = await sweep().finally(() => { onOwn = null; });
     assert(meanAsks.none === 2 && meanAsks.older === 2 && (await standingOf(meanNone)) === undefined && (await standingOf(meanOld)) === undefined
-        && /2 read again, a subject written meanwhile/.test(tally(meanRun)) && /2 out-of-date subject\(s\) closed/.test(tally(meanRun))
+        && /2 given a subject elsewhere mid-sweep/.test(tally(meanRun)) && /2 out-of-date subject\(s\) closed/.test(tally(meanRun))
         && (await claimOf(meanNone))?.status === "succeeded" && (await claimOf(meanOld))?.status === "succeeded",
       `a subject written while the model was asked, which its answer said nothing of, is read again and closed out of date, the claim finished then (${meanAsks.none} and ${meanAsks.older} asked: ${tally(meanRun)})`);
+    // …and one written there by a run that holds the claim now: no claim is handed back but this run's, the other's
+    // lease left to it (review pass 7, run-it: requeue_thought_work took the live lease another run held, or set pending
+    // a claim another run had finished, and the thought was asked again).
+    const leasedT = await seed("Leased: a note another run took and named while this one asked.");
+    let leasedAsks = 0;
+    onOwn = async (t) => {
+      if (!t.includes("Leased:") || ++leasedAsks > 1) return;
+      await sql`UPDATE thought_work_claims SET worker_id = 'subjects-other', claimed_at = now(), ttl_expires_at = now() + interval '600 seconds' WHERE thought_id = ${leasedT}::uuid AND work_type = ${POOL}`;
+      await asOther(leasedT, "phrase:a note taken elsewhere", "subject:stub-judge@p2r");
+    };
+    const leasedRun = await sweep().finally(() => { onOwn = null; });
+    const [leasedClaim] = (await sql`SELECT status, worker_id FROM thought_work_claims WHERE thought_id = ${leasedT}::uuid AND work_type = ${POOL}`) as { status: string; worker_id: string | null }[];
+    assert(leasedAsks === 1 && leasedClaim?.status === "claimed" && leasedClaim.worker_id === "subjects-other"
+        && /1 given a subject elsewhere mid-sweep/.test(tally(leasedRun)) && /; 1 claim\(s\) no longer this run's when released/.test(leasedRun.stdout),
+      `a subject written while the model was asked, by the run that holds the claim now, leaves that run's lease to it (${leasedAsks} asked; ${leasedClaim?.status} by ${leasedClaim?.worker_id}; ${tally(leasedRun)})`);
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), ttl_expires_at = NULL WHERE thought_id = ${leasedT}::uuid AND work_type = ${POOL}`;
+    // …and one written as the answer came, before the claim's end: the end waits on the door's lock on the thought,
+    // which the writer holds, and sees it (review pass 7, cold read: the check and the release, two statements,
+    // finished a claim over a subject written between them).
+    const lockedT = await seed("Locked: a note given a subject as its answer came back empty.");
+    const betweenClient = new SQL({ url: URL_!, max: 1 });
+    let betweenDone = null as Promise<void> | null;
+    let lockedRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const between = await betweenClient.reserve();
+      onOwn = async (t) => {
+        if (!t.includes("Locked:") || betweenDone !== null) return;
+        const fp = await fpNow(lockedT);
+        await between`BEGIN`;
+        await between`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${lockedT}::uuid::text, 0))`;
+        betweenDone = (async () => {
+          // The run's end waiting on the lock, or two seconds, whichever comes first.
+          for (let i = 0; i < 80; i++) {
+            const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
+            if (waits > 0) break;
+            await Bun.sleep(25);
+          }
+          await between`SELECT record_thought_subject(${lockedT}::uuid, ${"phrase:a note given its subject between"}, 'model', 'subject:stub-judge@p2r', NULL, ${fp}, ${subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "on", answer: "{}" })}::jsonb)`;
+          await between`COMMIT`;
+        })();
+      };
+      lockedRun = await sweep().finally(() => { onOwn = null; });
+      await betweenDone;
+      between.release();
+    } finally {
+      await betweenClient.close({ timeout: 5 });
+    }
+    assert(lockedRun !== null && /1 given a subject elsewhere mid-sweep/.test(tally(lockedRun)) && !/named nothing for/.test(tally(lockedRun))
+        && (await standingOf(lockedT))?.key === "phrase:a note given its subject between",
+      `a subject written as the answer came, before the claim's end, is seen by the end, which waits on the door's lock (${lockedRun === null ? "no run" : tally(lockedRun)})`);
     // A stop during a pause for the provider ends the sweep there, the call not made again (review pass 2: four were).
     await sql`SELECT requeue_thought_work(${POOL}, ${garbled}::uuid)`;
     const pauseStop = new AbortController();
@@ -7679,31 +7736,169 @@ if (want("10h")) {
     const straddleRun = await naming!;
     assert(/^ {2}waiting for \d+ transaction\(s\) writing thoughts as the pool was named/m.test(straddleRun.stdout) && (await standingOf(straddled))?.key === "ticket:SMD-82",
       `a capture open as its pool was named is waited for, pooled and read (exit ${straddleRun.code}: ${straddleRun.stdout.split("\n").filter((l) => /waiting|pool subjects/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
-    // …and one still open past the wait: the pooling is left unfinished, said, and the next run pools what it captured
-    // (review pass 6, cold read: the pooling was marked finished, and that capture was never pooled).
+    // …and one open long: the wait has no end of its own, says again which pid it waits on, and pools the capture once
+    // its transaction commits, in the same run (review pass 7: past a 30 s bound the pooling was left unfinished, and
+    // while the writer stayed open every run waited, pooled again and asked again each thought the model had named
+    // nothing for and each failed one).
+    const savedWaits = { ...NAMING_WAIT };
+    /** Until the run polls the transactions it waits on, its list of them read: a case acts while the run waits. */
+    const untilWaiting = async () => {
+      for (let i = 0; i < 200; i++) {
+        const [{ n }] = (await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%locktype = 'virtualxid'%"}`) as { n: number }[];
+        if (n > 0) return;
+        await Bun.sleep(25);
+      }
+    };
+    /** A connection's own transaction, open: `pid` its backend's, `q` its statements. */
+    const openTx = async (client: SQL) => {
+      const q = await client.reserve();
+      await q`BEGIN`;
+      return { q, pid: ((await q`SELECT pg_backend_pid() AS p`)[0] as { p: number }).p };
+    };
     await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
-    const savedWait = WRITERS_WAIT.ms;
-    WRITERS_WAIT.ms = 300;
     const lateHolder = new SQL({ url: URL_!, max: 1 });
-    let lateT = "";
+    let lateT = "", latePid = -1;
     let pastWait = null as Awaited<ReturnType<typeof sweep>> | null;
-    let pastWaitMs = -1;
     try {
-      await lateHolder.begin(async (tx: SQL) => {
-        lateT = ((await tx`SELECT upsert_thought(${"A note filed under SMD-83 in a transaction open past the naming's wait."}, ${{ metadata: { ticket: "SMD-83" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
-        const waitFrom = Date.now();
-        pastWait = await sweep({ model: false });
-        pastWaitMs = Date.now() - waitFrom;
-      });
+      NAMING_WAIT.sayMs = 300;
+      const late = await openTx(lateHolder);
+      latePid = late.pid;
+      lateT = ((await late.q`SELECT upsert_thought(${"A note filed under SMD-83 in a transaction open across the naming's wait."}, ${{ metadata: { ticket: "SMD-83" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
+      const run = sweep({ model: false });
+      await untilWaiting();
+      await Bun.sleep(1200);
+      await late.q`COMMIT`;
+      late.q.release();
+      pastWait = await run;
     } finally {
-      WRITERS_WAIT.ms = savedWait;
-      await lateHolder.close();
+      Object.assign(NAMING_WAIT, savedWaits);
+      await lateHolder.close({ timeout: 5 });
     }
-    const unfinished = await filledKey();
-    const afterWait = await sweep({ model: false });
-    assert(pastWait !== null && /^ {2}\d+ transaction\(s\) writing thoughts as the pool was named still are after 0\.3 s: its pooling is left unfinished, and the next run pools again$/m.test(pastWait.stdout)
-        && pastWaitMs < 10_000 && unfinished === "" && /^ {2}pool subjects:r1\.2: named, its pooling broken off before/m.test(afterWait.stdout) && (await standingOf(lateT))?.key === "ticket:SMD-83",
-      `a capture open past the naming's wait: its pooling left unfinished, said, and the next run pools and reads it (${pastWait === null ? "no run" : pastWait.stdout.split("\n").find((l) => /still are/.test(l))?.trim().slice(0, 90)}; filled ${JSON.stringify(unfinished)}; the run took ${pastWaitMs} ms)`);
+    assert(pastWait !== null && pastWait.code === 0
+        && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) writing thoughts as the pool was named, so the pooling sees what they capture \\(pid ${latePid}\\); a stop leaves the pooling to the next run$`, "m").test(pastWait.stdout)
+        && new RegExp(`^ {2}still waiting, after \\d+ s, for 1 transaction\\(s\\) writing thoughts .*\\(pid ${latePid}\\)`, "m").test(pastWait.stdout)
+        && (await filledKey()) === "subjects:r1.2" && (await standingOf(lateT))?.key === "ticket:SMD-83",
+      `a capture open long across the naming is waited for, its pid said and said again, and pooled and read in the same run (exit ${pastWait?.code}: ${pastWait === null ? "no run" : pastWait.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
+    // A stop during that wait ends the run there, 130, the pool named, its pooling unfinished and nothing pooled; the
+    // next run pools what the writer captured (review pass 7: an in-process stop waited out the wait and the pooling).
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+    const stopHolder = new SQL({ url: URL_!, max: 1 });
+    const namingStop = new AbortController();
+    let stopT = "", stopMs = -1;
+    let stoppedNaming = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const held = await openTx(stopHolder);
+      stopT = ((await held.q`SELECT upsert_thought(${"A note filed under SMD-85 in a transaction open as a stopped naming waited."}, ${{ metadata: { ticket: "SMD-85" } }}::jsonb) AS r`)[0] as { r: { id: string } }).r.id;
+      const run = sweep({ model: false, signal: namingStop.signal });
+      await untilWaiting();
+      await Bun.sleep(200);
+      const at = Date.now();
+      namingStop.abort();
+      // A run that does not hear the stop waits for the writer: it ends, after ten seconds, so the case fails, not hangs.
+      const safety = setTimeout(() => void held.q`COMMIT`.catch(() => {}), 10_000);
+      stoppedNaming = await run.finally(() => clearTimeout(safety));
+      stopMs = Date.now() - at;
+      await held.q`COMMIT`;
+      held.q.release();
+    } finally {
+      await stopHolder.close({ timeout: 5 });
+    }
+    const stopUnfinished = await filledKey(), stopClaim = await claimOf(stopT, "subjects:r1.2");
+    const afterNamingStop = await sweep({ model: false });
+    assert(stoppedNaming?.code === 130 && stopMs < 2000 && /stopped before pool subjects:r1\.2 was pooled: the caller's signal was aborted; the pool is named, nothing was pooled or claimed, and the next run pools it/.test(stoppedNaming.stderr)
+        && stopUnfinished === "" && stopClaim === undefined && /^ {2}pool subjects:r1\.2: named, its pooling broken off before/m.test(afterNamingStop.stdout) && (await standingOf(stopT))?.key === "ticket:SMD-85",
+      `a stop during the naming's wait ends the run there, 130, nothing pooled, and the next run pools the writer's capture (exit ${stoppedNaming?.code} after ${stopMs} ms; filled ${JSON.stringify(stopUnfinished)}; ${stopClaim?.status ?? "no claim"})`);
+    // …and one while another run holds the pool's lock, nothing named (review pass 7: pg_advisory_lock waited on the
+    // server, which no stop reached).
+    await setNamed("subjects:r0");
+    const lockHolder = new SQL({ url: URL_!, max: 1 });
+    const lockStop = new AbortController();
+    let lockMs = -1;
+    let lockStopped = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const K = await lockHolder.reserve();
+      await K`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
+      const run = sweep({ model: false, switchKey: true, signal: lockStop.signal });
+      await Bun.sleep(500);
+      const at = Date.now();
+      lockStop.abort();
+      const safety = setTimeout(() => void K`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`.catch(() => {}), 10_000);
+      lockStopped = await run.finally(() => clearTimeout(safety));
+      lockMs = Date.now() - at;
+      await K`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`;
+      K.release();
+    } finally {
+      await lockHolder.close({ timeout: 5 });
+    }
+    const [{ stillNamed }] = (await sql`SELECT value AS "stillNamed" FROM ob1_config WHERE key = 'subject_pool_key'`) as { stillNamed: string }[];
+    assert(lockStopped?.code === 130 && lockMs < 2000 && /^ {2}waiting for another run holding the subject pool's lock/m.test(lockStopped.stdout)
+        && /stopped waiting for the subject pool's lock: the caller's signal was aborted; nothing was named, pooled or claimed/.test(lockStopped.stderr) && stillNamed === "subjects:r0",
+      `a stop while another run holds the pool's lock ends the run there, 130, nothing named (exit ${lockStopped?.code} after ${lockMs} ms; named ${stillNamed})`);
+    // An edit since the naming, of a thought the pooling requeues, open: its trigger's claim holds the row the pooling
+    // writes. The pooling waits past NAMING_WAIT.lockMs, says the pid it waits on, and pools once it ends, in the same
+    // run (review pass 7: it waited without a word or an end, the pool's lock held). A capture open before the naming
+    // holds the run in its wait while the edit is made. A transaction holding the claims' write lock with no xid, which
+    // holds no row the pooling waits on, is not waited for (review pass 7, run-it: waited on, with no end to the wait).
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+    const editedT = await seed("A note filed under SMD-86, its ticket moved while its pool was named.", { ticket: "SMD-86" });
+    const firstHolder = new SQL({ url: URL_!, max: 1 }), editHolder = new SQL({ url: URL_!, max: 1 }), idleHolder = new SQL({ url: URL_!, max: 1 });
+    let editPid = -1;
+    let lockWaited = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      NAMING_WAIT.lockMs = 300;
+      const idle = await openTx(idleHolder);
+      await idle.q`LOCK TABLE thought_work_claims IN ROW EXCLUSIVE MODE`;
+      const first = await openTx(firstHolder);
+      await first.q`SELECT upsert_thought(${"A capture open as the edited note's pool was named."}, ${{ metadata: {} }}::jsonb)`;
+      // Should the run wait on the idle lock, it ends after ten seconds, so the case fails, not hangs.
+      const idleSafety = setTimeout(() => void idle.q`COMMIT`.catch(() => {}), 10_000);
+      const run = sweep({ model: false }).finally(() => clearTimeout(idleSafety));
+      await untilWaiting();
+      const edit = await openTx(editHolder);
+      editPid = edit.pid;
+      await edit.q`SELECT update_thought(${editedT}::uuid, NULL, ${{ ticket: "SMD-87" }}::jsonb)`;
+      await first.q`COMMIT`;
+      first.q.release();
+      await Bun.sleep(1500);
+      await edit.q`COMMIT`;
+      edit.q.release();
+      lockWaited = await run;
+      await idle.q`COMMIT`;
+      idle.q.release();
+    } finally {
+      Object.assign(NAMING_WAIT, savedWaits);
+      await firstHolder.close({ timeout: 5 });
+      await editHolder.close({ timeout: 5 });
+      await idleHolder.close({ timeout: 5 });
+    }
+    assert(lockWaited?.code === 0 && new RegExp(`^ {2}waiting for 1 transaction\\(s\\) holding locks on the tables the pooling reads and writes, which it waits on \\(pid ${editPid}\\)`, "m").test(lockWaited.stdout)
+        && (await filledKey()) === "subjects:r1.2" && (await standingOf(editedT))?.key === "ticket:SMD-87",
+      `a pooling held up by an edit's open claim waits for it, says its pid, and pools and reads the thought once it ends (exit ${lockWaited?.code}: ${lockWaited === null ? "no run" : lockWaited.stdout.split("\n").filter((l) => /waiting/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+    // A reader's transaction open across a naming, one holding an xid, is not waited for: it writes no thought a
+    // trigger read the pool for (review pass 7, run-it: a lock read of any mode on thoughts lived); nor one holding the
+    // thoughts' write lock with no xid, which has written nothing, its triggers to fire after the naming (review pass 7,
+    // run-it: an empty UPDATE was waited for). Bounded by a stop, should it wait.
+    await setNamed("subjects:r0");
+    const readHolder = new SQL({ url: URL_!, max: 1 }), emptyHolder = new SQL({ url: URL_!, max: 1 });
+    const readStop = new AbortController();
+    let readerRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const reader = await openTx(readHolder), empty = await openTx(emptyHolder);
+      await reader.q`SELECT count(*) FROM thoughts`;
+      await reader.q`SELECT pg_current_xact_id()`;
+      await empty.q`LOCK TABLE thoughts IN ROW EXCLUSIVE MODE`;
+      const bound = setTimeout(() => readStop.abort(), 10_000);
+      readerRun = await sweep({ model: false, switchKey: true, signal: readStop.signal }).finally(() => clearTimeout(bound));
+      await reader.q`COMMIT`;
+      reader.q.release();
+      await empty.q`COMMIT`;
+      empty.q.release();
+    } finally {
+      await readHolder.close({ timeout: 5 });
+      await emptyHolder.close({ timeout: 5 });
+    }
+    assert(readerRun?.code === 0 && !/waiting for/.test(readerRun.stdout) && (await filledKey()) === "subjects:r1.2",
+      `a reader open across a naming, and a transaction holding the thoughts' write lock with no xid, are not waited for (exit ${readerRun?.code}: ${readerRun?.stdout.split("\n").find((l) => /waiting/.test(l))?.trim().slice(0, 90) ?? "no wait"})`);
     // A capture whose xid follows the naming's, its trigger reading the pool before the naming committed: waited for by
     // its write lock on thoughts, and pooled (review pass 6, run-it: the xids pg_snapshot_xip lists, those below the
     // snapshot's xmax, left it out, and it was never pooled). The naming's window is held open by a lock on the
@@ -7745,6 +7940,108 @@ if (want("10h")) {
     await sweep({ model: false, switchKey: true });
     const [{ underNew }] = (await sql`SELECT count(*)::int AS "underNew" FROM thought_work_claims WHERE thought_id = ${otherKeyT}::uuid AND work_type = 'subjects:r1.2'`) as { underNew: number }[];
     assert(underNew === 1, `a thought another key's run holds live is pooled under the key named now (${underNew} claim(s) under it)`);
+    // A run under a pool named elsewhere while it asks: its answer is not written, the subject the new pool's run
+    // recorded standing, and it stops, exit 2 (review pass 7, cold read: a run under the key before a switch replaced,
+    // its call later, the subject the new pool's run had recorded, whose claim was finished, and no run asked again).
+    // The new pool's run is its writes, made while the stub holds the answer.
+    const OFF = "subjects:r1.2:p2";
+    const offOnly = (...ids: string[]) => sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
+                                               WHERE work_type = ${OFF} AND status IN ('pending', 'claimed') AND NOT (thought_id = ANY(${`{${ids.join(",")}}`}::uuid[]))`;
+    const switchedT = await seed("Switched: reviewed and merged pull request 727 while its pool was switched.");
+    await setNamed(OFF);
+    await sql`SELECT requeue_thought_work(${OFF}, ${switchedT}::uuid)`;
+    await offOnly(switchedT);
+    let switched = false;
+    onOwn = async (t) => {
+      if (switched || !t.includes("Switched:")) return;
+      switched = true;
+      await setNamed(POOL);
+      await asOther(switchedT, "pr:727", "subject:stub-judge@p2r");
+      await sql`SELECT requeue_thought_work(${POOL}, ${switchedT}::uuid)`;
+      await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = ${switchedT}::uuid AND work_type = ${POOL}`;
+    };
+    asked = ownCalls;
+    const offSwitched = await sweep({}, offEnv).finally(() => { onOwn = null; });
+    const switchedNow = await standingOf(switchedT);
+    assert(offSwitched.code === 2 && /The subject pool is now subjects:r1\.2:p2r: another run named another while this one ran, so this run, under subjects:r1\.2:p2, stops here and writes nothing more; what it holds goes back to its pool\./.test(offSwitched.stderr)
+        && switchedNow?.judge === "subject:stub-judge@p2r" && ownCalls === asked + 1 && (await claimOf(switchedT, OFF))?.status === "pending",
+      `a run whose pool is named elsewhere while it asks writes nothing more and stops, exit 2, the new pool's subject standing (exit ${offSwitched.code}; ${switchedNow?.judge}; ${ownCalls - asked} asked)`);
+    // …and one whose answer writes nothing, not JSON here, stops at its next claim, asking nothing more.
+    const switchedG = await seed("Switched, garbled: a note whose pool was switched as its answer came back.");
+    const switchedNext = await seed("Switched, next: reviewed and merged pull request 727, pending behind it.");
+    await setNamed(OFF);
+    await sql`SELECT requeue_thought_work(${OFF}, ${switchedG}::uuid)`;
+    await sql`SELECT requeue_thought_work(${OFF}, ${switchedNext}::uuid)`;
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 minute' WHERE thought_id = ${switchedG}::uuid AND work_type = ${OFF}`;
+    await offOnly(switchedG, switchedNext);
+    let switchedAgain = false;
+    onOwn = async (t) => {
+      if (switchedAgain || !t.includes("Switched, garbled:")) return;
+      switchedAgain = true;
+      await setNamed(POOL);
+    };
+    asked = ownCalls;
+    const offStopped = await sweep({}, offEnv).finally(() => { onOwn = null; });
+    assert(offStopped.code === 2 && /The subject pool is now subjects:r1\.2:p2r/.test(offStopped.stderr) && ownCalls === asked + 1
+        && (await claimOf(switchedG, OFF))?.status === "failed" && (await claimOf(switchedNext, OFF))?.status === "pending",
+      `…and one whose answer writes nothing stops at its next claim, asking nothing more (exit ${offStopped.code}; ${ownCalls - asked} asked)`);
+    // …and one whose model names nothing closes no subject: here one found with the reasoning off, out of date under
+    // the run's pool and current under the one named while it asked.
+    const keptT = await seed("Switched back: a note whose subject stands under the pool named while it was asked.");
+    await setNamed(POOL);
+    await asOther(keptT, "phrase:a note kept", "subject:stub-judge@p2");
+    await sql`SELECT requeue_thought_work(${POOL}, ${keptT}::uuid)`;
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), worker_id = NULL, ttl_expires_at = NULL
+               WHERE work_type = ${POOL} AND status IN ('pending', 'claimed') AND thought_id <> ${keptT}::uuid`;
+    let keptSwitch = false;
+    onOwn = async (t) => {
+      if (keptSwitch || !t.includes("Switched back:")) return;
+      keptSwitch = true;
+      await setNamed(OFF);
+    };
+    const keptRun = await sweep().finally(() => { onOwn = null; });
+    assert(keptRun.code === 2 && /The subject pool is now subjects:r1\.2:p2: /.test(keptRun.stderr) && (await standingOf(keptT))?.judge === "subject:stub-judge@p2",
+      `…and one whose model names nothing closes nothing, the subject current under the pool named now standing (exit ${keptRun.code}; ${(await standingOf(keptT))?.judge ?? "none standing"})`);
+    // A naming waits for a write in flight under the pool it renames: the write locks the pool's name FOR SHARE first,
+    // so no other pool is named, and its run records and finishes the thought, between that read and the write. Here
+    // the write is held on the door's lock while another key is named.
+    const flightT = await seed("In flight: reviewed and merged pull request 727 as another pool was named.");
+    await setNamed(OFF);
+    await sql`SELECT requeue_thought_work(${OFF}, ${flightT}::uuid)`;
+    await offOnly(flightT);
+    const doorHolder = new SQL({ url: URL_!, max: 1 }), namer = new SQL({ url: URL_!, max: 1 });
+    let renamed = "";
+    let flightDone = null as Promise<void> | null;
+    let flightRun = null as Awaited<ReturnType<typeof sweep>> | null;
+    try {
+      const D = await doorHolder.reserve();
+      onOwn = async (t) => {
+        if (flightDone !== null || !t.includes("In flight:")) return;
+        await D`BEGIN`;
+        await D`SELECT pg_advisory_xact_lock(hashtextextended('ob1:subject:' || ${flightT}::uuid::text, 0))`;
+        flightDone = (async () => {
+          for (let i = 0; i < 80; i++) {
+            const [{ waits }] = (await sql`SELECT count(*)::int AS waits FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`) as { waits: number }[];
+            if (waits > 0) break;
+            await Bun.sleep(25);
+          }
+          renamed = await namer.begin(async (tx: SQL) => {
+            await tx`SET LOCAL lock_timeout = '1s'`;
+            await tx`UPDATE ob1_config SET value = ${POOL} WHERE key = 'subject_pool_key'`;
+            return "renamed";
+          }).catch((e: Error) => ((e as { errno?: string }).errno === "55P03" ? "waited" : `failed: ${e.message}`));
+          await D`COMMIT`;
+        })();
+      };
+      flightRun = await sweep({}, offEnv).finally(() => { onOwn = null; });
+      await flightDone;
+      D.release();
+    } finally {
+      await doorHolder.close({ timeout: 5 });
+      await namer.close({ timeout: 5 });
+    }
+    assert(renamed === "waited" && flightRun?.code === 0 && (await standingOf(flightT))?.judge === "subject:stub-judge@p2",
+      `a naming waits for a write in flight under the pool it renames (the rename ${renamed || "not tried"}; exit ${flightRun?.code}; ${(await standingOf(flightT))?.judge})`);
     // The filed ticket in SQL against metadataTicket, value by value: the key's length at its edge, and what JavaScript's
     // trim takes that the locale's [[:space:]] may not (review pass 4, cold read: a no-break space about an id).
     const metas: unknown[] = [{}, { ticket: "SMD-1" }, { ticket: " SMD-2 " }, { ticket: "\tSMD-3\n" }, { ticket: "smd-4" }, { ticket: 5 }, { ticket: "S-6" },
