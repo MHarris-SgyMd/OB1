@@ -2186,9 +2186,10 @@ run whose key did not resolve; a raw call with no envelope records none. They de
 `review_note` do. Columns and not a reject event in `thought_audit`, because
 that log is the thoughts' and a reject that clears nothing changes no thought.
 Rows decided before 113 are backfilled from the audit where a decision wrote a
-pointer (an accept that set one, a reject that cleared one); the rest stay
-NULL. Two CHECKs hold a kind to the registry's and an unreviewed row to no
-reviewer. `--list` prints `decided by:` on an accepted or rejected row, read
+pointer (an accept that set one, a reject that cleared one), the kind only
+where the audit row names an agent and stamped it at the write; the rest stay
+NULL. Two CHECKs hold a kind to the registry's and to a row naming an agent,
+and an unreviewed row to no reviewer. `--list` prints `decided by:` on an accepted or rejected row, read
 beside the listing by the page's ids (the listing is not redefined, so the tool,
 `GET /v1/proposals` and the GUI do not show it yet: SMD-3338), with the kind the
 key had when it decided, else the registry's now ("classified after it
@@ -5670,8 +5671,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3082 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1761 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1028 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1765 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1032 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

@@ -5025,7 +5025,7 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const t: string[] = [];
-  for (let i = 0; i < 6; i++)
+  for (let i = 0; i < 10; i++)
     t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
   const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
   const OPERATOR = { name: "upgrade-113-operator", via: "consolidate", agent_id: agent };
@@ -5042,6 +5042,18 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5), reRejected = await propose(3, 5);
   const decisions = [await review(accepted, "accept"), await review(cleared, "accept"), await review(cleared, "reject", AGENT), await review(plain, "reject"),
     await review(reRejected, "accept"), await review(reRejected, "reject", AGENT), await review(reRejected, "reject")];
+  // The audit's kind is not always a key's at its decision: a keyless accept under a classified name (055 reads the
+  // kind by name), and a key classified after it decided, its audit row's kind filled in by 046's backfill.
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('consolidate', 'operator')`;
+  const keyless = await propose(6, 7), lateKind = await propose(8, 9);
+  const [{ id: late }] = await sql`INSERT INTO ob1_agents (label) VALUES ('upgrade-113-late') RETURNING canonical_agent_id::text AS id`;
+  const LATE = { name: "upgrade-113-late", via: "consolidate", agent_id: late };
+  decisions.push(await review(keyless, "accept", { name: "consolidate", via: "consolidate" }), await review(lateKind, "accept", LATE));
+  await sql`SELECT set_agent_kind('upgrade-113-late', 'agent')`;
+  await sql`SELECT backfill_thought_audit_events(NULL)`;
+  const auditKinds = await sql`SELECT actor_name, actor_kind, backfilled_at IS NOT NULL AS late FROM thought_audit WHERE actor_name IN ('consolidate', 'upgrade-113-late') AND diff ? 'supersedes' ORDER BY actor_name`;
+  assert(JSON.stringify(auditKinds) === JSON.stringify([{ actor_name: "consolidate", actor_kind: "operator", late: false }, { actor_name: "upgrade-113-late", actor_kind: "agent", late: true }]),
+    `before 113 the audit holds a kind for both: the keyless accept's from the name, the late key's filled in (${JSON.stringify(auditKinds)})`);
   assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false && decisions[5].cleared === true && decisions[6].cleared === false,
     `the decisions before 113: an accept, a clearing reject, a reject clearing nothing, and a clear then a reject clearing nothing (${JSON.stringify(decisions)})`);
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
@@ -5053,6 +5065,8 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   const who = async (id: string) => JSON.stringify((await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${id}::uuid`)[0]);
   const named = JSON.stringify({ by: OPERATOR.name, agent, kind: "operator" }), none = JSON.stringify({ by: null, agent: null, kind: null });
   const namedAgent = JSON.stringify({ by: AGENT.name, agent: agent2, kind: "agent" });
+  assert((await who(keyless)) === JSON.stringify({ by: "consolidate", agent: null, kind: null }) && (await who(lateKind)) === JSON.stringify({ by: LATE.name, agent: late, kind: null }),
+    `the backfill takes no kind from a name alone, nor one the audit filled in after the decision (${await who(keyless)}, ${await who(lateKind)})`);
   assert((await who(accepted)) === named && (await who(cleared)) === namedAgent && (await who(plain)) === none && (await who(reRejected)) === none,
     `the backfill names the reviewer the audit holds — the accept's write, and the clearing reject's by the other key, not the accept before it — and none for a reject that cleared nothing, after a clear or not (${await who(accepted)}, ${await who(cleared)}, ${await who(plain)}, ${await who(reRejected)})`);
   assert((await rows()) === before.rows && (await decided()) === before.decided && (await audits()) === before.audits,

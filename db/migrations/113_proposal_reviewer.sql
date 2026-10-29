@@ -67,9 +67,10 @@
 --      review_note. An accept's and a clearing reject's audit rows still
 --      name the same actor.
 --
---   3. Two CHECKs: reviewed_by_kind is one of the registry's kinds (046's),
---      and an unreviewed row carries no reviewer — the trigger keeps both,
---      the CHECKs hold a write made with it dropped.
+--   3. Two CHECKs: reviewed_by_kind is one of the registry's kinds (046's)
+--      and only beside an agent, and an unreviewed row carries no reviewer —
+--      the trigger and the backfill keep both, the CHECKs hold a write made
+--      with them dropped.
 --
 --   4. THE BACKFILL, from the audit: a row decided before this file whose
 --      decision wrote a pointer has that write's audit row, in the
@@ -78,7 +79,13 @@
 --      row with pointer_written: the update setting supersedes on its
 --      superseding_id to the other side. A rejected row: the update on
 --      either side clearing supersedes from the other. Each takes that
---      row's actor_name, canonical_agent_id and actor_kind, the newest such
+--      row's actor_name and canonical_agent_id, and its actor_kind only where
+--      the row names an agent and its kind was the trigger's at the write
+--      (backfilled_at NULL): the audit trigger reads a kind from a name alone
+--      (055), and 046's backfill fills one in later, neither of which is the
+--      kind of a key when it decided — so a keyless decision stays kindless
+--      here too, and a key classified since reads the registry's kind now.
+--      The newest such
 --      row (seq) when a transaction holds two — so a hand-run transaction
 --      that decided one row twice, a clearing reject then a reject clearing
 --      nothing by another key, is credited to the first; no path in the tree
@@ -185,7 +192,9 @@ DROP TRIGGER IF EXISTS supersession_proposals_stamp_reviewer ON supersession_pro
 UPDATE supersession_proposals p
    SET reviewed_by = a.actor_name, reviewed_by_agent_id = a.canonical_agent_id, reviewed_by_kind = a.actor_kind
   FROM (
-    SELECT DISTINCT ON (q.id) q.id, t.actor_name, t.canonical_agent_id, t.actor_kind
+    -- The kind only beside an agent and as the audit trigger stamped it at the write (WHAT 4).
+    SELECT DISTINCT ON (q.id) q.id, t.actor_name, t.canonical_agent_id,
+           CASE WHEN t.canonical_agent_id IS NOT NULL AND t.backfilled_at IS NULL THEN t.actor_kind END AS actor_kind
       FROM supersession_proposals q
       JOIN thought_audit t
         ON t.thought_id IN (q.older_id, q.newer_id)
@@ -207,7 +216,7 @@ UPDATE supersession_proposals p
 
 ALTER TABLE supersession_proposals DROP CONSTRAINT IF EXISTS supersession_proposals_reviewed_by_kind;
 ALTER TABLE supersession_proposals ADD CONSTRAINT supersession_proposals_reviewed_by_kind
-  CHECK (reviewed_by_kind IS NULL OR reviewed_by_kind IN ('operator', 'agent', 'ingested'));
+  CHECK (reviewed_by_kind IS NULL OR (reviewed_by_agent_id IS NOT NULL AND reviewed_by_kind IN ('operator', 'agent', 'ingested')));
 ALTER TABLE supersession_proposals DROP CONSTRAINT IF EXISTS supersession_proposals_reviewer_decided;
 ALTER TABLE supersession_proposals ADD CONSTRAINT supersession_proposals_reviewer_decided
   CHECK (reviewed_at IS NOT NULL OR (reviewed_by IS NULL AND reviewed_by_agent_id IS NULL AND reviewed_by_kind IS NULL));

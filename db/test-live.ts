@@ -7958,6 +7958,34 @@ if (want("16")) {
   const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
     "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
+  // A key classified before it decides: its kind at the decision, with no "since" (the reject clears nothing).
+  await sql`UPDATE ob1_agents SET kind = 'agent' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const classifiedReject = await consolidate("--reject", directed.id, "--note", "classified first");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(classifiedReject.code === 0 && classifiedReject.out.includes("decided by: consolidator (agent)\n"),
+    `a key classified before it decides is recorded with its kind then, and still says it once the registry forgets it (${classifiedReject.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
+  // A brain short of 113 (its columns gone, the trigger with them): a decision still lands, says the row records no
+  // reviewer, and rolls nothing back; --list says once that it cannot show who decided. Keyless, so the worker's
+  // audit rows below stay the reviews they count. 113 put back after, its backfill naming the keyless accept.
+  await sql`ALTER TABLE supersession_proposals DROP COLUMN reviewed_by CASCADE, DROP COLUMN reviewed_by_agent_id CASCADE, DROP COLUMN reviewed_by_kind CASCADE`;
+  let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
+  let shortStatus: string, shortPointer: string | null;
+  try {
+    shortReject = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--reject", undirected.id, "--note", "short of 113"], { env: keyless, cwd: HERE });
+    shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
+    shortList = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--list", "rejected"], { env: keyless, cwd: HERE });
+    shortAccept = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--accept", undirected.id, "--direction", "newer"], { env: keyless, cwd: HERE });
+    shortPointer = await supersedesOf(green);
+  } finally {
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_proposal_reviewer.sql") });
+  }
+  assert(shortReject.code === 0 && shortReject.out.includes("  the reject records no reviewer on the row: this brain is short of migration 113") && shortStatus === "rejected"
+      && shortAccept.code === 0 && shortAccept.out.includes("  the accept records no reviewer on the row: this brain is short of migration 113") && shortPointer === blue,
+    `on a brain short of 113 a reject and an accept each land and say the row records no reviewer (${shortReject.out.split("\n").filter((l) => /reviewer/.test(l)).map((l) => l.trim()).join(" | ")}; ${shortStatus}, pointer ${shortPointer === blue ? "back" : shortPointer})`);
+  assert(shortList.code === 0 && shortList.out.split("Who decided each row is not shown: this brain is short of migration 113").length === 2 && !/decided by:/.test(shortList.out),
+    `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
+  assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    "…and 113 put back, its backfill names the keyless accept from its audit row");
 
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;

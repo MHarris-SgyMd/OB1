@@ -16038,9 +16038,10 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   const refused = async (sql: string) => { try { await db.exec(sql); return "applied"; } catch (e) { return (e as Error).message; } };
   const onStale = await refused(`UPDATE supersession_proposals SET reviewed_by = 'x' WHERE id = '${p1}'`);
   const badKind = await refused(`UPDATE supersession_proposals SET reviewed_by_kind = 'robot' WHERE id = '${p2}'`);
+  const kindNoAgent = await refused(`UPDATE supersession_proposals SET reviewed_by_kind = 'operator', reviewed_by_agent_id = NULL WHERE id = '${p2}'`);
   await db.exec(`ALTER TABLE supersession_proposals ENABLE TRIGGER supersession_proposals_stamp_reviewer`);
-  assert(/supersession_proposals_reviewer_decided/.test(onStale) && /supersession_proposals_reviewed_by_kind/.test(badKind),
-    `the CHECKs hold a write made with the trigger dropped: no reviewer on an unreviewed row, a kind the registry's (${onStale.slice(0, 80)}; ${badKind.slice(0, 80)})`);
+  assert(/supersession_proposals_reviewer_decided/.test(onStale) && /supersession_proposals_reviewed_by_kind/.test(badKind) && /supersession_proposals_reviewed_by_kind/.test(kindNoAgent),
+    `the CHECKs hold a write made with the trigger dropped: no reviewer on an unreviewed row, a kind the registry's and only beside an agent (${onStale.slice(0, 80)}; ${badKind.slice(0, 80)}; ${kindNoAgent.slice(0, 80)})`);
 
   // The backfill: rows decided before 113 (reviewer emptied with the trigger off), re-applied. An accept that wrote its
   // pointer and a reject that cleared one have an audit row naming the actor; a reject that cleared nothing has none.
