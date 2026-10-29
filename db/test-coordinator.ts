@@ -94,7 +94,10 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
 // ---------------------------------------------------------------------------
 {
   const args = (name: keyof typeof CHILDREN, env: Record<string, string> = {}) => CHILDREN[name].args(env).join(" ");
-  ok(args("board-sync") === "--loop", "board-sync: --loop, its interval its own to read");
+  ok(args("board-sync") === "--trigger", "board-sync: one pass a trigger (SMD-3476)");
+  const every = CHILDREN["board-sync"].every!;
+  ok(every({}) === 300_000 && every({ OB1_BOARD_SYNC_INTERVAL: "60" }) === 60_000 && CHILDREN["board-sync"].digits.join() === "OB1_BOARD_SYNC_INTERVAL" && CHILDREN.sleep.every === undefined,
+    `board-sync's trigger runs every OB1_BOARD_SYNC_INTERVAL seconds (300 unset), guarded digits only; the followers run until stopped (${every({})}, ${every({ OB1_BOARD_SYNC_INTERVAL: "60" })})`);
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");

@@ -38,7 +38,7 @@
  * backlog can run for an hour, far past three of its 15-second polls. The
  * timer says the process is alive, as lease renewal does (lease.ts); a model
  * call hung inside a live process is not what it catches. Only the
- * long-running modes stamp — sync-linear.ts --loop, the --follow of
+ * long-running modes stamp — sync-linear.ts --trigger (each of the coordinator's passes, SMD-3476), the --follow of
  * extract-entities.ts, consolidate.ts and reembed.ts (SMD-2679), and sleep.ts --follow, through whose
  * row its followers stamp (SMD-1794) — so a one-shot run never leaves a row
  * that goes stale behind it.
@@ -191,7 +191,7 @@ export const REFUSAL_STAMP_TIMEOUT_MS = 10_000;
 
 /**
  * A follower's row ended on its start's refusal, the kind on it (SMD-3214):
- * the claim workers' under `--follow`, board-sync's under `--loop`, so
+ * the claim workers' under `--follow`, board-sync's under `--trigger`, so
  * preflight gives the kind's remedy — and, under db/supervise.ts, which keeps
  * the follower's own word, says it is held for that cause — where the row
  * said only "ended on a failure". Bounded by REFUSAL_STAMP_TIMEOUT_MS; a

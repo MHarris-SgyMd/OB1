@@ -14,7 +14,9 @@
  *
  * What runs. OB1_PASSES, a list of `sleep`, `workers` and `board-sync`
  * (commas or spaces). `workers` is the two followers, `extract` and
- * `consolidate`. Named beside `sleep`, it is left out and the log says so:
+ * `consolidate`; `board-sync` is one pass a trigger, every
+ * OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock, where the
+ * tool ran a loop of its own before (supervise's `every`). Named beside `sleep`, it is left out and the log says so:
  * the scheduler runs extraction and consolidation itself. A name that is no
  * pass is left out the same way, the rest still run. None named, none run,
  * and the coordinator waits for its stop. A change needs the coordinator
@@ -87,6 +89,8 @@ export type Child = {
   digits: readonly string[];
   /** Its argv after `bun <script>`, from its own environment. */
   args(env: Record<string, string | undefined>): string[];
+  /** A trigger's period in ms, from its own environment: one pass a run, the coordinator's clock between them (SMD-3476). Unset, it runs until stopped. */
+  every?(env: Record<string, string | undefined>): number;
   script: string;
 };
 
@@ -106,9 +110,11 @@ export const CHILDREN: Record<ChildName, Child> = {
   "board-sync": {
     name: "board-sync", uid: 1101, script: "sync-linear.ts",
     own: ["LINEAR_API_KEY", "OB1_LINEAR_INITIATIVE", "OB1_BOARD_SYNC_INTERVAL", "LINEAR_COMMENT_API_KEY", "OB1_FINDINGS_POST_CAP"],
-    requireKey: false, digits: [],
-    // The interval and the findings cap are read and refused by the tool itself.
-    args: () => ["--loop"],
+    // The interval is the coordinator's clock, so digits only here; its floor (10 s) and the findings cap the tool refuses itself.
+    requireKey: false, digits: ["OB1_BOARD_SYNC_INTERVAL"],
+    // One pass a trigger (SMD-3476): the loop the tool ran is the coordinator's clock.
+    args: () => ["--trigger"],
+    every: (env) => Number(or(env, "OB1_BOARD_SYNC_INTERVAL", "300")) * 1000,
   },
   extract: {
     name: "extract", uid: 1102, script: "extract-entities.ts",
@@ -337,6 +343,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
       worker: child.name,
       cmd: l.cmd,
       ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
+      ...(child.every ? { every: child.every(l.env) } : {}),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,

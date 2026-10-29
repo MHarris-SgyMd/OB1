@@ -3978,7 +3978,7 @@ else {
     assert(/!\s+workers\s+board-sync stale \(last stamped 16 min ago, every 300 s\); extract/m.test(stale.out), `a heartbeat past three intervals is stale, a warning (${row(stale.out, "workers")})`);
     assert(/board-sync has not stamped for 16 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'\./.test(fix(stale.out, "workers")),
       `…whose fix names the restart command and how to retire it (${fix(stale.out, "workers")})`);
-    assert(/up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && bun sync-linear\.ts --url \$DATABASE_URL --loop\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
+    assert(/up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator\.ts, or one pass: bun sync-linear\.ts --url \$DATABASE_URL\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
     // A worker that said it ended is stopped at once, not alive for three intervals (review pass 1).
     await beat("heartbeat:board-sync", v({ outcome: "stopped" }), 60);
     const stopped = await run(SQL_ENV);

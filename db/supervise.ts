@@ -39,6 +39,11 @@
  * the environment's, which nothing changes without a recreate, so either
  * holds until the stop, the follower never started.
  *
+ * A trigger (`every`, SMD-3476): a follower that runs one pass and exits —
+ * board-sync's — is run again on the trigger's clock after a pass that ends 0
+ * or 1, its row the pass's own, and its row ended "stopped" by a stop after
+ * one; a refusal or a crash is held as below.
+ *
  * The row. When the follower ends, its heartbeat (db/pass-stamp.ts) is ended
  * with `restart` — `in_s`, the seconds from the row's own stamp to the next
  * try (null: none until a recreate), `code`, the follower's exit status, and
@@ -68,7 +73,7 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { MIN_STAMP_EVERY_S, passStamper, stampKey, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
@@ -170,6 +175,15 @@ export type SuperviseOptions = {
   sql: SQL | null;
   /** The waits, RESTART_MS unless a test drives them faster. */
   waits?: { first: number; max: number; reset: number };
+  /**
+   * A trigger's period, in ms (SMD-3476): the follower runs one pass and
+   * exits, 0 or 1 (a pass that failed), and is run again `every` later — no
+   * backoff, no ended row, the pass having stamped its own — and a stop after
+   * such a pass ends its row "stopped". Any other end is a refusal or a crash,
+   * held on RESTART_MS's clock as a follower's is. Unset, the follower runs
+   * until stopped.
+   */
+  every?: number;
   stampTimeoutMs?: number;
   writer?: Writer;
 };
@@ -190,14 +204,14 @@ export function supervise(opts: SuperviseOptions): Supervisor {
   const stopped = new AbortController();
   let child: ReturnType<typeof Bun.spawn> | null = null;
 
-  /** The row's end, bounded: a database not answering is said once and left. */
+  /** A write to the row, bounded: a database not answering is said once and left. */
   let unwritten = false;
-  const stamp = async (since: Date, restart: RestartMark, refused?: string): Promise<void> => {
+  const bounded = async (write: (sql: SQL, key: string) => Promise<unknown>): Promise<void> => {
     if (opts.sql === null || key === null) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        endRow(opts.sql, { worker: opts.worker, key, since, restart, refused }),
+        write(opts.sql, key),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${(opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS) / 1000} s`)), opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS); }),
       ]);
       unwritten = false;
@@ -208,6 +222,12 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       clearTimeout(timer);
     }
   };
+  /** The row's end on the follower's end of its own. */
+  const stamp = (since: Date, restart: RestartMark, refused?: string): Promise<void> =>
+    bounded((sql, key) => endRow(sql, { worker: opts.worker, key, since, restart, refused }));
+  /** A trigger's row, ended "stopped" by a stop after its last pass, as the loop it replaced ended it. */
+  const stampStopped = (): Promise<void> =>
+    bounded((sql, key) => passStamper({ sql, worker: opts.worker, job: jobOf(opts.worker, key), intervalS: (opts.every ?? 0) / 1000 }).end("stopped"));
 
   const done = (async (): Promise<number> => {
     const guard = guardRefusal(opts.worker, env, opts);
@@ -220,6 +240,8 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       return 0;
     }
     let tries = 0;
+    /** A trigger whose last run was a pass, which a stop then ends "stopped"; not one held on a refusal. */
+    let passed = false;
     while (!stopped.signal.aborted) {
       const began = new Date();
       const piped = opts.label !== undefined;
@@ -245,7 +267,14 @@ export function supervise(opts: SuperviseOptions): Supervisor {
         code = 127;
       }
       child = null;
+      // A trigger's pass, failed or not: the pass stamped its own row, and the next runs on the trigger's clock.
+      passed = opts.every !== undefined && (code === 0 || code === 1);
       if (stopped.signal.aborted) break;
+      if (passed) {
+        tries = 0;
+        await sleepUnless(opts.every!, stopped.signal);
+        continue;
+      }
       const ranMs = Date.now() - began.getTime();
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
@@ -254,6 +283,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }
+    if (passed) await stampStopped();
     return 0;
   })();
 

@@ -15,7 +15,7 @@
  *
  *   bun db/sync-linear.ts --url postgres://…                 # one pass
  *   bun db/sync-linear.ts --url … --dry-run                  # what a pass would write; nothing written
- *   bun db/sync-linear.ts --url … --loop                     # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+ *   bun db/sync-linear.ts --url … --trigger                  # one pass as the coordinator runs it, every OB1_BOARD_SYNC_INTERVAL seconds (300), its heartbeat stamped
  *   bun db/sync-linear.ts --url … --audit                    # the lockstep census alone: missing / stale / extra, exit 1 when any
  *   bun db/sync-linear.ts --url … --full                     # every issue re-rendered and compared, not only the moved ones
  *   bun db/sync-linear.ts --self-check                       # the pure parts and the write decisions, no network, no database
@@ -72,7 +72,7 @@
  * OB1_METADATA_MODEL, OB1_LLM_LOCAL, OB1_EGRESS_*…), resolved once at start by
  * resolveEmbedConfig as db/reembed.ts does. LINEAR_API_KEY is the one knob of
  * its own; OB1_LINEAR_INITIATIVE (default "Open Brain") names the initiative
- * whose projects are the board; OB1_BOARD_SYNC_INTERVAL the loop's period.
+ * whose projects are the board; OB1_BOARD_SYNC_INTERVAL the trigger's period (the coordinator's clock).
  * All of them — the provider knobs too — are read from the environment, else
  * from the `.env` files on db/env.ts's search path ($OB1_ENV_FILE, evals/.env,
  * <repo>/.env, deploy/.env), so a run from a checkout resolves the same knobs a
@@ -516,7 +516,7 @@ export type Writer = {
   actor: Actor;
   dryRun: boolean;
   log: (line: string) => void;
-  /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --loop). */
+  /** Asked between issues: true ends the pass after the issue in hand (a SIGTERM, the coordinator's stop). */
   stopping?: () => boolean;
   /**
    * The structure beside the head row (SMD-1867): called with the row that
@@ -613,7 +613,7 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   // The same undo runs when a statement THROWS (a dropped connection) as when
   // one answers ok:false — the statements autocommit one by one, so a throw
   // between the phases would otherwise leave the clears and lose the pointer
-  // (ninth review pass). A kill between them is the remaining gap; the loop
+  // (ninth review pass). A kill between them is the remaining gap; a pass
   // stops between issues, not inside one, and the compose grace period is
   // sized for that.
   // A capture-only key's pointer is not written back: board-sync's write
@@ -1685,8 +1685,10 @@ async function main(): Promise<void> {
   // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
   const cli = commandLine("sync-linear.ts", {
     url: "one", initiative: "one", interval: "one", only: "one",
-    "dry-run": "none", loop: "none", audit: "none", full: "none", "self-check": "none", quiet: "none", "allow-refused": "none",
-  }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>" } });
+    "dry-run": "none", trigger: "none", loop: "none", audit: "none", full: "none", "self-check": "none", quiet: "none", "allow-refused": "none",
+  }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>", loop: "(retired: the coordinator's trigger)" } });
+  // The loop's clock is the coordinator's since SMD-3476: one pass a trigger, the wait between them the coordinator's.
+  if (cli.has("loop")) { console.error("--loop is retired (SMD-3476): the coordinator runs board-sync's pass every OB1_BOARD_SYNC_INTERVAL seconds — name board-sync in OB1_PASSES; from a checkout, OB1_PASSES=board-sync bun db/coordinator.ts"); process.exit(2); }
   if (cli.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (cli.has("audit") && cli.has("only")) { console.error("--audit takes no --only: the census is the whole board."); process.exit(2); }
@@ -1701,16 +1703,17 @@ async function main(): Promise<void> {
   // In the container none of the files is on the mount, so this reads nothing.
   const envSources = loadEnv();
   /**
-   * A refusal of the configuration: said, then exit 2 — and under --loop, the
-   * service's mode, `heartbeat:board-sync` ended first with its kind, so
-   * preflight gives the remedy and the compose service's supervisor says it
-   * is held for that cause (SMD-3214). A dry run or an audit writes no row,
-   * as its loop would not; a database out of reach leaves the row alone.
+   * A refusal of the configuration: said, then exit 2 — and under --trigger,
+   * the coordinator's mode, `heartbeat:board-sync` ended first with its kind,
+   * so preflight gives the remedy and the coordinator's supervisor says it is
+   * held for that cause (SMD-3214). A dry run or an audit writes no row, as
+   * its pass would not; a database out of reach leaves the row alone.
    */
+  const trigger = cli.has("trigger");
   const refuse = async (kind: StartRefusal, line: string): Promise<never> => {
     console.error(line);
     const at = databaseUrlIfAny(cli.value("url"));
-    if (cli.has("loop") && !cli.has("dry-run") && !cli.has("audit") && at !== null) {
+    if (trigger && !cli.has("dry-run") && !cli.has("audit") && at !== null) {
       const own = openSql(at);
       try {
         await endOnRefusal({ sql: own, worker: "board-sync", intervalS: DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
@@ -1784,8 +1787,8 @@ async function main(): Promise<void> {
     if ("off" in set) console.error(`  findings are not posted to the board: ${set.off}`);
     else { findings = set.step; console.log(`  ${set.banner}`); }
   }
-  // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
-  // passes are told apart by it.
+  // One run name per pass, for thought_sources.ingest_run (SMD-1867); the
+  // trigger's passes are told apart by it.
   let run = runName(SELF);
   const writer: Writer = {
     store,
@@ -1874,18 +1877,36 @@ async function main(): Promise<void> {
     return passCode(report.errors.length, told);
   };
 
-  // The initiative is configuration, resolved once before any pass: a name
+  // The trigger's heartbeat (db/pass-stamp.ts, SMD-2261): stamped running as
+  // the pass runs and re-stamped while it does, then its outcome, the row left
+  // waiting for the coordinator's next trigger (SMD-3476), which ends it
+  // "stopped" on a stop. A dry run or an audit writes nothing, its heartbeat
+  // included; a one-shot pass stamps nothing either, so no row is left to go
+  // stale. Made before the initiative is asked, so a pass that fails there is
+  // stamped failed too.
+  const stamper = trigger && !dryRun && !cli.has("audit")
+    ? passStamper({
+        sql, worker: "board-sync", intervalS: interval,
+        onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the pass goes on`),
+      })
+    : null;
+
+  // The initiative is configuration, resolved once before the pass: a name
   // that matches no initiative (or two) is exit 2 here, as a missing key is —
-  // not a "pass failed" line every interval for as long as the loop runs
-  // (sixth review pass). Under --loop the passes still ask Linear each time,
-  // so a board that gains a project is seen.
+  // not a "pass failed" line every interval for as long as the trigger runs
+  // (sixth review pass). Each trigger's pass asks Linear again, so a board
+  // that gains a project is seen.
   try { resolved = await initiativeProjects(gql, initiative); }
   catch (e) {
-    // Configuration exits 2; a transport error is a pass that failed — under
-    // --loop the next pass retries, a one-shot run exits 1 (twelfth pass).
+    // Configuration exits 2; a transport error is a pass that failed, exit 1 —
+    // stamped failed under --trigger, the coordinator's next trigger the retry
+    // (twelfth pass).
     if (e instanceof BoardConfigError) { await store.close(); await sql.close(); return await refuse("board", `  ${(e as Error).message}`); }
     console.error(`  ${(e as Error).message}`);
-    if (!cli.has("loop")) { await store.close(); await sql.close(); process.exit(1); }
+    await stamper?.stamp("failed");
+    await store.close();
+    await sql.close();
+    process.exit(1);
   }
 
   // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would
@@ -1896,21 +1917,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  // The loop's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
-  // pass, re-stamped while one runs, and "stopped" when the loop ends. A dry run
-  // or an audit writes nothing, its heartbeat included; a one-shot pass stamps
-  // nothing either, so no row is left to go stale.
-  const stamper = cli.has("loop") && !dryRun && !cli.has("audit")
-    ? passStamper({
-        sql, worker: "board-sync", intervalS: interval,
-        onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the loop goes on`),
-      })
-    : null;
   let code = 0;
   try {
-    if (!cli.has("loop")) { code = await once(); return; }
-    console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
-    code = await loopPasses({ once, intervalS: interval, stopped: () => stopping, stamper });
+    code = trigger ? await triggeredPass({ once, stamper }) : await once();
   } finally {
     await store.close();
     await sql.close();
@@ -1919,28 +1928,18 @@ async function main(): Promise<void> {
 }
 
 /**
- * The --loop: a pass, then the interval, until a signal. The last pass's
- * result is the loop's exit code — a service whose every pass reported errors
- * must not stop clean (eleventh review pass). The heartbeat (SMD-2261) is
- * stamped after every pass, re-stamped while one runs, and "stopped" when the
- * loop ends. Its own function so the stamping is tested without Linear.
+ * One pass as the coordinator's trigger runs it (SMD-3476): stamped running
+ * while it runs, then its outcome — one that reports errors, or throws, is
+ * failed — the row left waiting for the next trigger, not ended. The pass's
+ * code is the run's, so the coordinator sees a failed pass, and runs the next
+ * on its clock all the same. Its own function so the stamping is tested
+ * without Linear.
  */
-export async function loopPasses(opts: {
-  once: () => Promise<number>;
-  intervalS: number;
-  stopped: () => boolean;
-  stamper: PassStamper | null;
-  sleep?: (ms: number) => Promise<void>;
-}): Promise<number> {
-  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
-  let code = 0;
-  while (!opts.stopped()) {
-    console.log(`▸ ${new Date().toISOString()}`);
-    try { code = await (opts.stamper ? opts.stamper.during(opts.once()) : opts.once()); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
-    await opts.stamper?.stamp(code === 0 ? "ok" : "failed");
-    for (let waited = 0; waited < opts.intervalS && !opts.stopped(); waited++) await sleep(1000);
-  }
-  await opts.stamper?.end("stopped");
+export async function triggeredPass(opts: { once: () => Promise<number>; stamper: PassStamper | null }): Promise<number> {
+  console.log(`▸ ${new Date().toISOString()}`);
+  let code: number;
+  try { code = await (opts.stamper ? opts.stamper.during(opts.once()) : opts.once()); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
+  await opts.stamper?.stamp(code === 0 ? "ok" : "failed");
   return code;
 }
 

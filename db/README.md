@@ -5167,8 +5167,8 @@ board-sync was down for four days (2026-09-27 to 10-01) and nothing noticed:
 its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
-whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
+whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
+one pass on each of the coordinator's triggers (SMD-3476), and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
 (SMD-2679) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
@@ -5203,7 +5203,7 @@ row's `updated_at`, the database's `now()`.
 - **`refused`:** on an ended row, the start refusal that ended it, by kind
   (db/worker-bootstrap.ts's `START_REFUSALS`): the sleep scheduler's at a
   pass's start (SMD-2752); since SMD-3214 a claim follower's at its own start
-  under `--follow`, board-sync's under `--loop` — `linear-key`, `board`,
+  under `--follow`, board-sync's under `--trigger` — `linear-key`, `board`,
   `usage`, `egress` — and `db/supervise.ts`'s guard's. Preflight gives the
   kind's remedy. The scheduler's check, and a pass it drives, end no
   follower's row: the refusal is the scheduler's.
@@ -5263,7 +5263,7 @@ should read Done. `sync-linear.ts` is that sweep, and the coordinator's
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
-bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300), each stamping a heartbeat
+bun sync-linear.ts --url … --trigger                 # one pass, its heartbeat stamped, as the coordinator runs it every OB1_BOARD_SYNC_INTERVAL seconds (300); --loop is retired (SMD-3476)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
@@ -5358,9 +5358,9 @@ says of them, and names one the census lacks; `--audit` takes no `--only`. The
 scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
 and adds the header scan over every thought's text — a sequential scan — only
 when that plan has a *missing* identifier, since a hand paste is the one thing
-that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
-ends the pass after the issue in hand (the compose service allows 60 s); the next
-pass finds what was left.
+that could hold it; `--full` and `--audit` always scan. SIGTERM ends the pass
+after the issue in hand (the coordinator allows 120 s); the next pass finds what
+was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, and since SMD-1958 they write the same
@@ -5632,11 +5632,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1778 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1781 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 352 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 355 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
