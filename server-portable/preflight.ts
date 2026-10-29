@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -195,6 +195,8 @@ const {
 // the same way, so the gate judges the value the server will use.
 const embModel = stringOr(env.OB1_EMBEDDING_MODEL, DEF_EMB);
 const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
+/** Why this configuration forms no re-embed key the heartbeat rows carry — its width or its model name — or null: the sleep scheduler and a hand follower run none under it (SMD-3486). */
+const embUnfit = reembedKeyUnfit(embModel, embDim);
 /**
  * The two chat models by embed.ts's rule, the one the extractor and the judge
  * run by: the judge's is OB1_JUDGE_MODEL, else the metadata model (SMD-1901).
@@ -4069,11 +4071,12 @@ if (configFailed) {
             // not marked background, wake it (review pass 7: not every write).
             // Who runs them, the re-embed pass row's own answer
             // (reembedRunner): the scheduler, or a follower run by hand. A
-            // width that forms no key keeps re-embed out of sleep (sleep.ts's
-            // REEMBED_OK): no scheduler to credit (review pass 5). The
-            // scheduler's own key where its fresh row carries one, a
-            // checkout's configuration aside (review passes 5 and 6).
-            const ownKey = Number.isSafeInteger(embDim) && embDim > 0 ? reembedKey(embModel, embDim) : null;
+            // width or model name that forms no key a row carries keeps
+            // re-embed out of sleep (sleep.ts's REEMBED_OK): no scheduler to
+            // credit (review pass 5, SMD-3486). The scheduler's own key where
+            // its fresh row carries one, a checkout's configuration aside
+            // (review passes 5 and 6).
+            const ownKey = embUnfit === null ? reembedKey(embModel, embDim) : null;
             const sleepRow = facts.workers ? sleepBeatOf(facts.workers.heartbeats) : undefined;
             const schedulerKey = (sleepRow && freshBeat(sleepRow) && sleepRow.reembedJob) || ownKey;
             const runner = schedulerKey === null ? ({ by: "nobody" } as const) : reembedRunner(facts.workers?.heartbeats, schedulerKey, ownKey ?? schedulerKey, recorded.embedding_model, embModel);
@@ -4800,14 +4803,35 @@ if (configFailed) {
               // one stopped for it is retired, not started again (review pass 3).
               const sleepBeat = sleepBeatOf(w.heartbeats);
               const sleepRuns = sleepBeat !== undefined && freshBeat(sleepBeat);
-              // A scheduler whose row carries a re-embed key — running, or once started again — takes re-embed: a hand follower started too would make it refuse (review passes 3 and 7).
-              const sleepHere = sleepBeat !== undefined && sleepBeat.reembedJob !== undefined;
+              // sleepTakes: a scheduler that takes re-embed — its row carries a key, and it runs, or started
+              // again takes one under a name that fits (review passes 3 and 7; SMD-3486). sleepHere: one that
+              // refuses beside a hand follower — that, or this version under a model name no row carries,
+              // which takes none (SMD-3486 review passes 1 and 2).
+              const unfitHere = embUnfit === "model";
+              const sleepTakes = sleepBeat !== undefined && sleepBeat.reembedJob !== undefined && (sleepRuns || !unfitHere);
+              const sleepHere = sleepBeat !== undefined && (sleepBeat.reembedJob !== undefined || unfitHere);
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
                 // A re-embed follower is a hand run — no compose service runs one — so its fix is the row alone (review pass 3).
                 // Under another key than the model's own — a backfill — the scheduler takes none of its work (SMD-2679 PR 4b).
+                if ((h.stale || h.ended) && unfitHere && !sleepTakes && h.worker === "reembed") {
+                  // Under a model name no row carries, a follower started again under this configuration is refused, and a
+                  // scheduler here refuses beside one and runs no re-embed: the row retired, a one-shot run for the backlog —
+                  // under the follower's own key where it is a backfill this configuration may run, else the re-embed pass
+                  // row's to end (SMD-3486 review passes 2 and 3: "start it again" was refused).
+                  const why = sleepHere
+                    ? "the sleep scheduler here will not run beside a re-embed follower, nor runs re-embed under this stack's model name (the sleep row)"
+                    : "under this stack's model name a re-embed follower is refused, its heartbeat row being one no reader takes";
+                  const ownPass = h.job !== undefined && h.job !== reembedKey(embModel, embDim) ? h.job : null;
+                  const target = ownPass === null ? null : parseReembedKey(ownPass);
+                  const elsewhere = target !== null && !(target.model === embModel && target.dim === embDim);
+                  const oneShot = ownPass !== null && !elsewhere
+                    ? `, its own pass finished under its key — cd db && bun reembed.ts --url $DATABASE_URL --job ${shellWord(ownPass)}`
+                    : `, cd db && bun reembed.ts --url $DATABASE_URL (the vector models row says when)${elsewhere ? `; its pass under ${ownPass}, to another model or width, is the re-embed pass row's to end, if it has not` : ""}`;
+                  return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and ${why}: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — and re-embed with a one-shot run when there is work${oneShot}.`;
+                }
                 if ((h.stale || h.ended) && sleepHere && h.worker === "reembed") {
                   const own = (sleepRuns && sleepBeat?.reembedJob) || reembedKey(embModel, embDim);
                   // A backfill under this model and width: a one-shot run finishes it. Under another model or width,
@@ -4942,17 +4966,28 @@ if (configFailed) {
                 ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
                 : down ? (set.kind === "outage" ? null : `Its last sleep set re-embed down (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first sleep sets re-embed down again.`)
                 : `Re-embed was set down for ${h.running ? "this" : "its last"} sleep — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next sleep with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
-            const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}${setDetail}`;
+            // Under a model name that forms no key its row carries, the
+            // scheduler keeps re-embed out, as its start said, and the row
+            // says so: a row with no key, or a stopped one, whose restart takes
+            // this configuration (SMD-3486, review pass 2). Not a warning:
+            // nothing waits on it until a backlog does, which the vector models
+            // and re-embed pass rows warn of. A width that forms none fails
+            // the embedding config row, which skips this one (review pass 1).
+            const unfitName = (h.reembedJob === undefined || down) && embUnfit === "model";
+            const unfitDetail = unfitName ? `; ${h.reembedJob !== undefined ? "started again, " : ""}re-embed does not run in sleep — this stack's OB1_EMBEDDING_MODEL is no model name its row can carry (ASCII letters, digits and . _ : @ / + -, the name and its width at most 120 characters as <name>@<width>); any backlog is re-embedded by hand, as the vector models and re-embed pass rows say` : "";
+            const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}${setDetail}${unfitDetail}`;
             const fixes: string[] = [];
             // An ended row's set-down is mended first: the restart below starts it (review pass 2: the order read restart, then mend).
-            if (down && set && set.kind !== "model-switch" && setFix !== null) fixes.push(setFix);
+            // Not under a model name that keeps re-embed out once started again: nothing would set it down (review pass 3).
+            if (down && set && set.kind !== "model-switch" && setFix !== null && !unfitName) fixes.push(setFix);
             // Followers running here keep a scheduler down: it refuses beside
             // them, so "start it again" alone would only refuse again (review pass 3).
             const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
             // A re-embed follower run by hand keeps it down too: its fix is to stop that run (review pass 3).
             // Only beside a scheduler that runs re-embed — its row carries the key: v1.9.0's
-            // does not refuse beside one, which may be the only worker (review pass 7).
-            const handFollowers = h.reembedJob !== undefined ? handFollowersOf(w.heartbeats) : [];
+            // does not refuse beside one, which may be the only worker (review pass 7) —
+            // or one kept out of it by its model name, which still refuses beside one (SMD-3486 review pass 1).
+            const handFollowers = h.reembedJob !== undefined || unfitName ? handFollowersOf(w.heartbeats) : [];
             const handFix = `A re-embed follower run by hand runs here (${handFollowers.map((b) => b.job ?? b.key).join(", ")}), and the scheduler will not run beside it: stop that reembed.ts --follow (Ctrl-C, or its container) — its row ends as it stops`;
             // Not before a refusal of its own: the follower came after, and the cause is still to mend (review pass 4 of PR 4b-1).
             if (down && handFollowers.length && !followers.length && !refusedBy) {
