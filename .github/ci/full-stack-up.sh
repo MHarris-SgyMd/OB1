@@ -118,19 +118,12 @@ OB1_FORWARDER_KEY=$FORWARD_KEY
 EOF
 # The pull beside the build (SMD-3466): `up --build` pulled its images and
 # only then built, 6–13 s of pull and 13–20 s of build one after the other.
-# The pulled services are those with no build of their own whose image no
-# service builds. mcp and app run api's image: `pull`, even with
-# --ignore-buildable, asks the registry for it and is refused, so they are
-# left out, as up leaves them out. --quiet keeps the pull's progress out of
-# the build's log (each service's Pulling and Pulled lines and any error
-# still show); a failed pull fails the step at its wait, after the build, and
-# a failed build takes the pull down with it.
-mapfile -t pulled < <(docker compose -f compose.yaml config --format json | jq -r '
-  [.services[] | select(.build) | .image] as $built
-  | .services | to_entries[] | select(.value.build == null)
-  | select(.value.image as $i | $built | index($i) | not) | .key')
-[ ${#pulled[@]} -gt 0 ] || { echo "compose config failed (above) or names no service to pull" >&2; exit 1; }
-docker compose -f compose.yaml pull --quiet "${pulled[@]}" &
+# The pull skips the services compose.yaml marks `pull_policy: never` (api,
+# migrate, and mcp and app on api's image), so it fetches what up fetched.
+# --quiet keeps its progress out of the build's log (each service's Pulling
+# and Pulled lines and any error still show); a failed pull fails the step at
+# its wait, after the build, and a failed build takes the pull down with it.
+docker compose -f compose.yaml pull --quiet &
 pull_pid=$!
 trap 'kill "$pull_pid" 2> /dev/null || true' EXIT
 docker compose -f compose.yaml build
