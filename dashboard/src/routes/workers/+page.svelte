@@ -61,13 +61,13 @@
 										<div class="flex flex-wrap gap-2">
 											{#if data.canRetry && p.failed > 0}
 												<form method="POST" action="?/retry" data-testid="retry">
-													<input type="hidden" name="work_type" value={p.key} />
+													<input type="hidden" name="work_type" value={p.name} />
 													<button type="submit" class="button text-xs" aria-label="Retry {n(p.failed)} failed in {p.workType}">Retry {n(p.failed)} failed</button>
 												</form>
 											{/if}
 											{#if data.canRelease && p.stale > 0}
 												<form method="POST" action="?/release" data-testid="release">
-													<input type="hidden" name="work_type" value={p.key} />
+													<input type="hidden" name="work_type" value={p.name} />
 													<button type="submit" class="button text-xs" aria-label="Release {n(p.stale)} stale in {p.workType}">Release {n(p.stale)} stale</button>
 												</form>
 											{/if}

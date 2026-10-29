@@ -46,7 +46,7 @@ export const load: PageServerLoad = async (event) => {
 	const v = (await read(event, session, 'worker_status', {})) as WorkerStatusResult;
 	// A pool's name and a stale lease's worker are written by the workers: each on one line, cut.
 	return {
-		pools: v.pools.map((p) => ({ ...p, workType: oneLine(p.workType, 120), staleWorkerId: p.staleWorkerId === null ? null : oneLine(p.staleWorkerId, 80), key: p.workType })),
+		pools: v.pools.map((p) => ({ ...p, workType: oneLine(p.workType, 120), staleWorkerId: p.staleWorkerId === null ? null : oneLine(p.staleWorkerId, 80), name: p.workType })),
 		canRetry: may(session, 'retry_failed'),
 		canRelease: may(session, 'release_stale_leases'),
 		done: said ? doneFrom(said) : null,
@@ -54,39 +54,39 @@ export const load: PageServerLoad = async (event) => {
 };
 
 /**
- * A pool's name as its form posts it back: the core's own, whole — not trimmed, since a worker may have written one
- * with spaces about it, and its pool is that name exactly (review pass 1). A name that is blank is no pool's.
+ * Each action's operation, the answer field that counts what it moved, and its words: the two act alike, and differ in
+ * these alone. Release sends no include_live, so a worker still running keeps what it holds.
  */
-const workTypeOf = (form: FormData) => String(form.get('work_type') ?? '');
+const ACTS = {
+	retry: { tool: 'retry_failed', moved: 'retried', unnamed: 'Name the pool to retry: its form carries it.', fault: 'retry the pool', refused: 'retry' },
+	release: { tool: 'release_stale_leases', moved: 'released', unnamed: 'Name the pool whose stale leases to release: its form carries it.', fault: 'release the leases', refused: 'release' },
+} as const;
 
-/** The page again, its flash cookie saying what the action did. */
-function doneHere(event: RequestEvent, op: 'retry' | 'release', count: number, workType: string): never {
-	event.cookies.set(workersCookie(event.locals.sessionCookie), `${op}.${count}.${encodeURIComponent(workType)}`, { ...cookieOptions(event.url, event.locals.breakglass), maxAge: FLASH_MAX_AGE });
-	redirect(303, `${base}/workers`);
+/**
+ * One action on the pool its form names: the pool's name as the form posts it back, the core's own, whole — not
+ * trimmed, since a worker may have written one with spaces about it, and its pool is that name exactly (review pass
+ * 1); a blank one is no pool's. Done, the page again, its flash cookie saying what moved.
+ */
+async function act(event: RequestEvent, op: keyof typeof ACTS) {
+	const { tool, moved, unnamed, fault, refused } = ACTS[op];
+	const session = event.locals.session!;
+	if (!may(session, tool)) return fail(403, { error: notYours(op) });
+	const workType = String((await event.request.formData()).get('work_type') ?? '');
+	if (!workType.trim()) return fail(400, { error: unnamed });
+	const answer = await write(event, session, tool, { work_type: workType });
+	if (answer.ok) {
+		const count = (answer.body as Record<string, number>)[moved];
+		event.cookies.set(workersCookie(event.locals.sessionCookie), `${op}.${count}.${encodeURIComponent(workType)}`, { ...cookieOptions(event.url, event.locals.breakglass), maxAge: FLASH_MAX_AGE });
+		redirect(303, `${base}/workers`);
+	}
+	const code = codeOf(answer.body);
+	if (answer.status >= 500) console.error(`[dashboard] ${tool}: ${answer.status} ${code ?? ''}`.trimEnd());
+	return fail(answer.status, {
+		error: notAnswered(code, op) ?? (answer.status === 403 ? notYours(op) : answer.status >= 500 ? `The brain could not ${fault}${code ? ` (${code})` : ''}.` : `The brain refused the ${refused}${code ? ` (${code})` : ''}.`),
+	});
 }
 
 export const actions: Actions = {
-	retry: async (event) => {
-		const session = event.locals.session!;
-		if (!may(session, 'retry_failed')) return fail(403, { error: notYours('retry') });
-		const workType = workTypeOf(await event.request.formData());
-		if (!workType.trim()) return fail(400, { error: 'Name the pool to retry: its form carries it.' });
-		const answer = await write(event, session, 'retry_failed', { work_type: workType });
-		if (answer.ok) doneHere(event, 'retry', (answer.body as { retried: number }).retried, workType);
-		const code = codeOf(answer.body);
-		if (answer.status >= 500) console.error(`[dashboard] retry_failed: ${answer.status} ${code ?? ''}`.trimEnd());
-		return fail(answer.status, { error: notAnswered(code, 'retry') ?? (answer.status === 403 ? notYours('retry') : answer.status >= 500 ? `The brain could not retry the pool${code ? ` (${code})` : ''}.` : `The brain refused the retry${code ? ` (${code})` : ''}.`) });
-	},
-	release: async (event) => {
-		const session = event.locals.session!;
-		if (!may(session, 'release_stale_leases')) return fail(403, { error: notYours('release') });
-		const workType = workTypeOf(await event.request.formData());
-		if (!workType.trim()) return fail(400, { error: 'Name the pool whose stale leases to release: its form carries it.' });
-		// Stale leases alone: no include_live, so a worker still running keeps what it holds.
-		const answer = await write(event, session, 'release_stale_leases', { work_type: workType });
-		if (answer.ok) doneHere(event, 'release', (answer.body as { released: number }).released, workType);
-		const code = codeOf(answer.body);
-		if (answer.status >= 500) console.error(`[dashboard] release_stale_leases: ${answer.status} ${code ?? ''}`.trimEnd());
-		return fail(answer.status, { error: notAnswered(code, 'release') ?? (answer.status === 403 ? notYours('release') : answer.status >= 500 ? `The brain could not release the leases${code ? ` (${code})` : ''}.` : `The brain refused the release${code ? ` (${code})` : ''}.`) });
-	},
+	retry: (event) => act(event, 'retry'),
+	release: (event) => act(event, 'release'),
 };
