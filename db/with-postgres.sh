@@ -55,15 +55,19 @@ if [ -n "$KEEP" ]; then NAME="ob1-pg-keep-$KEEP"; else NAME="ob1-test-pg-$$"; fi
 # A port is free when a connect to 127.0.0.1 at it, the address DATABASE_URL
 # dials, is refused: on macOS podman's bind on every address succeeds beside a
 # listener on 127.0.0.1 or 0.0.0.0 alone, which would then take DATABASE_URL's
-# connections (reproduced: the command's connect timed out on it). A listener
-# that does fail the start (one on :: that no 127.0.0.1 connect reaches, or one
-# bound after the pick) is retried past (below).
+# connections (reproduced: the command's connect timed out on it). Such a
+# listener bound after the pick, or during the run, is neither seen nor fails
+# the start; below the port-0 ranges only a process binding that port by
+# number can be one. A listener that does fail the start (one on :: that no
+# 127.0.0.1 connect reaches, or one bound after the pick) is retried on a new
+# pick (below). 11434 is never picked: it is Ollama's, the provider
+# db/config.mjs defaults to, and a connect finds it only while Ollama runs.
 pick_port() {
   if [ -n "${OB1_PG_PORT:-}" ]; then echo "$OB1_PG_PORT"; return; fi
   for _ in $(seq 1 50); do
     p=$(( 10000 + $(od -An -N2 -tu2 /dev/urandom) % 10000 ))
+    case "$p" in 11434) continue ;; esac
     if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then echo "$p"; return; fi
-    exec 3>&- 2>/dev/null || true
   done
   echo 15432
 }
