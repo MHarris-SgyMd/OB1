@@ -1462,11 +1462,19 @@ services:
     # Postgres on `data`; the model provider and Linear's API on `egress`
     # (SMD-2583).
     networks: [data, egress]
-    # The server image's HEALTHCHECK asks :8000/health, which this serves
-    # not: off, or Docker would mark it unhealthy and fail every `up --wait`
-    # (podman's OCI builds drop the instruction, so it went unseen there).
+    # Its own, not the server image's HEALTHCHECK, which asks :8000/health,
+    # which this serves not (podman's OCI builds drop that instruction, so it
+    # went unseen there). Not `disable: true` either: Docker Compose's `up
+    # --wait` refuses a container with none ("has no healthcheck configured",
+    # CI's first run). The coordinator's process is there — exec form, so no
+    # shell's own command line matches; its health is its passes' heartbeats.
     healthcheck:
-      disable: true
+      test: ["CMD", "pgrep", "-f", "db/coordinator.ts"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      start_interval: 1s
+      retries: 3
     # A stop goes on to every child: the first SIGTERM stops each after the
     # work in hand. Extraction's p90 on the stable brain is 121 s
     # (2026-10-05), and a thought still in hand at the kill is not lost: its
