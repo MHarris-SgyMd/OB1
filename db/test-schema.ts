@@ -15750,10 +15750,13 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const KEY = "subject:qwen3.8:27b@p1";
 
-  // The shape: 111 the last definer of its four functions and of the two it carries; the sentinels; the trigger; the
-  // indexes; the CHECK; the comments.
-  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"])
-    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("111"), `one ${fn}, 111 its last definer (${lastDefinerOf(fn)})`);
+  // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
+  // with a check of the ticket a thought is filed under ([101]); the sentinels; the trigger; the indexes; the CHECK; the
+  // comments.
+  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
+    const by = fn === "record_thought_subject" ? "113" : "111";
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
+  }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
   assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src(RTS)),
     "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write");
@@ -15872,6 +15875,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
+  // 111 re-applied alone put its door back: the shipped one is 113's, which the sections after read.
+  await restoreShipped("record_thought_subject");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
@@ -15957,7 +15962,7 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
-console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one filed under another ticket, nothing while none (or a blank one) is named or for any other metadata edit; close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one filed under another ticket, nothing while none (or a blank one) is named or for any other metadata edit; the door refusing a subject the ticket a thought is filed under disagrees with (ob1_filed_ticket); close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
 {
   const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
   const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
@@ -15999,23 +16004,52 @@ console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts p
   await db.query(`UPDATE thoughts SET content = '[101] captured before, edited' WHERE id = $1`, [before]);
   assert((await status(before)) === "pending", "…and an edit pools a thought captured before the pool was named");
 
-  // The close: the subject read, and no other.
+  // The door, 111's carried with one check more: the ticket the thought is filed under, read under its lock. A rule's
+  // subject under another ticket, or a session header's or a model's on a thought filed since, is stale (review pass 5,
+  // run-it: a sweep's answer, or the pass's rule, read before the ticket moved, replaced the subject another pass had
+  // recorded since, and no run took the thought again).
   const fp = async (id: string) => (await db.query<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1`, [id])).rows[0].f;
+  const doorSrc = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_thought_subject(uuid, text, text, text, uuid, text, jsonb)'::regprocedure`)).rows[0].s;
+  assert(lastDefinerOf("record_thought_subject").startsWith("113") && lastDefinerOf("ob1_filed_ticket").startsWith("113") && /ob1_filed_ticket\(t\.metadata\)/.test(doorSrc) && /ob1:subject-lineage-with-its-artifact/.test(doorSrc),
+    "113 the door's last definer, its body reading ob1_filed_ticket and keeping 111's sentinel, and ob1_filed_ticket's");
+  const doorAt = async (id: string, key: string, by: string) =>
+    (await db.query<{ r: Record<string, unknown> }>(`SELECT record_thought_subject($1, $2, $3, $4, NULL, $5, NULL) AS r`, [id, key, by, `subject:${by}@r1`, await fp(id)])).rows[0].r;
+  const filedT = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[101] filed under its ticket', $1) RETURNING id`, [JSON.stringify({ ticket: " SMD-103 " })])).rows[0].id;
+  const atFiled = [await doorAt(filedT, "phrase:what the model read", "model"), await doorAt(filedT, "ticket:SMD-9", "first_line"), await doorAt(filedT, "ticket:SMD-9", "metadata"), await doorAt(filedT, "ticket:SMD-103", "metadata")];
+  assert(atFiled.slice(0, 3).every((r) => r.action === "none" && r.stale === true) && atFiled[3].action === "added",
+    `on a thought filed under SMD-103: a model's subject, a session header's and a rule's under another ticket refused as stale, the rule's at its ticket added (${atFiled.map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // Moved to its issue, behind a ticket that is not one and a no-break space: the rule's subject at the old ticket is
+  // stale now, at the issue's it replaces; taken away, a model's is added.
+  await db.query(`UPDATE thoughts SET metadata = $2 WHERE id = $1`, [filedT, JSON.stringify({ ticket: "not one", issue: "\u00a0SMD-104" })]);
+  const atIssue = [await doorAt(filedT, "ticket:SMD-103", "metadata"), await doorAt(filedT, "ticket:SMD-104", "metadata")];
+  await db.query(`UPDATE thoughts SET metadata = '{}' WHERE id = $1`, [filedT]);
+  const unfiledT = [await doorAt(filedT, "ticket:SMD-104", "metadata"), await doorAt(filedT, "phrase:what the model read", "model")];
+  assert(atIssue[0].stale === true && atIssue[1].action === "replaced" && unfiledT[0].stale === true && unfiledT[1].action === "replaced",
+    `filed under its issue: the old ticket's subject stale, the issue's replacing it; taken away: the rule's stale, a model's replacing it (${[...atIssue, ...unfiledT].map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // ob1_filed_ticket: metadataTicket in SQL (test-live [10h] holds the two together value by value; here its shape).
+  const filedOf = async (m: unknown) => (await db.query<{ t: string | null }>(`SELECT ob1_filed_ticket($1::jsonb) AS t`, [JSON.stringify(m)])).rows[0].t;
+  const filedVals = [await filedOf({ ticket: "\ufeffSMD-105\u3000" }), await filedOf({ ticket: "smd-106" }), await filedOf({ ticket: 107 }), await filedOf({ issue: ["SMD-108"] }),
+    await filedOf({ ticket: `SMD-${"9".repeat(196)}` }), await filedOf({ ticket: `SMD-${"9".repeat(197)}` }), await filedOf([]), await filedOf("SMD-109"), await filedOf(null)];
+  assert(filedVals[0] === "SMD-105" && filedVals.slice(1, 4).every((v) => v === null) && filedVals[4]?.length === 200 && filedVals.slice(5).every((v) => v === null),
+    `ob1_filed_ticket: a BOM and an ideographic space trimmed; a lower-case id, a number, an array, an id over 200 characters, metadata not an object: none (${filedVals.map((v) => v === null ? "null" : v.slice(0, 12)).join(", ")})`);
+
+  // The close: the subject read, and no other — on a thought filed under no ticket, a model's subject its own.
+  const closeT = await add("[101] the close's thought");
   const write = async (id: string, key: string) => (await db.query<{ r: { id: string } }>(`SELECT record_thought_subject($1, $2, 'model', 'subject:x@p2', NULL, $3, NULL) AS r`, [id, key, await fp(id)])).rows[0].r.id;
   const close = async (id: string, facet: string, f: string) => (await db.query<{ c: Record<string, unknown> }>(`SELECT close_thought_subject($1, $2, $3) AS c`, [id, facet, f])).rows[0].c;
   const standing = async (id: string) => (await db.query<{ id: string | null }>(`SELECT max(id::text) AS id FROM thought_facets WHERE thought_id = $1 AND kind = 'subject' AND valid_until IS NULL`, [id])).rows[0].id;
-  const read = await write(after, "phrase:the one read");
-  const since = await write(after, "phrase:written since");
-  const moved = await close(after, read, await fp(after));
-  assert(moved.action === "none" && moved.moved === true && moved.id === since && (await standing(after)) === since,
+  const read = await write(closeT, "phrase:the one read");
+  const since = await write(closeT, "phrase:written since");
+  const moved = await close(closeT, read, await fp(closeT));
+  assert(moved.action === "none" && moved.moved === true && moved.id === since && (await standing(closeT)) === since,
     `another subject written since the read: not closed, the one standing named (${JSON.stringify(moved)})`);
-  const stale = await close(after, since, "0".repeat(64));
-  assert(stale.action === "none" && stale.stale === true && (await standing(after)) === since, `a text moved since the read: not closed (${JSON.stringify(stale)})`);
-  const closed = await close(after, since, await fp(after));
-  assert(closed.action === "closed" && closed.id === since && (await standing(after)) === null, `the subject read, at the text read: closed (${JSON.stringify(closed)})`);
-  const none = await close(after, since, await fp(after));
+  const stale = await close(closeT, since, "0".repeat(64));
+  assert(stale.action === "none" && stale.stale === true && (await standing(closeT)) === since, `a text moved since the read: not closed (${JSON.stringify(stale)})`);
+  const closed = await close(closeT, since, await fp(closeT));
+  assert(closed.action === "closed" && closed.id === since && (await standing(closeT)) === null, `the subject read, at the text read: closed (${JSON.stringify(closed)})`);
+  const none = await close(closeT, since, await fp(closeT));
   assert(none.action === "none" && none.moved === undefined && none.stale === undefined, `none standing: none (${JSON.stringify(none)})`);
-  const gone = await close("00000000-0000-0000-0000-000000000113", since, await fp(after));
+  const gone = await close("00000000-0000-0000-0000-000000000113", since, await fp(closeT));
   assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
   const refused: string[] = [];
   for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {

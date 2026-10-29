@@ -5052,6 +5052,13 @@ console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; on
   assert((await inPool(fourth)) === "pending", "…and a thought finished in the pool is put back in it once its text changes");
   const closed = (await sql`SELECT close_thought_subject(${t[0]}::uuid, ${subject.id}::uuid, ${await fpOf(t[0])}::text) AS c`)[0].c as { action: string; id: string };
   assert(closed.action === "closed" && closed.id === subject.id, `close_thought_subject closes the subject read (${JSON.stringify(closed)})`);
+  // The door 113 redefines, on the upgraded brain: a model's subject on a thought filed under a ticket is refused as
+  // stale, the ticket's rule subject written (review pass 5).
+  const door = async (id: string, key: string, by: string) =>
+    (await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${`subject:${by}@r1`}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string; stale?: boolean };
+  const [modelUp, ruleUp] = [await door(third, "phrase:an upgraded note", "model"), await door(third, "ticket:SMD-113", "metadata")];
+  assert(modelUp.action === "none" && modelUp.stale === true && ruleUp.action === "added",
+    `the door 113 redefines: a model's subject on a thought filed under a ticket refused as stale, the rule's at its ticket added (${modelUp.action}, ${ruleUp.action})`);
   const after = await rows(), facetsAfter = await facets(), claimsAfter = await claims();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
   assert((await rows()) === after && (await facets()) === facetsAfter && (await claims()) === claimsAfter, "a re-apply is a no-op: every thought, facet and claim as it was");

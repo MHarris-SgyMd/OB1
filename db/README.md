@@ -299,7 +299,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3082 assertions: 3082 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3086 assertions: 3086 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -2173,8 +2173,8 @@ trigger, `thoughts_subject_pool` (`AFTER INSERT OR UPDATE OF content, metadata`)
 puts each new or edited thought back in the pool `ob1_config.subject_pool_key`
 names, through 016's `requeue_thought_work`, as 016's trigger does for the
 extraction pass; with no pool named it does nothing, and a metadata edit moves
-nothing, nor reads anything as the caller, unless it files the thought under
-another ticket (`metadata.ticket`, else `metadata.issue`, the metadata rule's fields):
+nothing, nor reads anything as the caller, unless it changes `metadata.ticket`
+or `metadata.issue` (the metadata rule's fields, the ticket a thought is filed under):
 such an edit reads `ob1_config` as the caller from 113 on, pool or no, as a
 capture does. The sweep claims from it as the extraction
 pass claims from its own, so a claim finished is the record that a thought was
@@ -2182,8 +2182,13 @@ asked at its text. `close_thought_subject(thought, facet, fingerprint)` closes
 the standing subject the model now names nothing for, under the door's advisory
 lock, only while the thought's text is the one read and that facet still stands
 (`stale`, `moved` or `none` otherwise), so a subject a pass wrote since the
-sweep read it stands. Refuses by name without 015, 016 or 111; a re-apply is a
-no-op. No grant is issued, but the trigger runs as the caller, as 016's does: a
+sweep read it stands. It redefines 111's door, `record_thought_subject`, to read
+under its lock the ticket the thought is filed under (`ob1_filed_ticket`,
+server-portable/subject.ts's `metadataTicket` in SQL, which the sweep reads too):
+a rule's subject under another ticket, or a session header's or a model's on a
+thought filed since, is refused as stale, as one found in a text that moved, so a
+write landing after another pass recorded the ticket's subject replaces nothing.
+Refuses by name without 015, 016 or 111; a re-apply is a no-op. No grant is issued, but the trigger runs as the caller, as 016's does: a
 ticket edit reads `ob1_config` (above), and once a pool is named a capturing
 role needs `SELECT, INSERT, UPDATE` on `thought_work_claims`, which preflight
 checks (below). The sweep's place in
@@ -3198,7 +3203,9 @@ its finished claims, and the pooling is marked finished in
 `ob1_config.subject_pool_filled` once it commits, so one that broke off (a thought
 deleted under it, a lost connection) is pooled again by the next run; a signal
 during it ends the CLI at once, and the pooling, one statement, runs on to its end
-on the server, holding the lock below, unmarked. One run
+on the server, holding the lock below, unmarked. A naming waits, at most 30 s,
+for the write transactions open as it named the pool, so what they capture is
+pooled. One run
 names and pools at a time, under a session advisory lock, a run that waits for
 another saying so. The first naming is
 refused while a login role that can capture — it reads `ob1_config`, without
@@ -3209,8 +3216,10 @@ again; a run that stops hands back what it holds, a second signal the claim in
 hand before the CLI exits, and a thought the provider stopped answering on goes to
 the end of the pool. A lease a gone worker ran out at its last attempt is failed by
 the next claim, which the pool line counts and a run says, exit 1. Within one key the claims are disjoint while their leases
-hold, and whatever the claims, the door's lock and fingerprint check make a sweep
-beside the pass, or beside another sweep, safe. A claim
+hold — a naming leaves a live lease to its run, though an edit pools its thought
+again — and whatever the claims, the door's lock, its fingerprint check and its
+check of the ticket a thought is filed under make a sweep beside the pass, or
+beside another sweep, safe. A claim
 finished is the record that the thought was asked at its text: one the model
 named nothing for is not asked again until its text, the ticket it is filed
 under, or the pool's key changes
@@ -5708,12 +5717,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3082 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1790 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 3086 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1798 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 370 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 378 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
