@@ -551,8 +551,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // rebuild of 071's mirror for a status-set change, SMD-3160), 109
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
   // listing pages, SMD-3249), 111 (a thought's own subject
-  // recorded, SMD-3306) and 112 (a thought's client_key, one thought
-  // per key, SMD-3314)
+  // recorded, SMD-3306), 112 (a thought's client_key, one thought
+  // per key, SMD-3314) and 113 (who decided a proposal, SMD-2608)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -699,13 +699,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]) — all
+  // refusing by name rows that share one ([20bd]); 113 adds the reviewer
+  // columns, their trigger and two CHECKs, refusing by name without 008,
+  // 029, 046 or 050 ([20be]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 83, `030 is among the last eighty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 84, `030 is among the last eighty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5000,6 +5002,59 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   assert(/^client_key is set once: thought /.test(moved), `…and the caller's key, kept from before, is set once: a write moving it refused (${moved.slice(0, 80)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
   assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
+  await sql.close();
+}
+
+console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 050; onto a populated brain at the file before it — proposals decided before it, the reviewer backfilled from the audit for an accept that wrote its pointer and a reject that cleared one, none guessed for a reject that cleared nothing; no thought, audit row or decision moved; a decision after it stamped with its key; a re-apply a no-op (SMD-2608)");
+{
+  const the113 = MIGRATIONS.find((f) => f.endsWith("_proposal_reviewer.sql"))!;  // by name: renumbered when main takes its number
+  for (const [stop, needs] of [
+    ["008", "migration 113 needs 008 (ob1_current_actor); this schema lacks it"],
+    ["029", "migration 113 needs 029 (supersession_proposals); this schema lacks it"],
+    ["046", "migration 113 needs 046 (ob1_registry_kind); this schema lacks it"],
+    ["050", "migration 113 needs 050 (thought_audit.seq); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const t: string[] = [];
+  for (let i = 0; i < 6; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
+  const OPERATOR = { name: "upgrade-113-operator", via: "consolidate", agent_id: agent };
+  const propose = async (o: number, n: number) =>
+    String((await sql`SELECT record_supersession_proposal(${t[o]}::uuid, ${t[n]}::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`)[0].id);
+  const review = async (id: string, decision: string) =>
+    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 113', NULL, ${OPERATOR}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
+  // Before 113: an accept that writes its pointer, an accept then a clearing reject, a reject that clears nothing.
+  const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5);
+  const decisions = [await review(accepted, "accept"), await review(cleared, "accept"), await review(cleared, "reject"), await review(plain, "reject")];
+  assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false, `the decisions before 113: an accept, a clearing reject, a reject clearing nothing (${JSON.stringify(decisions)})`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const decided = async () => JSON.stringify(await sql`SELECT id, status, reviewed_at::text AS r, review_note, superseding_id, pointer_written FROM supersession_proposals ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = { rows: await rows(), decided: await decided(), audits: await audits() };
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  const who = async (id: string) => JSON.stringify((await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${id}::uuid`)[0]);
+  const named = JSON.stringify({ by: OPERATOR.name, agent, kind: "operator" }), none = JSON.stringify({ by: null, agent: null, kind: null });
+  assert((await who(accepted)) === named && (await who(cleared)) === named && (await who(plain)) === none,
+    `the backfill names the reviewer the audit holds — the accept's write and the clearing reject's — and none for the reject that cleared nothing (${await who(accepted)}, ${await who(cleared)}, ${await who(plain)})`);
+  assert((await rows()) === before.rows && (await decided()) === before.decided && (await audits()) === before.audits,
+    "nothing else moved: every thought, every decision and the audit's rows as they were");
+  // After it, a reject that clears nothing records its key — the case SMD-2608 found recording nothing.
+  const later = await propose(1, 4);
+  await review(later, "reject");
+  assert((await who(later)) === named, `after 113 a reject that clears nothing records the key that decided it (${await who(later)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  assert((await who(later)) === named && (await who(plain)) === none, "a re-apply a no-op: the stamped row kept, none guessed");
   await sql.close();
 }
 

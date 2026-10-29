@@ -879,6 +879,33 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       sides: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
   }
 
+  /**
+   * SMD-2608: who decided each of these rows (113's columns, which its trigger
+   * stamps from the key that decided), by id — the listing (110) does not
+   * carry them, so they are read beside it as the writers are. "no-113" on a
+   * brain short of the file.
+   */
+  type Reviewer = { name: string | null; agentId: string | null; kind: string | null };
+  async function reviewersOf(ids: string[]): Promise<Map<string, Reviewer> | "no-113"> {
+    if (!ids.length) return new Map();
+    try {
+      const rows = (await sql`SELECT id::text AS id, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind
+                                FROM supersession_proposals WHERE id = ANY(${sql.array(ids, "UUID")}::uuid[])`) as
+        { id: string; reviewed_by: string | null; agent: string | null; reviewed_by_kind: string | null }[];
+      return new Map(rows.map((r) => [r.id, { name: r.reviewed_by, agentId: r.agent, kind: r.reviewed_by_kind }]));
+    } catch (e) {
+      if (/column "reviewed_by(_agent_id|_kind)?" does not exist/.test((e as Error).message)) return "no-113";
+      throw e;
+    }
+  }
+  const REVIEWERS_UNREAD = "Who decided each row is not shown: this brain is short of migration 113 (cd db && bun migrate.ts --url <url>).";
+  /** SMD-2608: a decided row's reviewer — the key's name and kind, a decision with no key said so, and none recorded said so. The name through the replies' cleaner: a key's name is the operator's, but one line. */
+  const reviewerText = (r: Reviewer | undefined): string =>
+    r?.name && r.agentId ? `${snippet(r.name, 80)} (${r.kind ?? "a key the registry has not classified"})`
+    : r?.name ? `${snippet(r.name, 80)}, with no key (no agent id)`
+    : r?.agentId ? `agent ${r.agentId}${r.kind ? ` (${r.kind})` : ""}, no name`
+    : "not recorded — no actor named the decision (a raw call), or it was made before migration 113 and wrote no pointer";
+
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 110's seven-argument form, always: 029, 070 or 109 re-applied by hand
     // lands its form beside 110's, and a call both forms take (under three
@@ -949,6 +976,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
     const proposals = withWriters(rows as unknown as Record<string, unknown>[], writers, read).map(normaliseProposal);
     if (!read) out(`  ${WRITERS_UNREAD}\n`);
+    // SMD-2608: who decided each decided row, said once on a brain short of 113.
+    const reviewers = await reviewersOf(rows.filter((p) => p.status === "accepted" || p.status === "rejected").map((p) => p.id));
+    if (reviewers === "no-113" && rows.some((p) => p.status === "accepted" || p.status === "rejected")) out(`  ${REVIEWERS_UNREAD}\n`);
     rows.forEach((p, i) => {
       const np = proposals[i];
       const flags = standingFlags(np);
@@ -962,6 +992,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
       out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
+      if (reviewers !== "no-113" && (p.status === "accepted" || p.status === "rejected")) out(`     decided by: ${reviewerText(reviewers.get(p.id))}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1084,8 +1115,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           for (const l of res.lapsed ?? []) {
             out(`  lapsed: ${l.id} no longer supersedes ${l.onto} — its capturer's capture-only pointer, cleared by this accept`);
           }
+          // SMD-2608: and on the row, as a reject's is.
+          const who = await reviewersOf([id]);
+          if (who !== "no-113") out(`  decided by: ${reviewerText(who.get(id))}`);
         } else {
           out(`  rejected ${id}${res.cleared ? `: the supersedes pointer this proposal had set is cleared` : ""}`);
+          // SMD-2608: what the row now records as its reviewer, read back — a brain short of 113 records none.
+          const who = await reviewersOf([id]);
+          out(who === "no-113" ? `  the reject records no reviewer: this brain is short of migration 113 (cd db && bun migrate.ts --url <url>)` : `  decided by: ${reviewerText(who.get(id))}`);
         }
       } else {
         code = 1;

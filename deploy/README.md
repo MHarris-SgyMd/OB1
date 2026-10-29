@@ -2154,8 +2154,10 @@ proposing which thoughts supersede which").
 podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list
 ```
 
-An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
-this container is the workers' key. To have it recorded as yours, give your
+A decision, accept or reject, is recorded under the agent of the key in
+`OB1_WORKER_KEY` (on the proposal's row since migration 113, and an accept in
+`thought_audit` too), which in this container is the workers' key. To have it
+recorded as yours, give your
 own key, one `MCP_ACCESS_KEYS` holds, to that one command: set before it on
 the same line, it reaches neither your shell nor the next command, and the
 bare `-e` passes it into the container without putting it on the command
@@ -2171,7 +2173,8 @@ every later compose command in that shell — an `up -d` included — would
 start the followers under your key. Without the prefix, the decision is the
 workers' key's.
 
-A reject records no reviewer whichever key runs it (SMD-2608). Accepting
+The decision then prints `decided by: <your key's name>`, and `--list
+accepted` or `--list rejected` shows it on each row (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
 ### The `sleep` profile instead

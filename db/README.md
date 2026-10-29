@@ -299,8 +299,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3063 assertions: 3063 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and twelve (112) migrations applied, and
+`bun test-schema.ts` prints `3081 assertions: 3081 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -341,7 +341,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-2608).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2165,6 +2165,34 @@ grant moves. test-schema [100] (the index's shape, one thought per key, the
 duplicate refusal, the re-apply), test-upgrade [20bd] (onto a populated brain at
 111, a duplicate refused by name), `server-portable/test-e2e-sql.ts` [24] (the
 tools).
+
+Migration 113 records who decided a proposal, accept and reject alike
+(SMD-2608). An accept was audited under the reviewer's key through its
+`thought_audit` row, but a reject wrote no row unless it cleared a pointer, so
+who rejected a proposal was recorded nowhere. Three columns on
+`supersession_proposals` mirror the audit row's: `reviewed_by` (the actor's
+name), `reviewed_by_agent_id` and `reviewed_by_kind` (the registry's kind, so a
+person's decision can be told from a machine's). One trigger writes them from
+the decision's actor envelope, never from a statement's values (050's rule),
+on any write that names the decision's columns: `review_supersession_proposal`
+sets the envelope from its `p_actor`, so its accept and reject, and 067's settle
+through it, are stamped with the key that decided, and 067's reopen clears them
+with `reviewed_at`. `db/consolidate.ts` run with no key decides as
+`consolidate` with no agent, as its audit row says; a raw call with no envelope
+records none. They describe the decision that stands, as `reviewed_at` and
+`review_note` do. Columns and not a reject event in `thought_audit`, because
+that log is the thoughts' and a reject that clears nothing changes no thought.
+Rows decided before 113 are backfilled from the audit where a decision wrote a
+pointer (an accept that set one, a reject that cleared one); the rest stay
+NULL. Two CHECKs hold a kind to the registry's and an unreviewed row to no
+reviewer. `--list` prints `decided by:` on an accepted or rejected row, read
+beside the listing by the page's ids (the listing is not redefined), and
+`--accept`/`--reject` print it after deciding. Needs 008, 029, 046 and 050; a
+re-apply fills only rows with no reviewer; no grant moves (every role that
+decides holds the capture group's `SELECT` on `ob1_agents`). test-schema [101],
+test-upgrade [20be] (refused without each prerequisite; the backfill onto a
+populated brain at 112), test-live [16] (`--reject` and `--list` with and
+without a key).
 
 ## What changed relative to the guide
 
@@ -5629,9 +5657,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1756 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1023 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3081 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1760 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1027 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 336 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

@@ -7934,6 +7934,25 @@ if (want("16")) {
   const statusAfter = await consolidate("--status");
   assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
 
+  // SMD-2608 (113): who decided, on the row — the worker's key on its accept and its reject, said by each and by
+  // --list; a reject run with no key carries 'consolidate' and no agent, said so.
+  const reviewerOf = async (id: string) =>
+    (await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { by: string | null; agent: string | null };
+  assert(/decided by: consolidator \(/.test(forced.out) && /decided by: consolidator \(/.test(unforced.out)
+      && JSON.stringify(await reviewerOf(directed.id)) === JSON.stringify({ by: "consolidator", agent: agent.id }),
+    `the accept and the reject each say who decided, and the row records the worker's key and agent (${unforced.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
+  const noKeyReject = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--reject", undirected.id, "--note", "no key"], { env: keyless, cwd: HERE });
+  assert(noKeyReject.code === 0 && /decided by: consolidate, with no key \(no agent id\)/.test(noKeyReject.out)
+      && JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    `a reject run with no key records 'consolidate' and no agent, and says so (${noKeyReject.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
+  const listRejected = await consolidate("--list", "rejected");
+  const decidedLines = listRejected.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  assert(decidedLines.length === 2 && decidedLines.some((l) => /^decided by: consolidator \(/.test(l)) && decidedLines.includes("decided by: consolidate, with no key (no agent id)"),
+    `--list rejected shows who decided each row (${decidedLines.join(" | ")})`);
+  const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
+  assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
+    "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
+
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;
   const retried = await consolidate("--retry-failed");
@@ -7987,10 +8006,11 @@ if (want("16")) {
   assert(widest.code === 0 && /no entity has gone 2000000 days/.test(widest.out) && /timestamp out of range/.test(pastFloor) && claimMax === "claimed" && /does not exist/.test(claimPast),
     `--stale ${MAX_STALE_DAYS} lists where 3,000,000 days is out of Postgres's range (${pastFloor}), and claim_thoughts takes MAX_BATCH where one more matches no signature (${claimPast.slice(0, 60)})`);
 
-  // The worker never wrote thought_audit itself: the three rows under its name
-  // are the two acceptances and the rejection's clearing.
+  // The worker never wrote thought_audit itself: the rows under its name are
+  // the reviews — four accepts (the fourth SMD-2608's, after a keyless reject
+  // whose clearing is under 'consolidate') and two cleared rejects.
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
-  assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
+  assert(Number(actorRows) === 6, `the worker's audit rows are exactly the reviews: four accepts and two cleared rejects (${actorRows})`);
 
   // 067 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
   // moved under the verdict — is the pass's to settle or replace. Through the
@@ -8154,7 +8174,7 @@ if (want("16")) {
     const beaconOut = await proposalRow(beacon.id);
     assert(fellOut.code === 0 && /stale proposals: 1 settled by the pass \(1 no longer a candidate pair\)/.test(fellOut.out) && beaconOut.status === "rejected" && beaconOut.review_note === passSettledNote("no longer a candidate pair — no shared entity", KEY) && (await lineageOf(beacon.id))[0].recipe.settled === "not-a-candidate" && (await lineageOf(beacon.id))[0].recipe.reason === "no shared entity",
            `a stale pair with no shared entity left is settled as no longer a candidate, at the current texts (exit ${fellOut.code}: ${staleLine(fellOut.out)}; ${JSON.stringify(beaconOut)})`);
-    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
+    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
     // A stale pair whose judge call TIMES OUT was reached, not left out: the
     // row stays stale, the thought is recorded failed, --retry-failed
     // revisits it — and a run meanwhile does not re-pool a failed thought
@@ -8254,7 +8274,7 @@ if (want("16")) {
       `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
-    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "…still without an audit row");
     // A person may not borrow the marker: rebuild_derived would read the
     // rejection as the pass's and reopen it on a move.
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
