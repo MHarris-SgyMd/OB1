@@ -13125,6 +13125,33 @@ if (want("32")) {
     const secOf = async (key: string) => (await sql`SELECT origin, body_md, pending_body_md AS pending FROM page_sections WHERE page_id = ${P}::uuid AND section_key = ${key}`)[0] as Sec | undefined;
     const revisions = async (key: string) => Number((await sql`SELECT count(*)::int AS c FROM page_section_revisions r JOIN page_sections s ON s.id = r.section_id WHERE s.page_id = ${P}::uuid AND s.section_key = ${key}`)[0].c);
     const consistent = async () => { const [x] = await sql`SELECT render_page(${P}::uuid) = (SELECT content FROM thoughts WHERE id = ${P}::uuid) AS same`; return x.same === true; };
+    // The slug races below are held, not timed: A creates inside an open
+    // transaction, B's create is dispatched, and A commits only once B is seen
+    // waiting on A's lock, or after 100 polls (about 5 s). Timed, A could commit
+    // before B looked the slug up, and B took the update path: neither refused,
+    // about 1 run in 5 under ci-parity on 10-02 (SMD-2475). Watched by B's pid
+    // from `sql`, which holds no transaction, so its view of pg_stat_activity is
+    // current (SMD-2742); `waitedOn` is the lock's wait_event, which each race
+    // pins.
+    const heldRace = async <T,>(run: (c: SQL) => Promise<T>): Promise<{ a: T; b: T; waitedOn: string }> => {
+      const bPid = Number((await cB`SELECT pg_backend_pid() AS p`)[0].p);
+      await cA`BEGIN`;
+      let a: T, pb: Promise<T>, waitedOn = "";
+      try {
+        a = await run(cA);
+        pb = run(cB);
+        for (let i = 0; i < 100 && !waitedOn; i++) {
+          const w = (await sql`SELECT wait_event_type AS t, wait_event AS e FROM pg_stat_activity WHERE pid = ${bPid}`)[0] as { t: string | null; e: string | null } | undefined;
+          if (w?.t === "Lock") waitedOn = w.e ?? "Lock";
+          else await Bun.sleep(50);
+        }
+      } finally {
+        await cA`COMMIT`;
+      }
+      return { a: a!, b: await pb!, waitedOn };
+    };
+    // A's outcome, for a failure message: a failed A leaves B nothing to wait on.
+    const said = (x: { ok: R | null; err: string }) => x.err.split("\n")[0].slice(0, 80) || (x.ok?.created ? "created" : "updated");
 
     // Two first writes of one key, at once: the page lock and the unique key
     // serialise them — one created, the other falls through to the
@@ -13184,16 +13211,15 @@ if (want("32")) {
     const pagesLeft = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug LIKE 'raced-delete-%'`)[0].c);
     assert(deadlocks === 0 && noPage + landed === 12 && pagesLeft === 0, `twelve section writes racing delete_thought of their page: no deadlock, each write landed first or found no page, every page gone (landed ${landed}, no page ${noPage}, deadlocks ${deadlocks})`);
 
-    // Two creates of one slug, at once: one page, the other refused by name —
+    // Two creates of one slug, held: one page, the other refused by name —
     // the loser's capture waits on 033's fingerprint lock, merges into the
     // winner's thought, and is refused before it can take the slug.
     const create = async (c: SQL) => { try { return { ok: ((await c`SELECT upsert_page('raced', 'A raced page') AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
-    const [ra, rb] = await Promise.all([create(cA), create(cB)]);
-    const created = [ra, rb].filter((x) => x.ok?.created === true), refusedOne = [ra, rb].filter((x) => x.ok === null);
+    const { a: ra, b: rb, waitedOn: rWaited } = await heldRace(create);
     const pagesRaced = Number((await sql`SELECT count(*)::int AS c FROM pages WHERE slug = 'raced'`)[0].c);
     const thoughtsRaced = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = '# A raced page'`)[0].c);
-    assert(created.length === 1 && refusedOne.length === 1 && /another writer created with this text meanwhile|holds this page's exact text/.test(refusedOne[0].err) && pagesRaced === 1 && thoughtsRaced === 1,
-      `two creates of one slug: one page, one thought, the other refused by name (${refusedOne[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    assert(rWaited === "advisory" && ra.ok?.created === true && rb.ok === null && /another writer created with this text meanwhile/.test(rb.err) && pagesRaced === 1 && thoughtsRaced === 1,
+      `two creates of one slug: B waited on A's fingerprint lock, one page, one thought, B refused by name (waited on ${rWaited || "nothing"}; A ${said(ra)}; B ${rb.err.split("\n")[0].slice(0, 110) || "not refused"})`);
     // Two pages superseding each other at once, and a supersede racing its
     // target's delete: upsert_page takes 029's supersession lock before any
     // row, as delete_thought does — the loser of the loop is WOULD_CYCLE by
@@ -13224,12 +13250,11 @@ if (want("32")) {
     assert(supDeadlocks === 0 && recreated + updated === 8, `a supersede racing its own page's delete, eight rounds: no deadlock — the page updated before the delete took it, or created anew after (${updated} updated, ${recreated} created anew)`);
     // …and under two titles the slug's own unique index is what the loser meets,
     // said by name rather than as the constraint's error (run-it, first review pass).
-    const createTitled = async (c: SQL, title: string) => { try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
-    const [ta, tb] = await Promise.all([createTitled(cA, "Title A"), createTitled(cB, "Title B")]);
-    const titledOk = [ta, tb].filter((x) => x.ok?.created === true), titledNo = [ta, tb].filter((x) => x.ok === null);
+    const createTitled = async (c: SQL) => { const title = c === cA ? "Title A" : "Title B"; try { return { ok: ((await c`SELECT upsert_page('raced-titles', ${title}) AS r`) as { r: R }[])[0].r, err: "" }; } catch (err) { return { ok: null as R | null, err: (err as Error).message }; } };
+    const { a: ta, b: tb, waitedOn: tWaited } = await heldRace(createTitled);
     const titledThoughts = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content IN ('# Title A', '# Title B')`)[0].c);
-    assert(titledOk.length === 1 && titledNo.length === 1 && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(titledNo[0].err) && titledThoughts === 1,
-      `two creates of one slug under two titles: one page, the loser refused by name and its thought rolled back (${titledNo[0]?.err.split("\n")[0].slice(0, 110) ?? "neither refused"})`);
+    assert(tWaited === "transactionid" && ta.ok?.created === true && tb.ok === null && /upsert_page: another writer created page 'raced-titles' meanwhile — retry, and the call will update it/.test(tb.err) && titledThoughts === 1,
+      `two creates of one slug under two titles: B waited on the slug's unique index (A's transaction), one page, B refused by name and its thought rolled back (waited on ${tWaited || "nothing"}; A ${said(ta)}; B ${tb.err.split("\n")[0].slice(0, 110) || "not refused"})`);
   } finally {
     await cA.close();
     await cB.close();
