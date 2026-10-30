@@ -45,7 +45,10 @@
  * change, every MIN_STAMP_EVERY_S, and ended at the stop. The status surface
  * reads it beside the passes' own rows, so a pass asked for that wrote no row
  * shows as missing, and a coordinator that stopped as stale. With no
- * database it is left unwritten, the passes running on.
+ * database it is left unwritten, the passes running on. The row is one
+ * coordinator's at a time, by an id of its process: a second started beside a
+ * live one writes nothing over it, says so, and takes it over once it is
+ * ended or stale.
  *
  * Output. Each child's lines go to this process's, after `[<name>] `.
  *
@@ -80,7 +83,7 @@ import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supe
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
 import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
-import { COORDINATOR_KEY, COORDINATOR_PASSES, type Coordinated, type CoordinatorValue } from "../server-portable/brain-info.ts";
+import { COORDINATOR_KEY, COORDINATOR_PASSES, STALE_AFTER_INTERVALS, type Coordinated, type CoordinatorValue } from "../server-portable/brain-info.ts";
 
 const HERE = import.meta.dir;
 
@@ -355,6 +358,7 @@ export function askedPasses(raw: string | undefined): Pass[] {
  * from `now`, the stamp's own time. A child not yet started is `starting`. Pure.
  */
 export function coordinatorValue(o: {
+  id: string;
   passes: readonly Pass[];
   children: readonly Child[];
   keys: ReadonlyMap<ChildName, string | null>;
@@ -374,7 +378,7 @@ export function coordinatorValue(o: {
       : s.state === "held" ? { ...base, state: "held", refused: s.refused }
       : { ...base, state: s.state };
   }
-  return { v: 1, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
+  return { v: 1, id: o.id, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
 }
 
 /**
@@ -382,24 +386,44 @@ export function coordinatorValue(o: {
  * write at a time, in order, each bounded by `timeoutMs` — the database may be
  * what is down — and its value taken as it runs, so its times are the stamp's.
  * A failure is said once until a write lands; the passes never wait on it.
+ *
+ * The row is one coordinator's at a time (review pass 3): a write replaces a
+ * row of its own `id`, or one ended, stale or not JSON — never another live
+ * coordinator's. So a second started beside the stack's (a one-off `compose
+ * run coordinator`, CI's held cases, a checkout's run) neither rewrites its
+ * children nor, at its stop, ends its row; it says so once, and takes the row
+ * over when the other's is ended or goes stale.
  */
-function coordinatorRow(o: { sql: SQL | null; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
+function coordinatorRow(o: { sql: SQL | null; id: string; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
   const sql = o.sql;
   if (sql === null) return { changed() {}, async end() {} };
   let chain: Promise<void> = Promise.resolve();
   let unwritten = false;
+  let notOurs = false;
   let ended = false;
+  const staleS = STALE_AFTER_INTERVALS * o.everyS;
   const write = (end: boolean): Promise<void> => {
     chain = chain.then(async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         // An object, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
-        await Promise.race([
+        // The CASE keeps a value that is not JSON from reaching the cast.
+        const wrote = (await Promise.race([
           sql`INSERT INTO ob1_config (key, value) VALUES (${COORDINATOR_KEY}, (${o.value(end)}::jsonb)::text)
-              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                WHERE CASE WHEN ob1_config.value IS JSON OBJECT
+                           THEN ob1_config.value::jsonb->>'id' IS NOT DISTINCT FROM ${o.id}
+                                OR ob1_config.value::jsonb->'ended' = 'true'::jsonb
+                                OR ob1_config.updated_at < now() - make_interval(secs => ${staleS})
+                           ELSE true END
+              RETURNING 1 AS wrote`,
           new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${o.timeoutMs / 1000} s`)), o.timeoutMs); }),
-        ]);
+        ])) as unknown[];
         unwritten = false;
+        if (wrote.length === 0 && !notOurs) {
+          o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`);
+        }
+        notOurs = wrote.length === 0;
       } catch (e) {
         if (!unwritten) o.err(`coordinator: could not stamp ${COORDINATOR_KEY} (${(e as Error).message}) — the passes run on, and it is tried again at the next change and every ${o.everyS} s`);
         unwritten = true;
@@ -451,12 +475,14 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const states = new Map<ChildName, FollowerState>();
   const keys = new Map<ChildName, string | null>();
   const everyS = opts.rowEveryS ?? MIN_STAMP_EVERY_S;
+  const id = crypto.randomUUID();
   const row = coordinatorRow({
     sql: opts.sql,
+    id,
     everyS,
     timeoutMs: opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS,
     err: writer.err,
-    value: (ended) => coordinatorValue({ passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
+    value: (ended) => coordinatorValue({ id, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
   });
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
