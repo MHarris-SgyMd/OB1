@@ -1637,6 +1637,14 @@ export const TASK_OK = ["running", "idle", "starting"] as const satisfies readon
 
 /** How long a child the coordinator started may go without a stamp of its own before it is missing: each pass stamps as it starts, so two of the shortest intervals. */
 export const START_GRACE_S = 120;
+/**
+ * The slack in "stamped since its start": the run's seconds add two rounded
+ * figures (the mark's `for_s`, the coordinator row's age) and the child's
+ * row's age is rounded on its own, so a first stamp within a second of the
+ * start can read a second older than the run. A row of the run before is
+ * older by a restart's wait, a minute at least (db/supervise.ts's RESTART_MS).
+ */
+const SINCE_START_SLACK_S = 5;
 
 /** One task as the status surface says it. */
 export type TaskStatus = {
@@ -1694,7 +1702,7 @@ function childStatus(name: Coordinated, mark: ChildMark, beat: WorkerHeartbeat |
   if (mark.state === "stopped") return { ...base, state: "stopped", words: "stopped with its coordinator" };
   // Starting or running: the seconds since its start, as of the read.
   const ranS = mark.for_s + c.ageS;
-  if (beat !== undefined && beat.ageS <= ranS) return { ...base, state: beatState(beat), words: heartbeatState(beat) };
+  if (beat !== undefined && beat.ageS <= ranS + SINCE_START_SLACK_S) return { ...base, state: beatState(beat), words: heartbeatState(beat) };
   const before = beat === undefined ? "" : `; its row is the run before's, ${heartbeatState(beat)}`;
   return ranS < START_GRACE_S
     ? { ...base, state: "starting", words: `started by its coordinator ${ago(ranS)} ago, no stamp of its own yet${before}` }

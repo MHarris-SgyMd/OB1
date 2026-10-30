@@ -1721,6 +1721,10 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   assert(fresh[1]?.state === "starting" && gone[1]?.state === "missing" && /written no heartbeat since/.test(gone[1]!.words) && gone[1]!.at === null
       && before[1]?.state === "missing" && /its row is the run before's, stale \(last stamped 15 min ago/.test(before[1]!.words) && before.length === 2,
     `a child with no stamp since its start is starting within the grace and missing after, an older row the run before's (${fresh[1]?.state}, ${gone[1]?.state}, ${before[1]?.words})`);
+  // A first stamp within a second of the start reads a second past the run's rounded seconds: still this run's (review pass 1).
+  const rounded = states({ "board-sync": { ...bs, for_s: 600 } }, [beat("heartbeat:board-sync", { every_s: 300 }, 611)]);
+  assert(rounded[1]?.state === "idle" && /^alive/.test(rounded[1]!.words),
+    `a row a rounding older than the run is still the run's, not the run before's (${rounded[1]?.state}: ${rounded[1]?.words})`);
   // Waiting for its next try, counted from the coordinator's stamp; stopped with it.
   const waiting = states({ "board-sync": { ...bs, state: "waiting", in_s: 60, code: 2, tries: 3 } }, [board], 20);
   const stopped = states({ "board-sync": { ...bs, state: "stopped" } }, [board]);

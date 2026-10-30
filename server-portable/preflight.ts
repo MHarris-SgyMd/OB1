@@ -5134,9 +5134,11 @@ if (configFailed) {
               const fixes = wrong.map((t) => {
                 const name = t.job ?? t.task;
                 if (t.task === "coordinator") {
+                  // As the workers row's: a coordinator taken away on purpose leaves a row only its retirement clears (review pass 1).
+                  const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
                   return t.state === "stale"
-                    ? `The coordinator has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database — start it again: ${COORDINATOR_UP}.`
-                    : `The coordinator stopped: start it again — ${COORDINATOR_UP}.`;
+                    ? `The coordinator has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database — start it again: ${COORDINATOR_UP}. ${retire}`
+                    : `The coordinator stopped: start it again — ${COORDINATOR_UP}. ${retire}`;
                 }
                 if (t.state === "missing") return `${name}: ${t.words} — the coordinator's log says why (compose logs coordinator).`;
                 return `${name}: ${t.words} — the ${t.task === "sleep" ? "sleep" : "workers"} row says what to do.`;

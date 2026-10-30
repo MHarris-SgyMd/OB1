@@ -3450,8 +3450,9 @@ else {
       // The coordinator gone quiet: said so, its restart named, and its children read from their own rows alone.
       await claims`UPDATE ob1_config SET updated_at = now() - interval '10 minutes' WHERE key = 'heartbeat:coordinator'`;
       const quiet = await run(SQL_ENV);
-      assert(/!\s+tasks\s+coordinator stale, board-sync idle$/m.test(quiet.out) && /The coordinator has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(fix(quiet.out, "tasks")),
-        `a coordinator past three intervals is stale, its restart named, and only rows of their own speak for its children (${row(quiet.out, "tasks")})`);
+      assert(/!\s+tasks\s+coordinator stale, board-sync idle$/m.test(quiet.out) && /The coordinator has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(fix(quiet.out, "tasks"))
+          && /Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:coordinator'\./.test(fix(quiet.out, "tasks")),
+        `a coordinator past three intervals is stale, its restart and its retirement named, and only rows of their own speak for its children (${row(quiet.out, "tasks")})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }
