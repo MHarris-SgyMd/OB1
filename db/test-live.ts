@@ -4281,14 +4281,18 @@ if (want("9f")) {
     providerDown503 = true;
     await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${midThought}::uuid`;
     const sentBackAgain = await pollUntil(async () => mid2.lines.filter((l) => l.includes(`${midThought} goes back to the pool unrecorded`)).length >= 2, 15_000);
-    const claimAgain = await claimOf(midThought);
+    // The line comes before the claim goes back (the worker's finally returns it), so the claim is
+    // polled out of hand, bounded; the value the poll saw is the one asserted. Read at once, it was
+    // still claimed (SMD-3612).
+    let claimAgain = undefined as Awaited<ReturnType<typeof claimOf>>;
+    await pollUntil(async () => (claimAgain = await claimOf(midThought)) !== undefined && claimAgain.status !== "claimed", 5_000);
     providerDown503 = false;
     const midAgain = await pollUntil(() => atModel(midThought), 15_000);
     const mid2Exit = await mid2.stop();
     downStatus = 503;
     assert(mid2Stamped && sentBack && waitingRow && claimAtOutage?.status === "pending" && claimAtOutage.last_error === null && resumed && midEmbedded && mid2Exit === "exit 0",
       `a provider outage mid-pass sends the row back to the pool unrecorded (${JSON.stringify(claimAtOutage)}), the follower's row waits mid-pass, failed, and the pass resumes when the provider answers (idle ${mid2Stamped}, sent back ${sentBack}, row waiting ${waitingRow}, resumed ${resumed}, embedded ${midEmbedded}; ${mid2Exit})`);
-    assert(sentBackAgain && claimAgain?.status === "pending" && midAgain,
+    assert(sentBackAgain && claimAgain?.status === "pending" && claimAgain.last_error === null && midAgain,
       `…and the thought, re-embedded since, is no suspect at the next outage: back to the pool unrecorded again, then re-embedded (sent back again ${sentBackAgain}, embedded ${midAgain}; claim ${JSON.stringify(claimAgain)})`);
 
     // A row the provider fails again right after it answered a probe is the row's own: recorded failed, not cycled for ever.
@@ -16716,7 +16720,10 @@ if (want("38")) {
       wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
       extractedAtWake = extractedDuringSweep;
       leftByWake = await rowsBy("zz-wake");
-      wakeMark = (await beat())?.slept;
+      // The sleep's end is marked after the line, and the row's next write carries it (pass-stamp.ts's
+      // slept), so it is polled for, bounded; the value the poll saw is the one asserted. Read at once,
+      // it was the start's mark, open (SMD-3627).
+      await pollUntil(async () => typeof (wakeMark = (await beat())?.slept)?.to === "string", 5_000);
     } finally {
       await fastDelete();
     }
