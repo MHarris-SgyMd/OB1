@@ -357,11 +357,12 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
+    const every = child.every?.(l.env);
     return supervise({
       worker: child.name,
       cmd: l.cmd,
       ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
-      ...(child.every?.(l.env) === undefined ? {} : { every: child.every!(l.env) }),
+      ...(every === undefined ? {} : { every }),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,

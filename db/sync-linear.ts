@@ -15,7 +15,7 @@
  *
  *   bun db/sync-linear.ts --url postgres://…                 # one pass
  *   bun db/sync-linear.ts --url … --dry-run                  # what a pass would write; nothing written
- *   bun db/sync-linear.ts --url … --trigger                  # the coordinator's mode: a pass at start and at each SIGUSR2 its clock sends, every OB1_BOARD_SYNC_INTERVAL seconds (300)
+ *   bun db/sync-linear.ts --url … --trigger                  # the coordinator's mode: a pass at start and at each SIGWINCH its clock sends, every OB1_BOARD_SYNC_INTERVAL seconds (300)
  *   bun db/sync-linear.ts --url … --audit                    # the lockstep census alone: missing / stale / extra, exit 1 when any
  *   bun db/sync-linear.ts --url … --full                     # every issue re-rendered and compared, not only the moved ones
  *   bun db/sync-linear.ts --self-check                       # the pure parts and the write decisions, no network, no database
@@ -1689,12 +1689,12 @@ async function main(): Promise<void> {
   }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>", loop: "(retired: --trigger, the coordinator's clock)" } });
   // The loop's clock is the coordinator's since SMD-3476: --trigger passes when it says.
   if (cli.has("loop")) { console.error("--loop is retired (SMD-3476): the coordinator runs board-sync's passes every OB1_BOARD_SYNC_INTERVAL seconds — name board-sync in OB1_PASSES; from a checkout, OB1_PASSES=board-sync bun db/coordinator.ts"); process.exit(2); }
-  // The coordinator's clock (SMD-3476): a SIGUSR2 starts the next pass when
-  // it lands while the process waits for one. Heard from here, first, since
-  // the signal's default ends the process; one during the start or a pass is
-  // let go, so passes keep at least the clock's gap, as --loop's sleep did.
-  let wake: (() => void) | null = null;
-  if (cli.has("trigger")) process.on(TRIGGER_SIGNAL, () => wake?.());
+  // The coordinator's clock (SMD-3476): a trigger starts the next pass when it
+  // lands while the process waits for one (triggerGate). One during the start
+  // or a pass is let go, so passes never overlap or queue: each starts on a
+  // tick of the clock that found the process waiting.
+  const gate = triggerGate();
+  if (cli.has("trigger")) process.on(TRIGGER_SIGNAL, gate.trigger);
   // A dry run or an audit is a run of its own: under --trigger it would wait for a clock that never comes.
   for (const f of ["dry-run", "audit"] as const) if (cli.has("trigger") && cli.has(f)) { console.error(`--trigger takes no --${f}: it is the coordinator's mode, a pass at each of its triggers; run --${f} alone.`); process.exit(2); }
   if (cli.has("self-check")) process.exit(await selfCheck());
@@ -1714,14 +1714,14 @@ async function main(): Promise<void> {
    * A refusal of the configuration: said, then exit 2 — and under --trigger,
    * the coordinator's mode, `heartbeat:board-sync` ended first with its kind,
    * so preflight gives the remedy and the coordinator's supervisor says it is
-   * held for that cause (SMD-3214). A dry run or an audit writes no row, as
-   * its passes would not; a database out of reach leaves the row alone.
+   * held for that cause (SMD-3214). A run of its own (a pass, a dry run, an
+   * audit) writes no row; a database out of reach leaves the row alone.
    */
   const trigger = cli.has("trigger");
   const refuse = async (kind: StartRefusal, line: string): Promise<never> => {
     console.error(line);
     const at = databaseUrlIfAny(cli.value("url"));
-    if (trigger && !cli.has("dry-run") && !cli.has("audit") && at !== null) {
+    if (trigger && at !== null) {
       const own = openSql(at);
       try {
         await endOnRefusal({ sql: own, worker: "board-sync", intervalS: DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
@@ -1904,18 +1904,15 @@ async function main(): Promise<void> {
   // otherwise land between the clears and the sets with no undo (tenth review
   // pass). The pass ends after the issue in hand; a second signal is the
   // runtime's default and kills.
-  // The next trigger, or at once on a stop, which ends the wait as it ends the pass.
-  const nextTrigger = (): Promise<void> =>
-    stopping ? Promise.resolve() : new Promise<void>((resolve) => { wake = () => { wake = null; resolve(); }; });
-  const stop = () => { if (stopping) process.exit(130); stopping = true; wake?.(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
+  const stop = () => { if (stopping) process.exit(130); stopping = true; gate.stop(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
   // The trigger's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
-  // pass, re-stamped while one runs, and "stopped" when the process ends. A dry
-  // run or an audit writes nothing, its heartbeat included; a one-shot pass
-  // stamps nothing either, so no row is left to go stale.
-  const stamper = trigger && !dryRun && !cli.has("audit")
+  // pass, re-stamped while one runs, and "stopped" when the process ends. A run
+  // of its own — a pass, a dry run, an audit, none under --trigger — stamps
+  // nothing, so no row is left to go stale.
+  const stamper = trigger
     ? passStamper({
         sql, worker: "board-sync", intervalS: interval,
         onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the passes go on`),
@@ -1925,7 +1922,7 @@ async function main(): Promise<void> {
   try {
     if (!trigger) { code = await once(); return; }
     console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL} the coordinator sends (every ${interval} s; nothing else sends one) against ${initiative}; SIGTERM/SIGINT ends it after the issue in hand`);
-    code = await triggerPasses({ once, next: nextTrigger, stopped: () => stopping, stamper });
+    code = await triggerPasses({ once, next: gate.next, stopped: () => stopping, stamper });
   } finally {
     await store.close();
     await sql.close();
@@ -1934,8 +1931,28 @@ async function main(): Promise<void> {
 }
 
 /**
+ * The wait between --trigger's passes (SMD-3476): `trigger` (the signal's
+ * handler) ends a wait in progress and is let go otherwise — during the start
+ * or a pass — and `stop` ends it, or the next, at once. While it waits it holds
+ * a timer, so the process stays alive between passes by a handle of its own,
+ * not by its caller's pending top-level await. Pure: the signal is main()'s.
+ */
+export function triggerGate(): { trigger: () => void; stop: () => void; next: () => Promise<void> } {
+  let wake: (() => void) | null = null;
+  let stopped = false;
+  return {
+    trigger: () => wake?.(),
+    stop: () => { stopped = true; wake?.(); },
+    next: () => stopped ? Promise.resolve() : new Promise<void>((resolve) => {
+      const hold = setInterval(() => {}, 1 << 30);
+      wake = () => { wake = null; clearInterval(hold); resolve(); };
+    }),
+  };
+}
+
+/**
  * --trigger: a pass, then the next trigger — the coordinator's clock, a
- * SIGUSR2 every OB1_BOARD_SYNC_INTERVAL seconds (SMD-3476; --loop's own clock
+ * SIGWINCH every OB1_BOARD_SYNC_INTERVAL seconds (SMD-3476; --loop's own clock
  * before) — until a signal to stop. One process for every pass, so its start,
  * its handlers and its once-a-run notes come once. The last pass's result is
  * the exit code — a service whose every pass reported errors must not stop

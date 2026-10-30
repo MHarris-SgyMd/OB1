@@ -5380,7 +5380,7 @@ should read Done. `sync-linear.ts` is that sweep, and the coordinator's
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
-bun sync-linear.ts --url … --trigger                 # the coordinator's mode: a pass at its start and at each SIGUSR2, its heartbeat stamped; the coordinator sends one every OB1_BOARD_SYNC_INTERVAL seconds (300); --loop is retired (SMD-3476)
+bun sync-linear.ts --url … --trigger                 # the coordinator's mode: a pass at its start and at each SIGWINCH, its heartbeat stamped; the coordinator sends one every OB1_BOARD_SYNC_INTERVAL seconds (300); --loop is retired (SMD-3476)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
@@ -5749,11 +5749,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3086 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1847 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1849 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 421 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 423 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

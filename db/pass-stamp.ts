@@ -51,16 +51,21 @@ import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
 import type { BudgetStop, SleepAside, SleepBudget, SleepHeld } from "../server-portable/brain-info.ts";
 
-/** The workers that stamp, as the key and preflight's row name them. */
-/** What the coordinator's clock sends board-sync for each pass (db/supervise.ts's `every`, db/sync-linear.ts --trigger, SMD-3476). */
-export const TRIGGER_SIGNAL = "SIGUSR2" as const;
+/**
+ * What the coordinator's clock sends board-sync for each pass (db/supervise.ts's
+ * `every`, db/sync-linear.ts --trigger, SMD-3476): SIGWINCH, whose default is
+ * to be ignored, so one that lands before the tool's handler is in — a slow
+ * start — does nothing, where SIGUSR2's default would end the process.
+ */
+export const TRIGGER_SIGNAL = "SIGWINCH" as const;
 /**
  * board-sync's interval, in whole seconds, as the tool and the coordinator's
- * clock both read it: at least 10, at most a week — a clock past setInterval's
- * 2^31 ms would fire every millisecond.
+ * clock both read it: at least 10, and at most 2147483 (24.8 days) — a clock
+ * past setInterval's 2^31 ms would fire every millisecond.
  */
-export const BOARD_INTERVAL_RULE = { min: 10, max: 604_800 } as const;
+export const BOARD_INTERVAL_RULE = { min: 10, max: 2_147_483 } as const;
 
+/** The workers that stamp, as the key and preflight's row name them. */
 export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed"] as const;
 export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 
