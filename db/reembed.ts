@@ -489,7 +489,7 @@ import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-st
 import { heartbeatKeyCarried, shellWord } from "../server-portable/brain-info.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, admitted, AbortedInHand, inHandCalls, setBack, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
@@ -566,7 +566,7 @@ export interface ReembedOptions {
   retryFallbacks?: boolean;
   writer?: Writer;
   signal?: AbortSignal;
-  onPass?: (stop: PassStop) => void;
+  onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
    * --follow SECONDS (SMD-2679): after the pass, poll every SECONDS — each
    * poll pools again (the data rule and the rows not at the target, or every
@@ -2023,6 +2023,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   let failed = 0;
   let vanished = 0;
   let lost = 0;
+  /** Thoughts whose embedding call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
+  let abortedInHand = 0;
+  /** Each worker's embedding call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
   let beats = 0;
   /** Worker ids with leases possibly outstanding, for a forced exit. */
   const activeWorkers = new Set<string>();
@@ -2058,9 +2062,12 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * write fell short of what was asked and the row should say so — "failed" with
    * an error, or "vanished" when the thought was deleted after it was claimed.
    */
-  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" } | { outcome: "abandoned" };
+  /** `setBack`: its call in hand aborted by the pass's caller (abortInHand), the worker sets it back in the queue (SMD-3379 PR 1b-2). */
+  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" } | { outcome: "abandoned" } | { outcome: "setBack" };
 
-  async function processRow(row: Row): Promise<Outcome> {
+  async function processRow(row: Row, workerId: string): Promise<Outcome> {
+    const call = inCall.get(workerId);
+    const callStop = call ? AbortSignal.any([onHardStop.signal, call.abort.signal]) : onHardStop.signal;
     let current = row;
     for (let attempt = 0; attempt < 3; attempt++) {
       // The hard stop came during the re-read below: the row is the pool's
@@ -2071,7 +2078,14 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // The hard stop aborts the call (onHardStop): its AbortError reaches the
       // worker's catch, which returns before recording or releasing anything,
       // the stop being set.
-      const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content }, onHardStop.signal);
+      let embedded: Awaited<ReturnType<typeof embedder.embedCapture>>;
+      try {
+        embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content }, callStop);
+      } catch (e) {
+        // The pass's caller aborted the call in hand (abortInHand): set back, not failed.
+        if (!hardStopped && call?.aborted) return { outcome: "setBack" };
+        throw e;
+      }
       // The hard stop came while the provider answered: the leases are
       // returned, so the vector is not written.
       if (hardStopped) return { outcome: "abandoned" };
@@ -2256,9 +2270,11 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           if (!row) {
             outcome = { outcome: "vanished" };
           } else {
+            inCall.begin(workerId);
             try {
-              outcome = await processRow(row);
-              probed = true;
+              outcome = await processRow(row, workerId);
+              // An aborted call is no answer from the provider (review pass 2).
+              if (outcome.outcome !== "setBack") probed = true;
             } catch (e) {
               if (e instanceof WriterThrow) throw e.error;
               const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
@@ -2333,6 +2349,25 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
           // Out of the heartbeat's set before the release goes out, so a beat in
           // flight across the release does not read the released row as lost.
           hb.held.delete(b.thought_id);
+          inCall.end(workerId);
+          // The pass's caller aborted the call in hand: the thought to the back of
+          // the queue, the worker goes on with its next claim; a set-back the
+          // database refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
+          if (outcome.outcome === "setBack") {
+            let back: boolean;
+            try {
+              back = await setBack(sql, JOB, workerId, b.thought_id);
+            } catch (re) {
+              hb.held.add(b.thought_id);
+              err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its embedding call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+              return;
+            }
+            // Not ours to set back: deleted, or edited or reaped meanwhile, and said so (review pass 1).
+            if (back) abortedInHand++;
+            else if ((await reportLost(sql, JOB, workerId, b.thought_id, err)) === "deleted") vanished++;
+            else lost++;
+            continue;
+          }
           if (outcome.outcome === "vanished") {
             // The claim row cascaded away with the thought; there is nothing to
             // release. Count it so the summary adds up.
@@ -2395,6 +2430,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         }
       }
     } finally {
+      inCall.end(workerId);
       hb.stop();
       beats += hb.beats;
       // Unconditionally: a worker that stops for any reason — an empty pool, a
@@ -2455,7 +2491,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   // Through the start: the provider answered its probe (extract-entities.ts's).
   opts.onStart?.({ ok: true, provider: "up" });
-  opts.onPass?.(stop);
+  opts.onPass?.(stop, inCall.abortInHand);
 
   say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
   /**
@@ -2668,7 +2704,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return hardStopped ? 130 : 0;
   }
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+  out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the embedding call in hand aborted by the pass's caller` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
   if (SUMMARY) {
     printCounts(after, "after");
     await printDuplicateGroups();

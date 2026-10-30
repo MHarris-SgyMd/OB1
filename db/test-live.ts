@@ -55,7 +55,7 @@ import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from ".
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { drainer, sweepOrphans } from "./rebuild.ts";
-import type { PassStop } from "./lease.ts";
+import type { InHandAbort, PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
@@ -4683,6 +4683,25 @@ if (want("9f")) {
     const pollExit = await polled.stop();
     assert(drained && pollWaiting && unpooledC && pooledC && pollExit === "exit 0",
       `…closed before a poll, it waits before the pool — a new thought not pooled while it waits — and pools and re-embeds it once the gate opens (drained ${drained}, waiting ${pollWaiting}, unpooled ${unpooledC}, re-embedded ${pooledC}; ${pollExit})`);
+    // abortInHand (SMD-3379 PR 1b-2): a follower's embedding call in hand
+    // aborted, the thought set back, and the follower goes on to re-embed it.
+    let abortEmbed: InHandAbort | undefined;
+    const embedFrom = probeCalls;
+    // Under OB1_LLM_TIMEOUT (2 s here), so a call not aborted answers rather than times out.
+    slowMs = 1500;
+    const aborting = liveFollower({ onPass: (_st, a) => { abortEmbed = a; } });
+    await aborting.idle();
+    const slowThought = await newThought("a thought whose embedding call is aborted in hand");
+    const embedInHand = await pollUntil(async () => (await claimOf(slowThought))?.status === "claimed", 15_000);
+    await Bun.sleep(200);
+    const embedTooYoung = abortEmbed?.(60_000) ?? -1;
+    const embedAborted = abortEmbed?.() ?? -1;
+    slowMs = 0;
+    const embedded = await pollUntil(() => atModel(slowThought), 15_000);
+    const abortingExit = await aborting.stop();
+    const setBackLine = aborting.lines.find((l) => /set back in the queue/.test(l)) ?? "";
+    assert(embedInHand && embedTooYoung === 0 && embedAborted === 1 && embedded && abortingExit === "exit 0" && /1 set back in the queue, the embedding call in hand aborted by the pass's caller/.test(setBackLine),
+      `abortInHand aborts a re-embed follower's call in hand: the thought set back and re-embedded, the follower going on (${embedTooYoung} then ${embedAborted} aborted, re-embedded ${embedded}; ${abortingExit}; ${setBackLine.trim().slice(0, 160)}; ${probeCalls - embedFrom} probe(s))`);
   } finally {
     restoreOutage();
     providerDown503 = false;
@@ -6303,6 +6322,58 @@ if (want("10")) {
   assert(movedWaiting && movedInHand && movedCode === 130 && movedRow?.stops === 1 && movedRow.stalled === 0,
          `…a hard stop while the window after a 1,500 ms wait is in hand counts the thought's time from the wait's end, so a 1,000 ms floor stalls nothing (exit ${movedCode}; ${JSON.stringify(movedRow)})`);
   await sql`SELECT delete_thought(${movedNote}::uuid, NULL::jsonb)`;
+  // abortInHand (SMD-3379 PR 1b-2): the pass's caller aborts the call in hand.
+  // A long note claimed first, a short one behind it; the gate holds the long
+  // one before its second window, then lets that window's slow call go and
+  // closes again from the next ask. A call younger than the bound given is
+  // left; with none, it is aborted — the first window kept, the stop counted,
+  // the long note set behind the short one — and the worker goes on to its
+  // next claim, where the closed gate holds it for the reading.
+  const firstNote = await seed(ledgerOf("aborted", "aborted"));
+  const behindNote = await seed("Kenji's note behind the aborted ledger.");
+  const atAbort = heldGate(3);
+  let abortInHand: InHandAbort | undefined;
+  const abortLines: string[] = [];
+  const abortRun = runExtract({ url: URL_!, env, workers: 1, admit: atAbort.admit, onPass: (_st, a) => { abortInHand = a; }, writer: { out: (l) => abortLines.push(l), err: (l) => abortLines.push(l) } });
+  const abortAtWindow = await pollUntil(async () => atAbort.waiting === 1, 10_000);
+  slowMs = 3000;
+  const abortFrom = calls;
+  atAbort.open();
+  atAbort.close();
+  let abortInFlight = false;
+  for (let i = 0; i < 250 && !abortInFlight; i++) { abortInFlight = calls > abortFrom; if (!abortInFlight) await Bun.sleep(20); }
+  const tooYoung = abortInHand?.(60_000) ?? -1;
+  const aborted = abortInHand?.() ?? -1;
+  slowMs = 0;
+  const abortHeld = await pollUntil(async () => atAbort.waiting === 1, 10_000);
+  const [abortRow] = (await sql`SELECT c.status, p.stops, p.parts, c.enqueued_at > (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${behindNote}::uuid AND work_type = ${KEY}) AS behind
+                                  FROM thought_work_claims c LEFT JOIN extraction_progress p USING (thought_id, work_type)
+                                 WHERE c.thought_id = ${firstNote}::uuid AND c.work_type = ${KEY}`) as { status: string; stops: number | null; parts: Record<string, unknown> | null; behind: boolean }[];
+  atAbort.open();
+  const abortCode = await abortRun;
+  const abortSummary = abortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(abortAtWindow && abortInFlight && tooYoung === 0 && aborted === 1 && abortHeld && abortRow?.status === "pending" && abortRow.stops === 1 && Object.keys(abortRow.parts ?? {}).length === 1 && abortRow.behind === true,
+         `abortInHand leaves a call younger than its bound, aborts the one in hand without one, and the thought goes behind the next, its first window kept and its stop counted (${tooYoung} then ${aborted} aborted; ${JSON.stringify({ status: abortRow?.status, stops: abortRow?.stops, kept: Object.keys(abortRow?.parts ?? {}).length, behind: abortRow?.behind })})`);
+  assert(abortCode <= 1 && (await statusOf(firstNote)) === "succeeded" && (await statusOf(behindNote)) === "succeeded" && /, 1 set back in the queue, the call in hand aborted by the pass's caller/.test(abortSummary),
+         `…and the worker goes on in the same run: both notes extracted, the summary counting the one set back (exit ${abortCode}: ${abortSummary.trim().slice(0, 200)})`);
+  for (const id of [firstNote, behindNote]) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // …and one deleted while its call is in hand, then aborted: not the
+  // worker's to set back, so counted deleted, not set back (review pass 1).
+  const vanishing = await seed(ledgerOf("vanishing", "vanished"));
+  let abortGone: InHandAbort | undefined;
+  const goneAbortLines: string[] = [];
+  slowMs = 3000;
+  const goneAbortFrom = calls;
+  const goneAbortRun = runExtract({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortGone = a; }, writer: { out: (l) => goneAbortLines.push(l), err: (l) => goneAbortLines.push(l) } });
+  let goneInFlight = false;
+  for (let i = 0; i < 500 && !goneInFlight; i++) { goneInFlight = calls > goneAbortFrom; if (!goneInFlight) await Bun.sleep(20); }
+  await sql`SELECT delete_thought(${vanishing}::uuid, NULL::jsonb)`;
+  const goneAborted = abortGone?.() ?? -1;
+  slowMs = 0;
+  const goneAbortCode = await goneAbortRun;
+  const goneAbortSummary = goneAbortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary) && goneAbortLines.some((l) => l.includes(`${vanishing}: deleted while it was leased`)),
+         `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -9740,6 +9811,67 @@ if (want("16")) {
   const statusAfter = await consolidate("--status");
   assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
 
+  // SMD-2608 (114): who decided, on the row — the worker's key on its accept and its reject, said by each and by
+  // --list; a reject run with no key carries 'consolidate' and no agent, said so; a key classified after it decided
+  // reads the registry's kind now, said so.
+  const reviewerOf = async (id: string) =>
+    (await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { by: string | null; agent: string | null };
+  /** consolidate.ts run with no worker key, as the keyless cases above run it. */
+  const consolidateKeyless = (...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: keyless, cwd: HERE });
+  /** The decided-by lines a run printed, trimmed. */
+  const decidedBy = (out: string) => out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  assert(/decided by: consolidator \(/.test(forced.out) && /decided by: consolidator \(/.test(unforced.out)
+      && JSON.stringify(await reviewerOf(directed.id)) === JSON.stringify({ by: "consolidator", agent: agent.id }),
+    `the accept and the reject each say who decided, and the row records the worker's key and agent (${decidedBy(unforced.out)[0]})`);
+  const noKeyReject = await consolidateKeyless("--reject", undirected.id, "--note", "no key");
+  assert(noKeyReject.code === 0 && /decided by: consolidate, no agent id recorded \(run with no key, or a key that did not resolve\)/.test(noKeyReject.out)
+      && JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    `a reject run with no key records 'consolidate' and no agent, and says so (${decidedBy(noKeyReject.out)[0]})`);
+  const listRejected = await consolidate("--list", "rejected");
+  const decidedLines = decidedBy(listRejected.out);
+  assert(decidedLines.length === 2 && decidedLines.includes("decided by: consolidator (a key the registry has not classified)") && decidedLines.includes("decided by: consolidate, no agent id recorded (run with no key, or a key that did not resolve)"),
+    `--list rejected shows who decided each row (${decidedLines.join(" | ")})`);
+  await sql`UPDATE ob1_agents SET kind = 'operator' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const listClassified = await consolidate("--list", "rejected");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(listClassified.out.includes("decided by: consolidator (operator — classified after it decided)") && listClassified.out.includes("decided by: consolidate, no agent id recorded"),
+    `a key classified after it decided reads the registry's kind now, said so; a decision with no agent lends none (${decidedBy(listClassified.out).join(" | ")})`);
+  const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
+  assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
+    "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
+  const listAccepted = await consolidate("--list", "accepted");
+  const acceptedLines = decidedBy(listAccepted.out);
+  assert(listAccepted.code === 0 && acceptedLines.length === 1 && acceptedLines[0] === "decided by: consolidator (a key the registry has not classified)",
+    `--list accepted shows who decided the accepted row (${acceptedLines.join(" | ")})`);
+  // A key classified before it decides: its kind at the decision, with no "since" (the reject clears nothing).
+  await sql`UPDATE ob1_agents SET kind = 'agent' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const classifiedReject = await consolidate("--reject", directed.id, "--note", "classified first");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(classifiedReject.code === 0 && classifiedReject.out.includes("decided by: consolidator (agent)\n"),
+    `a key classified before it decides is recorded with its kind then, and still says it once the registry forgets it (${decidedBy(classifiedReject.out)[0]})`);
+  // A brain short of 114 (its columns gone, the trigger with them): a decision still lands, says the row records no
+  // reviewer, and rolls nothing back; --list says once that it cannot show who decided. Keyless, so the worker's
+  // audit rows below stay the reviews they count. 114 put back after, its backfill naming the keyless accept.
+  await sql`ALTER TABLE supersession_proposals DROP COLUMN reviewed_by CASCADE, DROP COLUMN reviewed_by_agent_id CASCADE, DROP COLUMN reviewed_by_kind CASCADE`;
+  let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
+  let shortStatus: string, shortPointer: string | null;
+  try {
+    shortReject = await consolidateKeyless("--reject", undirected.id, "--note", "short of 114");
+    shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
+    shortList = await consolidateKeyless("--list", "rejected");
+    shortAccept = await consolidateKeyless("--accept", undirected.id, "--direction", "newer");
+    shortPointer = await supersedesOf(green);
+  } finally {
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_proposal_reviewer.sql") });
+  }
+  assert(shortReject.code === 0 && shortReject.out.includes("  the reject records no reviewer on the row: this brain is short of migration 114") && shortStatus === "rejected"
+      && shortAccept.code === 0 && shortAccept.out.includes("  the accept records no reviewer on the row: this brain is short of migration 114") && shortPointer === blue,
+    `on a brain short of 114 a reject and an accept each land and say the row records no reviewer (${shortReject.out.split("\n").filter((l) => /reviewer/.test(l)).map((l) => l.trim()).join(" | ")}; ${shortStatus}, pointer ${shortPointer === blue ? "back" : shortPointer})`);
+  assert(shortList.code === 0 && shortList.out.split("Who decided each row is not shown: this brain is short of migration 114").length === 2 && !/decided by:/.test(shortList.out),
+    `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
+  assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    "…and 114 put back, its backfill names the keyless accept from its audit row");
+
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;
   const retried = await consolidate("--retry-failed");
@@ -9793,10 +9925,11 @@ if (want("16")) {
   assert(widest.code === 0 && /no entity has gone 2000000 days/.test(widest.out) && /timestamp out of range/.test(pastFloor) && claimMax === "claimed" && /does not exist/.test(claimPast),
     `--stale ${MAX_STALE_DAYS} lists where 3,000,000 days is out of Postgres's range (${pastFloor}), and claim_thoughts takes MAX_BATCH where one more matches no signature (${claimPast.slice(0, 60)})`);
 
-  // The worker never wrote thought_audit itself: the three rows under its name
-  // are the two acceptances and the rejection's clearing.
+  // The worker never wrote thought_audit itself: the rows under its name are
+  // the reviews — four accepts (the fourth SMD-2608's, after a keyless reject
+  // whose clearing is under 'consolidate') and two cleared rejects.
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
-  assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
+  assert(Number(actorRows) === 6, `the worker's audit rows are exactly the reviews: four accepts and two cleared rejects (${actorRows})`);
 
   // 067 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
   // moved under the verdict — is the pass's to settle or replace. Through the
@@ -9960,7 +10093,7 @@ if (want("16")) {
     const beaconOut = await proposalRow(beacon.id);
     assert(fellOut.code === 0 && /stale proposals: 1 settled by the pass \(1 no longer a candidate pair\)/.test(fellOut.out) && beaconOut.status === "rejected" && beaconOut.review_note === passSettledNote("no longer a candidate pair — no shared entity", KEY) && (await lineageOf(beacon.id))[0].recipe.settled === "not-a-candidate" && (await lineageOf(beacon.id))[0].recipe.reason === "no shared entity",
            `a stale pair with no shared entity left is settled as no longer a candidate, at the current texts (exit ${fellOut.code}: ${staleLine(fellOut.out)}; ${JSON.stringify(beaconOut)})`);
-    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
+    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
     // A stale pair whose judge call TIMES OUT was reached, not left out: the
     // row stays stale, the thought is recorded failed, --retry-failed
     // revisits it — and a run meanwhile does not re-pool a failed thought
@@ -10060,7 +10193,7 @@ if (want("16")) {
       `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
-    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "…still without an audit row");
     // A person may not borrow the marker: rebuild_derived would read the
     // rejection as the pass's and reopen it on a move.
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);
@@ -11238,6 +11371,26 @@ if (want("16")) {
   const oldersAfter = await claimStatus(latest);
   assert(oldersWaiting && olders.length === 4 && calls - oldersFrom === 1 && oldersAfter === "succeeded" && oldersCode <= 1,
          `…its older sides deleted while it waits before its second pair, none of their texts is judged once the gate opens, and the thought is finished (${olders.length} older side(s), ${calls - oldersFrom} call(s), ${oldersAfter}, exit ${oldersCode})`);
+  // abortInHand (SMD-3379 PR 1b-2): the judge call in hand aborted, the
+  // thought set back, and the worker goes on — the thought claimed again and
+  // judged in the same run (its older seed, pooled beside it, has no older
+  // side of its own to judge).
+  const abortNewer = await seed("[16g] The watchtower opens at three now.", 31, 0, ["watchtower"]);
+  await seed("[16g] The watchtower opened at nine once.", 31, 2, ["watchtower"]);
+  let abortJudge: InHandAbort | undefined;
+  const abortJudgeLines: string[] = [];
+  slowMs = 3000;
+  const abortJudgeFrom = calls;
+  const abortJudgeRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortJudge = a; }, writer: { out: (l) => abortJudgeLines.push(l), err: (l) => abortJudgeLines.push(l) } });
+  let judgeInFlight = false;
+  for (let i = 0; i < 500 && !judgeInFlight; i++) { judgeInFlight = calls > abortJudgeFrom; if (!judgeInFlight) await Bun.sleep(20); }
+  const judgeTooYoung = abortJudge?.(60_000) ?? -1;
+  const judgeAborted = abortJudge?.() ?? -1;
+  slowMs = 0;
+  const abortJudgeCode = await abortJudgeRun;
+  const abortJudgeSummary = abortJudgeLines.find((l) => /thought\(s\) judged/.test(l)) ?? "";
+  assert(judgeInFlight && judgeTooYoung === 0 && judgeAborted === 1 && abortJudgeCode <= 1 && (await claimStatus(abortNewer)) === "succeeded" && /, 1 set back in the queue, the judge call in hand aborted by the pass's caller/.test(abortJudgeSummary),
+         `abortInHand aborts consolidation's judge call in hand: the thought set back, and the worker goes on to judge it again in the same run (${judgeTooYoung} then ${judgeAborted} aborted; exit ${abortJudgeCode}: ${abortJudgeSummary.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
 
   judge.stop(true);
