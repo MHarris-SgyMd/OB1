@@ -4837,9 +4837,9 @@ if (configFailed) {
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
         // board-sync's trigger passes (SMD-3476) and the extraction and
-        // consolidation followers stamp one after every pass. The sleep scheduler's, at least every
-        // minute, its followers through it (SMD-1794), is its own row below
-        // (SMD-2678). One older than three
+        // consolidation followers stamp one after every pass. The sleep
+        // scheduler's, at least every minute, its followers through it
+        // (SMD-1794), is its own row below (SMD-2678). One older than three
         // of its own intervals is a stopped worker — board-sync was down four
         // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
         // one whose last pass

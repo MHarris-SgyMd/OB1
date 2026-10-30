@@ -1693,10 +1693,11 @@ async function main(): Promise<void> {
   // lands while the process waits for one (triggerGate). One during the start
   // or a pass is let go, so passes never overlap or queue: each starts on a
   // tick of the clock that found the process waiting.
+  const trigger = cli.has("trigger");
   const gate = triggerGate();
-  if (cli.has("trigger")) process.on(TRIGGER_SIGNAL, gate.trigger);
+  if (trigger) process.on(TRIGGER_SIGNAL, gate.trigger);
   // A dry run or an audit is a run of its own: under --trigger it would wait for a clock that never comes.
-  for (const f of ["dry-run", "audit"] as const) if (cli.has("trigger") && cli.has(f)) { console.error(`--trigger takes no --${f}: it is the coordinator's mode, a pass at each of its triggers; run --${f} alone.`); process.exit(2); }
+  for (const f of ["dry-run", "audit"] as const) if (trigger && cli.has(f)) { console.error(`--trigger takes no --${f}: it is the coordinator's mode, a pass at each of its triggers; run --${f} alone.`); process.exit(2); }
   if (cli.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (cli.has("audit") && cli.has("only")) { console.error("--audit takes no --only: the census is the whole board."); process.exit(2); }
@@ -1717,7 +1718,6 @@ async function main(): Promise<void> {
    * held for that cause (SMD-3214). A run of its own (a pass, a dry run, an
    * audit) writes no row; a database out of reach leaves the row alone.
    */
-  const trigger = cli.has("trigger");
   const refuse = async (kind: StartRefusal, line: string): Promise<never> => {
     console.error(line);
     const at = databaseUrlIfAny(cli.value("url"));

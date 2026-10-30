@@ -5285,8 +5285,9 @@ its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
-a pass at its start and at each of the coordinator's triggers (SMD-3476), and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
-(SMD-2679) — and
+a pass at its start and at each of the coordinator's triggers (SMD-3476),
+and the `--follow` of `extract-entities.ts`, `consolidate.ts` and
+`reembed.ts` (SMD-2679) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or

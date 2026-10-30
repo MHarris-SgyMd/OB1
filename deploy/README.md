@@ -1918,12 +1918,12 @@ shape.
 
 Every `OB1_BOARD_SYNC_INTERVAL` seconds (300), on the coordinator's clock
 (SMD-3476; the tool's own `--loop` is retired), `bun db/sync-linear.ts
---trigger`, which the coordinator starts and signals, runs a pass: a few requests list every issue's identifier, last-updated time and names
-(a hundred a page), one query reads the brain's ticket rows, and the difference
-is the work — a new
-issue is captured (vector, tags, and the facets Linear knows: project, status,
-priority, labels, parent), a moved or edited one is updated in place with a
-fresh vector, an unchanged one costs nothing. There is no state file: the brain
+--trigger`, which the coordinator starts and signals, runs a pass: a few
+requests list every issue's identifier, last-updated time and names (a hundred
+a page), one query reads the brain's ticket rows, and the difference is the
+work — a new issue is captured (vector, tags, and the facets Linear knows:
+project, status, priority, labels, parent), a moved or edited one is updated in
+place with a fresh vector, an unchanged one costs nothing. There is no state file: the brain
 is the state, so a pass that dies is finished by the next one. The same command
 runs from a checkout against any brain (`bun db/sync-linear.ts --url … --audit`
 is the lockstep census alone; `db/README.md`, "The board in the brain"). The

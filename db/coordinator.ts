@@ -129,8 +129,8 @@ export const CHILDREN: Record<ChildName, Child> = {
     requireKey: false, digits: [],
     // One process, a pass at its start and at each of the coordinator's triggers (SMD-3476), where the tool kept
     // a clock of its own (--loop). The interval goes to it as --interval, so its heartbeat's period is the clock's
-    // whatever a checkout's .env says; a value it does not take (not whole seconds, under 10) it refuses itself,
-    // held as any refusal is. The findings cap it reads and refuses itself too.
+    // whatever a checkout's .env says; a value it does not take (not whole seconds, under 10, past setInterval's
+    // bound) runs no clock, and the tool refuses it, held as any refusal is. The findings cap it reads and refuses too.
     args: (env) => ["--trigger", "--interval", boardInterval(env)],
     every: boardEvery,
   },
