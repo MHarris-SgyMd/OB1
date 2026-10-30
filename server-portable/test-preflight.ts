@@ -1978,7 +1978,8 @@ else {
   assert(/a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims/.test(row((await run(SQL_ENV)).out, "consolidate pass")),
          "a follower beside an expired claim names the dead claim");
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
-  // Stamped again right before the read: its age is asserted within a late read's range (review pass 3, SMD-3569).
+  // Stamped again right before the read: its age is asserted within a late
+  // read's range (review pass 3, SMD-3569).
   await followerBeat(20);
   const consFollowed = await run(SQL_ENV);
   assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 2\d s ago\): 1 pending between its polls\s*$/m.test(consFollowed.out),
@@ -4088,8 +4089,8 @@ else {
     assert(/!\s+workers\s+board-sync stopped \(last stamped 6\d s ago, every 300 s\)/.test(row(stopped.out, "workers")) && /board-sync stopped 6\d s ago: start it again/.test(fix(stopped.out, "workers")),
       `a fresh stopped heartbeat warns with the restart (${row(stopped.out, "workers")})`);
     assert(staleJson.ok === true && staleJson.checks.some((c) => c.name === "workers" && c.status === "warn"), "…a warning under ok:true — a stopped worker never refuses the deploy");
-    // Just inside three intervals: alive, 10 s short of them, past a late
-    // read's 9 s (SMD-3569).
+    // Just inside three intervals: alive. 890 of 900 is 10 s inside, more than
+    // a late read's 9 s can cross (SMD-3569).
     await beat("heartbeat:board-sync", v(), 890);
     assert(/✓\s+workers\s+board-sync alive/.test(row((await run(SQL_ENV)).out, "workers")), "a heartbeat inside three intervals is alive");
 
