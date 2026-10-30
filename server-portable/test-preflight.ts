@@ -755,17 +755,48 @@ else {
   // upstream's body, with the same names, goes over 015's unrefused.
   await tamper.unsafe("CREATE OR REPLACE FUNCTION release_thought(p_thought_id uuid, p_work_type text, p_worker_id text, p_status text, p_error text DEFAULT NULL) RETURNS boolean LANGUAGE sql AS $$ SELECT true $$");
   const releaseStale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(releaseStale.code === 1 && /work claims\s+release_thought's or release_claims_for_worker's body is not 015's — it does not clear the lease/.test(releaseStale.out) && /015_thought_work_claims\.sql/.test(releaseStale.out),
+  assert(releaseStale.code === 1 && /worker claims\s+release_thought's or release_claims_for_worker's body is not 015's — it does not clear the lease/.test(releaseStale.out) && /015_thought_work_claims\.sql/.test(releaseStale.out),
          "a release_thought body that is not 015's does not start, naming 015 and the CHECK every worker release would fail");
   await tamper.unsafe("CREATE FUNCTION claim_thoughts(uuid[], text, text, int) RETURNS SETOF uuid LANGUAGE sql AS $$ SELECT NULL::uuid WHERE false $$");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
   const stray = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(stray.code === 0 && /work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies; 1 overload\(s\) no migration defines: claim_thoughts\(_uuid,text,text,int4\)/.test(stray.out) && /DROP FUNCTION claim_thoughts\(_uuid,text,text,int4\);/.test(stray.out),
+  assert(stray.code === 0 && /worker claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies; 1 overload\(s\) no migration defines: claim_thoughts\(_uuid,text,text,int4\)/.test(stray.out) && /DROP FUNCTION claim_thoughts\(_uuid,text,text,int4\);/.test(stray.out),
          "015 re-applied puts the bodies back, and an overload no migration defines is a warning naming it with its DROP");
   await tamper.unsafe("DROP FUNCTION claim_thoughts(uuid[], text, text, int)");
   await tamper.close();
-  assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
+  assert(/worker claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
          "…and dropped, the claim functions are the shipped four, said as such");
+
+  // 115's work claims (SMD-3598), "ticket claims" beside 015's "worker claims": the four functions the claim
+  // operations call, and a statement log that would print a renewal's or a release's token (a bind value) whole.
+  {
+    const ticket = new SQL({ url: LIVE, max: 1 });
+    const line = (out: string) => out.split("\n").find((l) => /ticket claims/.test(l)) ?? "";
+    try {
+      const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; no statement log prints a token/.test(whole.out),
+             `on a brain at 115 the four claim functions, the claims grant and no token-printing log: ok (${line(whole.out).trim()})`);
+      await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer) RENAME TO list_work_claims_away");
+      const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer) RENAME TO list_work_claims");
+      assert(missing.code === 1 && /ticket claims\s+migration 115's list_work_claims\(text\[\],text,boolean,integer\) missing under 115's signature/.test(missing.out) && /115_work_claims\.sql/.test(missing.out),
+             `a claim function missing: does not start, naming it and 115 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+      // Statement logging, set for the database so the next connection reads it (a superuser's settings).
+      const [{ db }] = (await ticket`SELECT current_database() AS db`) as { db: string }[];
+      const dbIdent = `"${db.replaceAll('"', '""')}"`;
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_statement = 0`);
+      const logging = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_parameter_max_length = 0`);
+      const capped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_duration_statement`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_parameter_max_length`);
+      assert(logging.code === 0 && /!  ticket claims\s+statement logging is on \(log_statement=none, log_min_duration_statement=0\) and log_parameter_max_length is -1: a renewal's or a release's token, a bind value, is logged whole/.test(logging.out)
+             && /ALTER SYSTEM SET log_parameter_max_length = 0/.test(logging.out) && /✓  ticket claims/.test(capped.out),
+             `statement logging with bind values whole: a warning naming the setting that stops it; with log_parameter_max_length = 0, ok (${line(logging.out).trim().slice(0, 120)} | ${line(capped.out).trim().slice(0, 40)})`);
+    } finally {
+      await ticket.close();
+    }
+  }
 
   /**
    * SMD-1499: the server sized for the table. On this small fixture both rows
@@ -2982,7 +3013,7 @@ else {
   const pre015 = await run(SQL_ENV);
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "before migration 015 there is nothing to read, and the check says so rather than warning");
-  assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present/.test(pre015.out),
+  assert(/worker claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present/.test(pre015.out),
          "…while the claim functions, which outlive the table, still read as 015's");
   assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "…and the consolidate pass check, which reads the same table, says so too");
@@ -3094,6 +3125,10 @@ else {
       assert(/a windowed capture, an edit with content, or 008's audit trigger \(060's snapshot trigger writes ob1_embedding_snapshot as the caller on every capture or edit that carries a vector\) \(061's vector lineage trigger and the write functions record derivations as the caller on every capture and edit, and drop a replaced set's row\), and every delete of a thought \(042's citation guard reads and writes thought_facets as the caller\) would fail/.test(writeLine(missingBoth.out)),
              "…and says what each missing privilege breaks: the capture path for the chunk, audit, snapshot and lineage writes (060's and 061's triggers named), every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
+      // 115's claims group (SMD-3598): soft — a warning naming the group, never the refusal the capture set's is.
+      assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim, release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
+             && /--grant <role> --groups claims/.test(missingBoth.out),
+             "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.

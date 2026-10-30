@@ -2304,8 +2304,9 @@ soft: a role without it gets a permission error (42501) naming `work_claims` on
 the calls, and nothing else; the rules hold for
 callers of the functions, while a role with the group can write the table
 directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
-The REST and MCP operations are SMD-3598, the `claimed` label on results
-SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
+The REST and MCP operations are `claim_work`, `renew_claim`, `release_claim` and
+`list_claims` (SMD-3598; server-portable/README.md, Work claims); the `claimed`
+label on results is SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
 the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
 (onto a populated brain at 114).
 
