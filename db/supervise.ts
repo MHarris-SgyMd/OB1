@@ -1,41 +1,43 @@
 #!/usr/bin/env bun
 /**
- * supervise.ts — the compose services' follower, run again after it ends on its
- * own, so the service can be `restart: unless-stopped` without a crash loop
- * (SMD-3214).
+ * supervise.ts — one core pass, run again after it ends on its own, so the
+ * coordinator that runs it (db/coordinator.ts, SMD-3476) can be `restart:
+ * unless-stopped` without a crash loop (SMD-3214).
  *
- * Why. `sleep`, `extract`, `consolidate` and `board-sync` were `on-failure:3`:
- * a refusal exits 2, and an unconditional restart made board-sync's a crash
- * loop that filled the log — podman restarts at once, with no backoff, and
- * never resets the count. But neither runtime starts an `on-failure`
- * container at boot (podman-restart.service starts `always` and
+ * Why. `sleep`, `extract`, `consolidate` and `board-sync` were `on-failure:3`
+ * services: a refusal exits 2, and an unconditional restart made board-sync's
+ * a crash loop that filled the log — podman restarts at once, with no
+ * backoff, and never resets the count. But neither runtime starts an
+ * `on-failure` container at boot (podman-restart.service starts `always` and
  * `unless-stopped` alone, as Docker's daemon does), so every reboot, podman
  * update and Docker restart left a brain serving and not sleeping — on
  * 2026-10-22 both brains' `sleep` and stable's `board-sync` stayed down until
- * someone started them by hand. This process is the service's command
- * instead: the container does not exit when the follower does, so the
- * runtime has nothing to restart, and the follower is run again here, on a
- * clock of minutes.
+ * someone started them by hand. So the follower is a child that ends without
+ * its container ending: the runtime has nothing to restart, and the follower
+ * is run again here, on a clock of minutes. Since SMD-3476 one coordinator
+ * holds every such child, one supervise() each.
  *
- * The run. `--run` is the follower's command, as `sh -c` runs it — `exec bun
- * db/sleep.ts --follow …`, its settings expanded from the environment as the
- * compose file's `sh -c` did. It must `exec`, so the process this one signals
- * is the follower's own. A follower that ends on its own — a refusal (2), a
- * throw (1), anything but a stop asked for — is run again after RESTART_MS's
- * first wait, doubled at each end in a row to its cap: 1, 2, 4, 8, then every
- * 15 minutes. One that ran RESTART_MS.reset or longer before it ended starts
- * the count again. A refusal is the configuration's, which a restart at once
+ * The run. `cmd` is the follower's argv, run with no shell — its settings
+ * already read by the coordinator, so nothing in them is parsed again — as
+ * `uid`/`gid` when given (the coordinator runs each pass as its own user, so
+ * none reads another's environment), in a process group of its own, and its
+ * output said line by line under `label`. A spawn that throws is an end of
+ * the follower (127), never this process's exit. A follower that ends on its
+ * own — a refusal (2), a throw (1),
+ * anything but a stop asked for — is run again after RESTART_MS's first wait,
+ * doubled at each end in a row to its cap: 1, 2, 4, 8, then every 15
+ * minutes. One that ran RESTART_MS.reset or longer before it ended starts the
+ * count again. A refusal is the configuration's, which a restart at once
  * would not mend; a fix outside the environment — a model pulled, the
- * migrations applied, the workers profile stopped beside `sleep` — is met at
- * the next try, and one in deploy/.env needs the service recreated, which
- * `up -d` does when its environment changes, and which starts it at once.
+ * migrations applied, a follower run by hand stopped — is met at the next
+ * try, and one in deploy/.env needs the coordinator recreated, which `up -d`
+ * does when its environment changes, and which starts it at once.
  *
- * The guards. `--require-key` and `--digits` are the compose file's `sh -c`
- * guards, moved here: no OB1_WORKER_KEY, or a setting named by `--digits`
- * that is not decimal digits (a value starting with a dash would reach the
- * CLI as a flag — `--status` ran once and exited 0). Each is the
- * environment's, which nothing changes without a recreate, so either holds
- * until the service is stopped, the follower never started.
+ * The guards. `requireKey` and `digits`: no OB1_WORKER_KEY, or a setting
+ * named by `digits` that is not decimal digits (a value starting with a dash
+ * would reach the CLI as a flag — `--status` ran once and exited 0). Each is
+ * the environment's, which nothing changes without a recreate, so either
+ * holds until the stop, the follower never started.
  *
  * The row. When the follower ends, its heartbeat (db/pass-stamp.ts) is ended
  * with `restart` — `in_s`, the seconds from the row's own stamp to the next
@@ -47,21 +49,17 @@
  * follower is not one the sleep scheduler or preflight counts as running. A
  * follower that wrote no row of its own gets one here: `heartbeat:<worker>`,
  * the claim workers' under the job their configuration names — the same
- * extractionKey and consolidatePassKey a compose follower runs under, which
- * takes no --job. With no DATABASE_URL, or a database not answering within
+ * extractionKey and consolidatePassKey a coordinator's follower runs under,
+ * which takes no --job. With no database, or one not answering within
  * STAMP_TIMEOUT_MS, the row is left as it is and the log says so; the next
  * follower writes its own.
  *
- * Signals. Its handlers are installed before anything else, so as PID 1
- * without an init it hears the runtime's stop. Each SIGTERM or SIGINT goes on
- * to the follower, whose own rules apply (the first stops it after the work in
- * hand, the second hard); once it has ended, this exits 0. Waiting, it exits
- * 0 at once. The follower is not PID 1, so a signal before its own handlers
- * are in ends it then (143), where as PID 1 it ignored one until the grace
- * ran out (137).
+ * A stop. Each stop() goes on to the follower, whose own rules apply (the
+ * first SIGTERM stops it after the work in hand, the second hard); once it
+ * has ended, `done` settles with 0. Waiting or held, it settles at once.
  *
- * Exit codes: 0 once stopped; 2 for its own command line — the compose file's,
- * held to its shape by CI. It never exits on its follower's behalf.
+ * As a command it is retired (its foot): a container from before SMD-3476
+ * that runs it holds, running nothing, rather than restart in a loop.
  */
 
 import type { SQL } from "bun";
@@ -70,17 +68,17 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, STAMPING_WORKERS, type StampingWorker } from "./pass-stamp.ts";
-import { commandLine, consoleWriter, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
-
-const FLAGS = { worker: "one", run: "one", "require-key": "none", digits: "many" } as const;
-const HINTS = { worker: `<${STAMPING_WORKERS.join("|")}>`, run: "<the follower's command, as sh -c runs it, exec'd>", digits: "<SETTING …>" };
+import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
 /** The longest a heartbeat write may take before it is left: the database may be what is down. */
 export const STAMP_TIMEOUT_MS = 10_000;
+/** The longest a follower's last output is waited for once it has exited. */
+const DRAIN_MS = 2_000;
+/** The longest partial line held before it is written anyway: a pass that never ends a line holds no memory past it. */
+const LINE_CAP = 64 * 1024;
 
 /** The wait before the follower's next run, after `tries` ends in a row (1 for the first). */
 export function restartWait(tries: number, first: number = RESTART_MS.first, max: number = RESTART_MS.max): number {
@@ -94,7 +92,7 @@ export type RestartMark = { in_s: number | null; code: number; tries: number };
 export type GuardRefusal = { kind: "identity" | "usage"; line: string };
 
 /**
- * The compose file's guards, by its own words: the worker key first, then each
+ * The guards, in the words of the compose file before SMD-3476: the worker key first, then each
  * setting `--digits` names that is not decimal digits (empty is unset, and
  * the follower's default). Null when both hold. Pure.
  */
@@ -105,14 +103,14 @@ export function guardRefusal(worker: string, env: Record<string, string | undefi
   const bad = (opts.digits ?? []).filter((name) => /[^0-9]/.test(env[name] ?? ""));
   if (bad.length) {
     const named = bad.map((name) => `${name} ('${env[name]}')`);
-    const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
+    const list = andList(named);
     return { kind: "usage", line: `${worker}: ${list} ${bad.length === 1 ? "takes" : "take"} digits only` };
   }
   return null;
 }
 
 /**
- * The heartbeat key a follower of `worker` stamps when compose runs it: the
+ * The heartbeat key a follower of `worker` stamps when the coordinator runs it: the
  * scheduler's and board-sync's own, the claim workers' under the job their
  * configuration names (they take no --job there). Null when the configuration
  * does not resolve — the follower then refuses in its own words.
@@ -158,8 +156,13 @@ export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: stri
 
 export type SuperviseOptions = {
   worker: StampingWorker;
-  /** The follower's command, as `sh -c` runs it. */
-  run: string;
+  /** The follower's argv, run with no shell. */
+  cmd: readonly string[];
+  /** The user and group it runs as; unset, this process's own. */
+  uid?: number;
+  gid?: number;
+  /** Put before each line it writes, which then goes to the writer; unset, its output is this process's. */
+  label?: string;
   requireKey?: boolean;
   digits?: readonly string[];
   env?: Record<string, string | undefined>;
@@ -182,7 +185,7 @@ export type Supervisor = {
 export function supervise(opts: SuperviseOptions): Supervisor {
   const env = opts.env ?? process.env;
   const waits = opts.waits ?? RESTART_MS;
-  const { err } = opts.writer ?? consoleWriter;
+  const { out, err } = opts.writer ?? consoleWriter;
   const key = followerKey(opts.worker, env);
   const stopped = new AbortController();
   let child: ReturnType<typeof Bun.spawn> | null = null;
@@ -210,7 +213,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     const guard = guardRefusal(opts.worker, env, opts);
     if (guard) {
       err(guard.line);
-      err(`supervise: ${opts.worker} is held, not started — that is deploy/.env's to mend, and the service's recreate (up -d) to read; it does not exit, so the runtime does not restart it in a loop (SMD-3214)`);
+      err(`supervise: ${opts.worker} is held, not started — that is deploy/.env's to mend, and the coordinator's recreate (up -d coordinator) to read; it does not exit, so the runtime does not restart it in a loop (SMD-3214)`);
       // Its last word kept — the scheduler's last sleep, its held thoughts — and the guard's kind on it.
       await stamp(new Date(0), { in_s: null, code: 2, tries: 0 }, guard.kind);
       if (!stopped.signal.aborted) await new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -219,15 +222,35 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     let tries = 0;
     while (!stopped.signal.aborted) {
       const began = new Date();
-      child = Bun.spawn(["sh", "-c", opts.run], { env: env as Record<string, string>, stdio: ["inherit", "inherit", "inherit"] });
-      const code = await child.exited;
+      const piped = opts.label !== undefined;
+      let code: number | null;
+      try {
+        // Its own process group: a terminal's Ctrl-C reaches this process alone, which passes one signal on, not a second.
+        child = Bun.spawn([...opts.cmd], {
+          env: env as Record<string, string>,
+          ...(opts.uid === undefined ? {} : { uid: opts.uid }),
+          ...(opts.gid === undefined ? {} : { gid: opts.gid }),
+          stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
+          detached: true,
+        });
+        const drained = piped
+          ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
+          : Promise.resolve();
+        code = await child.exited;
+        // The pumps never reject (labelled), so a drain cut short by the timer leaves nothing unhandled.
+        await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
+      } catch (e) {
+        // Never this process's exit: under `unless-stopped` that is the crash loop again (SMD-3214). An end of the child, run again on the clock.
+        err(`supervise: ${opts.worker} could not be started (${(e as Error).message})${opts.uid === undefined ? "" : ` as uid ${opts.uid}`}`);
+        code = 127;
+      }
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);
-      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the service recreated (up -d), which starts it at once (SMD-3214).`);
+      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }
@@ -243,36 +266,49 @@ export function supervise(opts: SuperviseOptions): Supervisor {
   };
 }
 
+/**
+ * Each line of `stream` to `write`, after `label`: a line ends at a newline or
+ * a carriage return (a progress line rewritten in place), a partial line past
+ * LINE_CAP is written as it is, and a last line with no end too. It never
+ * rejects: a stream or a writer that fails ends the pump, said once, and the
+ * child is still waited for on its own.
+ */
+async function labelled(stream: ReadableStream<Uint8Array>, label: string, write: (line: string) => void): Promise<void> {
+  const decoder = new TextDecoder();
+  let held = "";
+  try {
+    for await (const chunk of stream) {
+      // Split once per chunk: the last piece is the partial line held for the next, a
+      // closing carriage return with it, whose newline may open the next chunk.
+      let text = held + decoder.decode(chunk, { stream: true });
+      const cr = text.endsWith("\r") ? "\r" : "";
+      if (cr) text = text.slice(0, -1);
+      const lines = text.split(/\n|\r(?!\n)/);
+      held = (lines.pop() ?? "") + cr;
+      for (const line of lines) write(`${label}${line.endsWith("\r") ? line.slice(0, -1) : line}`);
+      for (; held.length > LINE_CAP; held = held.slice(LINE_CAP)) write(`${label}${held.slice(0, LINE_CAP)}`);
+    }
+    held += decoder.decode();
+    if (held) write(`${label}${held.endsWith("\r") ? held.slice(0, -1) : held}`);
+  } catch (e) {
+    try { write(`${label}(its output could not be read on: ${(e as Error).message})`); } catch { /* the writer itself failed */ }
+  }
+}
+
 function seconds(ms: number): string {
   const s = Math.round(ms / 1000);
   return s < 120 ? `${s} s` : `${Math.round(s / 60)} min`;
 }
 
 if (import.meta.main) {
-  // The handlers first: as PID 1 without an init, a stop before them is ignored until the grace runs out.
-  const heard: ("SIGTERM" | "SIGINT")[] = [];
-  let stop: (signal: "SIGTERM" | "SIGINT") => void = (signal) => void heard.push(signal);
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => stop(signal));
-  const cli = commandLine("supervise.ts", FLAGS, { hints: HINTS, note: "Runs --run as sh -c does, and again after it ends on its own (SMD-3214)." });
-  const worker = cli.value("worker");
-  const run = cli.value("run");
-  if (worker === undefined || !(STAMPING_WORKERS as readonly string[]).includes(worker) || run === undefined) {
-    console.error(`supervise.ts needs --worker (${STAMPING_WORKERS.join(", ")}) and --run`);
-    process.exit(2);
-  }
-  const url = databaseUrlIfAny();
-  const begin = (sql: SQL | null): Promise<number> => {
-    const s = supervise({ worker: worker as StampingWorker, run, requireKey: cli.has("require-key"), digits: cli.values("digits"), sql });
-    stop = s.stop;
-    for (const signal of heard) s.stop(signal);
-    return s.done;
-  };
-  if (url === null) {
-    console.error("supervise: no DATABASE_URL it can use, so the follower's heartbeat is left as the follower writes it");
-    process.exit(await begin(null));
-  }
-  const sql = openSql(url, { max: 1 });
-  await closeThenExit(sql, async () => {
-    return begin(sql);
+  // A container from before SMD-3476 runs `bun db/supervise.ts --worker … --run …`
+  // from a checkout it mounts. Exiting would have `unless-stopped` restart it
+  // in a loop (SMD-3214), so it says why it runs nothing and holds until its stop.
+  // Its old flags are still scanned, so anything else is refused (2) as before.
+  commandLine("supervise.ts", { worker: "one", run: "one", "require-key": "none", digits: "many" } as const, { note: "Retired as a command (SMD-3476): run as the old services did, it holds, running nothing, until its stop." });
+  console.error("supervise.ts: retired as a command (SMD-3476) — the coordinator runs every pass now; remove this container: compose up -d --remove-orphans, with the -f files and -p the stack was started with");
+  await new Promise<void>((resolve) => {
+    for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => resolve());
   });
+  process.exit(0);
 }

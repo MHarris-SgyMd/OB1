@@ -402,10 +402,10 @@
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
- *      their database); and a service that runs
- *      a db/ follower runs it through db/supervise.ts, its --worker the
- *      follower's and its --run an exec of it (SMD-3214: as `on-failure:3`
- *      the followers stayed down after every reboot)
+ *      their database); and no service runs a db/ follower but as a child
+ *      of the coordinator, whose command is `db/coordinator.ts` (SMD-3214:
+ *      as `on-failure:3` the followers stayed down after every reboot;
+ *      SMD-3476)
  *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
  *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
  *      file git tracks or would track names a tag of the version
@@ -8222,6 +8222,8 @@ const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "e
 /** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
+  // The coordinator (SMD-3476): root only to run each pass as its own user — to become it, signal it, and hand it its HOME and the dump volume.
+  coordinator: { cap_drop: ["ALL"], cap_add: ["CHOWN", "SETUID", "SETGID", "KILL"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   // The operator GUI (SMD-2280): the first service a browser reaches, so the image's files read-only and no capability.
   app: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
@@ -8229,13 +8231,12 @@ const CONFINEMENT: Record<string, Mapping> = {
   "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
-/** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. sleep's `sleep-dumps` is a named volume of the engine's own, written only when OB1_SLEEP_DUMP_DIR hands the scheduler --dump-dir (SMD-3203). */
+/** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. The coordinator's `sleep-dumps` is a named volume of the engine's own, written only when OB1_SLEEP_DUMP_DIR hands the scheduler --dump-dir (SMD-3203). */
 const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null, "lgtm-data": null, "sleep-dumps": null };
-const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
-  sleep: [...CHECKOUT_MODULES, "sleep-dumps:/var/lib/ob1/sleep-dumps"],
+  // The coordinator runs the server image (SMD-3476): the dump volume alone, no checkout.
+  coordinator: ["sleep-dumps:/var/lib/ob1/sleep-dumps"],
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],
@@ -8270,10 +8271,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     mcp: { mesh: { aliases: [meshName("mcp")] } },
     // The operator GUI (SMD-2280): a client of the REST core, reached by the proxy alone.
     app: { mesh: { aliases: ["app.ob1.internal"] } },
-    "board-sync": ["data", "egress"],
-    extract: ["data", "egress"],
-    consolidate: ["data", "egress"],
-    sleep: ["data", "egress"],
+    coordinator: ["data", "egress"],
     ollama: ["egress"],
     "ollama-pull": ["egress"],
     jev: ["egress"],
@@ -8506,7 +8504,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["the typed-decision tier built on the host's network", "compose.yaml", "      dockerfile: jev/Dockerfile\n", "      dockerfile: jev/Dockerfile\n      network: host\n"],
   ["a second label on compose.yaml's proxy", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: *proxy-routes\n      ob1.note: \"1\"\n"],
   ["the import runner mounting the directory a rootless engine keeps its socket in, by a variable the host sets (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${XDG_RUNTIME_DIR:-./run}:/run/host:ro\n"],
-  ["board-sync mounting the user's home in the long form, by a variable the host sets (SMD-2685 review pass 2)", "compose.yaml", "    profiles: [\"board-sync\"]\n    working_dir: /app\n    volumes:\n", "    profiles: [\"board-sync\"]\n    working_dir: /app\n    volumes:\n      - {type: bind, source: \"${HOME:-./home}\", target: /home/host, read_only: true}\n"],
+  ["the coordinator mounting the user's home in the long form, by a variable the host sets (SMD-2685 review pass 2)", "compose.yaml", "      - sleep-dumps:/var/lib/ob1/sleep-dumps\n", "      - sleep-dumps:/var/lib/ob1/sleep-dumps\n      - {type: bind, source: \"${HOME:-./home}\", target: /home/host, read_only: true}\n"],
   ["the import runner mounting the checkout's .git (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ../.git:/g:ro\n"],
   ["the import runner mounting deploy/ as ./ (SMD-2685 review pass 2)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./:/d:ro\n"],
   ["the import runner's pipeline list mounted writable", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:z\n"],
@@ -9190,10 +9188,11 @@ await checkPlugins();
 // two claim workers, the sleep scheduler — were `on-failure:3`, so that a
 // refusal stopped rather than looped, and neither runtime starts that policy
 // at boot: on 2026-10-22 both brains' sleep and stable's board-sync stayed
-// down after a podman machine restart (SMD-3214). They are `unless-stopped`
-// now, through db/supervise.ts, which holds a refusal itself: a follower run
-// any other way under that policy is the crash loop again, so
-// supervisorGapsIn holds each one's command. jev is `unless-stopped` too,
+// down after a podman machine restart (SMD-3214). Since SMD-3476 they are
+// children of one `unless-stopped` service, the coordinator
+// (db/coordinator.ts), each through db/supervise.ts, which holds a refusal
+// itself: a follower run any other way under that policy is the crash loop
+// again, so supervisorGapsIn holds every command. jev is `unless-stopped` too,
 // since it retries its own start (jev/serve.ts, SMD-3214 PR 3): it is no
 // db/ follower, and its image has no db/. A service added, or a policy
 // changed, is a change there on purpose. The overlays name no restart (check 28's OVERLAYS),
@@ -9201,7 +9200,7 @@ await checkPlugins();
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped", breakglass: "unless-stopped",
-  "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
+  coordinator: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
@@ -9221,14 +9220,14 @@ function restartGapsIn(text: string, held: Record<string, string>): [service: st
   for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
   return gaps;
 }
-/** The db/ followers by script — each runs until stopped — and the --worker db/supervise.ts names it by. */
-const FOLLOWER_WORKERS: Record<string, string> = { "sleep.ts": "sleep", "extract-entities.ts": "extract", "consolidate.ts": "consolidate", "sync-linear.ts": "board-sync" };
 const FOLLOWER_SCRIPT = /\bdb\/(sleep|extract-entities|consolidate|sync-linear)\.ts\b/;
+/** The coordinator's command, exactly, under the server image's `bun --no-install`: OB1_PASSES, not its argv, says what it runs. */
+const COORDINATOR_COMMAND = ["db/coordinator.ts"];
 /**
- * Where a compose file runs a db/ follower other than through db/supervise.ts
- * (SMD-3214): the command's first words `bun db/supervise.ts`, its --worker
- * the follower's, its --run starting `exec bun db/<the follower>`, so the stop
- * the supervisor passes on reaches the follower and not a shell.
+ * Where a compose file runs a db/ follower other than as the coordinator's
+ * child (SMD-3214, SMD-3476): no command names one, and the `coordinator`
+ * service's command is COORDINATOR_COMMAND, which runs each through
+ * db/supervise.ts.
  */
 function supervisorGapsIn(text: string): [service: string | null, detail: string][] {
   let doc: unknown;
@@ -9239,24 +9238,21 @@ function supervisorGapsIn(text: string): [service: string | null, detail: string
     const cmd = isMapping(def) ? def.command : undefined;
     const words = Array.isArray(cmd) ? cmd.map(String) : typeof cmd === "string" ? [cmd] : [];
     const script = words.map((w) => FOLLOWER_SCRIPT.exec(w)?.[1]).find((m) => m !== undefined);
-    if (script === undefined) continue;
-    const at = (flag: string) => { const i = words.indexOf(flag); return i === -1 ? undefined : words[i + 1]; };
-    if (words[0] !== "bun" || words[1] !== "db/supervise.ts") gaps.push([service, `runs db/${script}.ts other than through db/supervise.ts, which under \`unless-stopped\` restarts its refusal in a loop`]);
-    else if (at("--worker") !== FOLLOWER_WORKERS[`${script}.ts`]) gaps.push([service, `runs db/${script}.ts under --worker ${JSON.stringify(at("--worker") ?? null)}, where its heartbeat is ${FOLLOWER_WORKERS[`${script}.ts`]}'s`]);
-    else if (!at("--run")?.startsWith(`exec bun db/${script}.ts`)) gaps.push([service, `its --run does not begin \`exec bun db/${script}.ts\`, so the stop the supervisor passes on reaches a shell, not the follower`]);
+    if (script !== undefined) gaps.push([service, `runs db/${script}.ts itself, not as a child of the coordinator (db/coordinator.ts, OB1_PASSES), whose supervisor holds a refusal that \`unless-stopped\` would restart in a loop`]);
+    else if (service === "coordinator" && JSON.stringify(words) !== JSON.stringify(COORDINATOR_COMMAND)) gaps.push([service, `its command is ${JSON.stringify(cmd ?? null)}, not ${JSON.stringify(COORDINATOR_COMMAND)}: OB1_PASSES says what it runs`]);
   }
   return gaps;
 }
-const SUPERVISED = `services:\n  sleep:\n    command: ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--run", "exec bun db/sleep.ts --follow"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
+const SUPERVISED = `services:\n  coordinator:\n    command: ["db/coordinator.ts"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
 /** [what, text, the services (null = the file) the rule reports]. */
 const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
-  ["a follower supervised, beside a service that runs none", SUPERVISED, []],
-  ["the sh -c of before SMD-3214", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["sh", "-c", "exec bun db/sleep.ts --follow"]`), ["sleep"]],
-  ["a follower as the whole command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["bun", "db/sync-linear.ts", "--loop"]`), ["sleep"]],
-  ["a follower in a string command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: bun db/consolidate.ts --follow`), ["sleep"]],
-  ["the supervisor naming another worker", SUPERVISED.replace(`"--worker", "sleep"`, `"--worker", "extract"`), ["sleep"]],
-  ["a --run that does not exec", SUPERVISED.replace(`"exec bun db/sleep.ts`, `"bun db/sleep.ts`), ["sleep"]],
-  ["no --run at all", SUPERVISED.replace(`, "--run", "exec bun db/sleep.ts --follow"`, `, "db/sleep.ts"`), ["sleep"]],
+  ["the coordinator, beside a service that runs no follower", SUPERVISED, []],
+  ["the sh -c of before SMD-3214", `${SUPERVISED}  sleep:\n    command: ["sh", "-c", "exec bun db/sleep.ts --follow"]\n`, ["sleep"]],
+  ["a follower as the whole command", `${SUPERVISED}  board-sync:\n    command: ["bun", "db/sync-linear.ts", "--loop"]\n`, ["board-sync"]],
+  ["a follower in a string command", `${SUPERVISED}  consolidate:\n    command: bun db/consolidate.ts --follow\n`, ["consolidate"]],
+  ["a supervisor of before SMD-3476, a service of its own", `${SUPERVISED}  extract:\n    command: ["bun", "db/supervise.ts", "--worker", "extract", "--run", "exec bun db/extract-entities.ts --follow"]\n`, ["extract"]],
+  ["the coordinator handed arguments", SUPERVISED.replace(`["db/coordinator.ts"]`, `["db/coordinator.ts", "--passes", "sleep"]`), ["coordinator"]],
+  ["the coordinator with no command", SUPERVISED.replace(`    command: ["db/coordinator.ts"]\n`, "    image: x\n"), ["coordinator"]],
 ];
 const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
 const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };

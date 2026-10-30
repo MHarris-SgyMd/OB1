@@ -775,7 +775,7 @@ services:
       # into the image: set OB1_GIT_SHA when building (deploy/README.md).
       args:
         OB1_GIT_SHA: ${OB1_GIT_SHA:-unknown}
-    # Anchored: `board-sync` below inherits this block whole (`<<: *server-env`),
+    # Anchored: the `coordinator` below inherits this block whole (`<<: *server-env`),
     # so the provider, embedding and egress knobs are forwarded once, here, and a
     # worker that embeds and tags exactly as a capture does reads exactly what
     # the server reads. Check 14 parses anchors and merge keys (SMD-1954). It
@@ -957,9 +957,9 @@ services:
     # for preflight's reachability probe to find (SMD-1875). A hosts entry
     # only: nothing is published. podman writes both names itself and maps
     # this one to the same address (measured, podman 6); an older podman
-    # without the host-gateway keyword refuses the container. board-sync,
-    # which embeds through the same knobs, takes the same entry by anchor
-    # (fourth review pass).
+    # without the host-gateway keyword refuses the container. The
+    # coordinator, whose passes embed through the same knobs, takes the same
+    # entry by anchor (fourth review pass).
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
     networks:
@@ -1354,270 +1354,100 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # Keeps the brain in lockstep with the Linear board (SMD-1954). Optional —
-  # `--profile board-sync`; a brain that is not the fork's own never runs it.
+  # The brain's coordinator, first form (SMD-3476; docs/brain-coordinator.md,
+  # SMD-3215): one process, db/coordinator.ts, running the core passes
+  # OB1_PASSES names, each a child it runs again after it ends on its own
+  # (db/supervise.ts, SMD-3214). A default service — none named, it runs none.
+  # It replaced the `sleep`, `extract`, `consolidate` and `board-sync` services
+  # and their `sleep`, `workers` and `board-sync` profiles.
   #
-  # `bun db/sync-linear.ts --loop`: every OB1_BOARD_SYNC_INTERVAL seconds (300)
-  # it lists the issues of the OB1_LINEAR_INITIATIVE's projects, reads the
-  # brain's ticket rows, and writes the difference — a new issue captured, a
-  # moved one updated in place — through the server's own store and embedder
-  # (db/sync-linear.ts's header). No port, no key: it reaches Postgres as the
-  # migrator does and writes as the actor `board-sync`. Mounted read-only: db/
-  # and server-portable/, the tool's whole import surface — NOT the checkout,
-  # whose deploy/.env and evals/.env would otherwise sit on the tool's own
-  # `.env` search path inside the container (third review pass; the fifth moved
-  # the two shared modules it read from evals/ into db/ so these two mounts are
-  # the boundary, not a list of files). Like the migrator it needs no
-  # `bun install` — Bun built-ins and in-tree modules only.
+  # The passes (deploy/.env's OB1_PASSES, commas or spaces):
+  # - `board-sync` keeps the brain in lockstep with the Linear board
+  #   (SMD-1954): `bun db/sync-linear.ts --loop`, a pass every
+  #   OB1_BOARD_SYNC_INTERVAL seconds (300) writing the difference between the
+  #   OB1_LINEAR_INITIATIVE's issues and the brain's ticket rows through the
+  #   server's own store and embedder, as the actor `board-sync`. Its keys are
+  #   LINEAR_API_KEY (read-only use) and, to post consolidation findings as
+  #   comments (db/board-findings.ts, SMD-2681; under the default deny,
+  #   OB1_EGRESS_ALLOW=type:board-finding), LINEAR_COMMENT_API_KEY, never the
+  #   same key, at most OB1_FINDINGS_POST_CAP (5) a day. A brain that is not
+  #   the fork's own never names it.
+  # - `workers`, extraction and consolidation unattended (SMD-2424):
+  #   `extract-entities.ts --follow` and `consolidate.ts --follow`, each
+  #   draining its pool, then polling every OB1_EXTRACT_FOLLOW /
+  #   OB1_CONSOLIDATE_FOLLOW seconds (unset, the CLI's 15), one worker each
+  #   unless OB1_EXTRACT_WORKERS / OB1_CONSOLIDATE_WORKERS says more, so a
+  #   model slot stays free for captures. Claims are leased (015, 031): a
+  #   follower that dies loses nothing. Consolidation never applies a proposal
+  #   (029, 084, 102); start a backlog's extraction alone first
+  #   (deploy/README.md).
+  # - `sleep`, the sleep scheduler (SMD-1794, SMD-2678): `sleep.ts --follow`,
+  #   the re-derive sweep, re-embed, extraction and consolidation while the
+  #   brain is quiet, its OB1_SLEEP_* settings as deploy/.env.example says.
+  #   An alternative to `workers`: named together, sleep runs and the log says
+  #   so. OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps writes its verdict dumps
+  #   to the `sleep-dumps` volume (SMD-3203); copy them out with `compose cp`.
   #
-  # The model knobs are the server's, inherited from its anchor above; the two
-  # of its own are LINEAR_API_KEY (a personal API key, read-only use — it
-  # fetches issues) and OB1_LINEAR_INITIATIVE. The egress gate applies to its
-  # embed and tag calls as to a capture's: with the provider on the host,
-  # deploy/.env carries OB1_LLM_LOCAL=1 or every ticket lands without a vector.
+  # Each child runs as a user of its own (uids 1101–1104) with only its own
+  # settings — the server's environment, less every setting another child
+  # owns, plus its own — so none reads another's, by its environment or by
+  # /proc. This container holds the union: the record's "Credentials" names
+  # that cost. Every setting listed below the anchor is some child's own, or
+  # the coordinator's (db/test-coordinator.ts holds the list to
+  # db/coordinator.ts's). A key-guarded child (sleep, extract, consolidate)
+  # is held, not started, without OB1_WORKER_KEY, and so is any child whose
+  # number setting is not digits only (a value starting with a dash would
+  # reach the CLI as a flag); each is held until the coordinator is
+  # recreated, its heartbeat ended with the refusal. A child that ends on its
+  # own is run again after 1, 2, 4, 8, then every 15 minutes, its heartbeat
+  # ended with when, so preflight says it is held, not stopped.
   #
-  # With LINEAR_COMMENT_API_KEY set — a key of its own that can comment, never
-  # LINEAR_API_KEY — each pass ends by posting a consolidation finding between
-  # two tickets the board does not link as one comment on the newer ticket, at
-  # most OB1_FINDINGS_POST_CAP (5) a day and only where the egress gate allows
-  # it — under the default deny, OB1_EGRESS_ALLOW=type:board-finding
-  # (db/board-findings.ts, SMD-2681). It comments only.
-  board-sync:
-    image: oven/bun:1.4.3-alpine
-    profiles: ["board-sync"]
+  # Code. The server image, which since SMD-3476 carries db/coordinator.ts
+  # and the passes' import graph (.dockerignore's allow-list, held by
+  # db/test-coordinator.ts): one build with the servers, so the passes are the
+  # release's own — pinned by the release overlay as the servers are — and a
+  # stack needs no checkout to run them (SMD-2601). A changed db/ reaches them
+  # with the image's rebuild and the coordinator's recreate (`up -d --build`).
+  # It mounts no checkout, so no deploy/.env sits on a tool's `.env` path.
+  #
+  # The model knobs are the server's, by anchor; the egress gate applies to
+  # every pass's calls as to a capture's: with the provider on the host,
+  # deploy/.env carries OB1_LLM_LOCAL=1.
+  coordinator:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    # No .env read: the environment below is the whole of what it hands on.
+    entrypoint: ["bun", "--no-install", "--no-env-file"]
+    command: ["db/coordinator.ts"]
     working_dir: /app
+    # As root (the image's user is bun), so it can run each child as its own
+    # user — and with no other
+    # capability: to become each, signal each, and hand each its HOME and
+    # sleep the dump volume. No child keeps one. bun is not PID 1 (SMD-2666),
+    # and the init reaps.
+    init: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    user: "0:0"
     volumes:
-      - ../db:/app/db:ro
-      - ../server-portable:/app/server-portable:ro
+      - sleep-dumps:/var/lib/ob1/sleep-dumps
     environment:
       <<: *server-env
-      # The merge brings the server's whole block; the two things this worker
-      # does not read are unset again, so its environment is exactly what it
-      # reads (second review pass) — the key material stays with the server.
-      MCP_ACCESS_KEYS: ""
       PORT: ""
-      # No `:?` here: compose interpolates every service's block whether or not
-      # its profile is active, so a required-variable error would fail every
-      # `up` without the profile (the first review pass found the full-stack CI
-      # job and every existing stack). The tool refuses to start without it.
+      OB1_PASSES: ${OB1_PASSES:-}
+      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
+      # No `:?` here: compose interpolates every service's block, and the
+      # tool refuses to start without them when board-sync is named.
       LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       OB1_LINEAR_INITIATIVE: ${OB1_LINEAR_INITIATIVE:-}
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
       LINEAR_COMMENT_API_KEY: ${LINEAR_COMMENT_API_KEY:-}
       OB1_FINDINGS_POST_CAP: ${OB1_FINDINGS_POST_CAP:-}
-    # Through db/supervise.ts (SMD-3214), which runs the loop again after it
-    # ends on its own — a refusal, a database not answering yet — on a clock of
-    # minutes, so the container does not exit and the restart below cannot loop.
-    command: ["bun", "db/supervise.ts", "--worker", "board-sync", "--run", "exec bun db/sync-linear.ts --loop"]
-    # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
-    # too, and on Linux Docker Option B's name exists only through this entry.
-    extra_hosts: *host-alias
-    # Postgres on `data`; the model provider and Linear's API on `egress`.
-    networks: [data, egress]
-    # SIGTERM ends the loop after the issue in hand, not the pass — one embed
-    # and one write, seconds — and the brain is the state, so a pass cut short
-    # is finished by the next; this is the room for that one issue.
-    stop_grace_period: 60s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
-    # runtime starts an `on-failure` container at boot. The tool still exits 2
-    # on a missing LINEAR_API_KEY or a bad interval — configuration, which a
-    # restart does not fix — and an unconditional restart of the tool itself
-    # made that refusal a crash loop (fifth review pass); the supervisor above
-    # holds it instead, trying again after 1, 2, 4, 8, then every 15 minutes,
-    # and ends heartbeat:board-sync with when, so preflight says it is held.
-    restart: unless-stopped
-    logging: *logging
-
-  # Entity extraction and consolidation, unattended (SMD-2424). Optional —
-  # `--profile workers`, since each is a model call per thought: GPU time on a
-  # local model, money and the thought's text on a hosted one.
-  #
-  # `bun db/extract-entities.ts --follow` and `bun db/consolidate.ts --follow`:
-  # each drains its pool, then polls for new work every OB1_EXTRACT_FOLLOW /
-  # OB1_CONSOLIDATE_FOLLOW seconds (unset, the CLI's 15). One worker each
-  # unless OB1_EXTRACT_WORKERS / OB1_CONSOLIDATE_WORKERS says more — not the
-  # CLI's 2, so a model slot stays free for captures (the dogfood's 7B serves
-  # three at once; the two counts, board-sync and captures share the slots).
-  # Claims are leased (015, 031), so a follower that dies loses nothing: its
-  # thought goes back to the pool when the lease lapses (and is recorded
-  # failed at the third lapse).
-  #
-  # board-sync's shape — the same image, the same two read-only mounts, the
-  # server's environment by anchor — so, as board-sync does, it runs this
-  # checkout's code: neither release image carries the workers, and a
-  # checkout newer than the stack's release runs newer workers against an
-  # older schema (deploy/README.md; SMD-2601). Two differences from
-  # board-sync. MCP_ACCESS_KEYS stays: the worker names itself by
-  # OB1_WORKER_KEY's hash in that list (db/worker-bootstrap.ts). And
-  # OB1_WORKER_KEY is required: db/supervise.ts, the command, refuses to
-  # start the follower without it (`--require-key`), where a run from a
-  # checkout warns and writes mentions, edges and proposals with no agent id.
-  # The knobs are forwarded, so `compose exec extract env` shows what the
-  # follower was started with, and read by `--run`'s command line once the
-  # supervisor has found them digits only (`--digits`) — a value starting
-  # with a dash would otherwise reach the CLI as a flag (`--status` ran once
-  # and exited 0). Either refusal holds the service until it is recreated
-  # (SMD-3214). `exec` hands the shell's process to bun, so the stop signal
-  # the supervisor passes on reaches it.
-  extract:
-    image: oven/bun:1.4.3-alpine
-    profiles: ["workers"]
-    working_dir: /app
-    volumes: &claim-worker-mounts
-      - ../db:/app/db:ro
-      - ../server-portable:/app/server-portable:ro
-    environment:
-      <<: *server-env
-      PORT: ""
-      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
       OB1_EXTRACT_FOLLOW: ${OB1_EXTRACT_FOLLOW:-}
       OB1_EXTRACT_WORKERS: ${OB1_EXTRACT_WORKERS:-}
-    command:
-      - bun
-      - db/supervise.ts
-      - --worker
-      - extract
-      - --require-key
-      - --digits
-      - OB1_EXTRACT_FOLLOW
-      - OB1_EXTRACT_WORKERS
-      - --run
-      - exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
-    extra_hosts: *host-alias
-    # board-sync's: Postgres on `data`, the model provider on `egress`.
-    networks: [data, egress]
-    # The first SIGTERM stops each worker after the thought in hand — every
-    # window of it — and returns the rest of its claims. On the stable brain
-    # a thought's extraction took 37 s at the median, 121 s at p90 and 629 s
-    # at p99 (1,394 claims, two workers on qwen2.5:7b, 2026-10-05). A thought
-    # still in hand at the kill is not lost: its lease lapses (--ttl, 900 s)
-    # and the next follower extracts it again.
-    stop_grace_period: 120s
-    depends_on: &claim-worker-depends
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    # board-sync's rule, for both services: `unless-stopped`, so a reboot
-    # brings it back (SMD-3214), and the supervisor holds a refusal rather
-    # than letting the container exit. A refusal ends the follower with 2 —
-    # a key MCP_ACCESS_KEYS does not hold (or revoked, or of a scope that
-    # grants nothing), the egress gate, (this service) a model or prompt
-    # version other than the recorded key's, a provider refusing the first
-    # call at start — and the supervisor runs it again after 1, 2, 4, 8, then
-    # every 15 minutes, its heartbeat ended with when; podman would restart
-    # at once, with no backoff, and never reset the count. An outage is still
-    # no exit: a follower waits out the database going away and a provider
-    # outage itself (SMD-2599). A stop goes on to the follower, which ends
-    # after the thought in hand, and the service exits 0 (137 if killed past
-    # the grace period) and stays stopped.
-    restart: unless-stopped
-    logging: *logging
-
-  # Consolidation never applies a proposal; since 084 it stores related,
-  # evolves and duplicate verdicts as relation facets, and since 102 an
-  # unrelated one as a distinct (SMD-3117). Each proposal waits for review
-  # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
-  # a stale one the next pass settles (067). Beside extraction: the pool holds
-  # only thoughts with entities and a vector, and a candidate shares an
-  # entity, has a vector and was captured on an earlier UTC date (029), so a
-  # capture's neighbours were almost always extracted long before it is
-  # judged (one extract worker claims in queue order; with more, a neighbour
-  # captured just before 00:00 UTC can still be in hand). A backlog is not —
-  # a first run or a --switch-key pools every thought at one instant,
-  # claimed in no order — and a pair whose older side was still unextracted
-  # is never judged: start `extract` alone on one, and this when
-  # `extract-entities.ts --status` shows 0 in flight, 0 pending and 0 not
-  # yet in the pool (retrying any failed first). Once newer thoughts are
-  # judged, a failed extraction or embedding, and an import dated older than
-  # thoughts already judged, miss their pairs however this runs
-  # (deploy/README.md).
-  consolidate:
-    image: oven/bun:1.4.3-alpine
-    profiles: ["workers"]
-    working_dir: /app
-    volumes: *claim-worker-mounts
-    environment:
-      <<: *server-env
-      PORT: ""
-      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
       OB1_CONSOLIDATE_FOLLOW: ${OB1_CONSOLIDATE_FOLLOW:-}
       OB1_CONSOLIDATE_WORKERS: ${OB1_CONSOLIDATE_WORKERS:-}
-    command:
-      - bun
-      - db/supervise.ts
-      - --worker
-      - consolidate
-      - --require-key
-      - --digits
-      - OB1_CONSOLIDATE_FOLLOW
-      - OB1_CONSOLIDATE_WORKERS
-      - --run
-      - exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
-    extra_hosts: *host-alias
-    networks: [data, egress]
-    # A thought is up to --k (3) judged pairs: 11 s at the median, 38 s at
-    # the most on the stable brain (1,447 claims, 2026-10-05).
-    stop_grace_period: 60s
-    depends_on: *claim-worker-depends
-    restart: unless-stopped
-    logging: *logging
-
-  # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
-  # — `--profile sleep` — and an alternative to `--profile workers`, not a
-  # companion: `bun db/sleep.ts --follow` runs the re-derive sweep, then
-  # re-embed when the brain has vectors not at OB1_EMBEDDING_MODEL (SMD-2679),
-  # then extraction, then consolidation beside it, only while the brain is quiet
-  # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
-  # thought_audit; a search does not count (SMD-3315) — and hard-stops them
-  # within OB1_SLEEP_POLL seconds (unset, 5) of the next live write, every lease
-  # returned. A sleep runs at most OB1_SLEEP_BUDGET minutes (unset, 60; 0 for
-  # no clock), then its passes stop after the thought in hand and the next
-  # sleep waits for a live call; each pass's connections run under
-  # OB1_SLEEP_STATEMENT_TIMEOUT seconds (unset, 300), OB1_SLEEP_WORK_MEM and
-  # OB1_SLEEP_MAINTENANCE_WORK_MEM MB (unset, 4 and 64) — a statement past its
-  # timeout stops the sleep, not the scheduler (SMD-2679). Followers outside
-  # it do not yield, so it will not run (exit 2)
-  # while the workers profile's heartbeats are fresh: at its start, before
-  # each sleep, and within a poll while asleep — so both profiles brought up
-  # at once end it too.
-  #
-  # The workers' shape: the same image, mounts, environment, supervisor, key
-  # guard and digits-only knobs, so it runs this checkout's code too
-  # (SMD-2601). One worker per pass unless OB1_SLEEP_WORKERS says more.
-  # `init: true` from the start (SMD-2666): bun as PID 1 ignored SIGTERM until
-  # it installed its handlers, which the scheduler does after its start reads
-  # — and those wait out a database not answering yet, so a stop then waited
-  # out the grace. The supervisor installs its own first, and the scheduler
-  # is its child, not PID 1 (SMD-3214); the init still reaps.
-  #
-  # OB1_SLEEP_DUMP_DIR (unset, none) hands it --dump-dir: each consolidation
-  # pass appends every verdict, decide mode's link step included, to one file
-  # per pass key there (SMD-3203). Set it to /var/lib/ob1/sleep-dumps, where
-  # the `sleep-dumps` volume is mounted, and copy the files out with
-  # `compose cp` while the service runs. They hold the brain's text: each is
-  # created 0600.
-  sleep:
-    image: oven/bun:1.4.3-alpine
-    profiles: ["sleep"]
-    working_dir: /app
-    init: true
-    # The claim workers' two read-only mounts, copied since YAML merges no
-    # lists (check 28 holds them to the workers'), and the volume --dump-dir
-    # writes to, empty until OB1_SLEEP_DUMP_DIR names it.
-    volumes:
-      - ../db:/app/db:ro
-      - ../server-portable:/app/server-portable:ro
-      - sleep-dumps:/var/lib/ob1/sleep-dumps
-    environment:
-      <<: *server-env
-      PORT: ""
-      OB1_WORKER_KEY: ${OB1_WORKER_KEY:-}
       OB1_SLEEP_QUIET: ${OB1_SLEEP_QUIET:-}
       OB1_SLEEP_POLL: ${OB1_SLEEP_POLL:-}
       OB1_SLEEP_WORKERS: ${OB1_SLEEP_WORKERS:-}
@@ -1626,39 +1456,42 @@ services:
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
       OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
-    command:
-      - bun
-      - db/supervise.ts
-      - --worker
-      - sleep
-      - --require-key
-      - --digits
-      - OB1_SLEEP_QUIET
-      - OB1_SLEEP_POLL
-      - OB1_SLEEP_WORKERS
-      - OB1_SLEEP_BUDGET
-      - OB1_SLEEP_STATEMENT_TIMEOUT
-      - OB1_SLEEP_WORK_MEM
-      - OB1_SLEEP_MAINTENANCE_WORK_MEM
-      - --run
-      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}" $${OB1_SLEEP_DUMP_DIR:+--dump-dir "$${OB1_SLEEP_DUMP_DIR}"}
+    # The server's host alias (SMD-1875): the passes dial OB1_LLM_BASE_URL
+    # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
-    # The workers': Postgres on `data`, the model provider on `egress`
-    # (SMD-2583). On compose's default network it would wait for a database it
-    # cannot reach, for ever (its start's outage wait), never exiting to restart.
+    # Postgres on `data`; the model provider and Linear's API on `egress`
+    # (SMD-2583).
     networks: [data, egress]
-    # The first SIGTERM stops its passes after the thought in hand, as the
-    # extract service's does — extraction's p90 is 121 s on the stable brain —
-    # and a wait for the quiet at once.
+    # Its own, not the server image's HEALTHCHECK, which asks :8000/health,
+    # which this serves not (podman's OCI builds drop that instruction, so it
+    # went unseen there). Not `disable: true` either: Docker Compose's `up
+    # --wait` refuses a container with none ("has no healthcheck configured",
+    # CI's first run). The coordinator's process is there — exec form, so no
+    # shell's own command line matches; its health is its passes' heartbeats.
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "db/coordinator.ts"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      start_interval: 1s
+      retries: 3
+    # A stop goes on to every child: the first SIGTERM stops each after the
+    # work in hand. Extraction's p90 on the stable brain is 121 s
+    # (2026-10-05), and a thought still in hand at the kill is not lost: its
+    # lease lapses and the next follower takes it again.
     stop_grace_period: 120s
-    depends_on: *claim-worker-depends
-    # The workers' rule: `unless-stopped`, so a reboot brings it back
-    # (SMD-3214). A refusal ends the scheduler with 2 (a pass refusing at its
-    # first start, followers running outside it) and the supervisor runs it
-    # again after 1, 2, 4, 8, then every 15 minutes — so it starts on its own
-    # once the workers profile's followers stop; no key or a bad knob holds it
-    # until a recreate. An outage, at its start or in a sleep, is waited out,
-    # not exited.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      # The REST core builds the image it runs, as the MCP server's and the
+      # GUI's wait on it.
+      api:
+        condition: service_started
+    # `unless-stopped`, so a reboot brings it back with every child it runs
+    # (SMD-3214): neither runtime starts an `on-failure` container at boot,
+    # and it never exits on a child's behalf, so the restart cannot loop.
     restart: unless-stopped
     logging: *logging
 
@@ -1809,8 +1642,8 @@ services:
     # whoever reaches the port first claim it. So without both, this container
     # exits at once and says why. Compose's `:?` cannot do that job here:
     # compose interpolates every service's block, profile or not, so a
-    # required-variable error would fail every `up` (the board-sync lesson
-    # above). The restart policy then retries it, and `ps` shows it
+    # required-variable error would fail every `up` (board-sync's lesson,
+    # now the coordinator's above). The restart policy then retries it, and `ps` shows it
     # restarting, with the reason in its log. For a server that should come
     # back after a reboot, that beats stopping for good after three tries.
     entrypoint:
@@ -2474,10 +2307,10 @@ networks:
   #          project joins it: a canary is a brain of its own, on its own
   #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
-  #          the REST core, board-sync, the workers, the sleep scheduler, the import runner and
-  #          its role's one-shot. No other project joins it.
+  #          the REST core, the coordinator, the import runner and its
+  #          role's one-shot. No other project joins it.
   #   egress outward: whatever calls a model provider or a vendor (the two
-  #          servers, board-sync, the workers, the sleep scheduler, the import runner, n8n), and
+  #          servers, the coordinator's passes, the import runner, n8n), and
   #          the stack's own Ollama and Jev, which fetch their weights there
   #          and are called there by name.
   #   auth-egress  outward, the authorization server's alone.
