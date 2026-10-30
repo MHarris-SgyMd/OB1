@@ -3418,10 +3418,11 @@ answers; a key the door refuses is one that gave a key. It says so on stderr in
 two lines: the counts, then what to check (`OB1_JUDGE_MODEL`, naming the judge
 models whose answers gave no subject when another run's was not this one's, the
 chat endpoint, `OB1_SUBJECT_REASONING`) and what it did. In one transaction the
-window's claims finished as named nothing, by whichever run, go back to the pool
-while still finished with no subject standing (one another transaction holds is
-that one's to end), and the window starts again, stamped with the trip. Nothing
-else would ask them again (a changed judge model leaves them finished, above). A
+window's claims finished as named nothing, by whichever run, go back to the
+pool, at its head, while still finished with no subject standing (one another
+transaction holds is passed over, its end that one's: one that rolls back leaves
+it finished), and the window starts again, stamped with the trip. Nothing else
+would ask them again (a changed judge model leaves them finished, above). A
 claim a run finishes as named nothing is judged in the finish's own transaction,
 so it is in the window or not finished at all. Every other run of the pool that
 began before the stamp, read as written from the run's start, stops at its next
@@ -3433,31 +3434,39 @@ on thoughts that truly have no subject asked together: a trip's hand-back brings
 them up together, as does a pooling again (`subject_pool_filled` blanked, a
 switch of key and back, `OB1_SUBJECT_REASONING` turned off), which asks again
 every thought the model named nothing for. Once the judge is checked,
-`--judge-checked` runs with the alarm off, reading none of that run's answers.
-An out-of-date subject it closed on one stays closed until that thought is asked
-again, which the line says. Those it could not read stay failed, as the pass
-leaves its malformed rows, and `--retry-failed` puts back the pool's failed
-claims, this run's among them; a trip in a run whose `--retry-failed` returned
-any says those were chosen for failing, as the pass says of its first judgement
-after a `--retry-*`. It exits 3, ahead of the 1 of claims failed, and of a first
-signal's 130 when the claim the signal let finish trips it; a second signal at
-once exits 130, unjudged. A database lost as a trip is written leaves none of
-it, said, exit 3: the window still holds the answers before, so the next answer
-giving no subject trips it again. It reads an answer's shape, not its truth: on
-100 canary thoughts the 27B had keyed, `qwen2.5:7b`, the metadata model's
-default, which judges when `OB1_JUDGE_MODEL` is unset, answered every one in
-shape and named nothing for one, and gave the 27B's key for 60 of the other 99,
-where the 27B named nothing for 1 of the 63 it was asked in the canary's first
-naming run. So a weaker judge passes it, as does one answering a placeholder
-(`none`, `unknown`), which keys as a phrase (no canary subject is one), and
-`--subjects rules` stays the way for a brain whose judge model has not been
-measured on the question. A working judge that often names nothing trips it now
-and then: by a Monte Carlo of the rule, one naming nothing for 5% of the
-thoughts it is asked, in random order, trips within 1,000 answers 1.4% of the
-time, for 10% 75%, and for 15% always. Nor does it catch a judge that never ends
-its answer: `qwen3.5:0.8b`, thinking, ran 3 of 3 canary thoughts to the 300 s
-limit, and a call past the limit is no answer, so each such claim fails at the
-limit a call, through the pool.
+`--judge-checked` runs with the alarm off, reading none of that run's answers
+nor another run's stamp, so beside a run that trips it asks what that run hands
+back. The line offers it only when the answers naming nothing trip the alarm by
+themselves, since an unread answer is the judge's failure, and with `--limit`
+the count handed back, which, first in the pool, are all it then asks; without a
+limit it asks the whole pool unguarded. `--subjects rules`, which asks no judge
+model, refuses it. An out-of-date subject it closed on one stays closed until
+that thought is asked again, which the line says. Those it could not read stay
+failed, as the pass leaves its malformed rows, and `--retry-failed` puts back
+the pool's failed claims, this run's among them; a trip in a run whose
+`--retry-failed` returned any says those were chosen for failing, as the pass
+says of its first judgement after a `--retry-*`. It exits 3, ahead of the 1 of
+claims failed, and of a first signal's 130 when the claim the signal let finish
+trips it; a second signal at once exits 130, the claim in hand unjudged, unless
+its finish holds the window's lock: that lands, judged, and a trip it made may
+go unsaid, while one held past the CLI's 3 s grace is undone by the server, its
+claim back in the pool. A database lost as a trip is written leaves none of it,
+unless its commit landed as the connection went, said, exit 3: the window still
+holds the answers before, so the next answer giving no subject trips it again.
+It reads an answer's shape, not its truth: on 100 canary thoughts the 27B had
+keyed, `qwen2.5:7b`, the metadata model's default, which judges when
+`OB1_JUDGE_MODEL` is unset, answered every one in shape and named nothing for
+one, and gave the 27B's key for 60 of the other 99, where the 27B named nothing
+for 1 of the 63 it was asked in the canary's first naming run. So a weaker judge
+passes it, as does one answering a placeholder (`none`, `unknown`), which keys
+as a phrase (no canary subject is one), and `--subjects rules` stays the way for
+a brain whose judge model has not been measured on the question. A working judge
+that often names nothing trips it now and then: by a Monte Carlo of the rule,
+one naming nothing for 5% of the thoughts it is asked, in random order, trips
+within 1,000 answers 1.4% of the time, for 10% 75%, and for 15% always. Nor does
+it catch a judge that never ends its answer: `qwen3.5:0.8b`, thinking, ran 3 of
+3 canary thoughts to the 300 s limit, and a call past the limit is no answer, so
+each such claim fails at the limit a call, through the pool.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5918,11 +5927,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1903 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1910 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 461 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 468 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

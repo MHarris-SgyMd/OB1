@@ -275,6 +275,10 @@ const entries = sources.filter((f) => {
   // dials, and without --subjects the pass, which would drop it, refuses it.
   const checkedSweep = runWith(sweepEnv, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run", "--judge-checked");
   const checkedPass = run("extract-entities.ts", "--url", DEAD, "--judge-checked");
+  // …and beside --subjects rules, which asks no judge model, the sweep refuses it (review pass 4, cold read).
+  const checkedRules = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--judge-checked");
+  ok(checkedRules.code === 2 && /^--judge-checked turns off the judge model's garbage-judge alarm, and --subjects rules asks no judge model: drop one of them\.$/m.test(checkedRules.err),
+    `--subjects rules --judge-checked is refused, not taken in silence (exit ${checkedRules.code}: ${checkedRules.err.split("\n")[0].slice(0, 120)})`);
   ok(checkedSweep.code !== 2 && /\(subject:j@p2r\); the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedSweep.out)
       && checkedPass.code === 2 && /^extract-entities\.ts: --judge-checked goes with --subjects alone/m.test(checkedPass.err),
     `--judge-checked reaches the sweep, said, and the pass refuses it without --subjects (exits ${checkedSweep.code}, ${checkedPass.code}: ${checkedSweep.out.split("\n")[0].slice(-60)})`);

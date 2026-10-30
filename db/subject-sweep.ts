@@ -21,7 +21,8 @@
  *   likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this
  *   run began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the claim it let finish trips it) · 130 a
  *   signal (the first after the call in hand, which can run to the limit a call; a second at once, the claim in hand
- *   handed back, unjudged), or a caller's stop during the naming's waits
+ *   handed back, unjudged, unless its finish holds the window's lock: that lands, judged, a trip it made said or not),
+ *   or a caller's stop during the naming's waits
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
@@ -318,6 +319,11 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
   const urlProblem = noUrl ? (opts.sql == null ? NO_DATABASE_URL : null) : databaseUrlProblem(opts.url as string);
   if (urlProblem !== null) {
     err(urlProblem);
+    return 2;
+  }
+  // Refused rather than dropped (review pass 4, cold read: `--subjects rules --judge-checked` was taken in silence).
+  if (JUDGE_CHECKED && !MODEL) {
+    err("--judge-checked turns off the judge model's garbage-judge alarm, and --subjects rules asks no judge model: drop one of them.");
     return 2;
   }
   for (const [flag, v, rule] of [["--limit", opts.limit, { min: 1 }], ["--timeout", opts.timeout, { min: 1, max: MAX_CALL_TIMEOUT_S }]] as const) {
@@ -889,13 +895,16 @@ async function sweep(
 
   /**
    * The claims of `ids` a trip hands back: each still finished with no subject standing — one asked again since and
-   * keyed, failed or claimed is not — set pending again; one another transaction holds is passed over, its end that
-   * one's (review pass 3, cold read: waiting on it, the hand-back could close a cycle with a pooling, or an edit of two
-   * thoughts, whose claims it locks in another order). The thoughts handed back.
+   * keyed, failed or claimed is not — set pending again, at the pool's head, so the next run asks them first, and
+   * --judge-checked with --limit their count asks them alone (review pass 4, run-it: at its tail, a run with
+   * --judge-checked asked the pool's whole backlog first, the alarm off); one another transaction holds is passed over,
+   * its end that one's, one that rolls back leaving it finished (review pass 3, cold read: waiting on it, the hand-back
+   * could close a cycle with a pooling, or an edit of two thoughts, whose claims it locks in another order). The
+   * thoughts handed back.
    */
   const handBack = async (tx: SQL, ids: string[]): Promise<string[]> => ((await tx`
-    UPDATE thought_work_claims c SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL,
-                                     finished_at = NULL, enqueued_at = now(), worker_id = NULL
+    UPDATE thought_work_claims c SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, worker_id = NULL,
+           enqueued_at = (SELECT COALESCE(min(p.enqueued_at), now()) - interval '1 second' FROM thought_work_claims p WHERE p.work_type = ${POOL} AND p.status = 'pending')
       FROM (SELECT w.thought_id FROM thought_work_claims w
              WHERE w.work_type = ${POOL} AND w.status = 'succeeded' AND w.thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])
                AND NOT EXISTS (SELECT 1 FROM thought_facets f WHERE f.thought_id = w.thought_id AND f.kind = 'subject' AND f.valid_until IS NULL)
@@ -905,7 +914,7 @@ async function sweep(
 
   /** The line of a run another run's trip stops: when, on whose answers, and the claim in hand handed back with them. */
   const stampLine = (w: JudgeWindow, inHand: WindowAnswer | null) =>
-    `\n  Another run's garbage-judge alarm tripped at ${w.tripped}${w.by.length ? `, on answers from ${andList(w.by)}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, whose judge model is likely the same, stops here too` +
+    `\n  Another run's garbage-judge alarm tripped at ${w.tripped}${w.by.length ? `, on answers from ${andList(w.by)}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, ${w.by.length === 0 || w.by.includes(cfg.judgeModel) ? "whose judge model is likely the same" : `of the same pool though its judge model, ${cfg.judgeModel}, gave none of those answers`}, stops here too` +
     (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject it closed stays closed until it is asked again)` : ""}` : "") + "." +
     `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; ${runAgain("once the model is right,")}`;
 
@@ -930,10 +939,19 @@ async function sweep(
    * finished as named nothing, goes back too, uncounted, and the run stops (review pass 3, run-it: a run beside the
    * trip finished the claim in hand and counted it in the window after, which slid it out for good).
    */
-  const judgedIn = async (tx: SQL, entry: WindowAnswer): Promise<{ code: number; line: string } | null> => {
+  const judgedIn = async (tx: SQL, entry: WindowAnswer, inFinish: boolean): Promise<{ code: number; line: string } | null> => {
     const window = Math.max(1, JUDGE_ALARM.window);
-    await tx`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, '') ON CONFLICT (key) DO NOTHING`;
-    const [{ value }] = (await tx`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`) as { value: string }[];
+    // The row inserted if absent, then locked; one deleted between the two, the window reset by hand, is inserted
+    // again (review pass 4, cold read: the lock found no row, and the run ended in a trace).
+    let value: string | undefined;
+    for (let tries = 0; tries < 3 && value === undefined; tries++) {
+      await tx`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, '') ON CONFLICT (key) DO NOTHING`;
+      value = ((await tx`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`) as { value: string }[])[0]?.value;
+    }
+    // A second signal during a finish, up to the window's lock, runs beside it queued there, takes the finish back, the
+    // claim the stop's to hand back, unjudged: checked once the lock is had (review pass 4, cold read: checked before
+    // the wait, one during it let the finish land judged, and a trip it made went unsaid).
+    if (inFinish && hardStop.signal.aborted) throw ROLLED_BACK;
     const w = readJudgeWindow(value, POOL);
     if (w.tripped !== null && w.tripped !== tripBase) {
       const back = entry.f ? await handBack(tx, [entry.t]) : [];
@@ -964,7 +982,11 @@ async function sweep(
         (back.size > 0 ? `The ${back.size} thought(s) it named nothing for are back in the pool${closed ? `, and the out-of-date subject it closed on ${closed} of them stays closed until each is asked again` : ""}. ` : "") +
         (retried > 0 ? `This run's --retry-failed returned ${retried} claim(s) chosen for failing: some of these thoughts may be at fault. ` : "") +
         runAgain("Once the model is right,") +
-        ` If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: run once with --judge-checked, the alarm off.`,
+        // Offered only when the answers naming nothing trip it by themselves, an unread answer being the judge's
+        // failure whatever the thought, and with a limit, the thoughts handed back first in the pool (review pass 4:
+        // offered after unread answers alone, cold read, or with no limit, run-it, it ran a judge through the pool's
+        // backlog with the alarm off).
+        (judgeTrips(nothing) && back.size > 0 ? ` If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit ${back.size} asks the ${back.size} handed back, first in the pool, with the alarm off.` : ""),
     };
   };
 
@@ -979,7 +1001,7 @@ async function sweep(
     try {
       return await sql.begin(async (tx: SQL) => {
         const moved = await poolMoved(tx, true);
-        return moved !== null ? { code: 2, line: moved } : await judgedIn(tx, entry);
+        return moved !== null ? { code: 2, line: moved } : await judgedIn(tx, entry, false);
       });
     } catch (e) {
       if (!databaseUnavailable(e)) throw e;
@@ -1190,12 +1212,13 @@ async function sweep(
             // Finished by this run, the record that it was asked: judged in this transaction, so the claim is in the
             // window, for the alarm to hand back should it trip on it, or not finished at all, whatever ends the run
             // between the two (review pass 3, run-it: a database lost after the finish, or a second signal at the trip,
-            // left it finished outside the window, for good). A second signal before then takes the finish back too,
-            // the claim the stop's to hand back, unjudged; one as the window is written waits for the finish, judged.
-            if (hardStop.signal.aborted) throw ROLLED_BACK;
+            // left it finished outside the window, for good). A second signal before judgedIn has the window's lock
+            // takes the finish back too, the claim the stop's to hand back, unjudged; one once it is had lets the
+            // finish land, judged, a trip it made said to a caller in process, and through the CLI, which exits 130 as
+            // the stop's release settles, said or not.
             answer.f = true;
             answer.c = c?.action === "closed";
-            return { c, stale: false, gone: false, written, held, judged: true, alarm: await judgedIn(tx, answer) };
+            return { c, stale: false, gone: false, written, held, judged: true, alarm: await judgedIn(tx, answer, true) };
           });
         } catch (e) {
           if (e === ROLLED_BACK) return false;
