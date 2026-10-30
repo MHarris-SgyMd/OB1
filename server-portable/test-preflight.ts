@@ -3027,7 +3027,7 @@ else {
   // reads it, after [5] in the first shard and after [5b] in a full run.
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
-  const left = JSON.parse((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  const left = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(left.ok === true, `[5] leaves a brain preflight passes, the state [9] reads after it (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
 }
 
@@ -6082,7 +6082,7 @@ else {
   console.log("\n[doc] server-portable/README.md states this suite's assertion total, and each shard's");
   const readme = readFileSync(join(HERE, "README.md"), "utf8");
   const n = total();
-  // Its lines that run this suite with a count: `… bun test-preflight.ts  # 993 — …`, a shard's with its variable before.
+  // Its lines that run this suite with a count: `… bun test-preflight.ts  # 994 — …`, a shard's with its variable before.
   const lines = [...readme.matchAll(/^.*\btest-preflight\.ts\s+#\s*\d+.*$/gm)].map((m) => m[0]);
   const counts = (ls: string[]) => ls.map((l) => Number(/test-preflight\.ts\s+#\s*(\d+)/.exec(l)![1]));
   const shardOf = (l: string) => /\bOB1_PREFLIGHT_SHARD=(\S+)/.exec(l)?.[1];
