@@ -834,7 +834,8 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   // The rival claims the whole ticket over REST: refused, naming the writer's claim; no token in the refusal.
   const r = await rest("POST", "/v1/claims", { ticket: "SMD-9301", label: "the rival, over REST" }, KEYS.rival);
   const heldBy = (r.body.heldBy ?? []) as { id?: string; holder?: string }[];
-  assert(r.status === 409 && r.body.code === "WORK_CLAIMED" && heldBy.length === 1 && heldBy[0].id === mine?.id && heldBy[0].holder === "writer" && !JSON.stringify(r.body).includes(token) && !("token" in r.body),
+  assert(r.status === 409 && r.body.code === "WORK_CLAIMED" && heldBy.length === 1 && heldBy[0].id === mine?.id && heldBy[0].holder === "writer" && !JSON.stringify(r.body).includes(token) && !("token" in r.body)
+      && !("label" in heldBy[0]) && !("piece" in heldBy[0]) && !JSON.stringify(r.body).includes("over MCP"),
     `across transports: the same work claimed over REST with another key is refused 409 WORK_CLAIMED, naming the writer's claim, no token in it (${r.status} ${JSON.stringify(r.body).slice(0, 140)})`);
   const rm = await mcp("claim_work", { ticket: "SMD-9301" }, KEYS.rival);
   assert(rm.isError && rm.sc.code === "WORK_CLAIMED" && /^Refused: SMD-9301 is covered by a live claim: SMD-9301 PR 1 by writer since /.test(rm.text) && !rm.text.includes(token) && !JSON.stringify(rm.sc).includes(token),
@@ -894,6 +895,16 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
       `release_claim: another key's claim unforced 403, forced by a key not yet the operator 403 (forced), forced by the operator with no reason 400, with one 200 and recorded (${unforced.status} ${forcedAsAgent.status} ${noReason.status} ${forced.status} ${forcedClaim?.releasedByKind})`);
   } finally {
     await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+  }
+  // An ingested key (an importer's) cannot claim: the rival, classified so for the moment, is refused 403.
+  await sql`SELECT set_agent_kind('rival', 'ingested')`;
+  try {
+    const ingested = await rest("POST", "/v1/claims", { ticket: "SMD-9304" }, KEYS.rival);
+    const ingestedMcp = await mcp("claim_work", { ticket: "SMD-9304" }, KEYS.rival);
+    assert(ingested.status === 403 && ingested.body.code === "REFUSED_CLAIM_KEY" && ingestedMcp.isError && /^Refused: rival is an ingested \(importer's\) key, which cannot claim work\.$/.test(ingestedMcp.text),
+      `a key the registry calls ingested: claim_work refused 403 REFUSED_CLAIM_KEY over REST, in words over MCP (${ingested.status} ${ingested.body.code} | ${ingestedMcp.text})`);
+  } finally {
+    await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'rival'`;
   }
   // The writer releases its own over MCP with its token; again from anyone: already_released.
   const own = await mcp("release_claim", { id: String(mine?.id), token, reason: "merged" });

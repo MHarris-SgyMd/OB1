@@ -6273,6 +6273,14 @@ console.log("\n[32] Work claims in the tools' words (SMD-3598): claim_work's tok
     assert(r.isError === true && re.test(text(r)) && !text(r).includes("wc_") && !JSON.stringify(r.structuredContent).includes("wc_") && !text(r).includes("\n"),
       `${name}: refused in one line, by its rule, no token (${text(r).slice(0, 100)})`);
   }
+  // A writer's answer this server cannot read is a fault whose message never prints the answer: it may carry the token.
+  const { normaliseClaimAnswer, normaliseWorkClaim } = await import("./store.ts");
+  const thrown = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
+  const badOutcome = thrown(() => normaliseClaimAnswer({ outcome: "stolen", token: TOKEN, claim: claim() }, "claim_work"));
+  const badToken = thrown(() => normaliseClaimAnswer({ outcome: "claimed", code: null, token: TOKEN + "x", claim: claim() }, "claim_work"));
+  const badClaim = thrown(() => normaliseWorkClaim({ id: 1, token: TOKEN }, "claim_work"));
+  assert(badOutcome === "claim_work answered no envelope this server reads" && badToken === "claim_work answered a token not in its shape" && badClaim === "claim_work answered a claim this server cannot read",
+    `an answer the store cannot read throws without printing it, the token never in the message (${[badOutcome, badToken, badClaim].join(" | ")})`);
   const released = say.renderReleaseClaim({ ok: true, value: { outcome: "released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z", releaseReason: "merged" }) } } as never);
   const already = say.renderReleaseClaim({ ok: true, value: { outcome: "already_released", claim: claim({ state: "released", releasedAt: "2026-10-30T12:00:00.000Z" }) } } as never);
   const listed = say.renderListClaims({ ok: true, value: { claims: [claim()] } } as never);
