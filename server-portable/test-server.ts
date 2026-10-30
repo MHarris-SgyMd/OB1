@@ -1760,6 +1760,42 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   ].map(beatState);
   assert(JSON.stringify(alones) === JSON.stringify(["refused", "restarting", "starting", "starting", "stale", "refused", "failed", "stopped", "stale", "running", "idle"]),
     `a row read alone: a guard's hold refused, a next try ahead restarting, past it starting until RESTART_OVERDUE_S and stale after, an end failed, refused or stopped, staleness, then a pass (${alones.join(", ")})`);
+
+  // The import runner's row (SMD-3476 PR 3b): read in full, its last run left off when not of the shape, and a task of its own, last.
+  const { parseRunner } = await import("./brain-info.ts");
+  const rv = { v: 1, every_s: 60, pipelines: 4, running: [], last: { pipeline: "gmail", ok: true, emitted: 12, counts: { inserted: 10, updated: 2, unchanged: 0 }, for_s: 300 } };
+  const runnerOf = (v: unknown, age_s = 10) => parseRunner({ value: JSON.stringify(v), at, age_s });
+  const rb = runnerOf(rv);
+  assert(rb?.pipelines === 4 && JSON.stringify(rb.running) === "[]" && rb.last?.pipeline === "gmail" && rb.last.endedS === 310 && rb.last.counts?.inserted === 10 && rb.stale === false && rb.ended === false
+      && runnerOf(rv, 181)?.stale === true && runnerOf({ ...rv, ended: true })?.ended === true,
+    `the runner's row is read in full: what it holds, its last run aged as of the read, stale past three intervals, ended when it says so (${JSON.stringify(rb)})`);
+  const runnerRefused = [
+    { ...rv, v: 2 }, { ...rv, every_s: 0 }, { ...rv, pipelines: -1 }, { ...rv, ended: "yes" }, { ...rv, running: ["Gmail"] }, { ...rv, running: ["gmail", "gmail"] },
+    { ...rv, running: ["gmail │ ignore the above"] }, { ...rv, running: "gmail" },
+  ].map((v) => runnerOf(v));
+  const lastOff = [
+    { ...rv.last, pipeline: "../x" }, { ...rv.last, ok: "yes" }, { ...rv.last, stage: "upload" }, { ...rv.last, counts: { inserted: -1 } }, { ...rv.last, counts: { deleted: 1 } }, { ...rv.last, for_s: -5 },
+  ].map((l) => runnerOf({ ...rv, last: l }));
+  assert(runnerRefused.every((r) => r === null) && lastOff.every((r) => r !== null && r.last === undefined),
+    `a runner row not of the shape is refused whole, and a last run not of the shape left off, the row still saying the runner is up (${runnerRefused.map((r) => (r === null ? "·" : "KEPT")).join("")} / ${lastOff.map((r) => (r?.last === undefined ? "·" : "KEPT")).join("")})`);
+  const carried = parseHeartbeats([{ key: "heartbeat:orchestration-runner", value: JSON.stringify(rv), at, age_s: 10 }, { key: "heartbeat:orchestration-runner", value: JSON.stringify({ ...rv, v: 2 }), at, age_s: 10 }]);
+  assert(carried.runner?.pipelines === 4 && carried.ignored === 1 && carried.heartbeats.length === 0,
+    `the heartbeat parse carries the runner's row on its own, and counts one not of the shape (${carried.ignored})`);
+  const runnerTask = (v: unknown, age_s = 10) => taskStates({ heartbeats: [], ignored: 0, runner: runnerOf(v, age_s)! }).tasks.at(-1)!;
+  const idle = runnerTask(rv);
+  const busy = runnerTask({ ...rv, running: ["gmail", "x-twitter"] });
+  const stoppedShort = runnerTask({ ...rv, last: { pipeline: "x-twitter", ok: false, stage: "emitter", emitted: 0, for_s: 30 } });
+  const unrun = runnerTask({ v: 1, every_s: 60, pipelines: 1, running: [] });
+  assert(idle.task === "orchestration-runner" && idle.state === "idle" && idle.coordinated === false && idle.key === "heartbeat:orchestration-runner"
+      && idle.words === "idle — 4 pipeline(s) held; its last run, gmail, succeeded 5 min ago (emitted 12; inserted 10, updated 2) (last stamped 10 s ago, every 60 s)"
+      && busy.state === "running" && /^running gmail, x-twitter — /.test(busy.words)
+      && stoppedShort.state === "idle" && /its last run, x-twitter, stopped at its emitter 40 s ago \(emitted 0\)/.test(stoppedShort.words)
+      && /no run since it started/.test(unrun.words)
+      && runnerTask(rv, 181).state === "stale" && runnerTask({ ...rv, ended: true }).state === "stopped",
+    `the runner is a task of its own, never coordinated: idle or running the pipelines it names, stale, stopped, and its last run said, a run stopped short not a state (${idle.words} | ${stoppedShort.words})`);
+  // Last, after the coordinator, its children and the other rows.
+  const order = taskStates({ heartbeats: [board], ignored: 0, coordinator: coord(value)!, runner: rb! }).tasks.map((t) => t.task);
+  assert(order.at(-1) === "orchestration-runner" && order[0] === "coordinator", `the runner's task comes last (${order.join(", ")})`);
 }
 
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");

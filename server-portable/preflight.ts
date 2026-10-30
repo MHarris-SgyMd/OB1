@@ -339,6 +339,8 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
 
 /** The coordinator started again, as restartCommand words a pass's restart (db/config.mjs's coordinatorUp): recreated, with no deps. */
 const COORDINATOR_UP = "podman compose -f deploy/compose.yaml up -d --no-deps --force-recreate coordinator, with the -f files and -p the stack was started with (docker compose alike)";
+/** The import runner started again: its profile's services, as deploy/README.md starts them (SMD-3476 PR 3b). */
+const RUNNER_UP = "podman compose -f deploy/compose.yaml --profile orchestration up -d orchestration-runner, with the -f files and -p the stack was started with (docker compose alike)";
 
 /** How long a pending proposal may wait before the proposals row warns, in days (SMD-2680). */
 const PROPOSALS_WARN_DAYS = 7;
@@ -5139,6 +5141,11 @@ if (configFailed) {
                   return t.state === "stale"
                     ? `The coordinator has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database — start it again: ${COORDINATOR_UP}. ${retire}`
                     : `The coordinator stopped: start it again — ${COORDINATOR_UP}. ${retire}`;
+                }
+                // The import runner is the orchestration profile's own service, which no coordinator runs (SMD-3476 PR 3b).
+                if (t.task === "orchestration-runner") {
+                  const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
+                  return `${t.state === "stale" ? `The import runner has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database` : "The import runner stopped"} — start it again: ${RUNNER_UP}. ${retire}`;
                 }
                 if (t.state === "missing") return `${name}: ${t.words} — the coordinator's log says why (compose logs coordinator).`;
                 return `${name}: ${t.words} — the ${t.task === "sleep" ? "sleep" : "workers"} row says what to do.`;

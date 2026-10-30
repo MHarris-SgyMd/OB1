@@ -3498,6 +3498,8 @@ else {
       },
     }, 10);
     await put("heartbeat:board-sync", { v: 1, every_s: 300, running: false, outcome: "ok" }, 60);
+    // The import runner's row too (SMD-3476 PR 3b): the Verify's "the import runner's included".
+    await put("heartbeat:orchestration-runner", { v: 1, every_s: 60, pipelines: 2, running: [], last: { pipeline: "gmail", ok: true, emitted: 3, for_s: 40 } }, 20);
     try {
       const out = await run(SQL_ENV);
       const json = JSON.parse((await run(SQL_ENV, "--json")).out) as { checks: { name: string; status: string; detail: string; fix?: string }[] };
@@ -3507,7 +3509,7 @@ else {
       const record = await brainInfo({ version: "0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 } } as never,
         (p) => readDatabaseFacts(claims as never, { stats: false }, p), 10_000);
       const recordTasks = "error" in record.database ? "(no database)" : words(record.database.tasks ?? []);
-      const want = "coordinator running, board-sync idle, extract:qwen2.5:7b@p2 missing, consolidate restarting";
+      const want = "coordinator running, board-sync idle, extract:qwen2.5:7b@p2 missing, consolidate restarting, orchestration-runner idle";
       assert(check?.status === "warn" && check.detail === want && route === want && recordTasks === want,
         `preflight's tasks row, task_status's function and brain_info's record agree on each task's state (${check?.detail} | ${route} | ${recordTasks})`);
       assert(/extract:qwen2\.5:7b@p2: started by its coordinator 10 min ago, and it has written no heartbeat since — the coordinator's log says why \(compose logs coordinator\)\./.test(fix(out.out, "tasks"))
@@ -3516,9 +3518,16 @@ else {
       // The coordinator gone quiet: said so, its restart named, and its children read from their own rows alone.
       await claims`UPDATE ob1_config SET updated_at = now() - interval '10 minutes' WHERE key = 'heartbeat:coordinator'`;
       const quiet = await run(SQL_ENV);
-      assert(/!\s+tasks\s+coordinator stale, board-sync idle$/m.test(quiet.out) && /The coordinator has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(fix(quiet.out, "tasks"))
+      assert(/!\s+tasks\s+coordinator stale, board-sync idle, orchestration-runner idle$/m.test(quiet.out) && /The coordinator has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(fix(quiet.out, "tasks"))
           && /Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:coordinator'\./.test(fix(quiet.out, "tasks")),
         `a coordinator past three intervals is stale, its restart and its retirement named, and only rows of their own speak for its children (${row(quiet.out, "tasks")})`);
+      // The runner gone quiet: its own restart, its profile's, and its retirement (SMD-3476 PR 3b).
+      await claims`UPDATE ob1_config SET updated_at = now() - interval '10 minutes' WHERE key = 'heartbeat:orchestration-runner'`;
+      const runnerQuiet = await run(SQL_ENV);
+      assert(/orchestration-runner stale$/m.test(row(runnerQuiet.out, "tasks"))
+          && /The import runner has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml --profile orchestration up -d orchestration-runner/.test(fix(runnerQuiet.out, "tasks"))
+          && /Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:orchestration-runner'\./.test(fix(runnerQuiet.out, "tasks")),
+        `a runner past three intervals is stale, its profile's restart and its retirement named (${fix(runnerQuiet.out, "tasks")})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }
