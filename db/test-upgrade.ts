@@ -15,9 +15,10 @@
  * existing rows "correctly read NULL". Nothing held that claim. This does, and
  * generalises it, so the next migration is covered before it is written.
  *
- * CI runs this suite beside test-preflight.ts, each in its own database of one
- * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195). What the cluster
+ * CI runs this suite beside test-preflight.ts's first shard, each in its own
+ * database of one Postgres, as the same role (SMD-2219, SMD-3468), a Postgres
+ * the two have to themselves while the data-layer job's other suites run
+ * (SMD-3195). What the cluster
  * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
  * here to the current database, or named for this suite (ob1_upgrade_*,
  * ob1_notemp, tu_*). [12] opens a session in `postgres` on purpose, to hold a

@@ -155,7 +155,10 @@ main() {
   run server-portable    test-chunking.ts
   run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
-  run server-portable    test-preflight.ts
+  # CI runs its two shards side by side, each on a Postgres of its own
+  # (SMD-3468); here in series, each dropping its schema first.
+  OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
+  OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
   run compat/supabase-sql test-compat.ts
   # The vendored writers of a thought's content or vector (change 69), then
   # every extension tool on the SQL shim, as CI's data-layer job runs them —
