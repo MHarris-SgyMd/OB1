@@ -4251,6 +4251,16 @@ if (want("9f")) {
         IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN RAISE EXCEPTION '${words}' USING ERRCODE = '${errcode}'; END IF; RETURN NULL; END $$;
       CREATE TRIGGER zz_reembed_deadlock AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_deadlock()`);
     const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${OWN_KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    /**
+     * The claim once it is out of hand, polled for up to 5 s: a follower says a row's fate, or writes its
+     * vector, before the claim's release reaches the row (SMD-3612). The value the poll saw is returned,
+     * so it is the one asserted; at the bound, the last read.
+     */
+    const claimOutOfHand = async (id: string) => {
+      let claim = undefined as Awaited<ReturnType<typeof claimOf>>;
+      await pollUntil(async () => (claim = await claimOf(id)) !== undefined && claim.status !== "claimed", 5_000);
+      return claim;
+    };
 
     // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
     providerDown503 = true;
@@ -4281,14 +4291,15 @@ if (want("9f")) {
     providerDown503 = true;
     await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${midThought}::uuid`;
     const sentBackAgain = await pollUntil(async () => mid2.lines.filter((l) => l.includes(`${midThought} goes back to the pool unrecorded`)).length >= 2, 15_000);
-    const claimAgain = await claimOf(midThought);
+    // The line comes before the worker's finally hands the claim back: read at once, it was still claimed (SMD-3612).
+    const claimAgain = await claimOutOfHand(midThought);
     providerDown503 = false;
     const midAgain = await pollUntil(() => atModel(midThought), 15_000);
     const mid2Exit = await mid2.stop();
     downStatus = 503;
     assert(mid2Stamped && sentBack && waitingRow && claimAtOutage?.status === "pending" && claimAtOutage.last_error === null && resumed && midEmbedded && mid2Exit === "exit 0",
       `a provider outage mid-pass sends the row back to the pool unrecorded (${JSON.stringify(claimAtOutage)}), the follower's row waits mid-pass, failed, and the pass resumes when the provider answers (idle ${mid2Stamped}, sent back ${sentBack}, row waiting ${waitingRow}, resumed ${resumed}, embedded ${midEmbedded}; ${mid2Exit})`);
-    assert(sentBackAgain && claimAgain?.status === "pending" && midAgain,
+    assert(sentBackAgain && claimAgain?.status === "pending" && claimAgain.last_error === null && midAgain,
       `…and the thought, re-embedded since, is no suspect at the next outage: back to the pool unrecorded again, then re-embedded (sent back again ${sentBackAgain}, embedded ${midAgain}; claim ${JSON.stringify(claimAgain)})`);
 
     // A row the provider fails again right after it answered a probe is the row's own: recorded failed, not cycled for ever.
@@ -4400,7 +4411,8 @@ if (want("9f")) {
     }
     const seen = waits().slice(0, 3);
     const throttledEmbedded = await pollUntil(() => atModel(throttledThought), 15_000);
-    const throttledClaim = await claimOf(throttledThought);
+    // The vector's write commits a statement before the claim's release (SMD-3612 review pass 1).
+    const throttledClaim = await claimOutOfHand(throttledThought);
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
@@ -16752,6 +16764,9 @@ if (want("38")) {
     let extractedDuringSweep = false;
     sw.onExtract = async () => { extractedDuringSweep = true; };
     const acWake = new AbortController();
+    // The mark an earlier case left on the row, ended, which the run carries (lastSlept) until its first
+    // sleep stamps: not this run's (SMD-3627 review pass 1).
+    const priorFrom = (await beat())?.slept?.from;
     // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
     const wakeRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acWake.signal });
     let wokeInSweep = false;
@@ -16769,13 +16784,16 @@ if (want("38")) {
       wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
       extractedAtWake = extractedDuringSweep;
       leftByWake = await rowsBy("zz-wake");
-      wakeMark = (await beat())?.slept;
+      // The sleep's end is marked after the line, and the row's next write carries it (pass-stamp.ts's
+      // slept), so it is polled for, bounded; the value the poll saw is the one asserted. Read at once,
+      // it was the start's mark, open (SMD-3627).
+      await pollUntil(async () => typeof (wakeMark = (await beat())?.slept)?.to === "string" && wakeMark?.from !== priorFrom, 5_000);
     } finally {
       await fastDelete();
     }
     // The sleep's mark spans the sweep's reads: it read from == to before (review pass 1).
-    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
-      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
+    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && wakeMark.from !== priorFrom && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
+      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wakeMark !== undefined && wakeMark.from === priorFrom ? ", the mark on the row before the run" : ""}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
     sw.onExtract = null;
     const sweptNext = await pollUntil(async () => (await rowsBy("zz-wake")) === 0, 20_000);
     acWake.abort();
