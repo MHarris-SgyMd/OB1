@@ -209,7 +209,9 @@ free_rows() {
 # preflight-postgres; here one after the other on one, each shard dropping the
 # schema before its first database section, which their lane's length, inside
 # the database lane's, makes free. The script runs itself again under a second
-# with-postgres.sh with --pair, and that run does only this.
+# with-postgres.sh with --pair, and that run does only this — so a run needs
+# podman or docker even when DATABASE_URL is given, and without one this lane
+# fails with with-postgres.sh's "No working container runtime found".
 pair_rows() {
   FAILED=0
   BASE_ENV=$(env | LC_ALL=C sort)
