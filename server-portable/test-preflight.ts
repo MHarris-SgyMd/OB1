@@ -3051,8 +3051,8 @@ else {
   // missing privilege with its GRANT. `migrate.ts --grant` then issues the whole
   // documented set (db/config.mjs's ROLE_GRANTS, the one spelling); granted, the
   // role starts and a real windowed capture and an edit through it succeed. A
-  // full apply first, so upsert_thought is the shipped 4-argument form whatever
-  // state the reapply blocks above left. A role is cluster-wide and dropSchema
+  // full apply first, onto the schema dropped above, so upsert_thought is the
+  // shipped 4-argument form. A role is cluster-wide and dropSchema
   // does not touch it, so an interrupted run's leftover is dropped first and the
   // fixture cleans up whatever happens inside it.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });

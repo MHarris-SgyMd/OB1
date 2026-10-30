@@ -986,6 +986,9 @@ jobs:
           # 34 and 35 read what a step runs.
           leg() {
             local name=$1; shift
+            case $name in
+              "" | */*) echo "::error title=SQL data layer::a leg named \"$name\": a name is a file name in \$RUNNER_TEMP"; exit 1 ;;
+            esac
             if grep -qxF -- "$name" "$RUNNER_TEMP/data-layer.legs" 2> /dev/null; then
               echo "::error title=SQL data layer::two legs named $name: each needs a name of its own"
               exit 1
@@ -1215,9 +1218,22 @@ jobs:
           while waiting && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
           summaries=""
           failed=0
+          listed() { local l; for l in "${legs[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
+          # A suite's log no leg wrote is a background leg started outside
+          # leg() (a raw `( … ) &`, as this step's legs were before review
+          # pass 3), whose code nobody reads: refused (review pass 4).
+          for log in "$RUNNER_TEMP"/test-*.log; do
+            [ -e "$log" ] || continue
+            name=${log##*/}
+            listed "${name%.log}" && continue
+            echo "::error title=SQL data layer::$log is no leg's: a background suite started outside leg() runs with nobody reading its code — start it with leg"
+            failed=1
+          done
           for suite in "${legs[@]}"; do
             log="$RUNNER_TEMP/$suite.log"
             rc=$(cat "$RUNNER_TEMP/$suite.rc" 2> /dev/null) || rc="none, its subshell wrote no code by ${limit_s} s and 30 s"
+            # A code with no log is not a pass: the failing branch says so, and the loop goes on to the others.
+            [ -f "$log" ] || rc="$rc, and no log"
             [ "$rc" = 0 ] || failed=1
             case $rc in
               124) rc="124, over the ${limit_s} s limit" ;;
@@ -1232,7 +1248,7 @@ jobs:
               cat "$log" || true
             fi
             # The stamp, +<seconds>s, before the line report() prints.
-            summary=$(grep -aE '^\+[0-9.]+s [0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summary=$(grep -aE '^\+[0-9.]+s [0-9]+ assertions: ' "$log" 2> /dev/null | tail -n 1 || true)
             summaries+="  $suite: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
           done
           printf '\n%s' "$summaries"

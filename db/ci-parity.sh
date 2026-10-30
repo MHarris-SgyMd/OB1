@@ -133,10 +133,11 @@ main() {
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
   OB1_LIVE_SHARD=extract run db test-live.ts
-  # CI runs this one and test-preflight.ts in the background from the
-  # data-layer job's start, on a Postgres of their own, beside that job's suites
-  # below (SMD-2219, SMD-3195); here, in their places and in series, on the
-  # shared one, test-preflight.ts where CI ran it before SMD-3195.
+  # CI runs this one and test-preflight.ts's two shards in the background from
+  # the data-layer job's start, on Postgreses of their own, beside that job's
+  # suites below (SMD-2219, SMD-3195, SMD-3468); here, in their places and in
+  # series, on the shared one, test-preflight.ts where CI ran it before
+  # SMD-3195.
   run db                 test-upgrade.ts
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts

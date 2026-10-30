@@ -61,8 +61,8 @@ const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code ==
 
 /**
  * The advisory locks held in this database. pg_locks is the cluster's, and CI
- * runs this suite beside test-preflight.ts, whose captures take the same locks
- * in a database of its own (SMD-2219).
+ * runs this suite beside test-preflight.ts's first shard, whose captures take
+ * the same locks in a database of its own (SMD-2219, SMD-3468).
  */
 const advisoryLocksHere = async (sql: SQL) =>
   Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0].c);
