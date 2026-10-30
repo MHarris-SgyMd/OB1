@@ -7939,27 +7939,31 @@ if (want("16")) {
   // reads the registry's kind now, said so.
   const reviewerOf = async (id: string) =>
     (await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { by: string | null; agent: string | null };
+  /** consolidate.ts run with no worker key, as the keyless cases above run it. */
+  const consolidateKeyless = (...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: keyless, cwd: HERE });
+  /** The decided-by lines a run printed, trimmed. */
+  const decidedBy = (out: string) => out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
   assert(/decided by: consolidator \(/.test(forced.out) && /decided by: consolidator \(/.test(unforced.out)
       && JSON.stringify(await reviewerOf(directed.id)) === JSON.stringify({ by: "consolidator", agent: agent.id }),
-    `the accept and the reject each say who decided, and the row records the worker's key and agent (${unforced.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
-  const noKeyReject = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--reject", undirected.id, "--note", "no key"], { env: keyless, cwd: HERE });
+    `the accept and the reject each say who decided, and the row records the worker's key and agent (${decidedBy(unforced.out)[0]})`);
+  const noKeyReject = await consolidateKeyless("--reject", undirected.id, "--note", "no key");
   assert(noKeyReject.code === 0 && /decided by: consolidate, no agent id recorded \(run with no key, or a key that did not resolve\)/.test(noKeyReject.out)
       && JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
-    `a reject run with no key records 'consolidate' and no agent, and says so (${noKeyReject.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
+    `a reject run with no key records 'consolidate' and no agent, and says so (${decidedBy(noKeyReject.out)[0]})`);
   const listRejected = await consolidate("--list", "rejected");
-  const decidedLines = listRejected.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  const decidedLines = decidedBy(listRejected.out);
   assert(decidedLines.length === 2 && decidedLines.includes("decided by: consolidator (a key the registry has not classified)") && decidedLines.includes("decided by: consolidate, no agent id recorded (run with no key, or a key that did not resolve)"),
     `--list rejected shows who decided each row (${decidedLines.join(" | ")})`);
   await sql`UPDATE ob1_agents SET kind = 'operator' WHERE canonical_agent_id = ${agent.id}::uuid`;
   const listClassified = await consolidate("--list", "rejected");
   await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
   assert(listClassified.out.includes("decided by: consolidator (operator — classified after it decided)") && listClassified.out.includes("decided by: consolidate, no agent id recorded"),
-    `a key classified after it decided reads the registry's kind now, said so; a decision with no agent lends none (${listClassified.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim()).join(" | ")})`);
+    `a key classified after it decided reads the registry's kind now, said so; a decision with no agent lends none (${decidedBy(listClassified.out).join(" | ")})`);
   const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
   assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
     "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
   const listAccepted = await consolidate("--list", "accepted");
-  const acceptedLines = listAccepted.out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  const acceptedLines = decidedBy(listAccepted.out);
   assert(listAccepted.code === 0 && acceptedLines.length === 1 && acceptedLines[0] === "decided by: consolidator (a key the registry has not classified)",
     `--list accepted shows who decided the accepted row (${acceptedLines.join(" | ")})`);
   // A key classified before it decides: its kind at the decision, with no "since" (the reject clears nothing).
@@ -7967,7 +7971,7 @@ if (want("16")) {
   const classifiedReject = await consolidate("--reject", directed.id, "--note", "classified first");
   await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
   assert(classifiedReject.code === 0 && classifiedReject.out.includes("decided by: consolidator (agent)\n"),
-    `a key classified before it decides is recorded with its kind then, and still says it once the registry forgets it (${classifiedReject.out.split("\n").find((l) => /decided by/.test(l))?.trim()})`);
+    `a key classified before it decides is recorded with its kind then, and still says it once the registry forgets it (${decidedBy(classifiedReject.out)[0]})`);
   // A brain short of 113 (its columns gone, the trigger with them): a decision still lands, says the row records no
   // reviewer, and rolls nothing back; --list says once that it cannot show who decided. Keyless, so the worker's
   // audit rows below stay the reviews they count. 113 put back after, its backfill naming the keyless accept.
@@ -7975,10 +7979,10 @@ if (want("16")) {
   let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
   let shortStatus: string, shortPointer: string | null;
   try {
-    shortReject = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--reject", undirected.id, "--note", "short of 113"], { env: keyless, cwd: HERE });
+    shortReject = await consolidateKeyless("--reject", undirected.id, "--note", "short of 113");
     shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
-    shortList = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--list", "rejected"], { env: keyless, cwd: HERE });
-    shortAccept = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, "--accept", undirected.id, "--direction", "newer"], { env: keyless, cwd: HERE });
+    shortList = await consolidateKeyless("--list", "rejected");
+    shortAccept = await consolidateKeyless("--accept", undirected.id, "--direction", "newer");
     shortPointer = await supersedesOf(green);
   } finally {
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_proposal_reviewer.sql") });

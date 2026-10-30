@@ -987,8 +987,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const proposals = withWriters(rows as unknown as Record<string, unknown>[], writers, read).map(normaliseProposal);
     if (!read) out(`  ${WRITERS_UNREAD}\n`);
     // SMD-2608: who decided each decided row, said once on a brain short of 113.
-    const reviewers = await reviewersOf(rows.filter((p) => p.status === "accepted" || p.status === "rejected").map((p) => p.id));
-    if (reviewers === "no-113" && rows.some((p) => p.status === "accepted" || p.status === "rejected")) out(`  ${REVIEWERS_UNREAD}\n`);
+    const decided = (p: Listed) => p.status === "accepted" || p.status === "rejected";
+    const reviewers = await reviewersOf(rows.filter(decided).map((p) => p.id));
+    if (reviewers === "no-113" && rows.some(decided)) out(`  ${REVIEWERS_UNREAD}\n`);
     rows.forEach((p, i) => {
       const np = proposals[i];
       const flags = standingFlags(np);
@@ -1002,7 +1003,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
       out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
-      if (reviewers !== "no-113" && (p.status === "accepted" || p.status === "rejected")) out(`     decided by: ${reviewerText(reviewers.get(p.id))}`);
+      if (reviewers !== "no-113" && decided(p)) out(`     decided by: ${reviewerText(reviewers.get(p.id))}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1100,7 +1101,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // reviewer the row records, read in that transaction too, so a
             // decision racing this one is never what this one prints.
             : await sql.begin(async (tx) => {
-                const r = await review(tx as unknown as typeof sql);
+                const q = tx as unknown as typeof sql;
+                const r = await review(q);
                 if (r.ok && decision === "accept") {
                   // This transaction's own events (xmin, review pass 4: two
                   // accepts under one actor name sharing now() each read the
@@ -1108,14 +1110,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // subtransaction, and test-live's lapse cell fails if it
                   // ever does. In the order the lapse cleared them, which is
                   // the order --list named them (SMD-3035's one walk).
-                  r.lapsed = (await tx`
+                  r.lapsed = (await q`
                     SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
                      WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
                        AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
                        AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
                      ORDER BY seq`) as { id: string; onto: string }[];
                 }
-                if (r.ok) r.reviewer = await reviewersOf([id], tx as unknown as typeof sql);
+                if (r.ok) r.reviewer = await reviewersOf([id], q);
                 return r;
               });
       if (res.ok) {
@@ -1130,7 +1132,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           out(`  rejected ${id}${res.cleared ? `: the supersedes pointer this proposal had set is cleared` : ""}`);
         }
         // SMD-2608: what the row records as its reviewer — a brain short of 113 records none, said so.
-        out(res.reviewer === "no-113" || res.reviewer === undefined ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_113}` : `  decided by: ${reviewerText(res.reviewer.get(id))}`);
+        out(res.reviewer === "no-113" ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_113}` : `  decided by: ${reviewerText(res.reviewer?.get(id))}`);
       } else {
         code = 1;
         const why: Record<string, string> = {

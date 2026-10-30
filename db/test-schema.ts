@@ -15992,15 +15992,17 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   const who = async (id: string) => await one<{ by: string | null; agent: string | null; kind: string | null }>(
     `SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = $1::uuid`, [id]);
   const whoText = async (id: string) => JSON.stringify(await who(id));
+  const NONE = JSON.stringify({ by: null, agent: null, kind: null });
+  const BY_OP = JSON.stringify({ by: OP.name, agent: opId, kind: "operator" });
 
   // Pending: no reviewer. A reject under the operator's key records it — the case SMD-2608 found recording nothing.
-  assert((await whoText(p1)) === JSON.stringify({ by: null, agent: null, kind: null }), "a pending row has no reviewer");
+  assert((await whoText(p1)) === NONE, "a pending row has no reviewer");
   const r1 = await review(p1, "reject", OP);
-  assert(r1.ok === true && r1.cleared === false && (await whoText(p1)) === JSON.stringify({ by: OP.name, agent: opId, kind: "operator" }),
+  assert(r1.ok === true && r1.cleared === false && (await whoText(p1)) === BY_OP,
     `a reject that clears nothing records its reviewer: the key's name, agent and the registry's kind (${await whoText(p1)})`);
   // An accept records it too; a later decision by another key replaces it, a clearing reject included.
   await review(p2, "accept", OP);
-  assert((await whoText(p2)) === JSON.stringify({ by: OP.name, agent: opId, kind: "operator" }), `an accept records its reviewer (${await whoText(p2)})`);
+  assert((await whoText(p2)) === BY_OP, `an accept records its reviewer (${await whoText(p2)})`);
   const r2 = await review(p2, "reject", AG);
   assert(r2.ok === true && r2.cleared === true && (await whoText(p2)) === JSON.stringify({ by: AG.name, agent: agId, kind: "agent" }),
     `the agent's reject of the operator's accept replaces the reviewer, so a person's decision is told from an agent's (${await whoText(p2)})`);
@@ -16008,7 +16010,7 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   await review(p3, "reject", { name: "consolidate", via: "consolidate" });
   assert((await whoText(p3)) === JSON.stringify({ by: "consolidate", agent: null, kind: null }), `a decision with no key carries its name alone, no agent and no kind (${await whoText(p3)})`);
   await review(p4, "reject", null);
-  assert((await whoText(p4)) === JSON.stringify({ by: null, agent: null, kind: null }), `a decision with no envelope records none (${await whoText(p4)})`);
+  assert((await whoText(p4)) === NONE, `a decision with no envelope records none (${await whoText(p4)})`);
   // An agent_id not in the server's form is no agent, as on the audit row (010's reading), and a name alone — anyone's
   // to write, here a classified key's — lends the decision no kind. The name is kept as the envelope gave it.
   await review(p4, "reject", { name: "[101] agent key ", agent_id: "not-a-uuid" });
@@ -16018,11 +16020,11 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
 
   // Never the statement's values: a write naming the columns is stamped from the envelope present (none here).
   await db.query(`UPDATE supersession_proposals SET reviewed_by = 'forged', reviewed_by_kind = 'operator' WHERE id = $1::uuid`, [p1]);
-  assert((await whoText(p1)) === JSON.stringify({ by: null, agent: null, kind: null }), `a statement's own reviewer is replaced by the envelope's, here none (${await whoText(p1)})`);
+  assert((await whoText(p1)) === NONE, `a statement's own reviewer is replaced by the envelope's, here none (${await whoText(p1)})`);
   await db.query(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(OP)]);
   await db.query(`UPDATE supersession_proposals SET review_note = 'renoted' WHERE id = $1::uuid`, [p1]);
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
-  assert((await whoText(p1)) === JSON.stringify({ by: OP.name, agent: opId, kind: "operator" }), `…and a raw write of the decision under an envelope is that envelope's (${await whoText(p1)})`);
+  assert((await whoText(p1)) === BY_OP, `…and a raw write of the decision under an envelope is that envelope's (${await whoText(p1)})`);
   // A write naming none of the columns leaves them; a reopen (067's statement) clears them.
   await db.query(`UPDATE supersession_proposals SET similarity = 0.5 WHERE id = $1::uuid`, [p1]);
   assert((await who(p1)).by === OP.name, "a write naming none of the decision's columns leaves the reviewer as it was");
@@ -16031,7 +16033,7 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   let reopen = "";
   try { await db.query(`UPDATE supersession_proposals SET status = 'stale', reviewed_at = NULL, review_note = NULL WHERE id = $1::uuid AND status IN ('pending', 'rejected')`, [p1]); } catch (e) { reopen = (e as Error).message; }
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
-  assert(reopen === "" && (await whoText(p1)) === JSON.stringify({ by: null, agent: null, kind: null }), `067's reopen clears the reviewer with reviewed_at, an envelope present or not (${reopen.slice(0, 80) || await whoText(p1)})`);
+  assert(reopen === "" && (await whoText(p1)) === NONE, `067's reopen clears the reviewer with reviewed_at, an envelope present or not (${reopen.slice(0, 80) || await whoText(p1)})`);
 
   // The CHECKs, with the trigger out of the way: a reviewer on an unreviewed row, and a kind outside the registry's, refused.
   await db.exec(`ALTER TABLE supersession_proposals DISABLE TRIGGER supersession_proposals_stamp_reviewer`);
@@ -16059,16 +16061,16 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   let again: string;
   try { again = await reapply(file.slice(0, 3)); } catch (e) { again = `threw: ${(e as Error).message}`; }
   const trigAgain = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND tgname = 'supersession_proposals_stamp_reviewer'`)).n;
-  assert(again.endsWith("_proposal_reviewer.sql") && (await whoText(p3)) === before.p3 && (await whoText(p2)) === before.p2 && (await whoText(p4)) === JSON.stringify({ by: null, agent: null, kind: null }) && trigAgain === 1,
+  assert(again.endsWith("_proposal_reviewer.sql") && (await whoText(p3)) === before.p3 && (await whoText(p2)) === before.p2 && (await whoText(p4)) === NONE && trigAgain === 1,
     `the backfill names the reviewer the audit holds — the accept's write (${await whoText(p3)}) and the clearing reject's (${await whoText(p2)}) — and guesses none for a reject that cleared nothing (${before.p4} → ${await whoText(p4)}); one trigger after (${again.slice(0, 60)}, ${trigAgain})`);
-  assert(before.p5 === JSON.stringify({ by: OP.name, agent: opId, kind: "operator" }) && (await whoText(p5)) === JSON.stringify({ by: null, agent: null, kind: null }),
+  assert(before.p5 === BY_OP && (await whoText(p5)) === NONE,
     `…nor for a reject clearing nothing after an earlier decision's clear: the audit row must be the standing decision's own, by its time (${before.p5} → ${await whoText(p5)})`);
   // Re-applied, a row already holding a reviewer is not touched — p3's audit names the agent, its row now the operator.
   await db.query(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(OP)]);
   await db.query(`UPDATE supersession_proposals SET review_note = 'renoted by the operator' WHERE id = $1::uuid`, [p3]);
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await reapply(file.slice(0, 3));
-  assert((await whoText(p3)) === JSON.stringify({ by: OP.name, agent: opId, kind: "operator" }), `a re-apply leaves a row already holding a reviewer as it was, whatever its audit names (${await whoText(p3)})`);
+  assert((await whoText(p3)) === BY_OP, `a re-apply leaves a row already holding a reviewer as it was, whatever its audit names (${await whoText(p3)})`);
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
   await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[101]%'`);
