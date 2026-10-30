@@ -1363,8 +1363,9 @@ services:
   #
   # The passes (deploy/.env's OB1_PASSES, commas or spaces):
   # - `board-sync` keeps the brain in lockstep with the Linear board
-  #   (SMD-1954): `bun db/sync-linear.ts --loop`, a pass every
-  #   OB1_BOARD_SYNC_INTERVAL seconds (300) writing the difference between the
+  #   (SMD-1954): `bun db/sync-linear.ts --trigger`, a pass at its start and
+  #   at each of the coordinator's triggers, every OB1_BOARD_SYNC_INTERVAL
+  #   seconds (300), writing the difference between the
   #   OB1_LINEAR_INITIATIVE's issues and the brain's ticket rows through the
   #   server's own store and embedder, as the actor `board-sync`. Its keys are
   #   LINEAR_API_KEY (read-only use) and, to post consolidation findings as
