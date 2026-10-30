@@ -417,6 +417,109 @@ export async function admitted(admit: Admit, signal: AbortSignal): Promise<false
 export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;
 
 /**
+ * The calls a pass has in hand (SMD-3379 PR 1b-2), handed to the caller
+ * beside the pass's stop: abort(olderThanMs) aborts each worker's model call
+ * that has run at least that long — since the worker took up its thought,
+ * last passed the admit gate or ended a provider pause, a worker with no call
+ * to abort (at the gate, in a provider pause, in the decider's call) passed
+ * over — and every one with no argument. The thought goes behind every
+ * thought queued before it (setBack) — the sleep scheduler is to order its
+ * own stopped thoughts after (PR 1c) — or, deleted or no longer this worker's
+ * meanwhile, is counted so; extraction keeps the windows it has answered and
+ * counts the stop on it, as a wake's (093); and the worker carries on with
+ * its next claim — no restart, no start probe, no pool. An abort that comes
+ * between a thought's calls sets it back at its next call — before the admit
+ * gate, at a window or pair, when one is given. Returns how many it aborted.
+ * Inert once the pass is stopping or the run has returned. The sleep
+ * scheduler is to call it while its gate is closed (SMD-3379 PR 1c, N12).
+ */
+export type InHandAbort = (olderThanMs?: number) => number;
+
+/**
+ * One worker's model call for the thought it holds (inHandCalls): its abort,
+ * which the engine joins with the hard stop's for the calls; when it began —
+ * the thought taken up, the admit gate last passed or a provider pause ended;
+ * whether it has no call to abort now (at the gate, in a pause, in the
+ * decider's call); and whether it was aborted.
+ */
+export type InHandCall = { abort: AbortController; since: number; waiting: boolean; aborted: boolean };
+
+/**
+ * The calls a pass's workers hold, behind its InHandAbort (SMD-3379 PR 1b-2):
+ * an entry a worker, begun as it takes up a thought and ended when it is done
+ * with it; abortInHand aborts each entry at least `olderThanMs` old that is
+ * not waiting, and does nothing while `inert()` — the pass stopping, the run
+ * returned. One place for the three claim workers, so the rule cannot drift
+ * between them (review pass 3).
+ */
+export function inHandCalls(inert: () => boolean): { begin(workerId: string): InHandCall; get(workerId: string): InHandCall | undefined; end(workerId: string): void; abortInHand: InHandAbort } {
+  const calls = new Map<string, InHandCall>();
+  return {
+    begin(workerId) {
+      const call = { abort: new AbortController(), since: Date.now(), waiting: false, aborted: false };
+      calls.set(workerId, call);
+      return call;
+    },
+    get: (workerId) => calls.get(workerId),
+    end(workerId) {
+      calls.delete(workerId);
+    },
+    abortInHand(olderThanMs = 0) {
+      if (inert()) return 0;
+      const now = Date.now();
+      let n = 0;
+      for (const c of calls.values()) {
+        if (c.aborted || c.waiting || now - c.since < olderThanMs) continue;
+        c.aborted = true;
+        c.abort.abort(new AbortedInHand());
+        n++;
+      }
+      return n;
+    },
+  };
+}
+
+/**
+ * Await `pending` with the worker's call entry marked as holding no call to
+ * abort — a wait at the admit gate, a provider pause, the decider's call —
+ * and its call's time starting again after (InHandCall).
+ */
+export async function idleWhile<T>(call: InHandCall | undefined, pending: Promise<T>): Promise<T> {
+  if (!call) return pending;
+  call.waiting = true;
+  try {
+    return await pending;
+  } finally {
+    call.waiting = false;
+    call.since = Date.now();
+  }
+}
+
+/** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */
+export class AbortedInHand extends Error {
+  constructor() {
+    super("the call in hand was aborted by the pass's caller; the thought goes to the back of the queue");
+    this.name = "AbortedInHand";
+  }
+}
+
+/**
+ * Put a thought this worker holds at the back of the queue (InHandAbort): its
+ * claim back to pending, its attempt not counted — release_claims_for_worker's
+ * rule for a thought a worker did not finish — and its enqueued_at now, which
+ * claim_thoughts orders by. True when it was this worker's to put back; a
+ * database error is thrown.
+ */
+export async function setBack(sql: SQL, job: string, workerId: string, id: string): Promise<boolean> {
+  const rows = (await sql`
+    UPDATE thought_work_claims c
+       SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(c.attempt_count - 1, 0), enqueued_at = now()
+     WHERE c.thought_id = ${id}::uuid AND c.work_type = ${job} AND c.worker_id = ${workerId} AND c.status = 'claimed'
+    RETURNING 1 AS ok`) as { ok: number }[];
+  return rows.length > 0;
+}
+
+/**
  * The CLI's signals for a claim worker's pass: SIGINT and SIGTERM call the
  * pass's stop, and a stop that returns a release ends the process with 130
  * once the leases are returned, or after `graceMs` if they are not — leases
