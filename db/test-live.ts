@@ -4404,7 +4404,10 @@ if (want("9f")) {
     }
     const seen = waits().slice(0, 3);
     const throttledEmbedded = await pollUntil(() => atModel(throttledThought), 15_000);
-    const throttledClaim = await claimOf(throttledThought);
+    // The vector's write commits before the claim's release, a statement apart, so the claim is polled
+    // out of hand, as the outage case's is (SMD-3612 review pass 1).
+    let throttledClaim = undefined as Awaited<ReturnType<typeof claimOf>>;
+    await pollUntil(async () => (throttledClaim = await claimOf(throttledThought)) !== undefined && throttledClaim.status !== "claimed", 5_000);
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
@@ -16704,6 +16707,8 @@ if (want("38")) {
     sw.onExtract = async () => { extractedDuringSweep = true; };
     const acWake = new AbortController();
     // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
+    // The mark an earlier case left on the row, ended: not this run's (review pass 1).
+    const priorFrom = (await beat())?.slept?.from;
     const wakeRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acWake.signal });
     let wokeInSweep = false;
     let leftByWake = -1;
@@ -16723,12 +16728,12 @@ if (want("38")) {
       // The sleep's end is marked after the line, and the row's next write carries it (pass-stamp.ts's
       // slept), so it is polled for, bounded; the value the poll saw is the one asserted. Read at once,
       // it was the start's mark, open (SMD-3627).
-      await pollUntil(async () => typeof (wakeMark = (await beat())?.slept)?.to === "string", 5_000);
+      await pollUntil(async () => typeof (wakeMark = (await beat())?.slept)?.to === "string" && wakeMark?.from !== priorFrom, 5_000);
     } finally {
       await fastDelete();
     }
     // The sleep's mark spans the sweep's reads: it read from == to before (review pass 1).
-    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
+    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && wakeMark.from !== priorFrom && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
       `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
     sw.onExtract = null;
     const sweptNext = await pollUntil(async () => (await rowsBy("zz-wake")) === 0, 20_000);
