@@ -428,10 +428,10 @@ export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;
  * meanwhile, is counted so; extraction keeps the windows it has answered and
  * counts the stop on it, as a wake's (093); and the worker carries on with
  * its next claim — no restart, no start probe, no pool. An abort that comes
- * between a thought's calls sets it back at its next window or pair, before
- * the admit gate. Returns how many it aborted. Inert once the pass is
- * stopping or the run has returned. The sleep scheduler is to call it while
- * its gate is closed (SMD-3379 PR 1c, N12).
+ * between a thought's calls sets it back at its next call — before the admit
+ * gate, at a window or pair, when one is given. Returns how many it aborted.
+ * Inert once the pass is stopping or the run has returned. The sleep
+ * scheduler is to call it while its gate is closed (SMD-3379 PR 1c, N12).
  */
 export type InHandAbort = (olderThanMs?: number) => number;
 

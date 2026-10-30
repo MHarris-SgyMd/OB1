@@ -1737,7 +1737,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         let through: false | "open" | "waited";
         const call = inCall.get(workerId);
         // An abort that came between pairs — in a proposal's write — sets the
-        // thought back here, before the wait, not after it (review pass 3).
+        // thought back here, before the wait, not after it; it wins over a
+        // first stop that follows it (review passes 3 and 4).
         if (call?.aborted) throw new AbortedInHand();
         if (call) call.waiting = true;
         try {

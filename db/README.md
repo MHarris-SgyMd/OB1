@@ -5817,10 +5817,10 @@ worker's meanwhile, is counted so; extraction keeps the windows it has
 answered and counts the stop on it, as a wake's (093); and the worker goes on
 with its next claim, with no restart, no start probe and no pool. A thought
 past its last call when the abort comes finishes as it was; one aborted
-between its calls is set back at its next window or pair, before the admit
-gate. It is inert once the pass is stopping. The summary counts the thoughts
-set back. The sleep scheduler is to call it while its gate is closed (SMD-3379
-PR 1c, N12).
+between its calls is set back at its next call — before the admit gate, at a
+window or pair, when one is given. It is inert once the pass is stopping. The
+summary counts the thoughts set back. The sleep scheduler is to call it while
+its gate is closed (SMD-3379 PR 1c, N12).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

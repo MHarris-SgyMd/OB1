@@ -1310,9 +1310,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const admitWindow = ADMIT ? async (): Promise<void> => {
       const at = Date.now();
       const held = inHand.get(workerId);
-      // An abort that came between calls — in a window's save, a gate's
-      // re-read — sets the thought back here, before the wait, not after it
-      // (review pass 3).
+      // An abort that came between calls — in a window's save — sets the
+      // thought back here, before the wait, not after it; it wins over a first
+      // stop that follows it (review passes 3 and 4).
       if (call?.aborted) throw new AbortedInHand();
       if (held) held.pausedAt = at;
       if (call) call.waiting = true;
