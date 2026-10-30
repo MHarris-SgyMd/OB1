@@ -201,17 +201,20 @@ free_rows() {
   return "$FAILED"
 }
 
-# The pair lane (SMD-3638): test-upgrade.ts, then test-preflight.ts, on a
-# Postgres of their own, as CI's data-layer job runs them in the background on
-# its pair-postgres service (SMD-2219, SMD-3195) — CI side by side, each on a
-# database of its own; here one after the other on one, which their lane's
-# length, inside the database lane's, makes free. The script runs itself again
-# under a second with-postgres.sh with --pair, and that run does only this.
+# The pair lane (SMD-3638): test-upgrade.ts, then test-preflight.ts's two
+# shards, on a Postgres of their own, as CI's data-layer job runs them in the
+# background from its start (SMD-2219, SMD-3195, SMD-3468) — CI side by side,
+# test-upgrade.ts and the first shard on pair-postgres, the rest on
+# preflight-postgres; here one after the other on one, each shard dropping the
+# schema before its first database section, which their lane's length, inside
+# the database lane's, makes free. The script runs itself again under a second
+# with-postgres.sh with --pair, and that run does only this.
 pair_rows() {
   FAILED=0
   BASE_ENV=$(env | LC_ALL=C sort)
   run db                 test-upgrade.ts
-  run server-portable    test-preflight.ts
+  OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
+  OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
   return "$FAILED"
 }
 
@@ -277,7 +280,7 @@ main() {
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
   OB1_LIVE_SHARD=extract run db test-live.ts
-  # test-upgrade.ts and test-preflight.ts run in the pair lane (pair_rows).
+  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane (pair_rows).
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
