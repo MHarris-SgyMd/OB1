@@ -2441,8 +2441,9 @@ export const ROLE_GRANTS = Object.freeze({
     // SECURITY INVOKER review function, which updates the row as the caller.
     // Soft as the rest of this group — without SELECT brain_info reports the
     // queue unread, preflight's proposals row names this grant and the listing
-    // tool is refused; without UPDATE a decision is refused, its reply naming
-    // this grant; a capture and every other read go on. Recording a proposal
+    // tool is refused; without UPDATE a decision is refused, the MCP reply
+    // naming this grant (REST's FAILED carries Postgres's words); a capture and
+    // every other read go on. Recording a proposal
     // stays the worker group's (INSERT).
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "029" }),
     // brain_info reads what became of the findings board-sync posted to the

@@ -821,7 +821,8 @@ as "reset by <key>", and a decline's line names the reset as the way out.
 **`review_supersession_proposal(id, decision, direction?, note?, force?)`** is a
 **write-scoped** tool — `POST /v1/proposals/{id}/review` on the REST core — that accepts
 or rejects a proposal `list_supersession_proposals` listed: `db/consolidate.ts
---accept`/`--reject` for a client, the operator GUI's or an agent's over MCP. Any write
+--accept`/`--reject` for a client — an agent over MCP, or a REST caller (the operator
+GUI's buttons are SMD-3322's). Any write
 key may decide, an agent's included (the maintainer's call, 2026-10-26, amending
 029's "the machine proposes, someone confirms"); the proposal's row records the key
 that decided (migration 114), so a person's decision is still told from an agent's. A
@@ -848,7 +849,8 @@ key had then, or else the registry's kind now, said so.
 
 029's review function runs as the caller (SECURITY INVOKER), so the server's role needs
 `UPDATE` on `supersession_proposals`, the server group's since SMD-3338: a role granted
-before it is refused the decision, the MCP reply naming the grant, until `migrate.ts
+before it is refused the decision — the MCP reply naming the grant, REST answering
+`FAILED` with Postgres's "permission denied" — until `migrate.ts
 --grant` is run for it again; every other tool runs as before.
 
 ## A write copied to another brain: `client_key` (SMD-3314)
@@ -1176,7 +1178,7 @@ bun test-jobs.ts          # 45 — the async job registry in memory: the lifecyc
 bun run test:local        # 226 — fully local provider, no credential
 bun run test:sql          # 297 — store conformance, real Postgres in a container
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 296 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 297 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 116 — a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ```
 

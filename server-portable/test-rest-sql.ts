@@ -456,7 +456,7 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
 
 console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through either door, recorded under the caller's key; each check refused by name, force waiving those alone, on an accept alone");
 {
-  type Row = { status: string; reviewed_by: string | null; agent: string | null; kind: string | null };
+  type Row = { status: string; reviewed_by: string | null; agent: string | null; kind: string | null; note: string | null };
   const capture = async (content: string, key: string = KEYS.writer, extra: Record<string, unknown> = {}) =>
     String((await rest("POST", "/v1/thoughts", { content, source: "rest-suite", ...extra }, key)).body.id);
   const propose = async (older: string, newer: string, verdict = "newer_supersedes_older") =>
@@ -468,7 +468,7 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   };
   const review = (pid: string, body: Record<string, unknown>, key: string = KEYS.writer) => rest("POST", `/v1/proposals/${pid}/review`, body, key);
   const pointer = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0]?.s ?? null) as string | null;
-  const row = async (pid: string) => (await sql`SELECT status, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${pid}::uuid`)[0] as Row;
+  const row = async (pid: string) => (await sql`SELECT status, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind, review_note AS note FROM supersession_proposals WHERE id = ${pid}::uuid`)[0] as Row;
   const untouched = async (pid: string, n: string) => { const r = await row(pid); return r.status === "pending" && r.reviewed_by === null && (await pointer(n)) === null; };
 
   // An accept through REST: the pointer on the side the verdict names, the
@@ -479,8 +479,8 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   const aRow = await row(a.pid);
   assert(acc.status === 200 && acc.body.status === "accepted" && acc.body.supersedingId === a.n && acc.body.supersededId === a.o && acc.body.written === true
       && (await pointer(a.n)) === a.o && audit?.actor_name === "writer" && audit?.origin === "open-brain-api"
-      && aRow.status === "accepted" && aRow.reviewed_by === "writer" && aRow.agent !== null && (acc.body.reviewer as { name?: string } | null)?.name === "writer",
-    `an accept through REST sets the newer's supersedes, audited under the caller's key, the row recording it as the reviewer (${acc.status} ${JSON.stringify(acc.body).slice(0, 120)} | ${JSON.stringify(audit)} | ${JSON.stringify(aRow)})`);
+      && aRow.status === "accepted" && aRow.reviewed_by === "writer" && aRow.agent !== null && aRow.note === "the newer value stands" && (acc.body.reviewer as { name?: string } | null)?.name === "writer",
+    `an accept through REST sets the newer's supersedes, audited under the caller's key, the row recording it as the reviewer with the note (${acc.status} ${JSON.stringify(acc.body).slice(0, 120)} | ${JSON.stringify(audit)} | ${JSON.stringify(aRow)})`);
   // The same decision through MCP renders from the REST answer, ids swapped.
   const b = await pair("b");
   const bm = await mcp("review_supersession_proposal", { id: b.pid, decision: "accept", note: "the newer value stands" });
@@ -534,14 +534,22 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
     `a lineage pair: 409 REFUSED_LINEAGE_PAIR, nothing written; force accepts (${lRef.status} ${JSON.stringify(lRef.body)} → ${lForced.status})`);
   const wo = await capture("kappa writer: the writer's value");
   const wn = await capture("kappa writer: the hook's value", KEYS.hook);
+  // The hook's own later word on its side: a capture-only pointer an accept making that side stand clears (082).
+  const wNext = await capture("kappa writer: the hook's next value", KEYS.hook, { supersedes: wn });
   const wpid = await propose(wo, wn);
   const wRef = await review(wpid, { decision: "accept" });
   const wm = await mcp("review_supersession_proposal", { id: wpid, decision: "accept" });
   const wUntouched = await untouched(wpid, wn);
   const flags = wRef.body.flags as { stands?: string; captureOnly?: boolean; how?: string }[] | undefined;
-  assert(wRef.status === 409 && wRef.body.code === "REFUSED_WRITER" && flags?.[0]?.stands === "newer" && flags[0].captureOnly === true && flags[0].how === "would" && wUntouched
-      && wm.isError && wm.sc.code === "REFUSED_WRITER" && /capture-only key's/.test(wm.text) && /force: true/.test(wm.text),
-    `a WRITER flag: 409 REFUSED_WRITER naming the side and its rule, the MCP reply naming force, nothing written (${wRef.status} ${JSON.stringify(wRef.body)} | ${wm.text.slice(0, 160)})`);
+  assert(wRef.status === 409 && wRef.body.code === "REFUSED_WRITER" && flags?.[0]?.stands === "newer" && flags[0].captureOnly === true && flags[0].how === "would"
+      && (wRef.body.lapses as { newer?: number } | undefined)?.newer === 1 && wUntouched && (await pointer(wNext)) === wn
+      && wm.isError && wm.sc.code === "REFUSED_WRITER" && /capture-only key's/.test(wm.text) && /force: true/.test(wm.text) && /clears a capture-only pointer/.test(wm.text),
+    `a WRITER flag: 409 REFUSED_WRITER naming the side, its rule and the pointer it would clear, the MCP reply naming force, nothing written (${wRef.status} ${JSON.stringify(wRef.body)} | ${wm.text.slice(0, 160)})`);
+  // Forced through MCP: the REST answer's lapsed, as the reply words and carries it, and the pointer gone.
+  const wForced = await mcp("review_supersession_proposal", { id: wpid, decision: "accept", force: true });
+  assert(!wForced.isError && wForced.text.includes(`Lapsed: ${wNext} no longer supersedes ${wn} — its capturer's capture-only pointer, cleared by this accept.`)
+      && same(wForced.sc.lapsed, [{ id: wNext, onto: wn }]) && (await pointer(wn)) === wo && (await pointer(wNext)) === null,
+    `force accepts it, the reply naming the capture-only pointer the accept cleared (${JSON.stringify(wForced.sc.lapsed)} | ${wForced.text.split("\n")[1] ?? ""})`);
 
   // What the decision does not take, as the CLI refuses it; nothing written.
   const x = await pair("x");

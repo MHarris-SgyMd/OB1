@@ -886,7 +886,7 @@ export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal,
     switch (r.error) {
       case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
       case "EDITED_SINCE": return refuse({ code: "REFUSED_EDITED_SINCE", retryable: false, id, olderEdited: r.older_edited === true, newerEdited: r.newer_edited === true });
-      case "LINEAGE_PAIR": return refuse({ code: "REFUSED_LINEAGE_PAIR", retryable: false, id, status: w?.status ?? null, flags: w?.flags ?? [] });
+      case "LINEAGE_PAIR": return refuse({ code: "REFUSED_LINEAGE_PAIR", retryable: false, id, status: r.status ?? w?.status ?? null, flags: w?.flags ?? [] });
       case "WRITER": return refuse({ code: "REFUSED_WRITER", retryable: false, id, status: w?.status ?? "pending", flags: r.flags ?? [], edited: w?.edited === true,
         lapses: { older: w?.sides.older.lapses.length ?? 0, newer: w?.sides.newer.lapses.length ?? 0 } });
       case "DIRECTION_REQUIRED": return refuse({ code: "REFUSED_DIRECTION_REQUIRED", retryable: false, id, verdict: String(r.verdict) });

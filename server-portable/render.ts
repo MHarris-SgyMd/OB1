@@ -854,7 +854,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
-    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; its arguments the CLI line's under each), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
+    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "filters" && r.made
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
@@ -1643,7 +1643,8 @@ export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCo
   }, (r) => {
     const force = "pass force: true if the accept still holds";
     switch (r.code) {
-      case "NOT_FOUND": return `No proposal with id ${r.id}, or a thought it names is gone — list_supersession_proposals gives the proposal ids (not the thoughts').`;
+      // The id quoted, bounded, on one line: a non-uuid one is the caller's own text (review pass 1).
+      case "NOT_FOUND": return `No proposal with id ${JSON.stringify(snipText(r.id, 80))}, or a thought it names is gone — list_supersession_proposals gives the proposal ids (not the thoughts').`;
       case "REFUSED_EDITED_SINCE":
         return `Refused: the ${r.olderEdited && r.newerEdited ? "older and newer thoughts have" : r.olderEdited ? "older thought has" : "newer thought has"} been edited since the pair was judged (a stale proposal's has), so the verdict is about a text that is gone. Read both (fetch takes their ids) and ${force}, or reject it.`;
       case "REFUSED_LINEAGE_PAIR":

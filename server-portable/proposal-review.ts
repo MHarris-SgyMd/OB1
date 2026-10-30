@@ -10,8 +10,8 @@
 // reviewer the row records (114, SMD-2608), so what is checked is what is
 // decided, and a decision racing this one is never what this one answers.
 
-import type { SQL, TransactionSQL } from "bun";
-import { WRITERS_MISSING, type ProposalWriter } from "./store.ts";
+import type { SQL } from "bun";
+import type { ProposalWriter } from "./store.ts";
 import { standingFlags, type StandingFlag } from "./standing.ts";
 
 /**
@@ -79,14 +79,20 @@ export type ReviewResult = {
 const REVIEW_LOCK = "ob1:supersession-review";
 
 /**
- * The guard's read of an unforced accept's writers. In a savepoint: a brain
- * short of 094 answers it with an error, which must not end the decision's
- * transaction.
+ * The guard's read of an unforced accept's writers; "no-094" on a brain short
+ * of the file, found by a probe of its functions rather than by the read
+ * failing. Not a savepoint around the read (review pass 1): Bun rolls a failed
+ * one back to the savepoint and never releases it, so every statement after
+ * ran in a subtransaction — 029's write events took its xid, and the lapsed
+ * read below, which keys on the top transaction's, found none.
  */
-async function writersOf(q: TransactionSQL, id: string, direction: "newer" | "older" | undefined): Promise<ReviewWriters | "no-094" | null> {
-  let rows: Record<string, unknown>[];
-  try {
-    rows = await q.savepoint(async (sp) => (await sp`
+async function writersOf(q: SQL, id: string, direction: "newer" | "older" | undefined): Promise<ReviewWriters | "no-094" | null> {
+  const [{ has }] = (await q`SELECT to_regprocedure('public.list_proposal_writers(uuid[])') IS NOT NULL
+                                AND to_regprocedure('public.ob1_accept_takes(uuid, uuid)') IS NOT NULL
+                                AND to_regprocedure('public.ob1_accept_lapses(uuid, uuid)') IS NOT NULL
+                                AND to_regprocedure('public.ob1_capture_only_text(uuid)') IS NOT NULL AS has`) as { has: boolean }[];
+  if (!has) return "no-094";
+  const rows = (await q`
       SELECT p.verdict, p.status AS proposal_status,
              p.older_fingerprint IS NOT NULL AND p.older_fingerprint IS DISTINCT FROM content_fingerprint_of(o.content) AS older_moved,
              p.newer_fingerprint IS NOT NULL AND p.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(n.content) AS newer_moved,
@@ -99,11 +105,7 @@ async function writersOf(q: TransactionSQL, id: string, direction: "newer" | "ol
              ob1_accept_takes(p.newer_id, p.older_id) AS newer_takes, ob1_accept_lapses(p.newer_id, p.older_id) AS newer_lapses
         FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
         CROSS JOIN LATERAL list_proposal_writers(ARRAY[p.id]) w
-       WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as Record<string, unknown>[]);
-  } catch (e) {
-    if (WRITERS_MISSING.test((e as Error).message)) return "no-094";
-    throw e;
-  }
+       WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as Record<string, unknown>[];
   if (!rows.length) return null;
   const r = rows[0];
   const text = (v: unknown) => (v == null ? null : String(v));
@@ -132,17 +134,18 @@ export async function reviewProposal(sql: SQL, r: ReviewRequest): Promise<Review
     // names the other — is the harm 066 exists to prevent (the derivation
     // archives its input while still naming it). Read from the row's own
     // predicate, and only while the row is unreviewed: a decided row is
-    // 029's to answer (ALREADY_ACCEPTED on an accepted one).
-    const lineage = guarded
-      ? ((await q`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
-                    FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
-                   WHERE p.id = ${r.id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as { lineage: boolean }[])[0]?.lineage === true
-      : false;
+    // 029's to answer (ALREADY_ACCEPTED on an accepted one). Its status read
+    // with it, for the refusal's expected decision on a brain short of 094 too.
+    const [pair] = guarded
+      ? (await q`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage, p.status
+                   FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+                  WHERE p.id = ${r.id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as { lineage: boolean; status: string }[]
+      : [];
     // SMD-2707: an accept whose standing side is a capture-only key's text,
     // or of lower trust than the other, takes force — read on a lineage pair
     // too, so its refusal names a flag the force would also waive.
     const writers = guarded ? await writersOf(q, r.id, r.direction ?? undefined) : null;
-    if (lineage) return { ok: false, error: "LINEAGE_PAIR", writers };
+    if (pair?.lineage === true) return { ok: false, error: "LINEAGE_PAIR", status: pair.status, writers };
     if (writers && writers !== "no-094" && writers.flags.some((f) => f.how !== "if")) return { ok: false, error: "WRITER", flags: writers.flags, writers };
     const res = { ...((await q`
       SELECT review_supersession_proposal(${r.id}::uuid, ${r.decision}::text, ${r.note ?? null}::text, ${r.direction ?? null}::text, ${r.actor}::jsonb, ${r.force === true}::boolean) AS r`)[0].r as Omit<ReviewResult, "writers">), writers };
@@ -152,7 +155,10 @@ export async function reviewProposal(sql: SQL, r: ReviewRequest): Promise<Review
       // of this transaction's, under this actor — this transaction's own
       // (xmin: two accepts under one actor name sharing now() each read the
       // other's), in the order the lapse cleared them, which is the order the
-      // listing named them (SMD-3035's one walk).
+      // listing named them (SMD-3035's one walk). Nothing in this transaction
+      // runs in a subtransaction — no savepoint, and 029 and update_thought
+      // open none — or its events would carry another xid; test-live's lapse
+      // cells fail if one ever does.
       res.lapsed = (await q`
         SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
          WHERE created_at = now() AND action = 'update' AND actor_name = ${r.actorName}
