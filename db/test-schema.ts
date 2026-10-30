@@ -16012,9 +16012,11 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
     `the holder's own claim again with its token is renewed in place: one row, its label kept, no token shown again (${again.outcome})`);
   const relabel = await claim("SMD-9001", AGENT, null, "moved to the laptop", a.token, 600);
   const longer = await renew(a.claim!.id, a.token, AGENT, 3600);
+  const brief = await claim("SMD-9024", AGENT, null, null, null, 120);
   assert(relabel.outcome === "renewed" && relabel.claim!.label === "moved to the laptop" && epoch(relabel.claim!.expires_at) - epoch(relabel.claim!.renewed_at) === 600_000
-    && longer.outcome === "renewed" && epoch(longer.claim!.expires_at) - epoch(longer.claim!.renewed_at) === 3600_000,
-    `…a renewal by claim_work takes the new label and its lease (10 minutes), and renew_work_claim its own lease (an hour), never the default (${JSON.stringify([relabel.claim?.label, longer.outcome])})`);
+    && longer.outcome === "renewed" && epoch(longer.claim!.expires_at) - epoch(longer.claim!.renewed_at) === 3600_000
+    && brief.outcome === "claimed" && epoch(brief.claim!.expires_at) - epoch(brief.claim!.claimed_at) === 120_000,
+    `…a renewal by claim_work takes the new label and its lease (10 minutes), renew_work_claim its own lease (an hour), and a new claim its own (2 minutes), never the default (${JSON.stringify([relabel.claim?.label, longer.outcome, brief.outcome])})`);
   // The holder's own claim on overlapping work is in the way too: a token proves one claim, never a second on the same work.
   const ownWhole = await claim("SMD-9020", AGENT);
   const ownPiece = await claim("SMD-9020", AGENT, "PR 1", null, ownWhole.token);
