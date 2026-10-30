@@ -1453,6 +1453,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
     `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
   // A migration seen (SMD-3379 PR 1c-1): restarting, at any age — the new process waits the migration out unstamped.
+  // brain-info.ts takes no imports: its copy of the exit status pinned to config.mjs' (review pass 2).
+  const { MIGRATION_EXIT: infoExit } = await import("./brain-info.ts");
+  const { MIGRATION_EXIT: configExit } = await import("../db/config.mjs");
+  assert(infoExit === configExit, `brain-info.ts' MIGRATION_EXIT is config.mjs' (${infoExit}, ${configExit})`);
   const migrating = [20, 2_000].map((age) => heldState(heldRow(age, { in_s: 0, code: 75, tries: 0 })));
   assert(migrating.every((m, i) => m.startsWith(`restarting after a migration — its supervisor ran it again ${["20 s", "33 min"][i]} ago, and the new process stamps once migrate.ts lets ob1:migrate go`))
       && /^held: exited 75, 1 end\(s\) in a row — its supervisor runs it again in 60 s/.test(heldState(heldRow(0, { in_s: 60, code: 75, tries: 1 }))),

@@ -54,9 +54,9 @@
  * STAMP_TIMEOUT_MS, the row is left as it is and the log says so; the next
  * follower writes its own.
  *
- * A migration. A follower that ends with MIGRATION_EXIT (75) — the sleep
- * scheduler, which saw migrate.ts take its lock or the ledger move (SMD-3379
- * PR 1c-1) — runs again at once, its try not counted, the row's restart
+ * A migration. The sleep scheduler, ended with MIGRATION_EXIT (75) — it saw
+ * migrate.ts take its lock or the ledger move (SMD-3379 PR 1c-1) — runs again
+ * at once, its try not counted, the ends before it forgotten after a long run, the row's restart
  * saying in_s 0 and code 75: the next process waits the migration out at its
  * start and takes its start's reads again on the schema it left. It runs the
  * code this process has — in compose the coordinator's baked image, which
@@ -84,8 +84,8 @@ import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
 /**
- * A follower that ends with MIGRATION_EXIT — the sleep scheduler, a migration
- * seen (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
+ * The sleep scheduler, ended with MIGRATION_EXIT — a migration seen
+ * (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
  * process waits the migration out and reads its start again. Past this many such ends in a row, each
  * within MIGRATION_QUICK_MS of its start, it is run again on the clock as any
  * end is: a follower that saw a migration at every start would otherwise spin.
@@ -189,6 +189,8 @@ export type SuperviseOptions = {
   sql: SQL | null;
   /** The waits, RESTART_MS unless a test drives them faster. */
   waits?: { first: number; max: number; reset: number };
+  /** MIGRATION_QUICK_MS unless a test drives it faster. */
+  migrationQuickMs?: number;
   stampTimeoutMs?: number;
   writer?: Writer;
 };
@@ -204,6 +206,7 @@ export type Supervisor = {
 export function supervise(opts: SuperviseOptions): Supervisor {
   const env = opts.env ?? process.env;
   const waits = opts.waits ?? RESTART_MS;
+  const quickMs = opts.migrationQuickMs ?? MIGRATION_QUICK_MS;
   const { out, err } = opts.writer ?? consoleWriter;
   const key = followerKey(opts.worker, env);
   const stopped = new AbortController();
@@ -268,11 +271,14 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();
-      // A migration seen: run again at once on its code, the try not counted,
-      // unless it keeps ending so at once (SMD-3379 PR 1c-1).
-      // Only quick ones count: a first 75 after a long run is the migration it is for (review pass 1).
-      migrationsInRow = code === MIGRATION_EXIT && ranMs < MIGRATION_QUICK_MS ? migrationsInRow + 1 : 0;
-      if (code === MIGRATION_EXIT && migrationsInRow <= MIGRATION_RESTARTS) {
+      // The scheduler's migration seen: run again at once, the try not
+      // counted, unless it keeps ending so at once (SMD-3379 PR 1c-1). Only
+      // quick ones count: a first 75 after a long run is the migration it is
+      // for (review pass 1). Another follower's 75 is any end (review pass 2).
+      migrationsInRow = code === MIGRATION_EXIT && ranMs < quickMs ? migrationsInRow + 1 : 0;
+      if (opts.worker === "sleep" && code === MIGRATION_EXIT && migrationsInRow <= MIGRATION_RESTARTS) {
+        // A long run ends the ends in a row before it, as on the clock (review pass 2).
+        if (ranMs >= waits.reset) tries = 0;
         err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)} — a migration seen; restarting after a migration, at once, to wait it out and read its start again${key && opts.sql ? `, ${key} says so` : ""}`);
         await stamp(began, { in_s: 0, code, tries });
         continue;

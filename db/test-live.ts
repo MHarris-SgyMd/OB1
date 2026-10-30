@@ -16100,6 +16100,33 @@ if (want("37b")) {
     const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
     assert(fourRuns && runsSeen === 4 && atOnce === 3 && onTheClock === 1 && migrationRow?.restart?.code === 75 && migrationRow.restart.tries === 1 && migratingCode === 0,
       `a follower exiting 75 runs again at once, no try counted, three times, then on the clock, its first counted end (${runsSeen} run(s), ${atOnce} at once, ${onTheClock} on the clock, row ${JSON.stringify(migrationRow?.restart)}, exit ${migratingCode})`);
+    // The row the at-once restart writes, as preflight and brain_info read
+    // it; a slow 75 after three quick ones runs again at once, its count
+    // started again, and its long run forgets the end before it (review
+    // pass 2). Runs: exit 3, three quick 75s, a slow 75, then one that stays.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    writeFileSync(migrationRuns, "");
+    const staged = `n=$(grep -c . ${migrationRuns}); echo run >> ${migrationRuns}; case $n in 0) exit 3;; 1|2|3) exit 75;; 4) sleep 0.4; exit 75;; *) exec sleep 30;; esac`;
+    const slow = supervise({ worker: "sleep", cmd: ["sh", "-c", staged], sql: ssql as never, waits: { first: 50, max: 50, reset: 300 }, migrationQuickMs: 200, writer });
+    const sixRuns = await pollUntil(async () => runsOf() >= 6, 10_000);
+    await Bun.sleep(300);
+    const slowRow = await row("heartbeat:sleep");
+    const slowRuns = runsOf();
+    slow.stop("SIGTERM");
+    const slowCode = await within(slow.done, 2000);
+    rmSync(migrationRuns, { force: true });
+    const slowAtOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once/.test(l)).length;
+    assert(sixRuns && slowRuns === 6 && slowAtOnce === 4 && slowRow?.restart?.in_s === 0 && slowRow.restart.code === 75 && slowRow.restart.tries === 0 && slowCode === 0,
+      `a slow 75 after three quick ones runs again at once, and the row says in_s 0, code 75, the end before the long run forgotten (${slowRuns} run(s), ${slowAtOnce} at once, row ${JSON.stringify(slowRow?.restart)}, exit ${slowCode})`);
+    // Another follower's 75 is any end, on the clock (review pass 2).
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const other = supervise({ worker: "board-sync", cmd: ["sh", "-c", "exit 75"], sql: ssql as never, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer });
+    const otherHeld = await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 5000);
+    other.stop("SIGTERM");
+    assert(otherHeld && (await within(other.done, 2000)) === 0 && !said.some((l) => /a migration seen/.test(l)),
+      `another follower exiting 75 runs again on the clock, not at once (held ${otherHeld})`);
     // The count starts again after a run of `reset` or longer: here every run counts as long.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const resetting = supervise({ worker: "board-sync", cmd: ["sh", "-c", "sleep 0.15; exit 2"], sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
@@ -17836,16 +17863,18 @@ if (want("38")) {
         const migRun = sleepRun({ follow: true, signal: migStop.signal, pollMs: 200 });
         const migWaited = await pollUntil(async () => lines.slice(migFrom).some((l) => /^  migration: backend \d+ holds ob1:migrate, applying migrations — the scheduler waits for it to finish before it starts$/.test(l)), 10_000);
         await Bun.sleep(600);
-        const migStartedEarly = lines.slice(migFrom).some((l) => /^  \[(extract|consolidate)\]/.test(l));
+        // Nothing of the start but the wait: its reads come after (`quiet:` the first said), then its passes.
+        const migStartedEarly = lines.slice(migFrom).some((l) => /^  (\[(extract|consolidate)\]|quiet:)/.test(l));
         await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
         const migRunning = await pollUntil(async () => (await beat())?.running === true, 15_000);
-        await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('999_smd3379_ledger_moved', 'test')`;
+        // Named before every file, so only the ledger's count moves (review pass 2).
+        await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('000_smd3379_ledger_moved', 'test')`;
         const migCode = await bounded(migRun, migStop);
         const migBeat = await beat();
-        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, \d{3}_\S+ to 999_smd3379_ledger_moved — the passes stop now, their leases returned, and the scheduler exits 75/.test(l));
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned, and the scheduler exits 75 for its supervisor/.test(l));
         assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
-          `a lock held at the start is waited out before the passes' starts, and the ledger moving then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
-        await sql`DELETE FROM schema_migrations WHERE name = '999_smd3379_ledger_moved'`;
+          `a lock held at the start is waited out before the start's reads, and a row added to the ledger then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
+        await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
         const lockFrom = lines.length;
         const lockStop = new AbortController();
         const lockRun = sleepRun({ follow: true, signal: lockStop.signal, pollMs: 200 });
@@ -17860,7 +17889,7 @@ if (want("38")) {
       } finally {
         await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});
         holder.release();
-        await sql`DELETE FROM schema_migrations WHERE name = '999_smd3379_ledger_moved'`;
+        await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
       }
     }
   } finally {
