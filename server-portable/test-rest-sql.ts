@@ -860,6 +860,8 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   // A read key lists, every claim of the ticket, no token or hash; it may not claim. A capture-only key does neither.
   const l = await rest("GET", "/v1/claims?ticket=smd-9301", undefined, KEYS.reader);
   const listed = (l.body.claims ?? []) as Claim[];
+  const otherTicket = await rest("GET", "/v1/claims?ticket=SMD-9399", undefined, KEYS.reader);
+  assert(otherTicket.status === 200 && (otherTicket.body.claims as unknown[]).length === 0, `…and a ticket nobody claimed lists nothing: the filter is the ticket's (${(otherTicket.body.claims as unknown[]).length})`);
   const readerClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9302" }, KEYS.reader);
   const hookClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9302" }, KEYS.hook);
   const hookList = await rest("GET", "/v1/claims", undefined, KEYS.hook);
