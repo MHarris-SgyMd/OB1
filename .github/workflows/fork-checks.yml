@@ -975,45 +975,31 @@ jobs:
             done
           }
           finish() { echo "$2" > "$RUNNER_TEMP/$1.rc.part" && mv "$RUNNER_TEMP/$1.rc.part" "$RUNNER_TEMP/$1.rc"; }
-          # Each leg's name, written as it is launched and used for its log and
-          # code, is what the last step waits on; each leg's PID, taken on the
-          # line that starts it, is checked against those names below. Each
-          # suite written out, as checks 34 and 35 read what a step runs.
-          launch() { leg=$1; echo "$leg" >> "$RUNNER_TEMP/data-layer.legs"; }
-          pids=()
-          launch test-upgrade
-          (
-            set +e
-            DATABASE_URL=$UPGRADE_DATABASE_URL \
-              timeout --kill-after=10s "${limit_s}s" bun test-upgrade.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
-            finish "$leg" "${PIPESTATUS[0]}"
-          ) < /dev/null > /dev/null 2>&1 & pids+=("$!")
-          launch test-preflight-first
-          (
-            set +e
-            cd ../server-portable
-            DATABASE_URL=$PREFLIGHT_DATABASE_URL OB1_PREFLIGHT_SHARD=first \
-              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
-            finish "$leg" "${PIPESTATUS[0]}"
-          ) < /dev/null > /dev/null 2>&1 & pids+=("$!")
-          launch test-preflight-rest
-          (
-            set +e
-            cd ../server-portable
-            DATABASE_URL=$PREFLIGHT_REST_DATABASE_URL OB1_PREFLIGHT_SHARD=rest \
-              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
-            finish "$leg" "${PIPESTATUS[0]}"
-          ) < /dev/null > /dev/null 2>&1 & pids+=("$!")
-          # A name for each leg, and each name once: a launch line lost or
-          # repeated leaves two legs one log and one code, the last step
-          # reading whichever lands first (review pass 2, SMD-3468); a launch
-          # line with no leg after it would wait out the limit.
-          names=$(wc -l < "$RUNNER_TEMP/data-layer.legs")
-          distinct=$(sort -u "$RUNNER_TEMP/data-layer.legs" | wc -l)
-          if [ "$names" -ne "${#pids[@]}" ] || [ "$distinct" -ne "$names" ]; then
-            echo "::error title=SQL data layer::the start step started ${#pids[@]} legs under $names names, $distinct distinct, in $RUNNER_TEMP/data-layer.legs: each leg needs a launch line of its own, with a name of its own, before its subshell"
-            exit 1
-          fi
+          # leg <name> <command>...: one background leg, its log and code under
+          # <name>, the name written to data-layer.legs, which the last step
+          # waits on. A leg is one call, its name, its registration and its
+          # command on one line, so no edit to one line can part a leg from its
+          # name (review passes 1–3); a name given twice is refused, since two
+          # legs under one name would share a log and a code. The command's
+          # assignments before the call reach it, as bash exports them to a
+          # function's commands. Each suite written out on its call, as checks
+          # 34 and 35 read what a step runs.
+          leg() {
+            local name=$1; shift
+            if grep -qxF -- "$name" "$RUNNER_TEMP/data-layer.legs" 2> /dev/null; then
+              echo "::error title=SQL data layer::two legs named $name: each needs a name of its own"
+              exit 1
+            fi
+            echo "$name" >> "$RUNNER_TEMP/data-layer.legs"
+            (
+              set +e
+              timeout --kill-after=10s "${limit_s}s" "$@" 2>&1 | stamp > "$RUNNER_TEMP/$name.log"
+              finish "$name" "${PIPESTATUS[0]}"
+            ) < /dev/null > /dev/null 2>&1 &
+          }
+          DATABASE_URL=$UPGRADE_DATABASE_URL leg test-upgrade bun test-upgrade.ts
+          (cd ../server-portable && DATABASE_URL=$PREFLIGHT_DATABASE_URL OB1_PREFLIGHT_SHARD=first leg test-preflight-first bun test-preflight.ts)
+          (cd ../server-portable && DATABASE_URL=$PREFLIGHT_REST_DATABASE_URL OB1_PREFLIGHT_SHARD=rest leg test-preflight-rest bun test-preflight.ts)
         env:
           UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1upgrade
           PREFLIGHT_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1preflight
