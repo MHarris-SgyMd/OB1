@@ -479,6 +479,22 @@ export function inHandCalls(inert: () => boolean): { begin(workerId: string): In
   };
 }
 
+/**
+ * Await `pending` with the worker's call entry marked as holding no call to
+ * abort — a wait at the admit gate, a provider pause, the decider's call —
+ * and its call's time starting again after (InHandCall).
+ */
+export async function idleWhile<T>(call: InHandCall | undefined, pending: Promise<T>): Promise<T> {
+  if (!call) return pending;
+  call.waiting = true;
+  try {
+    return await pending;
+  } finally {
+    call.waiting = false;
+    call.since = Date.now();
+  }
+}
+
 /** The reason an InHandAbort aborts a worker's call with: the worker reads it, apart from a hard stop's or a timeout's. */
 export class AbortedInHand extends Error {
   constructor() {

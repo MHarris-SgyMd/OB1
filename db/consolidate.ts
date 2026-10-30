@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -1729,27 +1729,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // No early exit on `stopping` here: a thought is at most --k calls, bounded
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
+    const call = inCall.get(workerId);
     for (const [pairIndex, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
       // here, its claim and lease kept.
       if (ADMIT) {
         let through: false | "open" | "waited";
-        const call = inCall.get(workerId);
         // An abort that came between pairs — in a proposal's write — sets the
         // thought back here, before the wait, not after it; it wins over a
         // first stop that follows it (review passes 3 and 4).
         if (call?.aborted) throw new AbortedInHand();
-        if (call) call.waiting = true;
         try {
-          through = await admitted(ADMIT, gate);
+          through = await idleWhile(call, admitted(ADMIT, gate));
         } catch (e) {
           throw new AdmitThrow(e);
-        } finally {
-          if (call) {
-            call.waiting = false;
-            call.since = Date.now();
-          }
         }
         if (!through) throw new StoppedBetweenPairs();
         // After the gate held it both sides are read again: the live write
@@ -1791,8 +1785,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
-        const inHandAbort = inCall.get(workerId)?.abort.signal;
-        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal, ...(inHandAbort ? [inHandAbort] : [])]);
+        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
         // deadline for all three calls, as for the judge's one.
@@ -1803,7 +1796,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The hard stop aborted the call: the thought is abandoned, not failed.
         if (hardStopped) return { outcome: "abandoned" };
         // The pass's caller aborted it (abortInHand): the worker sets the thought back.
-        if (inCall.get(workerId)?.aborted) throw new AbortedInHand();
+        if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
         // else is the provider's and is classified by the caller.
         if (timedOut(e)) {
@@ -2212,13 +2205,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
                   // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
-                  const pausing = inCall.get(workerId);
-                  if (pausing) pausing.waiting = true;
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
-                  if (pausing) {
-                    pausing.waiting = false;
-                    pausing.since = Date.now();
-                  }
+                  await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
                   if (stopping || outage.reason !== null) return;
                 } else {
                   outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };

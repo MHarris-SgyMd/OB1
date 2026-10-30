@@ -195,7 +195,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, inHandCalls, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -1315,10 +1315,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // stop that follows it (review passes 3 and 4).
       if (call?.aborted) throw new AbortedInHand();
       if (held) held.pausedAt = at;
-      if (call) call.waiting = true;
       let through: false | "open" | "waited" = false;
       try {
-        through = await admitted(ADMIT, gate);
+        through = await idleWhile(call, admitted(ADMIT, gate));
       } catch (e) {
         throw new AdmitThrow(e);
       } finally {
@@ -1327,10 +1326,6 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         if (held) {
           held.since += waited;
           held.pausedAt = undefined;
-        }
-        if (call) {
-          call.waiting = false;
-          call.since = Date.now();
         }
       }
       if (!through) throw new StoppedBetweenWindows();
@@ -1405,8 +1400,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // decideEntities. The row's metadata is the egress subject, as extraction's.
     if (jevCfg && extraction.entities.length) {
       // The decider's call takes no signal: no call abortInHand can abort.
-      if (call) call.waiting = true;
-      const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }).finally(() => { if (call) call.waiting = false; });
+      const decided = await idleWhile(call, decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }));
       extraction = { ...extraction, entities: decided.entities };
     }
     if (hardStopped) return { outcome: "abandoned" };
@@ -1682,13 +1676,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
                   // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
-                  const pausing = inCall.get(workerId);
-                  if (pausing) pausing.waiting = true;
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
-                  if (pausing) {
-                    pausing.waiting = false;
-                    pausing.since = Date.now();
-                  }
+                  await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
                   // The pause was the provider's: the thought's clock starts again (review pass 3).
                   const paused = inHand.get(workerId);
                   if (paused) paused.since = Date.now();
