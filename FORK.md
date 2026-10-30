@@ -213,27 +213,28 @@ clients reach the brain, soaks at least 24 hours.
 
 ### Deploying
 
-[`SETUP.md`](SETUP.md) is the path: Postgres with pgvector, the migrations, the
-server as a Bun process or the container `server-portable/Dockerfile` builds
-(`deploy/compose.yaml` is the working reference), or Cloudflare Workers;
-`docs/01-getting-started.md` is the same stack at a beginner's pace. There is
-no Supabase Edge Function build in this fork to deploy — `server/` left with
-SMD-1800 — and the vendored MCP servers, APIs and workers under the category
-directories run the same way, `bun <file>`, behind the same TLS proxy
-(`primitives/deploy-remote-mcp/`; every README's deploy section says so since
-SMD-1802, and the repo rule in `CLAUDE.md` reads "remote over HTTP, never
-stdio" with no host named). To deploy upstream's Edge Function, use upstream's
-checkout and guide; this fork's schema is a superset of the guide's, so that
-function runs against a brain built here — at its model's width
-(`openai/text-embedding-3-small`, 1536; `SETUP.md`'s local default is 1024, and
-`upsert_thought` refuses another width).
+The brain deploys one way: the compose stack, `deploy/compose.yaml` — the proxy,
+the REST core, the MCP server at `/mcp`, Postgres and the profiles beside them
+(SMD-2282's decision 6, SMD-2288). [`SETUP.md`](SETUP.md) brings it up, and
+`docs/01-getting-started.md` is the same stack at a beginner's pace. Clients
+reach `/mcp` through a TLS proxy or tunnel in front of the stack's proxy, or at
+`http://127.0.0.1:8000/mcp` on its own machine (`docs/01-getting-started.md`,
+Steps 6 and 7). There is no single-process, lone-container, Workers or
+Kubernetes deployment, and no Supabase Edge Function build: `server/` left
+with SMD-1800, the Workers target with SMD-3152.
 
-### Required migration
+The stack's `migrate` service applies every migration under `db/migrations/`
+before `api` starts, and the servers assume the whole set. Nothing degrades
+around a missing one: `capture_thought` is one call to `upsert_thought`, with
+no two-step fallback (`server-portable/store-sql.ts`), and preflight's
+"migration ledger" row warns of a brain behind the tree.
 
-`db/migrations/004_upsert_thought_with_embedding.sql` must be applied for
-the atomic capture path. Without it `capture_thought` still works — it falls back
-to the old two-step write and logs a warning — but you keep the failure mode the
-migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
+A vendored extension, recipe or integration server under the category
+directories is not the brain. It is one HTTP process beside the stack,
+`bun <file>`, behind the same TLS proxy, never stdio
+(`primitives/deploy-remote-mcp/`). A contribution that adds operations to the
+brain is a plugin (`plugins/<name>/`, SMD-2310), which the brain's own servers
+serve.
 
 ---
 
@@ -623,10 +624,11 @@ server/test-capture-atomicity.mjs# fix 5   (new file); deleted by SMD-1800 (test
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
+.github/workflows/ci-shift.yml   # SMD-3467 (new file — warns of a job or step on main that got slower)
 .github/dependabot.yml           # SMD-2093 (new file — moves the workflows' SHA-pinned actions)
 scripts/check-fork-consistency.ts # fix 7 (new file)
 scripts/mechanism-yield.ts       # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
-scripts/ci-step-times.ts         # SMD-3305 (new file — a CI job's and its steps' times over a window of runs, with medians; not a gate)
+scripts/ci-step-times.ts         # SMD-3305 (new file — a CI job's and its steps' times over a window of runs, with medians; not a gate); SMD-3467 adds --shift
 scripts/suite-sections.ts        # SMD-3305 (new file — a suite's bracketed sections by wall time; not a gate)
 scripts/connector-registry.ts    # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
 scripts/contributions.ts         # SMD-1933 (new file — the one walk of the contribution directories)
