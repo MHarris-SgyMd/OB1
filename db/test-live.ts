@@ -20263,6 +20263,70 @@ if (want("45")) {
   }
 }
 
+if (want("46")) {
+  console.log("\n[46] Migration 115 on a real Postgres: two claims on one ticket at once, held — the second waits on the ticket's lock until the first commits, then reads it: a piece against the whole refused, the same piece refused by the answer (not the index's error), two pieces both claimed, a takeover against the holder's renewal of its lapsed claim refused (SMD-3597)");
+  // Its own clients, the watcher among them: [24] closed the suite's.
+  const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });
+  type Answer = { outcome: string; code: string | null; message: string | null; claim: { id: string } | null; held_by: { id: string }[]; token: string | null };
+  const A = { name: "race-a" }, B = { name: "race-b" };
+  const claimOn = (c: SQL, issue: string, actor: object, piece: string | null) => async () =>
+    ((await c`SELECT claim_work(${issue}, ${piece}, NULL, 14400, NULL, ${actor}::jsonb) AS r`) as { r: Answer }[])[0].r;
+  // Held, not timed (SMD-2475's heldRace): A claims inside an open transaction,
+  // B's claim is dispatched, and A commits only once B is seen waiting on a
+  // lock, or after 100 polls (about 5 s). Watched by B's pid from `watch`,
+  // which holds no transaction, so its view of pg_stat_activity is current
+  // (SMD-2742).
+  const race = async (a: () => Promise<Answer>, b: () => Promise<Answer>) => {
+    const bPid = Number((await cB`SELECT pg_backend_pid() AS p`)[0].p);
+    await cA`BEGIN`;
+    let ra: Answer | undefined, pb: Promise<Answer> | undefined, waitedOn = "";
+    try {
+      ra = await a();
+      pb = b();
+      for (let i = 0; i < 100 && !waitedOn; i++) {
+        const w = (await watch`SELECT wait_event_type AS t, wait_event AS e FROM pg_stat_activity WHERE pid = ${bPid}`)[0] as { t: string | null; e: string | null } | undefined;
+        if (w?.t === "Lock") waitedOn = w.e ?? "Lock";
+        else await Bun.sleep(50);
+      }
+    } finally {
+      await cA`COMMIT`;
+    }
+    let rb: Answer | undefined, err = "";
+    try { rb = await pb!; } catch (e) { err = (e as Error).message.split("\n")[0]; }
+    return { ra: ra!, rb, err, waitedOn };
+  };
+  try {
+    // The whole ticket and a piece of it: B waits on the advisory lock, then reads A's claim and is refused by it.
+    const w = await race(claimOn(cA, "SMD-9101", A, null), claimOn(cB, "SMD-9101", B, "PR 1"));
+    assert(w.waitedOn === "advisory" && w.ra.outcome === "claimed" && w.rb?.outcome === "refused" && w.rb.code === "WORK_CLAIMED" && w.rb.held_by[0]?.id === w.ra.claim?.id,
+      `a piece claimed while another session holds the whole ticket uncommitted: it waits on the ticket's advisory lock, then is refused naming the first claim (waited on ${w.waitedOn || "nothing"}; ${w.rb?.outcome ?? w.err})`);
+    // The same piece: refused by the answer, not by the unique index's error.
+    const s = await race(claimOn(cA, "SMD-9102", A, "PR 2"), claimOn(cB, "SMD-9102", B, "pr 2"));
+    assert(s.waitedOn === "advisory" && s.ra.outcome === "claimed" && s.rb?.outcome === "refused" && s.rb.code === "WORK_CLAIMED" && s.err === "",
+      `the same piece at once: one claimed, the other refused by the answer, never the index's duplicate-key error (waited on ${s.waitedOn || "nothing"}; ${s.rb?.outcome ?? s.err})`);
+    // Two pieces of one ticket: they share the lock, and both are claimed.
+    const p = await race(claimOn(cA, "SMD-9103", A, "PR 1"), claimOn(cB, "SMD-9103", B, "PR 2"));
+    assert(p.waitedOn === "advisory" && p.ra.outcome === "claimed" && p.rb?.outcome === "claimed",
+      `two pieces of one ticket at once: they wait on one lock and both are claimed (waited on ${p.waitedOn || "nothing"}; ${p.rb?.outcome ?? p.err})`);
+    const live = Number((await watch`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9101', 'SMD-9102', 'SMD-9103'])`)[0].n);
+    assert(live === 4, `four live claims stand: the whole of SMD-9101, one PR 2 of SMD-9102, both pieces of SMD-9103 (${live})`);
+    // A lapsed claim: its holder renews (A, held open) while another key claims the work (B). B waits on the
+    // lock, then reads the renewal and is refused — without renew's lock B would read the claim lapsed, wait
+    // on its row instead, and die on the index (review pass 2's surviving mutant).
+    const lapsed = await claimOn(cA, "SMD-9104", A, null)();
+    await watch`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = ${lapsed.claim!.id}::uuid`;
+    const renewOn = async () => ((await cA`SELECT renew_work_claim(${lapsed.claim!.id}::uuid, ${lapsed.token}, 14400, ${A}::jsonb) AS r`) as { r: Answer }[])[0].r;
+    const r = await race(renewOn, claimOn(cB, "SMD-9104", B, null));
+    assert(r.waitedOn === "advisory" && r.ra.outcome === "renewed" && r.rb?.outcome === "refused" && r.rb.code === "WORK_CLAIMED" && r.err === "",
+      `a takeover racing the holder's renewal of its lapsed claim: it waits on the ticket's lock, then is refused by the renewed claim, never the index's error (waited on ${r.waitedOn || "nothing"}; ${r.rb?.outcome ?? r.err})`);
+  } finally {
+    await watch`UPDATE work_claims SET released_at = now(), released_by = 'test-live', release_reason = '[46]' WHERE issue IN ('SMD-9101', 'SMD-9102', 'SMD-9103', 'SMD-9104') AND released_at IS NULL`;
+    await cA.close();
+    await cB.close();
+    await watch.close();
+  }
+}
+
 console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
 {
   // [33] and [35] check the projection after the sections before them, in the
