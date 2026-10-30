@@ -2132,9 +2132,9 @@ supersede which"):
   does a whole brain);
 - an import dated older than thoughts already judged.
 
-**Consolidation applies no proposal.** Each proposal waits for a reviewer: a person, or an agent's write key through the `review_supersession_proposal` tool (SMD-3338), the proposal recording which. One whose text moved under it (a stale row) is judged
+**Consolidation applies no proposal.** Each proposal waits for a reviewer: a person, or an agent's write key through the `review_supersession_proposal` tool (SMD-3338), the proposal recording the key (its kind too, once you classify it). One whose text moved under it (a stale row) is judged
 again by the next pass, which settles it unless the conflict still stands,
-when it waits for a person again (067). `--list` shows the queue.
+when it waits for a reviewer again (067). `--list` shows the queue.
 `--accept <id>` or `--reject <id>` decides one, with `--note` giving your
 reason; the tool takes the same over MCP or REST (`POST /v1/proposals/{id}/review`). When the listing says the judge did not state which thought is
 current, an accept needs `--direction newer` or `--direction older`.

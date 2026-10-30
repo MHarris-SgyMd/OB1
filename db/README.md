@@ -3908,8 +3908,9 @@ three on an accept, as `--force` does, and nothing else; a direction or force
 on a reject, and a note beginning with the pass's marker, are refused as the
 CLI refuses them. Any write key may decide, an agent's included — the
 maintainer's amendment (2026-10-26) of 029's "the machine proposes, someone
-confirms": the proposal's row records who decided (114), so a person's decision
-is still told from an agent's. 029's own comment stays as written; the file is
+confirms": the proposal's row records who decided (114), so once the operator
+classifies the keys (`set_agent_kind`) a person's decision is told from an
+agent's; an unclassified key's reads "a key the registry has not classified". 029's own comment stays as written; the file is
 frozen. A read or capture key does not see the tool. The review function runs
 as the caller, so the server's role needs the server group's `UPDATE` on
 `supersession_proposals` (Grants, below).

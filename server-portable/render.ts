@@ -1696,7 +1696,7 @@ export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCo
  */
 export const reviewHint = (msg: string): string =>
   /permission denied for (table|relation) supersession_proposals/.test(msg)
-    ? " — this server's database role may not decide a proposal: grant it the server group again (cd db && bun migrate.ts --url <the owner's connection> --grant <role>), which holds UPDATE on supersession_proposals since SMD-3338"
+    ? " — this server's database role may not decide a proposal: add the server group to its grants (cd db && bun migrate.ts --url <the owner's connection> --grant <role> --groups server), which holds UPDATE on supersession_proposals since SMD-3338"
     : /review_supersession_proposal|supersession_proposals/.test(msg) && /does not exist|could not find/i.test(msg)
       ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied"
       : "";
