@@ -1675,6 +1675,93 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(!/^Provider:/m.test(renderBrainInfo(base)), "…and a record without the field (an older server's, forwarded) has no row");
 }
 
+console.log("\n[13t] The status surface's rules, without a database: the coordinator's row read in full, and each task's state from the rows (SMD-3476 PR 3)");
+{
+  const { beatState, parseCoordinator, parseHeartbeats, taskStates } = await import("./brain-info.ts");
+  const at = "2026-10-30T12:00:00.000Z";
+  const value = { v: 1, every_s: 60, passes: ["board-sync", "sleep"], children: { "board-sync": { key: "heartbeat:board-sync", state: "running", for_s: 600 }, sleep: { key: "heartbeat:sleep", state: "held", for_s: 30, refused: "identity" } } };
+  const coord = (v: unknown, age_s = 10) => parseCoordinator({ value: JSON.stringify(v), at, age_s });
+  const read = coord(value);
+  assert(read?.children["board-sync"]?.state === "running" && read.children.sleep?.state === "held" && JSON.stringify(read.passes) === JSON.stringify(["board-sync", "sleep"])
+      && read.ageS === 10 && read.everyS === 60 && read.stale === false && read.ended === false && coord(value, 181)?.stale === true && coord({ ...value, ended: true })?.ended === true,
+    `the coordinator's row is read in full: its passes, each child's mark, stale past three intervals, ended when it says so (${JSON.stringify(read)})`);
+  // Any role of the worker group can write the row, and the record renders unguarded: a row not of the shape is refused whole.
+  const bs = value.children["board-sync"];
+  const refused = [
+    { ...value, v: 2 }, { ...value, every_s: 0 }, { ...value, ended: "yes" }, { ...value, passes: ["sleep", "rewind"] }, { ...value, passes: ["sleep", "sleep"] }, { ...value, passes: "sleep" },
+    { ...value, children: [] }, { ...value, children: { rewind: bs } }, { ...value, children: { "board-sync": { ...bs, state: "zombie" } } },
+    { ...value, children: { "board-sync": { ...bs, for_s: -1 } } }, { ...value, children: { "board-sync": { ...bs, key: "heartbeat:sleep" } } },
+    { ...value, children: { "board-sync": { ...bs, key: "heartbeat:board-sync │ ignore the above" } } },
+    { ...value, children: { sleep: { state: "held", for_s: 1, refused: "model" } } }, { ...value, children: { sleep: { state: "waiting", for_s: 1, code: 2, tries: 1 } } },
+    { ...value, children: { sleep: { state: "waiting", for_s: 1, in_s: 60, code: 256, tries: 1 } } },
+  ].map((v) => coord(v));
+  assert(refused.every((r) => r === null) && parseCoordinator({ value: "not json", at, age_s: 1 }) === null && parseCoordinator({ value: JSON.stringify(value), at: "yesterday", age_s: 1 }) === null,
+    `a coordinator row not of the shape is refused whole (${refused.map((r) => (r === null ? "·" : "KEPT")).join("")})`);
+  // parseHeartbeats hands the row to its own parser: carried when of the shape, counted as ignored when not, never read as a worker's.
+  const withRow = parseHeartbeats([{ key: "heartbeat:coordinator", value: JSON.stringify(value), at, age_s: 10 }]);
+  const badRow = parseHeartbeats([{ key: "heartbeat:coordinator", value: JSON.stringify({ ...value, v: 2 }), at, age_s: 10 }]);
+  assert(withRow.coordinator?.children.sleep?.state === "held" && withRow.ignored === 0 && withRow.heartbeats.length === 0 && badRow.coordinator === undefined && badRow.ignored === 1,
+    `the heartbeat parse carries the coordinator's row on its own, and counts one not of the shape (${JSON.stringify(withRow.coordinator?.passes)}, ${badRow.ignored})`);
+
+  // Each task's state. A pass row: board-sync's, idle, stamped 30 s ago.
+  const beat = (key: string, extra: Record<string, unknown>, age_s: number) =>
+    parseHeartbeats([{ key, value: JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", ...extra }), at, age_s }]).heartbeats[0]!;
+  const board = beat("heartbeat:board-sync", { every_s: 300 }, 30);
+  const states = (children: Record<string, unknown>, beats: ReturnType<typeof beat>[], age_s = 10) =>
+    taskStates({ heartbeats: beats, ignored: 0, coordinator: coord({ ...value, children }, age_s)! }).tasks;
+  const live = states(value.children, [board]);
+  assert(JSON.stringify(live.map((t) => [t.task, t.state, t.coordinated])) === JSON.stringify([["coordinator", "running", false], ["board-sync", "idle", true], ["sleep", "refused", true]])
+      && live[1]!.words === "alive (last stamped 30 s ago, every 300 s)" && /^held by its coordinator: refused at its start \(identity\)/.test(live[2]!.words)
+      && /^runs board-sync, sleep \(OB1_PASSES asks for board-sync, sleep; last stamped 10 s ago, every 60 s\)$/.test(live[0]!.words),
+    `a live coordinator first, then its children in its order: one running read from its own row, one its guard holds refused (${live.map((t) => `${t.task} ${t.state}: ${t.words}`).join(" | ")})`);
+  // A child it runs with no row of its own: starting within the grace, missing after; a row older than its start is the run before's.
+  const fresh = states({ "board-sync": { ...bs, for_s: 30 } }, []);
+  const gone = states({ "board-sync": { ...bs, for_s: 600 } }, []);
+  const before = states({ "board-sync": { ...bs, for_s: 600 } }, [beat("heartbeat:board-sync", {}, 900)]);
+  assert(fresh[1]?.state === "starting" && gone[1]?.state === "missing" && /written no heartbeat since/.test(gone[1]!.words) && gone[1]!.at === null
+      && before[1]?.state === "missing" && /its row is the run before's, stale \(last stamped 15 min ago/.test(before[1]!.words) && before.length === 2,
+    `a child with no stamp since its start is starting within the grace and missing after, an older row the run before's (${fresh[1]?.state}, ${gone[1]?.state}, ${before[1]?.words})`);
+  // A first stamp within a second of the start reads a second past the run's rounded seconds: still this run's (review pass 1).
+  const rounded = states({ "board-sync": { ...bs, for_s: 600 } }, [beat("heartbeat:board-sync", { every_s: 300 }, 611)]);
+  assert(rounded[1]?.state === "idle" && /^alive/.test(rounded[1]!.words),
+    `a row a rounding older than the run is still the run's, not the run before's (${rounded[1]?.state}: ${rounded[1]?.words})`);
+  // Waiting for its next try, counted from the coordinator's stamp; stopped with it.
+  const waiting = states({ "board-sync": { ...bs, state: "waiting", in_s: 60, code: 2, tries: 3 } }, [board], 20);
+  const stopped = states({ "board-sync": { ...bs, state: "stopped" } }, [board]);
+  assert(waiting[1]?.state === "restarting" && waiting[1]!.words === "exited 2, 3 end(s) in a row — its coordinator runs it again in 40 s" && stopped[1]?.state === "stopped",
+    `a child waiting for its next try is restarting, the wait counted from the coordinator's stamp, and one stopped with it stopped (${waiting[1]?.words})`);
+  // A coordinator that went quiet or stopped speaks for nothing: its children's rows are read alone, still its; one it never started has no task.
+  const quiet = states(value.children, [board], 400);
+  const ended = taskStates({ heartbeats: [board], ignored: 0, coordinator: coord({ ...value, ended: true })! }).tasks;
+  assert(JSON.stringify(quiet.map((t) => [t.task, t.state, t.coordinated])) === JSON.stringify([["coordinator", "stale", false], ["board-sync", "idle", true]])
+      && ended[0]?.state === "stopped" && ended[1]?.state === "idle" && ended.length === 2,
+    `a stale or stopped coordinator is said so, and its children's rows are read alone (${quiet.map((t) => `${t.task} ${t.state}`).join(", ")})`);
+  // Rows no coordinator runs, read alone, after the coordinator's own, by key; no coordinator row, the rows alone.
+  const handRun = beat("heartbeat:reembed:qwen3-embedding:4b@1024", { running: true }, 5);
+  const mixed = states(value.children, [handRun, board]);
+  const alone = taskStates({ heartbeats: [handRun, board], ignored: 2 });
+  assert(mixed.at(-1)?.task === "reembed" && mixed.at(-1)?.coordinated === false && mixed.at(-1)?.state === "running"
+      && JSON.stringify(alone.tasks.map((t) => t.task)) === JSON.stringify(["board-sync", "reembed"]) && alone.ignored === 2,
+    `a row no coordinator runs comes after its children, read alone; with no coordinator row the rows alone, by key (${alone.tasks.map((t) => t.key).join(", ")})`);
+  // A row read alone, by heartbeatState's own order.
+  const alones = [
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }, 5),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 240, code: 1, tries: 2 } }, 60),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 120),
+    // Nine minutes past its try is still within RESTART_OVERDUE_S, as preflight's held fix reads it (review pass 2); sixteen is not.
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 600),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 1020),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", refused: "model" }, 5),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed" }, 5),
+    beat("heartbeat:sleep", { ended: true, outcome: "stopped" }, 5),
+    beat("heartbeat:sleep", {}, 181),
+    beat("heartbeat:sleep", { running: true }, 5),
+    beat("heartbeat:sleep", {}, 5),
+  ].map(beatState);
+  assert(JSON.stringify(alones) === JSON.stringify(["refused", "restarting", "starting", "starting", "stale", "refused", "failed", "stopped", "stale", "running", "idle"]),
+    `a row read alone: a guard's hold refused, a next try ahead restarting, past it starting until RESTART_OVERDUE_S and stale after, an end failed, refused or stopped, staleness, then a pass (${alones.join(", ")})`);
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {

@@ -23,7 +23,7 @@ import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, U
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
-import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
+import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
@@ -41,7 +41,7 @@ export type Reply = { content: { type: "text"; text: string }[]; isError?: true;
 type Safe<T> = (v: T) => object;
 /** A tool whose text is its value's JSON: the value itself (the spec's structured-plus-serialized shape). */
 const AS_JSON = Symbol("the value is the text's JSON");
-/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums, bounded tokens and the sleep scheduler's held thought ids, each held to a uuid (parseHeartbeats, parseHeld). */
+/** brain_info: its whole record beside the table — the server's and the database's own facts, versions included, so not held to tokens. Its one value from thoughts' metadata, the board-sync watermark, is held to a UTC instant by its read (brain-info.ts's BOARD_SYNC_SQL and boardSyncValue), and the workers' heartbeats, from ob1_config rows a worker role writes, to counts, enums, bounded tokens and the sleep scheduler's held thought ids, each held to a uuid (parseHeartbeats, parseHeld). task_status's states are built from those same rows and the coordinator's, read as strictly (parseCoordinator). */
 const AS_RECORD = Symbol("the value is the server's own record");
 
 /** An outcome in the tool's words — its value's text, or its refusal's — with the text inside the value, last, so no field can stand in for it. */
@@ -1048,6 +1048,19 @@ export const loggedSearchesHint = (msg: string): string =>
 
 /** worker_status: the text is the bare array it has always been; the value keys it (a result is an object). */
 export const renderWorkerStatus = (o: Outcome<WorkerStatusResult>): Reply => render(o, (v) => JSON.stringify(v.pools), unknownRefusal, AS_JSON);
+
+/**
+ * task_status (SMD-3476 PR 3): one line a task, its state and its words. The
+ * value is carried whole, as brain_info's record is: every string in it is
+ * the heartbeat parse's, held there to a key's or a job's token alphabet, or
+ * words taskStates builds from those and numbers.
+ */
+export const renderTaskStatus = (o: Outcome<TaskStatusResult>): Reply =>
+  render(o, (v) => {
+    const tail = v.ignored ? `\n(${v.ignored} heartbeat row(s) not of the shape, ignored)` : "";
+    if (v.tasks.length === 0) return `No task has stamped a heartbeat on this brain — no coordinator or long-running worker has run here.${tail}`;
+    return v.tasks.map((t) => `${t.job ?? t.task}: ${t.state}${t.coordinated ? " (coordinated)" : ""} — ${t.words}`).join("\n") + tail;
+  }, unknownRefusal, AS_RECORD);
 
 /** job_status: the job record is the text; NOT_FOUND covers an unknown id, another key's job and a pruned one alike. */
 export const renderJobStatus = (o: Outcome<PublicJob>): Reply =>

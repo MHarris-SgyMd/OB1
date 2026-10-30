@@ -16259,6 +16259,10 @@ if (want("37b")) {
     delete cliEnv.LINEAR_API_KEY;
     const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "board-sync" }, stdout: "pipe", stderr: "pipe" });
     await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 15_000);
+    // Its own row (SMD-3476 PR 3): the pass asked for, and the child waiting for its next try with the end's code.
+    await pollUntil(async () => (await row("heartbeat:coordinator"))?.children?.["board-sync"]?.state === "waiting", 5000);
+    const coordMid = await row("heartbeat:coordinator");
+    const coordFacts = (await readDatabaseFacts(ssql as never, { stats: false })).workers?.coordinator;
     const t0 = Date.now();
     cli.kill("SIGTERM");
     const cliCode = await cli.exited;
@@ -16266,8 +16270,53 @@ if (want("37b")) {
     assert(cliCode === 0 && Date.now() - t0 < 2000 && /^coordinator: runs board-sync — not root, so each as this process's user, not its own$/m.test(cliErr)
         && /^\[board-sync\] .*LINEAR_API_KEY/m.test(cliErr) && /supervise: board-sync exited 2 after \d+ s — a refusal, its lines above say why; it runs again at .* \(in 60 s, end 1 in a row\), heartbeat:board-sync says so/.test(cliErr),
       `the coordinator runs board-sync, waits a minute after its refusal, and a SIGTERM then ends it with 0 at once (exit ${cliCode} after ${Date.now() - t0} ms)`);
+    const coordEnd = await row("heartbeat:coordinator");
+    const midMark = coordMid?.children?.["board-sync"];
+    assert(coordMid?.v === 1 && coordMid.every_s === 60 && JSON.stringify(coordMid.passes) === JSON.stringify(["board-sync"]) && Object.keys(coordMid.children).length === 1
+        && midMark?.key === "heartbeat:board-sync" && midMark.code === 2 && midMark.tries === 1 && midMark.in_s > 40 && midMark.in_s <= 60 && coordMid.ended === undefined
+        && coordFacts?.children["board-sync"]?.state === "waiting" && coordFacts.ended === false && coordFacts.stale === false
+        && coordEnd?.ended === true && coordEnd.children?.["board-sync"]?.state === "stopped" && coordEnd.age < 5,
+      `the coordinator's row names the pass asked for and its child waiting for its next try, read in full, then stopped and ended at the stop (${JSON.stringify(coordMid)} → ${JSON.stringify(coordEnd?.children)})`);
+    // The row is one coordinator's at a time (review pass 3): one started beside a live coordinator's row
+    // writes nothing over it, says so once, and ends nothing at its stop; beside an ended row it takes it over.
+    const foreign = (ended: boolean) => ssql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:coordinator', ${JSON.stringify({ v: 1, id: "other", every_s: 60, passes: ["sleep"], children: {}, ...(ended ? { ended: true } : {}) })})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    /** A second coordinator, no pass named, run until `until` holds of its log or the row (15 s at most), then stopped: its code, its log, the row while it ran and after. */
+    const second = async (until: (log: string) => Promise<boolean>) => {
+      const p = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "" }, stdout: "ignore", stderr: "pipe" });
+      let log = "";
+      const pump = (async () => { for await (const chunk of p.stderr as ReadableStream<Uint8Array>) log += new TextDecoder().decode(chunk); })();
+      await pollUntil(() => until(log), 15_000).catch(() => {});
+      const during = await row("heartbeat:coordinator");
+      p.kill("SIGTERM");
+      const code = await p.exited;
+      await pump;
+      return { code, log, during, after: await row("heartbeat:coordinator") };
+    };
+    await foreign(false);
+    const besideLive = await second(async (log) => log.includes("is another live coordinator's"));
+    assert(besideLive.code === 0 && /heartbeat:coordinator is another live coordinator's, from another host, so this one's state is not stamped/.test(besideLive.log)
+        && besideLive.log.split("is another live coordinator's").length === 2
+        && besideLive.during?.id === "other" && besideLive.after?.id === "other" && besideLive.after.ended === undefined && JSON.stringify(besideLive.after.passes) === JSON.stringify(["sleep"]),
+      `a coordinator beside another's live row writes nothing over it, says so once, and ends nothing at its stop (${JSON.stringify(besideLive.after)})`);
+    await foreign(true);
+    const besideEnded = await second(async () => (await row("heartbeat:coordinator"))?.id !== "other");
+    assert(besideEnded.code === 0 && typeof besideEnded.during?.id === "string" && besideEnded.during.id !== "other" && JSON.stringify(besideEnded.during.passes) === JSON.stringify([])
+        && besideEnded.during.ended === undefined && besideEnded.after?.id === besideEnded.during.id && besideEnded.after.ended === true && !/another live coordinator/.test(besideEnded.log),
+      `beside an ended row it takes the row over, and ends its own at its stop (${JSON.stringify(besideEnded.during)} → ended ${besideEnded.after?.ended})`);
+    // A live row of its own host — the process before it, stopped hard, as a reboot stops a container — is taken over at once (review pass 4).
+    await ssql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:coordinator', ${JSON.stringify({ v: 1, id: "before", host: hostname(), every_s: 60, passes: ["sleep"], children: {} })})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    const sameHost = await second(async () => (await row("heartbeat:coordinator"))?.id !== "before");
+    assert(sameHost.code === 0 && typeof sameHost.during?.id === "string" && sameHost.during.id !== "before" && sameHost.during.host === hostname() && !/another live coordinator/.test(sameHost.log),
+      `a live row of its own host, the run before's stopped hard, is taken over at once (${JSON.stringify(sameHost.during)})`);
     const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "workers,sleep" }, stdout: "pipe", stderr: "pipe" });
     await pollUntil(async () => (await row("heartbeat:sleep"))?.refused === "identity", 15_000);
+    await pollUntil(async () => (await row("heartbeat:coordinator"))?.children?.sleep?.state === "held", 5000);
+    const heldRow = await row("heartbeat:coordinator");
+    assert(JSON.stringify(heldRow?.passes) === JSON.stringify(["workers", "sleep"]) && JSON.stringify(Object.keys(heldRow?.children ?? {})) === JSON.stringify(["sleep"])
+        && heldRow.children.sleep.refused === "identity" && heldRow.children.sleep.key === "heartbeat:sleep",
+      `both asked for, the row names both passes and runs sleep alone, held by its guard with the kind (${JSON.stringify(heldRow)})`);
     await Bun.sleep(200);
     const guardRunning = cliGuard.exitCode === null;
     cliGuard.kill("SIGTERM");

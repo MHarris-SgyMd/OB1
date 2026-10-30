@@ -2589,6 +2589,147 @@
         ]
       }
     },
+    "/v1/status": {
+      "get": {
+        "operationId": "task_status",
+        "summary": "Task Status",
+        "description": "Say each of the brain's background tasks in one word, from their heartbeat rows: the coordinator and the passes it runs (the sleep scheduler, the extraction and consolidation followers, board-sync), then any other long-running worker (a re-embed follower run by hand). Each task's `state` is one of running (a pass under way), idle (alive between passes), starting (started, not yet stamped), restarting (ended on its own, run again on the coordinator's clock), refused (held by a start refusal: deploy/.env's to mend), failed (ended on a failure), stale (no stamp in three of its intervals), stopped, or missing (the coordinator started it and it has written no heartbeat). `words` says the same in a reader's words, `coordinated` whether the coordinator runs it, and `at`/`ageS` its row's last stamp by the database's clock. brain_info and preflight read the same states. Read-only. Returns { tasks, ignored }: `ignored` counts heartbeat rows not of the shape; empty when no task has run on this brain.",
+        "x-ob1-scope": "read",
+        "responses": {
+          "200": {
+            "description": "The operation's value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing there: NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, REFUSED_SUPERSEDED_GONE.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A fault (FAILED, with its message; no retryable until SMD-2461).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: \"forwarder\"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: \"token\"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "brainKey": []
+          },
+          {
+            "accessKey": []
+          },
+          {
+            "bearer": []
+          },
+          {
+            "brainKey": [],
+            "forwarder": []
+          },
+          {
+            "accessKey": [],
+            "forwarder": []
+          },
+          {
+            "bearer": [],
+            "forwarder": []
+          }
+        ]
+      }
+    },
     "/v1/brain": {
       "get": {
         "operationId": "brain_info",

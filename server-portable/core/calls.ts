@@ -32,6 +32,7 @@ export const CALLS = {
   thought_stats: (c, p, i) => c.thoughtStats(p, i),
   thought_changes: (c, p, i) => c.thoughtChanges(p, i),
   worker_status: (c, p, i) => c.workerStatus(p, i),
+  task_status: (c, p, i) => c.taskStatus(p, i),
   brain_info: async (c) => ok(await c.brainInfo("tool")),
   job_status: (c, p, i) => c.jobStatus(p, i),
   scan_thoughts: (c, p, i, o) => c.scanThoughts(p, i, { track: o.track }),

@@ -319,6 +319,7 @@ const WORDS: Record<ToolName, Words> = {
   list_thought_ids: { render: (o) => say.renderThoughtIds(o), fault: readFault() },
   list_logged_searches: { render: (o) => say.renderLoggedSearches(o), fault: readFault(() => say.loggedSearchesHint) },
   worker_status: { render: (o) => say.renderWorkerStatus(o), fault: readFault() },
+  task_status: { render: (o) => say.renderTaskStatus(o), fault: readFault() },
   // brain_info's record is never a refusal: the reply renders the value itself.
   brain_info: { render: (o) => say.renderBrainInfoReply((o as { value: never }).value), fault: readFault() },
   // capture's fault is STORE_UNAVAILABLE, the transient the session hook keeps and retries (SMD-1978).

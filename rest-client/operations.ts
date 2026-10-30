@@ -23,6 +23,7 @@ export const OPERATIONS = {
   search: { method: "POST", path: "/v1/search/compat" },
   search_thoughts: { method: "POST", path: "/v1/search" },
   search_thoughts_keyword: { method: "POST", path: "/v1/search/keyword" },
+  task_status: { method: "GET", path: "/v1/status" },
   thought_changes: { method: "GET", path: "/v1/changes" },
   thought_stats: { method: "GET", path: "/v1/stats" },
   update_thought: { method: "PATCH", path: "/v1/thoughts/{id}" },

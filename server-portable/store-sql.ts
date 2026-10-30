@@ -20,7 +20,7 @@
 
 import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
-import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
+import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
@@ -46,6 +46,7 @@ import type {
   ThoughtKeywordMatch,
   LoggedSearchPage,
   WorkerStatusRow,
+  HeartbeatRead,
   RetryFailedResult,
   ReleaseLeasesOpts,
   ReleaseLeasesResult,
@@ -518,6 +519,10 @@ export class SqlStore implements ThoughtStore {
       filter: (r.filter as Record<string, unknown> | null) ?? {},
     }));
     return { searches, truncated };
+  }
+
+  async heartbeats(): Promise<HeartbeatRead> {
+    return readHeartbeats(this.sql as never);
   }
 
   async workerStatus(): Promise<WorkerStatusRow[]> {

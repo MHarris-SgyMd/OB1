@@ -88,6 +88,7 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   thought_stats: { method: "GET", path: "/v1/stats", ok: 200, call: CALLS.thought_stats },
   thought_changes: { method: "GET", path: "/v1/changes", ok: 200, call: CALLS.thought_changes },
   worker_status: { method: "GET", path: "/v1/workers", ok: 200, call: CALLS.worker_status },
+  task_status: { method: "GET", path: "/v1/status", ok: 200, call: CALLS.task_status },
   brain_info: { method: "GET", path: "/v1/brain", ok: 200, call: CALLS.brain_info },
   job_status: { method: "GET", path: "/v1/jobs/{job_id}", ok: 200, call: CALLS.job_status },
   scan_thoughts: { method: "POST", path: "/v1/scans", ok: 202, call: CALLS.scan_thoughts },

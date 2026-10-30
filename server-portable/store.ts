@@ -12,7 +12,10 @@
 
 import type { ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
-import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
+import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
+
+/** The parsed heartbeat rows (brain-info.ts's readHeartbeats). */
+export type HeartbeatRead = Awaited<ReturnType<typeof readHeartbeats>>;
 import type { Lineage } from "./lineage.ts";
 import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
@@ -1591,6 +1594,13 @@ export interface ThoughtStore {
   workerStatus(): Promise<WorkerStatusRow[]>;
 
   /**
+   * The heartbeat rows of ob1_config, parsed as brain_info reads them — each
+   * pass's and the coordinator's — for the status surface (task_status,
+   * SMD-3476 PR 3). Read-only.
+   */
+  heartbeats(): Promise<HeartbeatRead>;
+
+  /**
    * Requeue a pool's `failed` claim rows to `pending` (SMD-2132) — the write
    * half of `worker_status`, the `db/*.ts --retry-failed` path over a tool. One
    * statement, scoped to `workType` alone (`WHERE work_type = $1 AND status =
@@ -2042,7 +2052,7 @@ export function maskUrl(url: string): string {
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
-  listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
+  listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, reviewProposal: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
