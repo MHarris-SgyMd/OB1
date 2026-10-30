@@ -506,7 +506,7 @@ function coordinatorUp(pass) {
  */
 export function restartCommand(worker, job) {
   if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
-  if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)`;
+  if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
   // No compose service runs a re-embed follower: the sleep scheduler does (SMD-2679 PR 4b).

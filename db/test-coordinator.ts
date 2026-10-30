@@ -94,7 +94,14 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
 // ---------------------------------------------------------------------------
 {
   const args = (name: keyof typeof CHILDREN, env: Record<string, string> = {}) => CHILDREN[name].args(env).join(" ");
-  ok(args("board-sync") === "--loop", "board-sync: --loop, its interval its own to read");
+  ok(args("board-sync") === "--trigger --interval 300" && args("board-sync", { OB1_BOARD_SYNC_INTERVAL: " 60 " }) === "--trigger --interval 60" && args("board-sync", { OB1_BOARD_SYNC_INTERVAL: "5" }) === "--trigger --interval 5",
+    `board-sync: --trigger, its interval handed in as --interval, trimmed — one the tool does not take its own to refuse (${args("board-sync")})`);
+  const every = CHILDREN["board-sync"].every!;
+  ok(every({}) === 300_000 && every({ OB1_BOARD_SYNC_INTERVAL: " 60 " }) === 60_000 && every({ OB1_BOARD_SYNC_INTERVAL: "1209600" }) === 1_209_600_000 && every({ OB1_BOARD_SYNC_INTERVAL: "2147483" }) === 2_147_483_000 && CHILDREN["board-sync"].digits.length === 0 && CHILDREN.sleep.every === undefined,
+    `board-sync's trigger every OB1_BOARD_SYNC_INTERVAL seconds (300 unset), up to setInterval's bound; the followers sent none (${every({})}, ${every({ OB1_BOARD_SYNC_INTERVAL: " 60 " })})`);
+  // A value the tool refuses runs no clock: past setInterval's bound one would fire every millisecond, under a second it would land before the tool's handler.
+  const refusedClock = ["2147484", "99999999", "5", "0.5", "-1", "0x10", "1e3", "x"].filter((v) => every({ OB1_BOARD_SYNC_INTERVAL: v }) !== undefined);
+  ok(refusedClock.length === 0, `an interval the tool refuses (past setInterval's bound, under 10 s, not whole seconds) runs no clock (ran one: ${refusedClock.join(", ") || "none"})`);
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");
@@ -136,8 +143,11 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   const usage = cli("--passes", "sleep");
   const unknown = cli("run", "reembed");
   const help = cli("run", "sleep", "--help");
+  const oneTrigger = cli("run", "board-sync", "--trigger");
   ok(usage.exitCode === 2 && /takes no arguments — OB1_PASSES names the passes it runs/.test(usage.stderr.toString()) && unknown.exitCode === 2,
     `an argument other than run, or run of no pass, is usage (2) (${usage.exitCode}, ${unknown.exitCode})`);
+  ok(oneTrigger.exitCode === 2 && /run board-sync takes no --trigger: that is the coordinator's own mode/.test(oneTrigger.stderr.toString()),
+    `run board-sync --trigger is refused: the trigger's clock is the coordinator's alone (${oneTrigger.exitCode})`);
   ok(help.exitCode === 0 && /^usage: bun db\/sleep\.ts/m.test(help.stdout.toString() + help.stderr.toString()),
     `run sleep --help runs the scheduler's own script with those args, and exits with its code (${help.exitCode})`);
 }
