@@ -1676,7 +1676,9 @@ export function beatState(h: WorkerHeartbeat): TaskState {
     if (h.restart.inS === null) return "refused";
     const left = h.restart.inS - h.ageS;
     if (left > 0) return "restarting";
-    return -left > STALE_AFTER_INTERVALS * h.everyS ? "stale" : "starting";
+    // Past its next try, by the rule preflight's held fix reads the row by (review pass 2): a follower's start
+    // stamps nothing until its first pass, so it is starting until RESTART_OVERDUE_S, then taken for gone.
+    return -left > RESTART_OVERDUE_S ? "stale" : "starting";
   }
   if (h.ended) return h.outcome === "failed" ? (h.refused ? "refused" : "failed") : "stopped";
   if (h.stale) return "stale";

@@ -1748,7 +1748,9 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
     beat("heartbeat:sleep", { ended: true, outcome: "failed", refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }, 5),
     beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 240, code: 1, tries: 2 } }, 60),
     beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 120),
+    // Nine minutes past its try is still within RESTART_OVERDUE_S, as preflight's held fix reads it (review pass 2); sixteen is not.
     beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 600),
+    beat("heartbeat:sleep", { ended: true, outcome: "failed", restart: { in_s: 60, code: 1, tries: 2 } }, 1020),
     beat("heartbeat:sleep", { ended: true, outcome: "failed", refused: "model" }, 5),
     beat("heartbeat:sleep", { ended: true, outcome: "failed" }, 5),
     beat("heartbeat:sleep", { ended: true, outcome: "stopped" }, 5),
@@ -1756,8 +1758,8 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
     beat("heartbeat:sleep", { running: true }, 5),
     beat("heartbeat:sleep", {}, 5),
   ].map(beatState);
-  assert(JSON.stringify(alones) === JSON.stringify(["refused", "restarting", "starting", "stale", "refused", "failed", "stopped", "stale", "running", "idle"]),
-    `a row read alone: a guard's hold refused, a next try ahead restarting, just past starting and long past stale, an end failed, refused or stopped, staleness, then a pass (${alones.join(", ")})`);
+  assert(JSON.stringify(alones) === JSON.stringify(["refused", "restarting", "starting", "starting", "stale", "refused", "failed", "stopped", "stale", "running", "idle"]),
+    `a row read alone: a guard's hold refused, a next try ahead restarting, past it starting until RESTART_OVERDUE_S and stale after, an end failed, refused or stopped, staleness, then a pass (${alones.join(", ")})`);
 }
 
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
