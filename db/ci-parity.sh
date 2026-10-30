@@ -133,10 +133,11 @@ main() {
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
   OB1_LIVE_SHARD=extract run db test-live.ts
-  # CI runs this one and test-preflight.ts in the background from the
-  # data-layer job's start, on a Postgres of their own, beside that job's suites
-  # below (SMD-2219, SMD-3195); here, in their places and in series, on the
-  # shared one, test-preflight.ts where CI ran it before SMD-3195.
+  # CI runs this one and test-preflight.ts's two shards in the background from
+  # the data-layer job's start, on Postgreses of their own, beside that job's
+  # suites below (SMD-2219, SMD-3195, SMD-3468); here, in their places and in
+  # series, on the shared one, test-preflight.ts where CI ran it before
+  # SMD-3195.
   run db                 test-upgrade.ts
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
@@ -155,7 +156,11 @@ main() {
   run server-portable    test-chunking.ts
   run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
-  run server-portable    test-preflight.ts
+  # CI runs its two shards side by side, the first beside test-upgrade.ts on
+  # pair-postgres, the rest on preflight-postgres (SMD-3468); here in series,
+  # each dropping the schema before its first database section.
+  OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
+  OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
   run compat/supabase-sql test-compat.ts
   # The vendored writers of a thought's content or vector (change 69), then
   # every extension tool on the SQL shim, as CI's data-layer job runs them —

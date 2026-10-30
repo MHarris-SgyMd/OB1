@@ -15,13 +15,13 @@
  * existing rows "correctly read NULL". Nothing held that claim. This does, and
  * generalises it, so the next migration is covered before it is written.
  *
- * CI runs this suite beside test-preflight.ts, each in its own database of one
- * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195). What the cluster
- * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
- * here to the current database, or named for this suite (ob1_upgrade_*,
- * ob1_notemp, tu_*). [12] opens a session in `postgres` on purpose, to hold a
- * lock its count must not see.
+ * CI runs this suite beside test-preflight.ts's first shard, each in its own
+ * database of one Postgres, as the same role (SMD-2219, SMD-3468), a Postgres
+ * the two have to themselves while the data-layer job's other suites run
+ * (SMD-3195). What the cluster shares — a role and its settings, pg_locks,
+ * pg_stat_activity — is scoped here to the current database, or named for
+ * this suite (ob1_upgrade_*, ob1_notemp, tu_*). [12] opens a session in
+ * `postgres` on purpose, to hold a lock its count must not see.
  *
  *   ./with-postgres.sh bun test-upgrade.ts
  */
@@ -61,8 +61,8 @@ const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code ==
 
 /**
  * The advisory locks held in this database. pg_locks is the cluster's, and CI
- * runs this suite beside test-preflight.ts, whose captures take the same locks
- * in a database of its own (SMD-2219).
+ * runs this suite beside test-preflight.ts's first shard, whose captures take
+ * the same locks in a database of its own (SMD-2219, SMD-3468).
  */
 const advisoryLocksHere = async (sql: SQL) =>
   Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`)[0].c);
