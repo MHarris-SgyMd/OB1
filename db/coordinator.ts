@@ -48,7 +48,8 @@
  * database it is left unwritten, the passes running on. The row is one
  * coordinator's at a time, by an id of its process: a second started beside a
  * live one writes nothing over it, says so, and takes it over once it is
- * ended or stale.
+ * ended or stale; one of the same host (a container restarted after a hard
+ * stop) at once.
  *
  * Output. Each child's lines go to this process's, after `[<name>] `.
  *
@@ -78,6 +79,7 @@
 
 import type { SQL } from "bun";
 import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
@@ -359,6 +361,7 @@ export function askedPasses(raw: string | undefined): Pass[] {
  */
 export function coordinatorValue(o: {
   id: string;
+  host: string;
   passes: readonly Pass[];
   children: readonly Child[];
   keys: ReadonlyMap<ChildName, string | null>;
@@ -378,7 +381,7 @@ export function coordinatorValue(o: {
       : s.state === "held" ? { ...base, state: "held", refused: s.refused }
       : { ...base, state: s.state };
   }
-  return { v: 1, id: o.id, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
+  return { v: 1, id: o.id, host: o.host, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
 }
 
 /**
@@ -388,13 +391,17 @@ export function coordinatorValue(o: {
  * A failure is said once until a write lands; the passes never wait on it.
  *
  * The row is one coordinator's at a time (review pass 3): a write replaces a
- * row of its own `id`, or one ended, stale or not JSON — never another live
- * coordinator's. So a second started beside the stack's (a one-off `compose
- * run coordinator`, CI's held cases, a checkout's run) neither rewrites its
- * children nor, at its stop, ends its row; it says so once, and takes the row
- * over when the other's is ended or goes stale.
+ * row of its own `id` or its own `host`, or one ended, stale or not JSON —
+ * never another live coordinator's. So a second started beside the stack's (a
+ * one-off `compose run coordinator`, CI's held cases, each a container of its
+ * own) neither rewrites its children nor, at its stop, ends its row; it says
+ * so once, and takes the row over when the other's is ended or goes stale.
+ * The host (review pass 4): a container restarted after a hard stop keeps
+ * its hostname, so its next process takes over the row the last left live at
+ * once, rather than three intervals later. Two runs from checkouts on one
+ * machine share a host, and so the row.
  */
-function coordinatorRow(o: { sql: SQL | null; id: string; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
+function coordinatorRow(o: { sql: SQL | null; id: string; host: string; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
   const sql = o.sql;
   if (sql === null) return { changed() {}, async end() {} };
   let chain: Promise<void> = Promise.resolve();
@@ -413,6 +420,7 @@ function coordinatorRow(o: { sql: SQL | null; id: string; value: (ended: boolean
               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
                 WHERE CASE WHEN ob1_config.value IS JSON OBJECT
                            THEN ob1_config.value::jsonb->>'id' IS NOT DISTINCT FROM ${o.id}
+                                OR ob1_config.value::jsonb->>'host' IS NOT DISTINCT FROM ${o.host}
                                 OR ob1_config.value::jsonb->'ended' = 'true'::jsonb
                                 OR ob1_config.updated_at < now() - make_interval(secs => ${staleS})
                            ELSE true END
@@ -421,7 +429,7 @@ function coordinatorRow(o: { sql: SQL | null; id: string; value: (ended: boolean
         ])) as unknown[];
         unwritten = false;
         if (wrote.length === 0 && !notOurs) {
-          o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`);
+          o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, from another host, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`);
         }
         notOurs = wrote.length === 0;
       } catch (e) {
@@ -457,6 +465,8 @@ export type CoordinatorOptions = {
   /** The row's period and each write's bound: MIN_STAMP_EVERY_S and STAMP_TIMEOUT_MS unless a test drives them faster. */
   rowEveryS?: number;
   stampTimeoutMs?: number;
+  /** The host its row names: this machine's (os.hostname), unless a test plants another. */
+  host?: string;
 };
 
 /** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all and the row says so. */
@@ -476,13 +486,15 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const keys = new Map<ChildName, string | null>();
   const everyS = opts.rowEveryS ?? MIN_STAMP_EVERY_S;
   const id = crypto.randomUUID();
+  const host = opts.host ?? hostname();
   const row = coordinatorRow({
     sql: opts.sql,
     id,
+    host,
     everyS,
     timeoutMs: opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS,
     err: writer.err,
-    value: (ended) => coordinatorValue({ id, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
+    value: (ended) => coordinatorValue({ id, host, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
   });
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);

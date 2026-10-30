@@ -502,6 +502,12 @@ export type CoordinatorValue = {
    * Not read: the record carries no id.
    */
   id: string;
+  /**
+   * The host it runs on: a container restarted after a hard stop (a reboot)
+   * keeps its hostname, so its next process takes over its own row at once.
+   * Not read either.
+   */
+  host: string;
   every_s: number;
   /** The passes OB1_PASSES asks for, those of COORDINATOR_PASSES alone, in its order. */
   passes: (typeof COORDINATOR_PASSES)[number][];
@@ -510,7 +516,7 @@ export type CoordinatorValue = {
   ended?: true;
 };
 /** The coordinator's row as the record carries it: its value, read in full, and its stamp judged against the database's clock. */
-export type CoordinatorBeat = Omit<CoordinatorValue, "v" | "id" | "every_s" | "ended"> & { at: string; ageS: number; everyS: number; stale: boolean; ended: boolean };
+export type CoordinatorBeat = Omit<CoordinatorValue, "v" | "id" | "host" | "every_s" | "ended"> & { at: string; ageS: number; everyS: number; stale: boolean; ended: boolean };
 
 const MARK_STATES = ["starting", "running", "stopped", "waiting", "held"] as const;
 /** A state's age past which it is not one a stamp writes: ten years. */

@@ -16226,7 +16226,7 @@ if (want("37b")) {
     };
     await foreign(false);
     const besideLive = await second(async (log) => log.includes("is another live coordinator's"));
-    assert(besideLive.code === 0 && /heartbeat:coordinator is another live coordinator's, so this one's state is not stamped/.test(besideLive.log)
+    assert(besideLive.code === 0 && /heartbeat:coordinator is another live coordinator's, from another host, so this one's state is not stamped/.test(besideLive.log)
         && besideLive.log.split("is another live coordinator's").length === 2
         && besideLive.during?.id === "other" && besideLive.after?.id === "other" && besideLive.after.ended === undefined && JSON.stringify(besideLive.after.passes) === JSON.stringify(["sleep"]),
       `a coordinator beside another's live row writes nothing over it, says so once, and ends nothing at its stop (${JSON.stringify(besideLive.after)})`);
@@ -16235,6 +16235,12 @@ if (want("37b")) {
     assert(besideEnded.code === 0 && typeof besideEnded.during?.id === "string" && besideEnded.during.id !== "other" && JSON.stringify(besideEnded.during.passes) === JSON.stringify([])
         && besideEnded.during.ended === undefined && besideEnded.after?.id === besideEnded.during.id && besideEnded.after.ended === true && !/another live coordinator/.test(besideEnded.log),
       `beside an ended row it takes the row over, and ends its own at its stop (${JSON.stringify(besideEnded.during)} → ended ${besideEnded.after?.ended})`);
+    // A live row of its own host — the process before it, stopped hard, as a reboot stops a container — is taken over at once (review pass 4).
+    await ssql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:coordinator', ${JSON.stringify({ v: 1, id: "before", host: hostname(), every_s: 60, passes: ["sleep"], children: {} })})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+    const sameHost = await second(async () => (await row("heartbeat:coordinator"))?.id !== "before");
+    assert(sameHost.code === 0 && typeof sameHost.during?.id === "string" && sameHost.during.id !== "before" && sameHost.during.host === hostname() && !/another live coordinator/.test(sameHost.log),
+      `a live row of its own host, the run before's stopped hard, is taken over at once (${JSON.stringify(sameHost.during)})`);
     const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "coordinator.ts")], { cwd: HERE, env: { ...cliEnv, OB1_PASSES: "workers,sleep" }, stdout: "pipe", stderr: "pipe" });
     await pollUntil(async () => (await row("heartbeat:sleep"))?.refused === "identity", 15_000);
     await pollUntil(async () => (await row("heartbeat:coordinator"))?.children?.sleep?.state === "held", 5000);
