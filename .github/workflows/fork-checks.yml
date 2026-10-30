@@ -751,6 +751,14 @@ jobs:
         working-directory: db
         run: bun test-weekly-digest.ts
 
+      # SMD-3476: the coordinator's first form — what OB1_PASSES runs (sleep
+      # over workers), each child's settings and command line, and
+      # compose.yaml's coordinator handed every setting a child owns. No
+      # database. Its planted /proc check runs as root in the full-stack job.
+      - name: Coordinator (no database)
+        working-directory: db
+        run: bun test-coordinator.ts
+
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
@@ -1258,92 +1266,109 @@ jobs:
           code /tmp/notyet.out 0
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun api preflight.ts | grep -F 'preflight OK'
 
-      # SMD-2424, SMD-3214: the workers profile's own command, run for real
-      # against this stack (its database is up; --no-deps starts nothing
-      # else), detached, as the service runs. db/supervise.ts, the command,
-      # holds without a worker key and on a setting that is not digits —
-      # `--status` as a value once reached the CLI as a flag, ran and exited 0
-      # — and starts no follower; a well-formed setting gets as far as the
-      # worker, whose own refusal proves the exec and the arguments were
+      # SMD-2424, SMD-3214, SMD-3476: the coordinator's own command, run for
+      # real against this stack (its database is up; --no-deps starts nothing
+      # else), detached, as the service runs, with OB1_PASSES naming the
+      # workers. Each child runs as its own user, and the log says which. The
+      # supervisor holds a child without a worker key and on a setting that
+      # is not digits — `--status` as a value once reached the CLI as a flag,
+      # ran and exited 0 — and starts no follower; a well-formed setting gets
+      # as far as the worker, whose own refusal proves the arguments were
       # taken: SMD-2599's start probe, which a --follow worker makes before it
       # registers a key or claims anything, and which this stack's provider
       # stub (embeddings only, a bare 404 for chat) refuses with exit 2 — and
       # the supervisor holds that too, to run it again in a minute. Each case
       # is still running once its line is logged — the container does not
       # exit, so `unless-stopped` has nothing to restart in a loop — and a
-      # stop ends it promptly with 0. The eight cases share nothing but
-      # heartbeat rows nothing here reads, so they run side by side
+      # stop ends it promptly with 0. The cases share nothing but heartbeat
+      # rows nothing here reads, so they run side by side
       # (.github/ci/held-cases.sh, SMD-3365).
-      - name: The workers profile holds a refusal rather than exiting
+      - name: The coordinator's workers hold a refusal rather than exiting
         working-directory: deploy
         run: |
-          # Nothing else in this stack runs the workers' image: pull it first,
-          # so the bound below times the command, not Docker Hub.
-          docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
           before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
           source ../.github/ci/held-cases.sh
-          held_case x-nokey workers extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          held_case c-nokey workers consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
-          held_case x-follow workers extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          held_case c-workers workers consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          held_case nokey workers 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case x-follow workers "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held_case c-workers workers "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
           # …and each setting is checked, not only the pair's first.
-          held_case c-follow workers consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          held_case x-both workers extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          held_case x-probe workers extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          held_case c-probe workers consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_case c-follow workers "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held_case x-both workers "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held_case x-probe workers 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          held_case c-probe workers 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          # The exclusion by construction: both named, sleep runs and the followers do not, and nothing is refused for it.
+          held_case both 'workers,sleep' 'names both sleep and workers, which never run together — sleep runs' -e OB1_WORKER_KEY=
+          # A name that is no pass is left out, the rest still run.
+          held_case unknown 'workers,extractor' "names 'extractor', which is no pass" -e OB1_WORKER_KEY=
           held_wait
-          held_also x-nokey 'supervise: extract is held, not started'
+          held_also nokey 'coordinator: runs extract (uid 1102) and consolidate (uid 1103)'
+          held_also nokey 'supervise: extract is held, not started'
+          held_also nokey 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
+          held_also x-probe '[extract] '
           held_also x-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
           held_also x-probe 'it runs again at'
           held_also c-probe 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          held_also both 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
+          held_never both 'extract: '
+          held_never both 'consolidate: '
+          held_also unknown 'extract: OB1_WORKER_KEY is not set in deploy/.env'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
             printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
           done
+          # SMD-3476: the planted check, in the coordinator's own container as
+          # root with its confinement — each child its own user, one unable to
+          # read another's /proc/<pid>/environ, which it reads with the users
+          # dropped. The suite is no file of the image's: mounted for this run alone.
+          docker compose -f compose.yaml run --rm --no-deps -T -v "$PWD/../db/test-coordinator.ts:/app/db/test-coordinator.ts:ro" coordinator db/test-coordinator.ts --require-root
 
-      # SMD-2678, SMD-3214: the sleep profile's own command, the same way. Its
-      # supervisor holds without a worker key and on each setting that is not
-      # digits, and ends heartbeat:sleep with the refusal and no next try, so
-      # preflight says the recreate it waits for; a well-formed setting
-      # reaches the scheduler, whose own refusals prove the exec and the
-      # arguments were taken — --poll past a minute, and a claim follower's
-      # fresh heartbeat in this stack's database, beside which it will not
-      # sleep (the two profiles are alternatives), which also proves it
-      # reaches the database on the server's environment — each held, to run
-      # again in a minute. Each writes heartbeat:sleep, which two cases read,
-      # so those two run as batches of their own and the seven between them
-      # side by side (.github/ci/held-cases.sh, SMD-3365).
-      - name: The sleep profile holds a refusal rather than exiting
+      # SMD-2678, SMD-3214, SMD-3476: the coordinator with OB1_PASSES=sleep,
+      # the same way. Its supervisor holds the scheduler without a worker key
+      # and on each setting that is not digits, and ends heartbeat:sleep with
+      # the refusal and no next try, so preflight says the recreate it waits
+      # for; a well-formed setting reaches the scheduler, whose own refusals
+      # prove the arguments were taken — --poll past a minute, and a claim
+      # follower's fresh heartbeat in this stack's database, beside which it
+      # will not sleep, which also proves it reaches the database on the
+      # server's environment — each held, to run again in a minute. Each
+      # writes heartbeat:sleep, which two cases read, so those two run as
+      # batches of their own and the rest between them side by side
+      # (.github/ci/held-cases.sh, SMD-3365).
+      - name: The coordinator's sleep holds a refusal rather than exiting
         working-directory: deploy
         run: |
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
           source ../.github/ci/held-cases.sh
           row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
-          held_case nokey sleep sleep 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held_case nokey sleep 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
           held_wait
           stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           # concat_ws skips the null in_s: held for a recreate, no next try.
           [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
-          held_case quiet sleep sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          held_case poll sleep sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          held_case workers sleep sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          held_case poll61 sleep sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
+          held_case quiet sleep "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held_case poll sleep "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held_case workers sleep "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held_case poll61 sleep '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
           # the path one argument with its space, and one it cannot write is
           # the scheduler's own refusal, before it reads the database.
-          held_case dumpdir sleep sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
+          held_case dumpdir sleep '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
+          # SMD-3476: the dump volume is handed to sleep's own user, which can write there.
+          held_case dumpvol sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
-          held_case budget sleep sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          held_case mwm sleep sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
-          held_case budget-max sleep sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          held_case budget sleep "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held_case mwm sleep "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held_case budget-max sleep '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
           held_wait
           held_also poll61 'supervise: sleep exited 2'
+          held_also dumpvol 'coordinator: runs sleep (uid 1104)'
+          held_never dumpvol 'is not a directory this process can write'
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
           q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          held_case outside sleep sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          held_case outside sleep 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
           held_wait
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
           held_also outside 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
@@ -1447,13 +1472,13 @@ jobs:
           # missed it).
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
           all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
-          [ "${#all[@]}" -ge 8 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the eight it has" >&2; exit 1; }
+          [ "${#all[@]}" -ge 5 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the five it has" >&2; exit 1; }
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
-              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "sleep"])
-              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "sleep"])
+              and (on("data") == ["api", "coordinator", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres"])
+              and (on("egress") == ["api", "coordinator", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner"])
               and (on("auth-egress") == ["auth"]) and (on("edge") == ["breakglass", "forwarder"]) and (on("front") == ["breakglass", "forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
@@ -1462,35 +1487,26 @@ jobs:
             | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"])'
           docker compose -p open-brain-canary -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true))'
-          # SMD-2424: the workers profile's two followers publish nothing,
-          # keep the key list the worker names itself by (board-sync blanks
-          # it), are handed the worker key, mount the checkout read-only,
-          # reach a host model by the host alias, wait for the schema, keep
-          # their grace periods (120 s, 60 s), and come back after a reboot
-          # through db/supervise.ts, which holds a refusal rather than loop
-          # (SMD-3214); take no plugin knob — the plugin login role's
-          # password is the two servers' and the migrator's (SMD-2310); and
-          # each command is the supervisor with the key guard, the worker's
-          # two settings guarded digits only, and a --run of exactly its
-          # worker's exec'd --follow, so no flag (a --switch-key would lift
-          # the model-change refusal) rides along. The holds themselves are
-          # run, by the step above.
-          docker compose -f compose.yaml --profile workers config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[:9] == ["bun", "db/supervise.ts", "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "--run"] and (.services.extract.command | length == 10) and (.services.extract.command[9] | test("^exec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"$"))) and (.services.consolidate.command[:9] == ["bun", "db/supervise.ts", "--worker", "consolidate", "--require-key", "--digits", "OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS", "--run"] and (.services.consolidate.command | length == 10) and (.services.consolidate.command[9] | test("^exec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"$")))'
-          # SMD-2678: the sleep profile's service holds the same, and more of
-          # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
-          # in, SMD-2666), the extract service's grace (120 s), its eight
-          # settings handed in — the budget's four since SMD-2679, the dump
-          # directory since SMD-3203 — the workers' two read-only mounts and
-          # the dump volume, and its command the supervisor with the key guard
-          # and the seven numbers guarded digits only, its --run exactly the
-          # scheduler's exec'd --follow with them, --dump-dir only when its
-          # setting is (SMD-3214).
-          docker compose -f compose.yaml --profile sleep config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 3) and ([.volumes[] | select(.type == "bind")] | length == 2 and all(.read_only == true)) and ([.volumes[] | select(.type == "volume") | "\(.source):\(.target)"] == ["sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\" \\$+\\{OB1_SLEEP_DUMP_DIR:\\+--dump-dir \"\\$+\\{OB1_SLEEP_DUMP_DIR\\}\"\\}$")))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy " ]
+          # SMD-3476: the coordinator, a default service, publishes nothing,
+          # keeps the key list the workers name themselves by and is handed
+          # the worker key and every pass's settings (db/test-coordinator.ts
+          # holds which child gets which); takes no plugin knob — the plugin
+          # login role's password is the two servers' and the migrator's
+          # (SMD-2310); runs the server image as root, with bun's auto-install
+          # off, waiting on the REST core that builds it, and mounts the dump
+          # volume alone, no checkout;
+          # reaches a host model by the host alias, waits for the schema,
+          # keeps the longest grace (120 s, extraction's), runs under an init
+          # (bun as PID 1 ignores SIGTERM until its handlers are in, SMD-2666)
+          # as root with no capability but the four it needs to run each pass
+          # as its own user, and comes back after a reboot (SMD-3214). Its
+          # command takes no argument: OB1_PASSES says what it runs. The holds
+          # themselves are run, by the steps above.
           docker compose -f compose.yaml config --format json \
-            | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.coordinator | (has("ports") | not) and (has("profiles") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_PASSES") and has("OB1_WORKER_KEY") and has("LINEAR_API_KEY") and has("OB1_EXTRACT_FOLLOW") and has("OB1_CONSOLIDATE_WORKERS") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and ([.volumes[] | "\(.type) \(.source):\(.target)"] == ["volume sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .user == "0:0" and .entrypoint == ["bun", "--no-install", "--no-env-file"] and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .cap_drop == ["ALL"] and (.cap_add | sort) == ["CHOWN", "KILL", "SETGID", "SETUID"] and .security_opt == ["no-new-privileges:true"] and .command == ["db/coordinator.ts"] and .depends_on.api.condition == "service_started" and .healthcheck.test == ["CMD", "pgrep", "-f", "db/coordinator.ts"] and (.healthcheck.disable // false) == false)'
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app coordinator forwarder mcp migrate postgres proxy " ]
+          docker compose -f compose.yaml config --format json \
+            | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app, .services.coordinator; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
           # image unbuilt, bun with auto-install off, holding none of the
           # server's secrets: no database URL, no key list, no provider key,
@@ -2957,11 +2973,15 @@ jobs:
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_OTHER_KEY=' .env || { echo "no LINEAR_OTHER_KEY line in .env to leave out" >&2; exit 1; }
           if grep -qiE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          # SMD-3312: with no Linear key of its own the canary runs no
-          # board-sync, said.
+          # SMD-3312, SMD-3476: with no Linear key of its own, and no
+          # OB1_PASSES, the canary's coordinator runs no board-sync, said. Its
+          # environment is the one its children's are cut from (db/coordinator.ts
+          # childEnv), so the Linear keys board-sync would read are read there.
           grep -F 'note: the canary runs no board-sync' /tmp/canary-up.out
-          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "the canary started a board-sync with no key of its own" >&2; exit 1; fi
-          board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync | head -n 1)"; }
+          coord() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator | head -n 1; }
+          board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(coord)"; }
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "the canary's up left no coordinator running" >&2; exit 1; }
+          board_env | grep -qx 'OB1_PASSES=' || { echo "the canary's coordinator runs passes its env file does not name: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
@@ -3088,14 +3108,18 @@ jobs:
           # the comment key empty. Its shell exports a Linear read and comment
           # key besides, as one that sourced stable's .env would: canary.sh
           # unsets them, so neither reaches board-sync (review pass 2).
-          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\nLINEAR_COMMENT_API_KEY=ci-pasted-comment-key\nlinear_other_key=ci-pasted-other-key\n' >> .env.canary.local
-          LINEAR_API_KEY=ci-shell-linear-key LINEAR_COMMENT_API_KEY=ci-shell-comment-key FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
+          # SMD-3476: the file names board-sync in OB1_PASSES, and the shell
+          # exports another OB1_PASSES, stable's, which never reaches the
+          # canary's coordinator.
+          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\nLINEAR_COMMENT_API_KEY=ci-pasted-comment-key\nlinear_other_key=ci-pasted-other-key\nOB1_PASSES=board-sync\n' >> .env.canary.local
+          OB1_PASSES=sleep,workers LINEAR_API_KEY=ci-shell-linear-key LINEAR_COMMENT_API_KEY=ci-shell-comment-key FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
           grep -F 'cleared LINEAR_COMMENT_API_KEY (a Linear key the canary never holds' /tmp/canary-root.out
           grep -F 'cleared linear_other_key (a Linear key the canary never holds' /tmp/canary-root.out
           if grep -F 'cleared LINEAR_API_KEY' /tmp/canary-root.out; then echo "the up cleared the canary's own read key" >&2; exit 1; fi
           if grep -qE '^(LINEAR_COMMENT_API_KEY|linear_other_key)=.' .env.canary.local || grep -qF ci-pasted- .env.canary.local; then echo "the canary's env file still holds a pasted Linear key" >&2; exit 1; fi
           grep -qxF 'LINEAR_API_KEY=ci-canary-own-linear-key' .env.canary.local || { echo "the canary's env file lost its own read key" >&2; exit 1; }
           grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
+          board_env | grep -qx 'OB1_PASSES=board-sync' || { echo "the canary's coordinator does not run its file's passes alone (the shell's beat the file's?): $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run up --connect' /tmp/canary-root.out
@@ -3118,8 +3142,9 @@ jobs:
           cq "DELETE FROM ob1_config WHERE key = 'ci_canary_plain_up'"
           grep -F "wrote to the canary's env file, $PWD/.env.canary.local: SERVER_PORT=\"8012\" (it said 8011)" /tmp/canary-moved.out
           # SMD-3312 review pass 2: an upgrade's own path, board-sync running
-          # since the root up, stopped for the migration and recreated after it.
-          grep -F 'canary board-sync stopped for the migration' /tmp/canary-moved.out
+          # since the root up, its coordinator stopped for the migration and
+          # recreated after it (SMD-3476).
+          grep -F 'canary coordinator stopped for the migration' /tmp/canary-moved.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-moved.out
           [ "$(grep -c '^SERVER_PORT=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one SERVER_PORT line after the move" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/mcp?…, a port this canary no longer answers on: move it with claude mcp remove --scope user open-brain-canary, then up --connect' /tmp/canary-moved.out
@@ -3147,17 +3172,19 @@ jobs:
           refused 'go with up' down --refresh
           # …and where the canary's Postgres is stopped when the run begins, the
           # guard is asked once it is started, after the writers stop: exit 1,
-          # and the next up brings them back. Board-sync is stopped with it,
-          # and first, since it depends on Postgres: left running over a stopped
-          # database soon after its pass, as the --port 8012 up above leaves it,
-          # it took ~30 s to stop, its loop's last heartbeat waiting out Bun's
-          # connect timeout (SMD-3464): most of SMD-3155's cost here (SMD-3465).
+          # and the next up brings them back. The coordinator, whose board-sync
+          # pass the --port 8012 up above left running, is stopped with it, and
+          # first, since it depends on Postgres: left running over a stopped
+          # database soon after its pass, board-sync took ~30 s to stop, its
+          # loop's last heartbeat waiting out Bun's connect timeout (SMD-3464):
+          # most of SMD-3155's cost here (SMD-3465; the coordinator's since
+          # SMD-3476).
           cq "UPDATE ob1_config SET value = 'stable' WHERE key = 'tier'"
-          docker compose -p open-brain-canary -f compose.yaml --profile board-sync stop board-sync postgres
+          docker compose -p open-brain-canary -f compose.yaml stop coordinator postgres
           rc=0; ./canary.sh up --no-smoke > /tmp/canary-latestamp.out 2>&1 || rc=$?
           { [ "$rc" = 1 ] && grep -qF "is stamped 'stable', not canary" /tmp/canary-latestamp.out && grep -qF 'Run up --refresh to finish one.' /tmp/canary-latestamp.out \
             && ! grep -qF "the canary's database is kept" /tmp/canary-latestamp.out; } || { cat /tmp/canary-latestamp.out >&2; echo "a plain up over a stopped canary stamped stable exited $rc, not 1 naming --refresh" >&2; exit 1; }
-          if grep -qF 'canary board-sync stopped for' /tmp/canary-latestamp.out; then echo "the up found board-sync running over the stopped Postgres: the case's stop missed it" >&2; exit 1; fi
+          if grep -qF 'canary coordinator stopped for' /tmp/canary-latestamp.out; then echo "the up found the coordinator running over the stopped Postgres: the case's stop missed it" >&2; exit 1; fi
           cq "UPDATE ob1_config SET value = 'canary' WHERE key = 'tier'"
           # A port edited into the file by hand: the next up (no --port) moves
           # the forwarder there, and a connector left at the port it published
@@ -3204,37 +3231,49 @@ jobs:
           # SMD-3154: up --no-refresh brings the canary level in place. A row
           # only the canary holds (a key in its ob1_config, which a refresh's
           # restore replaces) survives it, no tier half runs, and its ledger is
-          # current. A running sleep worker (a stand-in carrying compose's
-          # labels for the service; --init, so a stop does not wait out its
-          # grace) is stopped before the canary's Postgres is touched, and
-          # comes back from compose.yaml's definition after the smoke, unless
-          # the env file holds no OB1_WORKER_KEY, as this canary's does not:
-          # then it is left stopped and up exits 1, said.
+          # current. SMD-3476: a canary from before the coordinator runs the
+          # retired sleep and board-sync services (stand-ins carrying compose's
+          # labels for them; --init, so a stop does not wait out a grace):
+          # each is stopped before the canary's Postgres is touched and
+          # removed, said, and where the canary's env file names no
+          # OB1_PASSES, the passes they ran are written there, so the
+          # coordinator runs them on — sleep held by it while the file holds
+          # no OB1_WORKER_KEY, as this canary's does not: then up exits 1, said.
           cq "INSERT INTO ob1_config (key, value) VALUES ('ci_canary_only', 'kept') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-          standin() { docker rm -f open-brain-canary-sleep-1 > /dev/null 2>&1 || true
-            docker run -d --init --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
+          standin() { docker rm -f "open-brain-canary-$1-1" > /dev/null 2>&1 || true
+            docker run -d --init --name "open-brain-canary-$1-1" --label com.docker.compose.project=open-brain-canary --label "com.docker.compose.service=$1" \
               --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600; }
-          standin > /dev/null
+          standin sleep > /dev/null
+          standin board-sync > /dev/null
           # SMD-3312 review pass 2: LINEAR_API_KEY on two lines (compose reads
-          # the last) is refused before anything changes, board-sync still
-          # running after it.
+          # the last) is refused before anything changes, the coordinator and
+          # the stand-ins still running after it.
           printf 'LINEAR_API_KEY=ci-dummy-linear-key\n' >> .env.canary.local
           refused 'LINEAR_API_KEY is set on more than one line' up --no-refresh --no-smoke
-          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ] || { echo "the refused up stopped board-sync" >&2; exit 1; }
-          # SMD-3312: the canary's board-sync, recreated by the edited up, is
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "the refused up stopped the coordinator" >&2; exit 1; }
+          for retired in sleep board-sync; do
+            [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter "label=com.docker.compose.service=$retired")" ] || { echo "the refused up stopped the retired $retired stand-in" >&2; exit 1; }
+          done
+          # SMD-3312: the canary's coordinator, recreated by the edited up, is
           # stopped for the migration too; with stable's read key in the
           # canary's file in place of its own, padded with spaces (compared as
-          # compose reads it, spaces aside), the up clears it, said, and turns
-          # board-sync off, its container removed, said.
-          sed -i '/^LINEAR_API_KEY=/d' .env.canary.local
+          # compose reads it, spaces aside), the up clears it, said, and leaves
+          # board-sync out of the coordinator's passes, said. SMD-3476: with
+          # no OB1_PASSES line, the file is given the stand-ins' passes.
+          sed -i '/^LINEAR_API_KEY=/d; /^OB1_PASSES=/d' .env.canary.local
           printf 'LINEAR_API_KEY=" %s "\n' "$(sed -n 's/^LINEAR_API_KEY=//p' .env | tr -d "\"'")" >> .env.canary.local
           rc=0; FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke > /tmp/canary-nokey.out 2>&1 || rc=$?
-          { grep -qF "cleared LINEAR_API_KEY (stable's LINEAR_API_KEY)" /tmp/canary-nokey.out && grep -qF 'canary board-sync stopped for the migration' /tmp/canary-nokey.out \
-            && grep -qF 'canary board-sync off, its container removed' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with stable's LINEAR_API_KEY did not clear it, stop board-sync and remove it, said" >&2; exit 1; }
+          { grep -qF "cleared LINEAR_API_KEY (stable's LINEAR_API_KEY)" /tmp/canary-nokey.out && grep -qF 'canary coordinator stopped for the migration' /tmp/canary-nokey.out \
+            && grep -qF 'canary board-sync off, left out of the coordinator' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with stable's LINEAR_API_KEY did not clear it, stop the coordinator and leave board-sync out, said" >&2; exit 1; }
           if grep -qF ci-dummy-linear-key .env.canary.local; then echo "the canary's env file still holds stable's read key" >&2; exit 1; fi
-          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "up --no-refresh left a board-sync container with no key of the canary's own" >&2; exit 1; fi
-          { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
-          if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
+          for retired in sleep board-sync; do
+            grep -qF "the canary's $retired container, retired in SMD-3476 (the coordinator runs its pass), removed" /tmp/canary-nokey.out || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh did not say it removed the retired $retired container" >&2; exit 1; }
+            if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter "label=com.docker.compose.service=$retired")" ]; then echo "up --no-refresh left the retired $retired container" >&2; exit 1; fi
+          done
+          grep -qF "wrote to the canary's env file, $PWD/.env.canary.local: OB1_PASSES=\"sleep,board-sync\"" /tmp/canary-nokey.out || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh did not carry the retired containers' passes to OB1_PASSES" >&2; exit 1; }
+          [ "$(grep -c '^OB1_PASSES=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds other than one OB1_PASSES line" >&2; exit 1; }
+          board_env | grep -qx 'OB1_PASSES=sleep' || { echo "the canary's coordinator runs other than sleep with no key of its own for board-sync: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          { [ "$rc" = 1 ] && grep -qF 'canary sleep held by the coordinator, running nothing' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with sleep named and no OB1_WORKER_KEY exited $rc, not 1 with sleep held" >&2; exit 1; }
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
           # SMD-3312: the canary's own read key back, so board-sync comes back.
           # Below the empty LINEAR_API_KEY= line the clearing left, as an
@@ -3249,7 +3288,8 @@ jobs:
           # that wrote the raw key without its entry passed every up above).
           sed -i '/^OB1_FORWARDER_KEY=/d; /^MCP_ACCESS_KEYS=/d' .env.canary.local
           printf 'MCP_ACCESS_KEYS=open-brain-canary:write:%s\n' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" >> .env.canary.local
-          standin_id="$(standin)"
+          # A retired sleep container again: removed, and nothing written, the file naming its passes now.
+          standin sleep > /dev/null
           # The canary's `server`, retired in SMD-2287 PR 6b: a stand-in under
           # its labels, as a canary stood up before then keeps the container,
           # which compose.yaml no longer names. The up removes it, said.
@@ -3265,22 +3305,25 @@ jobs:
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$FORWARD_3")" ] || { echo "up --no-refresh did not give the canary its forward key beside its write key" >&2; exit 1; }
           if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$CANARY_FORWARD" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD" "$PG_CANARY" "$canary_plugin") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
-          grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
-          grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
+          grep -F 'canary coordinator stopped for the migration' /tmp/canary-norefresh.out
+          grep -F "the canary's sleep container, retired in SMD-3476 (the coordinator runs its pass), removed" /tmp/canary-norefresh.out
+          if grep -F 'OB1_PASSES=' /tmp/canary-norefresh.out | grep -F 'wrote to'; then echo "up --no-refresh rewrote OB1_PASSES the file already names" >&2; exit 1; fi
+          grep -F 'canary coordinator, on the new build (OB1_PASSES: sleep,board-sync;' /tmp/canary-norefresh.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
-          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ] || { echo "up --no-refresh did not bring board-sync back running" >&2; exit 1; }
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "up --no-refresh did not bring the coordinator back running" >&2; exit 1; }
+          board_env | grep -qx 'OB1_PASSES=sleep,board-sync' || { echo "up --no-refresh did not bring the coordinator back on the file's passes" >&2; exit 1; }
+          for _ in $(seq 1 15); do docker logs "$(coord)" 2>&1 | grep -qF 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' && break; sleep 1; done
+          docker logs "$(coord)" 2>&1 | grep -F 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' || { docker logs "$(coord)" >&2; echo "the canary's coordinator does not run board-sync and sleep, each as its own user" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8013/mcp/health)" = ok ] || { echo "the canary does not answer at 8013 after up --no-refresh" >&2; exit 1; }
-          worker="$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep --no-trunc)"
-          { [ -n "$worker" ] && [ "$worker" != "$standin_id" ] && [ "$(docker inspect -f '{{join .Config.Cmd " "}}' "$worker")" != 600 ]; } || { echo "up --no-refresh did not replace the sleep stand-in with compose's worker (${worker:-none})" >&2; exit 1; }
+          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh left the retired sleep stand-in" >&2; exit 1; fi
           migs=(../db/migrations/*.sql)
           [ "$(cq "SELECT max(name) FROM schema_migrations")" = "${migs[-1]##*/}" ] || { echo "the canary's ledger is not at the highest migration (${migs[-1]##*/}) after up --no-refresh" >&2; exit 1; }
-          docker rm -f open-brain-canary-sleep-1 > /dev/null
-          sed -i '/^OB1_WORKER_KEY=ci-canary-worker-key-not-stables$/d' .env.canary.local
+          sed -i '/^OB1_WORKER_KEY=ci-canary-worker-key-not-stables$/d; /^OB1_PASSES=/d' .env.canary.local
           cq "DELETE FROM ob1_config WHERE key = 'ci_canary_only'"
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"

@@ -420,12 +420,10 @@ network of its own, `postgres-port`, for its loopback port, and
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
 | `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port, and under the `auth` profile on the break-glass port. With `OB1_PUBLIC_ORIGIN` set, sign-in through the proxy works at that origin only, not here, nor through the edge proxy's host for the brain | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused, its origin not the one the GUI reads (`dashboard/README.md`, "The origin") |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
-| `postgres` | `postgres:5432` on `data` alone — the migrator, the REST core, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
+| `postgres` | `postgres:5432` on `data` alone — the migrator, the REST core, the coordinator's passes and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` on `egress` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
 | `jev` (`--profile jev`) | `jev:8020` on `egress` — the server's preflight, and a spike run in a container | Nothing. The host-ports file publishes it on `127.0.0.1:${JEV_PORT:-8020}` for a spike run from a checkout (`OB1_JEV_BASE_URL=http://127.0.0.1:8020`) | Not intended; an unauthenticated model API, as Ollama's is |
-| `board-sync` (`--profile board-sync`) | Listens on nothing; dials `postgres:5432` on `data`, and the model provider and Linear's API on `egress` | Nothing | Nothing |
-| `extract`, `consolidate` (`--profile workers`) | Listen on nothing; dial `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
-| `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
+| `coordinator` | Listens on nothing; its passes (`OB1_PASSES`: board-sync, the workers, the sleep scheduler) dial `postgres:5432` on `data`, and the model provider and Linear's API on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `orchestration-runner:8090` and the vendors its workflows name, and its brain calls go to the REST core as `api:8000` (SMD-2295), all on `egress`. Not the mesh, where every backend the proxy reaches is (a tier of another project joined it, its server `server` too, from SMD-2294 to SMD-2874) | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
@@ -982,24 +980,26 @@ restarts is each container's restart policy; compose is not involved. In
 `compose.yaml` what serves is `unless-stopped`: Postgres, the three servers and the operator GUI,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
-profile's `lgtm` and `pg-exporter` — and, since SMD-3214, `board-sync`, the
-two workers, the sleep scheduler and `jev`. What runs once is `"no"`: the migrator,
+profile's `lgtm` and `pg-exporter` — and, since SMD-3214, the core passes
+and `jev`; since SMD-3476 the passes are one service, the coordinator. What
+runs once is `"no"`: the migrator,
 `ollama-pull`, the runner's role job and the exporter's.
 
 The four followers and `jev` were `on-failure:3`, so that a configuration a restart does
 not fix stopped them rather than looped; but neither runtime starts that
 policy at boot, so every reboot left a brain serving and not sleeping (on
 2026-10-22 both dogfood brains' `sleep` and stable's `board-sync` stayed down
-until started by hand). Their command is now `db/supervise.ts`, which runs the
-follower and, when it ends on its own — a refusal (exit 2), a crash — runs it
+until started by hand). Each is now a child of the coordinator
+(`db/coordinator.ts`), which runs the passes `OB1_PASSES` names, each through
+`db/supervise.ts`, and, when one ends on its own — a refusal (exit 2), a crash — runs it
 again after 1, 2, 4, 8, then every 15 minutes, its heartbeat ended with when.
 The container never exits, so the runtime has nothing to restart in a loop. A
 fix outside `deploy/.env` (a model pulled, the migrations applied) is met at
-the next try; one in `deploy/.env` needs the service recreated, which `up -d`
-does when its environment changes. No `OB1_WORKER_KEY`, or a setting that is
-not digits, holds it until that recreate, the follower never started.
-Preflight's `workers` and `sleep` rows say a held service is held, its cause
-and its next try, rather than "start it again".
+the next try; one in `deploy/.env` needs the coordinator recreated, which
+`up -d` does when its environment changes. No `OB1_WORKER_KEY`, or a setting
+that is not digits, holds that pass until that recreate, the follower never
+started. Preflight's `workers` and `sleep` rows say a held pass is held, its
+cause and its next try, rather than "start it again".
 
 `jev` is `unless-stopped` as well, and needs no supervisor: serving, it
 never exits on its own. A fetch that fails or hashes wrong, an engine that does
@@ -1893,13 +1893,13 @@ The fork's own brain holds its Linear board — every issue in the Open Brain
 initiative's projects as one thought, in the shape the hand captures used. Until
 SMD-1954 that was a paste per ticket, and a ticket that moved to Done kept
 reading Backlog until someone pasted it again, which made a second row. The
-`board-sync` profile is that sweep as a service:
+coordinator's `board-sync` pass is that sweep, unattended:
 
 ```bash
 # deploy/.env: LINEAR_API_KEY=lin_api_…  (and OB1_LINEAR_INITIATIVE when the
-# initiative is not "Open Brain")
-podman compose -f deploy/compose.yaml --profile board-sync up -d
-podman compose -f deploy/compose.yaml --profile board-sync logs -f board-sync
+# initiative is not "Open Brain"), and board-sync in OB1_PASSES
+podman compose -f deploy/compose.yaml up -d coordinator
+podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
@@ -1909,8 +1909,8 @@ or its supervisor holds it — a refusal, which it tries again on its own, the
 row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
 board, an interval or findings cap it does not take, an endpoint the egress
 policy refuses wholesale, each with its remedy (SMD-3214) — and once the
-heartbeat is older than three intervals: its container removed. It names `up -d --no-deps board-sync`, with the
-`-f` files and `-p` the stack was started with. Just after `up`, the server's
+heartbeat is older than three intervals: the coordinator stopped or removed. It names `up -d --no-deps
+--force-recreate coordinator`, with the `-f` files and `-p` the stack was started with. Just after `up`, the server's
 preflight can read the row a `down` left before board-sync's first pass stamps
 it; such a warning in the start-up log clears on the next `bun preflight.ts`.
 `db/README.md`, "Long-running workers report their liveness", has the row's
@@ -1944,27 +1944,28 @@ start-up log says the step is off; `bun db/board-findings.ts --url … --dry-run
 prints what it would post. `db/README.md`, "What it tells the board", has the
 rules.
 
-## Extraction and consolidation as services
+## Extraction and consolidation as passes
 
 Once extraction has run on a brain, each capture is queued for it as it
 lands, and an extracted thought joins consolidation's pool, but nothing does
-the work until a worker runs. The `workers` profile runs both workers as
-services: `db/extract-entities.ts --follow` as `extract` and
+the work until a worker runs. The coordinator's `workers` pass runs both,
+each a child of its own: `db/extract-entities.ts --follow` as `extract` and
 `db/consolidate.ts --follow` as `consolidate`. Each drains its pool, then
 polls for new work.
 
-**Two profiles, pick one.** `--profile workers` runs both followers always,
-at low concurrency, beside live traffic. `--profile sleep` runs the same two
+**Two passes, pick one.** `workers` runs both followers always, at low
+concurrency, beside live traffic. `sleep` runs the same two
 passes, and re-embed when the brain has vectors to re-embed, only while the brain is quiet, at most an hour a sleep by default, and
-stops them within seconds of the next live call ("The `sleep` profile
+stops them within seconds of the next live call ("The `sleep` pass
 instead", below) — so a backlog, and a sync write's capture made after a
 sleep's clock, waits for the next live call and the quiet. They are alternatives,
-not companions: the `sleep` service will not run beside the workers'
-followers — it refuses at its start, and when one starts later it ends
-(exit 2) before its next sleep begins, or within a poll if asleep, both
-profiles brought up at once included; its supervisor then tries it again
-every few minutes, so it starts on its own once the followers stop. The rest of this
-section is the `workers` profile.
+not companions: `OB1_PASSES` naming both runs `sleep` alone, and the log says
+so (SMD-3476). The scheduler itself will not run beside a follower run outside
+it — by hand, or an old stack's container — it refuses at its start, and when
+one starts later it ends (exit 2) before its next sleep begins, or within a
+poll if asleep; its supervisor then tries it again every few minutes, so it
+starts on its own once the followers stop. The rest of this section is the
+`workers` pass.
 
 **The cost comes first.** Extraction makes a model call per thought (per
 window of a long one), and consolidation up to three, one per judged pair. On
@@ -1975,20 +1976,23 @@ money per call, and each thought's text goes to the provider under the egress
 policy. Decide before you enable it.
 
 The first start drains a backlog — every thought already in the brain — so
-it runs `extract` alone, and adds `consolidate` once the backlog is done
-("Start `extract` alone on a backlog", below). Mint the worker key, append
-the line keygen prints to `MCP_ACCESS_KEYS` (comma-separated), set the raw key
-as `OB1_WORKER_KEY` in `deploy/.env`, and start extraction:
+extraction runs alone first, a one-off that does the backlog and exits, and
+`workers` is named once the backlog is done ("Extraction alone on a
+backlog", below). Mint the worker key, append the line keygen prints to
+`MCP_ACCESS_KEYS` (comma-separated), set the raw key as `OB1_WORKER_KEY` in
+`deploy/.env`, and run extraction, detached, as a one-off of the
+coordinator's — the extract pass's script, as its user with its settings
+(`db/coordinator.ts run <pass> [args…]`):
 
 ```bash
 (cd server-portable && bun keygen.ts --name workers --scope capture)
-podman compose -f deploy/compose.yaml --profile workers up -d extract
+podman compose -f deploy/compose.yaml run -d --rm --no-deps coordinator db/coordinator.ts run extract --workers 1
 ```
 
 Then read where it stands, as often as you like:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --status
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --status
 ```
 
 Its `status:` line counts the pool. The backlog is done when it reads `0 in
@@ -1999,24 +2003,23 @@ those now, while no newer thought has been judged without them, and wait for
 the line again:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --retry-failed --workers 1
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --retry-failed --workers 1
 ```
 
-Then add consolidation:
+Then name `workers` in `OB1_PASSES` in `deploy/.env` and recreate the
+coordinator, which starts both followers:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers up -d consolidate
-podman compose -f deploy/compose.yaml --profile workers logs -f extract consolidate
+podman compose -f deploy/compose.yaml up -d coordinator
+podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
-From then on `--profile workers up -d` brings both back with the stack (or
-`COMPOSE_PROFILES=workers` in `deploy/.env`). Name the profile on `down`
-too: a plain `down` leaves the two followers running against a database it
-has removed.
+From then on the stack's `up -d` brings both back, and a plain `down` stops
+them with the rest: the coordinator is one of the stack's default services.
 
 **What each one is:**
-- **Identity.** Both need a worker key, and refuse to start without one (exit
-  2), so what they write carries its agent id. A key the database cannot
+- **Identity.** Both need a worker key, and are held, never started, without
+  one, so what they write carries its agent id. A key the database cannot
   resolve at start is a warning, as for a run from a checkout.
 - **Settings.** `OB1_EXTRACT_FOLLOW` and `OB1_CONSOLIDATE_FOLLOW` set the poll
   interval in seconds (unset, 15). `OB1_EXTRACT_WORKERS` and
@@ -2030,19 +2033,15 @@ has removed.
   or `--workers`. Everything else is the server's environment: the model, the
   endpoints, the egress policy, the extraction window and the escalation
   model.
-- **Code.** The services run this checkout's `db/` and `server-portable/`,
-  mounted read-only as for `board-sync`; neither release image carries the
-  workers (SMD-2601). So the profile needs a checkout, and the checkout should
-  be at the release the stack runs: a newer one runs newer worker code
-  against an older schema, and the workers do not check the schema's version.
-  The mount is the checkout compose was run from, so run it from one that
-  stays (not a worktree you will remove). A changed checkout reaches a
-  follower when it is restarted — any restart, its supervisor's included.
-- **Stopping.** `stop` lets each worker finish the thought it holds: the
-  supervisor passes the signal on. The grace period is 120 s for `extract` (a
-  thought's extraction took 121 s at p90 on the stable brain) and 60 s for
-  `consolidate`. Inside it the service exits 0; past it the container is
-  killed (137). Either way it stays stopped, and
+- **Code.** The coordinator runs the server image, which carries `db/`'s
+  passes since SMD-3476, so they are the release's own and a stack with no
+  checkout runs them too. A changed `db/` reaches them when the image is
+  rebuilt and the coordinator recreated (`up -d --build`), as the servers'
+  code does.
+- **Stopping.** `stop coordinator` lets each worker finish the thought it
+  holds: the coordinator passes the signal on to every pass. Its grace period
+  is 120 s (a thought's extraction took 121 s at p90 on the stable brain).
+  Inside it the coordinator exits 0; past it the container is killed (137). Either way it stays stopped, and
   a thought still held is not lost: its lease lapses after 900 s and the next
   run takes it (a thought whose lease lapses three times is recorded failed).
 - **Refusals.** A configuration refusal exits 2: no key, a key
@@ -2052,12 +2051,12 @@ has removed.
   Ollama), or (`extract`) a model or prompt version other than the one the
   brain's extraction key records. So does a provider that refuses the
   follower's first call at start — a model it does not serve, a refused key,
-  a wrong base URL (SMD-2599). The service does not exit: its supervisor runs
+  a wrong base URL (SMD-2599). The coordinator does not exit: its supervisor runs
   the follower again after 1, 2, 4, 8, then every 15 minutes, and preflight's
   `workers` row says it is held, the refusal by its kind with the kind's
   remedy, and the next try (SMD-3214).
   No key, or a setting that is not digits, the supervisor refuses itself,
-  before the follower starts, and holds until the service is recreated.
+  before the follower starts, and holds until the coordinator is recreated.
 - **Outages.** A follower waits out the database going away (it checks
   again after 5 s, doubling to 5 min) and a provider outage — a transient
   error past its pauses, a 404 naming the model while Ollama pulls it, a
@@ -2077,14 +2076,15 @@ reaches them:
 - a `consolidate` recreated under the new key judges every thought against
   the old model's entities, and never judges the new ones.
 
-With `COMPOSE_PROFILES=workers`, a plain `up -d` after the change starts both,
-so stop them before you pull or edit. Then run the switch once — a backlog,
-so it ends as the first start does:
+A plain `up -d` after the change recreates the coordinator, which starts
+both, so stop them before you pull or edit — stopping the coordinator, which
+stops its other passes too. Then run the switch once — a backlog, so it ends
+as the first start does:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
+podman compose -f deploy/compose.yaml stop coordinator
 # now edit deploy/.env, or move the checkout
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps extract bun db/extract-entities.ts --switch-key --workers 1
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --switch-key --workers 1
 ```
 
 Check that it exited 0, read `--status` until the done line, and retry any
@@ -2093,7 +2093,7 @@ comes back. Then bring the followers back with the REST core, whose
 capture-time tagging reads the same `OB1_METADATA_MODEL`:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers up -d api extract consolidate
+podman compose -f deploy/compose.yaml up -d api coordinator
 ```
 
 The switch re-extracts every thought that has no row under the new key — all
@@ -2111,7 +2111,7 @@ With `OB1_JUDGE_MODEL` set, a new metadata model leaves consolidation's key
 as it was, so thoughts already judged are not judged again against the new
 entities.
 
-**Start `extract` alone on a backlog.** A pair is judged once, from its newer
+**Extraction alone on a backlog.** A pair is judged once, from its newer
 side, against older thoughts that share an entity, have a vector and were
 captured on an earlier UTC date. If the older one had no entities or no
 vector yet, the pair is never judged. For captures beside a running `extract`
@@ -2142,7 +2142,7 @@ Since migration 084 the pass also stores its related, evolves and duplicate
 verdicts as `relation` facets on the newer thought — edges, not proposals,
 nothing to review (`--list relations` lists them) — and since 102 a pair it
 calls unrelated as a `distinct` one, two near neighbours kept apart (`--status`
-counts them; SMD-3117). The service connects as the
+counts them; SMD-3117). The pass connects as the
 superuser, so it stores them. A brain that ran the pass before 084 has none for
 the thoughts judged then: `--status` counts them and prints the `DELETE FROM
 thought_work_claims …` that has the next pass judge exactly those again (their
@@ -2151,7 +2151,7 @@ postgres psql -U postgres openbrain -c "…"` (`db/README.md`, "Consolidation:
 proposing which thoughts supersede which").
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps consolidate bun db/consolidate.ts --list
+podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run consolidate --list
 ```
 
 An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
@@ -2162,7 +2162,7 @@ bare `-e` passes it into the container without putting it on the command
 line:
 
 ```bash
-OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml --profile workers run --rm --no-deps -e OB1_WORKER_KEY consolidate bun db/consolidate.ts --accept <id> --note "…"
+OB1_WORKER_KEY="$(cat ~/.config/ob1/my-key)" podman compose -f deploy/compose.yaml run --rm --no-deps -e OB1_WORKER_KEY coordinator db/coordinator.ts run consolidate --accept <id> --note "…"
 ```
 
 The run prints `agent: <name>` first; check it names your key. Do not
@@ -2174,11 +2174,11 @@ workers' key's.
 A reject records no reviewer whichever key runs it (SMD-2608). Accepting
 unattended waits on a judge that can tell conflicts apart (SMD-1873).
 
-### The `sleep` profile instead
+### The `sleep` pass instead
 
-`--profile sleep` runs one service, `sleep`: `db/sleep.ts --follow`, the
-sleep scheduler (SMD-1794; this service, SMD-2678). It runs this profile's two
-passes, and re-embed, only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
+`sleep` in `OB1_PASSES` runs `db/sleep.ts --follow`, the sleep scheduler
+(SMD-1794, SMD-2678), as the coordinator's child. It runs the `workers`
+pass's two followers' work, and re-embed, only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
 with no live call — the re-derive sweep, then re-embed when the brain has
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call), then
@@ -2195,7 +2195,7 @@ embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
 re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
-back and recreate `api` and `sleep`, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds
+back and recreate `api` and the coordinator, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds
 (unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
 model call in hand is aborted and every lease returned, and the brain is
 quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
@@ -2212,12 +2212,12 @@ running pass costs a search 24–33 ms, so its passes go on through a session of
 searches (SMD-3315). Preflight's `sleep` row says whether it is asleep, with
 its last sleep.
 
-**First start.** The same worker key as the `workers` profile (`OB1_WORKER_KEY`,
-its line in `MCP_ACCESS_KEYS`), then:
+**First start.** The same worker key as the `workers` pass (`OB1_WORKER_KEY`,
+its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES`, then:
 
 ```bash
-podman compose -f deploy/compose.yaml --profile sleep up -d sleep
-podman compose -f deploy/compose.yaml --profile sleep logs -f sleep
+podman compose -f deploy/compose.yaml up -d coordinator
+podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `asleep:` when a sleep begins, `extraction drained — consolidating
@@ -2230,37 +2230,33 @@ says `the sleep's clock is spent (60 min) with nothing left to do — it ends`.
 Each sleep begins with the re-derive sweep, which says `re-derive: N orphaned
 lineage row(s) swept` when it deletes any.
 The settings go out as startup parameters, which a transaction pooler
-(PgBouncer, a managed host's pooled endpoint) refuses: the service connects to
+(PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts
 --status` (the command above) reads its progress, and a status read is not a
-live call. `COMPOSE_PROFILES=sleep` in `deploy/.env` brings it back with the
-stack's `up -d`; like the workers it is `unless-stopped` through its
-supervisor, so a reboot brings it back ("After a reboot", above). Name the
-profile on `down` too (`--profile sleep down`, or `COMPOSE_PROFILES=sleep`): a
-plain `down` removes Postgres and leaves `sleep` running, waiting for ever for
-a database that is gone.
+live call. The coordinator is a default service and `unless-stopped`, so the
+stack's `up -d` and a reboot bring it back ("After a reboot", above), and a
+plain `down` stops it with the rest.
 
-**From the `workers` profile.** Stop its followers first, and take `workers`
-out of `COMPOSE_PROFILES`: the `sleep` service refuses to run (exit 2, and
-its log names them) while a follower's heartbeat is fresh — at its start, or
-when an awake or asleep poll finds one — since a follower does not yield to a
-live call. A follower stopped cleanly marks its row ended, so the refusal
-lifts at once; one killed past its grace leaves its row fresh for up to three
-of its intervals (3 min), so delete the rows as the log says — needed anyway
-if you are retiring the profile, or preflight's `workers` row asks for them
-back. The service does not exit on the refusal: its supervisor tries again
-after 1, 2, 4, 8, then every 15 minutes, so it starts on its own once the
-followers' rows are ended or gone (SMD-3214). Each refusal ends
-`heartbeat:sleep` on a failure with that next try, so preflight's `sleep` row
-says it is held, names the followers keeping it down and the two ways out:
-one profile or the other, each taken out of `COMPOSE_PROFILES` with its rows
-deleted.
+**From the `workers` pass.** Name `sleep` in `OB1_PASSES` in place of
+`workers` and recreate the coordinator: it stops the followers and starts the
+scheduler, never both at once. Then delete the followers' rows, or
+preflight's `workers` row asks for them back. A follower run outside the
+coordinator — by hand, or an old stack's `extract` and `consolidate`
+containers, which `up -d --remove-orphans` removes — still keeps the
+scheduler down: it refuses to run (exit 2, its log naming them) while a
+follower's heartbeat is fresh, at its start or when an awake or asleep poll
+finds one, since a follower does not yield to a live call. A follower stopped
+cleanly marks its row ended, so the refusal lifts at once; one killed past
+its grace leaves its row fresh for up to three of its intervals (3 min). The
+coordinator does not exit on the refusal: its supervisor tries again after 1,
+2, 4, 8, then every 15 minutes (SMD-3214), and preflight's `sleep` row says it
+is held and names the followers keeping it down.
 
 ```bash
-podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
-# retiring the profile: delete the rows the log or preflight names, e.g.
+# deploy/.env: OB1_PASSES=sleep (in place of workers)
+podman compose -f deploy/compose.yaml up -d coordinator
+# delete the followers' rows the log or preflight names, e.g.
 podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -c "DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%'"
-podman compose -f deploy/compose.yaml --profile sleep up -d sleep
 ```
 
 **Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_POLL` (1–60, the most a
@@ -2277,25 +2273,25 @@ last sleep stopped, and how many sleeps stopped on it. **The clock is on by
 default:** upgraded, a quiet night holds the model for an hour, and the rest
 of a backlog waits for the next live call — `OB1_SLEEP_BUDGET=0` and a
 recreate restore the old behaviour, a larger value drains a backlog sooner. The scheduler reads its
-environment once, so recreate the service after changing any of them, the
-key or the model: `podman compose -f deploy/compose.yaml --profile sleep up -d
-sleep`. A `restart` keeps the values it was created with.
+environment once, so recreate the coordinator after changing any of them, the
+key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
+A `restart` keeps the values it was created with.
 
 **Reading a pass pair by pair** (SMD-3203). With
-`OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps`, where the service mounts its
+`OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps`, where the coordinator mounts its
 `sleep-dumps` volume, each consolidation pass appends every verdict to one
 JSONL file per pass key there, as `db/consolidate.ts --dump` writes them. That
 includes decide mode's link step, when it was asked and whether it capped the
 pair, which a capped pair that stores no relation leaves nowhere else. Copy
-them out while `sleep` runs, to a directory outside any checkout:
-`podman compose -f deploy/compose.yaml cp sleep:/var/lib/ob1/sleep-dumps <dir>`.
+them out while the coordinator runs, to a directory outside any checkout:
+`podman compose -f deploy/compose.yaml cp coordinator:/var/lib/ob1/sleep-dumps <dir>`.
 From a stopped container podman's copy says it copied and puts the files
 elsewhere or nowhere. They hold the brain's text, each file created 0600, and
 a copy keeps that mode; unset, nothing is written and the volume stays empty.
 
-**Changing the model** is the `workers` profile's procedure above with `sleep`
-in place of the two followers: stop `sleep` before the change reaches it, run
-the switch, then bring back `api sleep`. The switch extracts the backlog
+**Changing the model** is the `workers` pass's procedure above: stop the
+coordinator before the change reaches it, run the switch, then bring back
+`api coordinator`. The switch extracts the backlog
 itself, in the foreground and beside any live traffic, as it does under
 `workers`; only consolidation's new pool — the thoughts re-pooled under the
 new key — waits for the brain to go quiet. An embedding model change
@@ -2314,10 +2310,10 @@ starts and whatever refuses it sets down for that sleep (SMD-2679): a bad
 recorded under another model ends each
 start at once (exit 2, `heartbeat:sleep` ended failed), and its supervisor
 tries again after 1, 2, 4, 8, then every 15 minutes, each try refused the same
-way until the cause is mended (SMD-3214), so `podman logs` on `sleep` names
+way until the cause is mended (SMD-3214), so the coordinator's log names
 the cause within seconds of the first start, not at the first quiet, and
 preflight's `sleep` row gives it and the next try. As with the `workers`
-profile, a model `ollama-pull` is still pulling at a first boot is refused the
+pass, a model `ollama-pull` is still pulling at a first boot is refused the
 same way, and met at a later try once the pull is done. A worker key revoked
 later, or the key moved by a `--switch-key` run elsewhere, ends it at the next
 sleep, held the same way. Each pass's banner is said once there, not at every sleep;
@@ -2635,13 +2631,17 @@ accepted: it keeps, as a plain `up` does, and is refused on a canary with no
 database to keep (no volume, changing nothing; or one whose database holds
 no relations), where a plain `up` would stand one up. Either form
 builds its images while the canary serves, then stops its writers before its
-Postgres is touched, its servers, a running `sleep` worker and a running
-board-sync, and brings the worker back on the new build once the smoke has
-passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
-`up` says how to start it, and exits 1), and board-sync as step 5 below says.
-A run that fails after the stop says what it left stopped and how to go on.
-A running writer of another profile (the workers, the import runner) is
-refused before anything changes: stop it first.
+Postgres is touched, its servers and its coordinator, and removes any
+container of the services the coordinator replaced (SMD-3476). Once the smoke
+has passed it recreates the coordinator on the new build, running the passes
+its env file's `OB1_PASSES` names (the canary's own, never stable's), board-sync
+as step 5 below says; a `sleep` or `workers` pass with no `OB1_WORKER_KEY` in
+the file is held, and `up` says so and exits 1. The first `up` after the
+coordinator came writes into the file the passes its old running containers
+ran, where it names none. A run that fails after the stop says what it left
+stopped and how to go on. A running writer of another profile (the import
+runner, the database monitor) is refused before anything changes: stop it
+first.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
 `open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
@@ -2818,11 +2818,11 @@ open-brain-canary`), and `down` leaves it alone. That same `up` takes
 stable's keys out of the file and mints the canary's own (SMD-2874 PR 2): a
 key of the canary's own in `MCP_ACCESS_KEYS` is kept, as is an
 `OB1_WORKER_KEY` whose hash is the canary's (one of stable's is cleared), so a
-canary sleep worker keeps its key; `--connect` registers the connector with
+canary's sleep pass keeps its key; `--connect` registers the connector with
 the new key, and an `up` without it says the connector holds one the canary
 no longer takes. `COMPOSE_PROFILES` becomes `""`: a profile's service the
-canary runs (its sleep scheduler, say) is started by naming the profile on
-the command line, as it always was beside canary.sh's empty one.
+canary runs is started by naming the profile on the command line, as it
+always was beside canary.sh's empty one; its passes are its `OB1_PASSES`.
 
 `up` can be re-run, and re-running it is how the canary catches up after
 stable is redeployed:
@@ -2920,13 +2920,13 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke.
-5. It (re)starts the canary's board-sync on the new build whenever the
-   canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
+5. Its coordinator runs board-sync on the new build when the canary's env
+   file's `OB1_PASSES` names it and the file holds a `LINEAR_API_KEY` of its
+   own (SMD-3312, SMD-3476). A canary
    upgraded in place (a plain `up`) is never refreshed, and a refresh was
    what brought it stable's ticket rows, so without its own board-sync its
-   copy of the board stays as it was at its last refresh. A running
-   board-sync stops with the other writers before the canary's Postgres is
-   touched (3), as the sleep worker does.
+   copy of the board stays as it was at its last refresh. The coordinator
+   stops with the other writers before the canary's Postgres is touched (3).
    - **The key is the canary's alone:** a Linear personal API key made for it
      with Read access alone, one line in its env file (`.env.canary.local`
      beside stable's for open-brain-canary):
@@ -2936,9 +2936,8 @@ stable is redeployed:
      ```
 
      Never stable's: a personal key can write unless it was made read-only,
-     and board-sync runs the checkout's `db/` (an unreleased build's, on the
-     canary; keep the tree `up` ran from while the canary runs it, as the
-     sleep worker's). **Making the key read-only is what keeps the canary off
+     and board-sync runs an unreleased build's `db/` on the canary (the
+     canary's server image, built from the tree `up` ran from). **Making the key read-only is what keeps the canary off
      the board's writes**; canary.sh cannot tell a key's access, and what it
      checks guards against accidents, not against a write key it has never
      seen:
@@ -2958,21 +2957,21 @@ stable is redeployed:
      makes besides.
    - **Turning it on** in a canary that holds rows of its own: set the file's
      `LINEAR_API_KEY` line (one line; a clearing leaves it as
-     `LINEAR_API_KEY=`, to fill in), then `up` (`up --refresh` would replace
+     `LINEAR_API_KEY=`, to fill in) and name `board-sync` in its
+     `OB1_PASSES`, then `up` (`up --refresh` would replace
      those rows with stable's). **Checking it syncs:** the
      canary's `brain_info` shows a `heartbeat:board-sync` alive and a
      board-sync watermark that keeps up with stable's.
-   - **Turning it off:** empty the line (or take it out) and re-run
-     `up`: every board-sync container of the canary's is removed,
-     said. With no key and none standing, the run says the canary runs no
-     board-sync.
+   - **Turning it off:** take `board-sync` out of `OB1_PASSES`, or empty
+     the key's line, and re-run `up`: the coordinator comes back without it,
+     said, and the run says the canary runs no board-sync.
 6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
 
-`down` removes the canary's containers, its sleep worker and board-sync
-among them, and its own networks. It
+`down` removes the canary's containers, its coordinator among them, and its
+own networks. It
 deregisters the connector only when `claude` has it at user scope and at a
 URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 `localhost`), with any path and any `?key=`. A connector at stable's own
@@ -3000,8 +2999,8 @@ is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
 beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
 The canary's sleep dumps (its `sleep-dumps` volume, SMD-3203) go with the
-database: the down names the sleep profile, so compose counts that service and
-its volume.
+database: the coordinator that mounts it is a default service, so compose
+counts the volume.
 Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in
@@ -3889,11 +3888,12 @@ so the profile builds from a checkout.
   this stack's database only with `-f deploy/compose.host-ports.yaml` ("What is
   reachable from where", above); the same goes for the two workers below.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
-  worker with a per-thought model cost, so it runs as a service only when asked:
-  the `workers` profile runs it and `db/consolidate.ts --follow`, the pass that
-  proposes supersessions from the entities it extracts, or the `sleep` profile
-  runs both only while the brain is quiet ("Extraction and consolidation as
-  services", above). Decide on the cost before you ask for either.
+  worker with a per-thought model cost, so the coordinator runs it only when
+  `OB1_PASSES` asks: the `workers` pass runs it and `db/consolidate.ts
+  --follow`, the pass that proposes supersessions from the entities it
+  extracts, or the `sleep` pass runs both only while the brain is quiet
+  ("Extraction and consolidation as passes", above). Decide on the cost
+  before you ask for either.
   A follower exits 0 when stopped, so watch its log: it says there when the
   model looks at fault, after each pass drains the pool. A follower started on
   a backlog says nothing until the backlog is done, so try a new model on a
