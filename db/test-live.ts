@@ -64,7 +64,7 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { passDumpFile, run as runSleep } from "./sleep.ts";
@@ -15918,41 +15918,70 @@ if (want("37")) {
     await throwing.stamp("ok");
     assert(first === "resolved" && throwCalls === 1 && (await row(throwing.key))?.outcome === "ok", `a throwing reporter is told once, neither rejects the stamp nor stops the next (${first}, ${throwCalls})`);
 
-    // board-sync's loop: a pass that reports errors, one that throws, one that
-    // finishes; then the signal. The loop's code is the last pass's.
+    // board-sync's trigger (SMD-3476): a pass that reports errors, one that
+    // throws, one that finishes, each at a trigger; then the signal to stop.
+    // The process's code is the last pass's.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     const codes = [1, "throw", 0] as const;
     let i = 0;
+    let triggers = 0;
     const seenOutcomes: string[] = [];
-    const loopStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
-    const origStamp = loopStamper.stamp.bind(loopStamper);
-    loopStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
-    const origEnd = loopStamper.end.bind(loopStamper);
-    loopStamper.end = async (o, m) => { seenOutcomes.push(`end:${o}`); await origEnd(o, m); };
+    const tStamper = passStamper({ sql: hsql as never, worker: "board-sync", intervalS: 10 });
+    const origStamp = tStamper.stamp.bind(tStamper);
+    tStamper.stamp = async (o, m) => { seenOutcomes.push(o); await origStamp(o, m); };
+    const origEnd = tStamper.end.bind(tStamper);
+    tStamper.end = async (o, m) => { seenOutcomes.push(`end:${o}`); await origEnd(o, m); };
     const log = console.log, error = console.error;
     console.log = () => {};
     console.error = () => {};
-    let loopCode: number;
-    let midLoop: { running?: boolean } | null = null;
+    let tCode: number;
+    let midPass: { running?: boolean } | null = null;
     try {
-      loopCode = await loopPasses({
-        once: async () => { if (i === 0) { await Bun.sleep(300); midLoop = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
-        intervalS: 10, stopped: () => i >= codes.length, stamper: loopStamper, sleep: async () => {},
+      tCode = await triggerPasses({
+        once: async () => { if (i === 0) { await Bun.sleep(300); midPass = await row("heartbeat:board-sync"); } const c = codes[i++]; if (c === "throw") throw new Error("Linear unreachable"); return c; },
+        next: async () => { triggers++; }, stopped: () => i >= codes.length, stamper: tStamper,
       });
     } finally {
       console.log = log;
       console.error = error;
     }
     const board = await row("heartbeat:board-sync");
-    assert((midLoop as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midLoop)})`);
-    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && loopCode! === 0 && board?.outcome === "stopped" && board.ended === true && board.every_s === 60,
-      `the loop stamps each pass's outcome (errors and a throw both failed), then stopped (${seenOutcomes.join(",")}; ${JSON.stringify(board)})`);
-    // A dry run or an audit passes no stamper: the loop writes no row.
+    assert((midPass as { running?: boolean } | null)?.running === true, `board-sync's pass is stamped running while it runs (${JSON.stringify(midPass)})`);
+    assert(seenOutcomes.join(",") === "failed,failed,ok,end:stopped" && tCode! === 0 && triggers === 2 && board?.outcome === "stopped" && board.ended === true && board.every_s === 60,
+      `the trigger stamps each pass's outcome (errors and a throw both failed), waits for a trigger between passes, then stopped (${seenOutcomes.join(",")}; ${triggers} triggers; ${JSON.stringify(board)})`);
+    // The wait between passes (triggerGate): a trigger counts only while it waits — one before is let go —
+    // and a stop ends a wait, or the next, at once.
+    {
+      const gate = triggerGate();
+      gate.trigger();
+      const early = await Promise.race([gate.next().then(() => "passed"), Bun.sleep(50).then(() => "waiting")]);
+      const waiting = gate.next();
+      let heard = "waiting";
+      void waiting.then(() => { heard = "passed"; });
+      await Bun.sleep(20);
+      gate.trigger();
+      await Bun.sleep(20);
+      const afterTrigger = heard;
+      const stopped = triggerGate();
+      const mid = stopped.next();
+      stopped.stop();
+      const stopEnds = await Promise.race([mid.then(() => "ended"), Bun.sleep(200).then(() => "hung")]);
+      const afterStop = await Promise.race([stopped.next().then(() => "at once"), Bun.sleep(50).then(() => "hung")]);
+      // One wait at a time: a second next() while one is pending is that wait (the early race's), never an orphaned second.
+      const twice = triggerGate();
+      const first = twice.next();
+      const same = twice.next() === first;
+      twice.trigger();
+      const firstEnds = await Promise.race([first.then(() => "ended"), Bun.sleep(200).then(() => "hung")]);
+      assert(early === "waiting" && afterTrigger === "passed" && stopEnds === "ended" && afterStop === "at once" && same && firstEnds === "ended",
+        `a trigger before the wait is let go, one during it starts the next pass, a stop ends the wait and the next at once, and a second wait is the first (${early}, ${afterTrigger}, ${stopEnds}, ${afterStop}, ${same}, ${firstEnds})`);
+    }
+    // A dry run or an audit passes no stamper: the passes write no row.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     let j = 0;
     console.log = () => {};
-    try { await loopPasses({ once: async () => (j++, 0), intervalS: 10, stopped: () => j >= 1, stamper: null, sleep: async () => {} }); } finally { console.log = log; }
-    assert((await row("heartbeat:board-sync")) === null, "a loop with no stamper (a dry run, an audit) writes no heartbeat");
+    try { await triggerPasses({ once: async () => (j++, 0), next: async () => {}, stopped: () => j >= 1, stamper: null }); } finally { console.log = log; }
+    assert((await row("heartbeat:board-sync")) === null, "passes with no stamper (a dry run, an audit) write no heartbeat");
 
     // A tier refresh copies ob1_config whole: its settle step deletes the
     // source's heartbeats, so a canary never reports stable's workers (review pass 1).
@@ -15965,7 +15994,7 @@ if (want("37")) {
     assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
 
     // A follower's start refusal ends its row with the kind (SMD-3214):
-    // board-sync's, under --loop alone — its own two kinds, and usage — the
+    // board-sync's, under --trigger alone — its own two kinds, and usage — the
     // exit still 2; a one-shot run, a dry run and an audit write no row.
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const boardEnv: Record<string, string> = { ...(process.env as Record<string, string>), OB1_ENV_FILES: "off", DATABASE_URL: URL_! };
@@ -15974,18 +16003,26 @@ if (want("37")) {
       const c = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "sync-linear.ts"), ...argv], { cwd: HERE, env: { ...boardEnv, ...extra } });
       return { code: c.exitCode, err: c.stderr.toString() };
     };
-    const noKey = boardRun({}, "--loop");
+    const noKey = boardRun({}, "--trigger", "--interval", "600");
     const noKeyRow = await row("heartbeat:board-sync");
-    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.age < 10,
-      `board-sync --loop with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
-    const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--loop");
+    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.every_s === 600 && noKeyRow.age < 10,
+      `board-sync --trigger with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key, its period the --interval handed in (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
+    const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--trigger");
     const intervalRow = await row("heartbeat:board-sync");
-    assert(badInterval.code === 2 && /must be a decimal integer >= 10 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
+    assert(badInterval.code === 2 && /must be a decimal integer >= 10 and <= 2147483 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
       `…and on an interval it does not take, usage (exit ${badInterval.code}; ${JSON.stringify(intervalRow)})`);
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-    const unlooped = [boardRun({}), boardRun({}, "--loop", "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];
+    const unlooped = [boardRun({}), boardRun({}, "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];
     assert(unlooped.every((r) => r.code === 2) && (await row("heartbeat:board-sync")) === null,
       `a one-shot run and a dry run refused the same exit 2 and write no row (${unlooped.map((r) => r.code).join(", ")})`);
+    // --trigger takes no run of its own: refused before its refusals' rows, which a dry run never writes.
+    const triggerDry = boardRun({}, "--trigger", "--dry-run");
+    assert(triggerDry.code === 2 && /^--trigger takes no --dry-run: it is the coordinator's mode/m.test(triggerDry.err) && (await row("heartbeat:board-sync")) === null,
+      `--trigger with --dry-run is refused by name, no row written (exit ${triggerDry.code})`);
+    // --loop is retired (SMD-3476): refused by name, pointing at the coordinator, before anything is read or written.
+    const retired = boardRun({ LINEAR_API_KEY: "lin_api_not_real" }, "--loop");
+    assert(retired.code === 2 && /^--loop is retired \(SMD-3476\): the coordinator runs board-sync's passes every OB1_BOARD_SYNC_INTERVAL seconds/m.test(retired.err) && (await row("heartbeat:board-sync")) === null,
+      `--loop is refused by name, the coordinator named, no row written (exit ${retired.code}: ${retired.err.split("\n")[0].slice(0, 90)})`);
     // A database not answering: the end is left within its bound, said, and the refusal goes on.
     const deadSql = new SQL({ url: "postgres://u@127.0.0.1:1/none", max: 1 });
     let heardDead = "";
@@ -16120,6 +16157,22 @@ if (want("37b")) {
     labelled.stop("SIGTERM");
     assert((await within(labelled.done, 1000)) === 0 && ["[board-sync] one", "[board-sync] two", "[board-sync] three"].every((l) => said.includes(l)),
       `a labelled follower's every line reaches the writer after its label (${said.filter((l) => l.startsWith("[")).join(" | ")})`);
+    // A trigger (SMD-3476): while the follower runs it is sent TRIGGER_SIGNAL
+    // every `every` ms, a pass each, and nothing else about it changes — no
+    // end, no restart, no row of the supervisor's.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const heardAt = join(tmpdir(), `ob1-trigger-${process.pid}`);
+    rmSync(heardAt, { force: true });
+    const triggered = supervise({ worker: "board-sync", cmd: ["sh", "-c", `trap 'echo pass >> ${heardAt}' WINCH; while :; do sleep 0.05; done`], every: 80, sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => existsSync(heardAt) && readFileSync(heardAt, "utf8").split("\n").filter(Boolean).length >= 3, 5000);
+    const midTrigger = await row("heartbeat:board-sync");
+    triggered.stop("SIGTERM");
+    const triggerCode = await within(triggered.done, 2000);
+    const passesHeard = existsSync(heardAt) ? readFileSync(heardAt, "utf8").split("\n").filter(Boolean).length : 0;
+    rmSync(heardAt, { force: true });
+    assert(triggerCode === 0 && passesHeard >= 3 && midTrigger === null && !said.some((l) => /exited/.test(l)),
+      `a trigger's follower is sent its signal on the clock, a pass each, and never ended or restarted for it (${passesHeard} heard; row ${JSON.stringify(midTrigger)}; ${said.join(" | ").slice(0, 120)})`);
     // No database to write to: the supervisor runs and holds the same, the row left alone.
     const unstamped = supervise({ worker: "sleep", cmd: ["sh", "-c", "exit 2"], sql: null, waits: fast, writer });
     await Bun.sleep(200);
