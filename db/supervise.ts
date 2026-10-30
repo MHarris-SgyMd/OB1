@@ -39,6 +39,10 @@
  * the environment's, which nothing changes without a recreate, so either
  * holds until the stop, the follower never started.
  *
+ * A trigger (`every`, SMD-3476): while the follower runs it is sent
+ * TRIGGER_SIGNAL every `every` ms, a pass each — board-sync's clock, which its
+ * --loop kept before. Nothing else about it changes.
+ *
  * The row. When the follower ends, its heartbeat (db/pass-stamp.ts) is ended
  * with `restart` — `in_s`, the seconds from the row's own stamp to the next
  * try (null: none until a recreate), `code`, the follower's exit status, and
@@ -68,7 +72,7 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { MIN_STAMP_EVERY_S, stampKey, TRIGGER_SIGNAL, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
@@ -170,6 +174,13 @@ export type SuperviseOptions = {
   sql: SQL | null;
   /** The waits, RESTART_MS unless a test drives them faster. */
   waits?: { first: number; max: number; reset: number };
+  /**
+   * A trigger's period, in ms (SMD-3476): while the follower runs, it is sent
+   * TRIGGER_SIGNAL this often, one pass each — board-sync's clock, the
+   * coordinator's since its --loop retired. Its ends, refusals and rows are a
+   * follower's as ever. Unset, it is sent nothing.
+   */
+  every?: number;
   stampTimeoutMs?: number;
   writer?: Writer;
 };
@@ -236,7 +247,26 @@ export function supervise(opts: SuperviseOptions): Supervisor {
         const drained = piped
           ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
           : Promise.resolve();
-        code = await child.exited;
+        // The trigger's clock, from the follower's start: its first pass is its own, at start.
+        const running = child;
+        // A signal that cannot be sent (the child gone between the check and the kill, a user it may not signal) is
+        // said once and the clock goes on: a throw on the timer would end this process, every pass with it.
+        let unsent = false;
+        const tick = opts.every === undefined ? undefined : setInterval(() => {
+          if (running.exitCode !== null || running.signalCode !== null) return;
+          try {
+            running.kill(TRIGGER_SIGNAL);
+            unsent = false;
+          } catch (e) {
+            if (!unsent) err(`supervise: ${opts.worker}'s trigger could not be sent (${(e as Error).message}); the clock goes on`);
+            unsent = true;
+          }
+        }, opts.every);
+        try {
+          code = await child.exited;
+        } finally {
+          clearInterval(tick);
+        }
         // The pumps never reject (labelled), so a drain cut short by the timer leaves nothing unhandled.
         await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
       } catch (e) {

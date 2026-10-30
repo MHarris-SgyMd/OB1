@@ -506,7 +506,7 @@ function coordinatorUp(pass) {
  */
 export function restartCommand(worker, job) {
   if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
-  if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)`;
+  if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
   // No compose service runs a re-embed follower: the sleep scheduler does (SMD-2679 PR 4b).
@@ -2557,6 +2557,15 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "page_sections",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "064" }),
     Object.freeze({ table: "page_section_revisions", privileges: Object.freeze(["SELECT", "INSERT"]),           since: "064" }),
   ]),
+  // Work claims (115, SMD-3597): who holds a ticket, or one piece of it, under
+  // a lease. Written only through claim_work, renew_work_claim and
+  // release_work_claim (SECURITY INVOKER, PUBLIC's EXECUTE), read through
+  // list_work_claims. No DELETE: an ended claim stays as history. The holder's
+  // kind is read from ob1_agents, the capture group's SELECT. Soft: a role
+  // without it is refused the claim calls, naming the table, and nothing else.
+  claims: Object.freeze([
+    Object.freeze({ table: "work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "115" }),
+  ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
   // (and enabled RLS with a policy for it) — a role that does not exist on plain
@@ -2736,7 +2745,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
      AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "community", "extensions", "recipes"]);
 /**
  * Groups a release removed, each with why: `migrate.ts --groups` refuses one by
  * name rather than as an unknown word. `sleep` was the sleep scheduler's read

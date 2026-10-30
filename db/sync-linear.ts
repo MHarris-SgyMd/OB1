@@ -15,7 +15,7 @@
  *
  *   bun db/sync-linear.ts --url postgres://…                 # one pass
  *   bun db/sync-linear.ts --url … --dry-run                  # what a pass would write; nothing written
- *   bun db/sync-linear.ts --url … --loop                     # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300)
+ *   bun db/sync-linear.ts --url … --trigger                  # the coordinator's mode: a pass at start and at each SIGWINCH its clock sends, every OB1_BOARD_SYNC_INTERVAL seconds (300)
  *   bun db/sync-linear.ts --url … --audit                    # the lockstep census alone: missing / stale / extra, exit 1 when any
  *   bun db/sync-linear.ts --url … --full                     # every issue re-rendered and compared, not only the moved ones
  *   bun db/sync-linear.ts --self-check                       # the pure parts and the write decisions, no network, no database
@@ -72,7 +72,7 @@
  * OB1_METADATA_MODEL, OB1_LLM_LOCAL, OB1_EGRESS_*…), resolved once at start by
  * resolveEmbedConfig as db/reembed.ts does. LINEAR_API_KEY is the one knob of
  * its own; OB1_LINEAR_INITIATIVE (default "Open Brain") names the initiative
- * whose projects are the board; OB1_BOARD_SYNC_INTERVAL the loop's period.
+ * whose projects are the board; OB1_BOARD_SYNC_INTERVAL the trigger's period (the coordinator's clock, handed in as --interval).
  * All of them — the provider knobs too — are read from the environment, else
  * from the `.env` files on db/env.ts's search path ($OB1_ENV_FILE, evals/.env,
  * <repo>/.env, deploy/.env), so a run from a checkout resolves the same knobs a
@@ -130,7 +130,7 @@ import type { Derived } from "./ingest-contract.ts";
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, databaseUrlIfAny, openSql } from "./connect.ts";
-import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper, TRIGGER_SIGNAL, BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
 import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
@@ -140,7 +140,7 @@ import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, t
 export { IDENTIFIER_PATTERN, issueFacets, LABELS_BOUND, labelNames, RELATIONS_BOUND, renderIssue, stripAutolinks, type LinearIssue };
 
 export const DEFAULT_INITIATIVE = "Open Brain";
-export const DEFAULT_INTERVAL_S = 300;
+export const DEFAULT_INTERVAL_S = DEFAULT_BOARD_INTERVAL_S;
 export const ACTOR_NAME = "board-sync";
 const SELF = "db/sync-linear.ts";
 
@@ -516,7 +516,7 @@ export type Writer = {
   actor: Actor;
   dryRun: boolean;
   log: (line: string) => void;
-  /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --loop). */
+  /** Asked between issues: true ends the pass after the issue in hand (SIGTERM under --trigger). */
   stopping?: () => boolean;
   /**
    * The structure beside the head row (SMD-1867): called with the row that
@@ -613,7 +613,7 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   // The same undo runs when a statement THROWS (a dropped connection) as when
   // one answers ok:false — the statements autocommit one by one, so a throw
   // between the phases would otherwise leave the clears and lose the pointer
-  // (ninth review pass). A kill between them is the remaining gap; the loop
+  // (ninth review pass). A kill between them is the remaining gap; a pass
   // stops between issues, not inside one, and the compose grace period is
   // sized for that.
   // A capture-only key's pointer is not written back: board-sync's write
@@ -1685,8 +1685,19 @@ async function main(): Promise<void> {
   // Every argument accounted for (db/cli.ts), as the other db/ scripts do it.
   const cli = commandLine("sync-linear.ts", {
     url: "one", initiative: "one", interval: "one", only: "one",
-    "dry-run": "none", loop: "none", audit: "none", full: "none", "self-check": "none", quiet: "none", "allow-refused": "none",
-  }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>" } });
+    "dry-run": "none", trigger: "none", loop: "none", audit: "none", full: "none", "self-check": "none", quiet: "none", "allow-refused": "none",
+  }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>", loop: "(retired: --trigger, the coordinator's clock)" } });
+  // The loop's clock is the coordinator's since SMD-3476: --trigger passes when it says.
+  if (cli.has("loop")) { console.error("--loop is retired (SMD-3476): the coordinator runs board-sync's passes every OB1_BOARD_SYNC_INTERVAL seconds — name board-sync in OB1_PASSES; from a checkout, OB1_PASSES=board-sync bun db/coordinator.ts"); process.exit(2); }
+  // The coordinator's clock (SMD-3476): a trigger starts the next pass when it
+  // lands while the process waits for one (triggerGate). One during the start
+  // or a pass is let go, so passes never overlap or queue: each starts on a
+  // tick of the clock that found the process waiting.
+  const trigger = cli.has("trigger");
+  const gate = triggerGate();
+  if (trigger) process.on(TRIGGER_SIGNAL, gate.trigger);
+  // A dry run or an audit is a run of its own: under --trigger it would wait for a clock that never comes.
+  for (const f of ["dry-run", "audit"] as const) if (trigger && cli.has(f)) { console.error(`--trigger takes no --${f}: it is the coordinator's mode, a pass at each of its triggers; run --${f} alone.`); process.exit(2); }
   if (cli.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (cli.has("audit") && cli.has("only")) { console.error("--audit takes no --only: the census is the whole board."); process.exit(2); }
@@ -1701,19 +1712,21 @@ async function main(): Promise<void> {
   // In the container none of the files is on the mount, so this reads nothing.
   const envSources = loadEnv();
   /**
-   * A refusal of the configuration: said, then exit 2 — and under --loop, the
-   * service's mode, `heartbeat:board-sync` ended first with its kind, so
-   * preflight gives the remedy and the compose service's supervisor says it
-   * is held for that cause (SMD-3214). A dry run or an audit writes no row,
-   * as its loop would not; a database out of reach leaves the row alone.
+   * A refusal of the configuration: said, then exit 2 — and under --trigger,
+   * the coordinator's mode, `heartbeat:board-sync` ended first with its kind,
+   * so preflight gives the remedy and the coordinator's supervisor says it is
+   * held for that cause (SMD-3214). A run of its own (a pass, a dry run, an
+   * audit) writes no row; a database out of reach leaves the row alone.
    */
   const refuse = async (kind: StartRefusal, line: string): Promise<never> => {
     console.error(line);
     const at = databaseUrlIfAny(cli.value("url"));
-    if (cli.has("loop") && !cli.has("dry-run") && !cli.has("audit") && at !== null) {
+    if (trigger && at !== null) {
       const own = openSql(at);
       try {
-        await endOnRefusal({ sql: own, worker: "board-sync", intervalS: DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+        // The period the coordinator handed in, where it reads as one: the row's every_s is the clock's.
+        const handed = readNumber("--interval", (cli.value("interval") ?? "").trim(), BOARD_INTERVAL_RULE);
+        await endOnRefusal({ sql: own, worker: "board-sync", intervalS: typeof handed === "number" ? handed : DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
       } finally {
         await own.close().catch(() => {});
       }
@@ -1726,7 +1739,9 @@ async function main(): Promise<void> {
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
-  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, { min: 10 }) : DEFAULT_INTERVAL_S;
+  // Under --trigger the coordinator's clock reads it by the same rule (BOARD_INTERVAL_RULE), so neither runs a period
+  // the other refuses; a run of its own waits on no interval, so takes any from 10 up, as it did.
+  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, trigger ? BOARD_INTERVAL_RULE : { min: 10 }) : DEFAULT_INTERVAL_S;
   if (typeof intervalRead !== "number") return await refuse("usage", `${intervalRead.error} (whole seconds).`);
   const interval = intervalRead;
   const dryRun = cli.has("dry-run");
@@ -1784,8 +1799,8 @@ async function main(): Promise<void> {
     if ("off" in set) console.error(`  findings are not posted to the board: ${set.off}`);
     else { findings = set.step; console.log(`  ${set.banner}`); }
   }
-  // One run name per pass, for thought_sources.ingest_run (SMD-1867); a loop's
-  // passes are told apart by it.
+  // One run name per pass, for thought_sources.ingest_run (SMD-1867); the
+  // trigger's passes are told apart by it.
   let run = runName(SELF);
   const writer: Writer = {
     store,
@@ -1876,41 +1891,41 @@ async function main(): Promise<void> {
 
   // The initiative is configuration, resolved once before any pass: a name
   // that matches no initiative (or two) is exit 2 here, as a missing key is —
-  // not a "pass failed" line every interval for as long as the loop runs
-  // (sixth review pass). Under --loop the passes still ask Linear each time,
-  // so a board that gains a project is seen.
+  // not a "pass failed" line every interval for as long as the trigger runs
+  // (sixth review pass). Under --trigger the later passes ask Linear each
+  // time, inside their heartbeat, so a board that gains a project is seen.
   try { resolved = await initiativeProjects(gql, initiative); }
   catch (e) {
     // Configuration exits 2; a transport error is a pass that failed — under
-    // --loop the next pass retries, a one-shot run exits 1 (twelfth pass).
+    // --trigger the first pass asks again, a one-shot run exits 1 (twelfth pass).
     if (e instanceof BoardConfigError) { await store.close(); await sql.close(); return await refuse("board", `  ${(e as Error).message}`); }
     console.error(`  ${(e as Error).message}`);
-    if (!cli.has("loop")) { await store.close(); await sql.close(); process.exit(1); }
+    if (!trigger) { await store.close(); await sql.close(); process.exit(1); }
   }
 
   // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would
   // otherwise land between the clears and the sets with no undo (tenth review
   // pass). The pass ends after the issue in hand; a second signal is the
   // runtime's default and kills.
-  const stop = () => { if (stopping) process.exit(130); stopping = true; console.error(`  stopping after the issue in hand (a second signal kills)`); };
+  const stop = () => { if (stopping) process.exit(130); stopping = true; gate.stop(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 
-  // The loop's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
-  // pass, re-stamped while one runs, and "stopped" when the loop ends. A dry run
-  // or an audit writes nothing, its heartbeat included; a one-shot pass stamps
-  // nothing either, so no row is left to go stale.
-  const stamper = cli.has("loop") && !dryRun && !cli.has("audit")
+  // The trigger's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every
+  // pass, re-stamped while one runs, and "stopped" when the process ends. A run
+  // of its own — a pass, a dry run, an audit, none under --trigger — stamps
+  // nothing, so no row is left to go stale.
+  const stamper = trigger
     ? passStamper({
         sql, worker: "board-sync", intervalS: interval,
-        onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the loop goes on`),
+        onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not written: ${e.message.split("\n")[0]} — the role needs INSERT and UPDATE on ob1_config (the worker grant group); the passes go on`),
       })
     : null;
   let code = 0;
   try {
-    if (!cli.has("loop")) { code = await once(); return; }
-    console.log(`  ${SELF}: a pass every ${interval} s against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends the loop after the issue in hand`);
-    code = await loopPasses({ once, intervalS: interval, stopped: () => stopping, stamper });
+    if (!trigger) { code = await once(); return; }
+    console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL}, which the coordinator sends every ${interval} s (run by hand nothing does, but a terminal's resize: one pass is a run without --trigger) against ${initiative}; SIGTERM/SIGINT ends it after the issue in hand`);
+    code = await triggerPasses({ once, next: gate.next, stopped: () => stopping, stamper });
   } finally {
     await store.close();
     await sql.close();
@@ -1919,26 +1934,50 @@ async function main(): Promise<void> {
 }
 
 /**
- * The --loop: a pass, then the interval, until a signal. The last pass's
- * result is the loop's exit code — a service whose every pass reported errors
- * must not stop clean (eleventh review pass). The heartbeat (SMD-2261) is
- * stamped after every pass, re-stamped while one runs, and "stopped" when the
- * loop ends. Its own function so the stamping is tested without Linear.
+ * The wait between --trigger's passes (SMD-3476): `trigger` (the signal's
+ * handler) ends a wait in progress and is let go otherwise — during the start
+ * or a pass — and `stop` ends it, or the next, at once. While it waits it holds
+ * a timer, so the process stays alive between passes by a handle of its own,
+ * not by its caller's pending top-level await. Pure: the signal is main()'s.
  */
-export async function loopPasses(opts: {
+export function triggerGate(): { trigger: () => void; stop: () => void; next: () => Promise<void> } {
+  let wake: (() => void) | null = null;
+  let waiting: Promise<void> | null = null;
+  let stopped = false;
+  return {
+    trigger: () => wake?.(),
+    stop: () => { stopped = true; wake?.(); },
+    // One wait at a time: a second call while one is pending is that wait, never a second timer.
+    next: () => stopped ? Promise.resolve() : (waiting ??= new Promise<void>((resolve) => {
+      const hold = setInterval(() => {}, 1 << 30);
+      wake = () => { wake = null; waiting = null; clearInterval(hold); resolve(); };
+    })),
+  };
+}
+
+/**
+ * --trigger: a pass, then the next trigger — the coordinator's clock, a
+ * SIGWINCH every OB1_BOARD_SYNC_INTERVAL seconds (SMD-3476; --loop's own clock
+ * before) — until a signal to stop. One process for every pass, so its start,
+ * its handlers and its once-a-run notes come once. The last pass's result is
+ * the exit code — a service whose every pass reported errors must not stop
+ * clean (eleventh review pass). The heartbeat (SMD-2261) is stamped after
+ * every pass, re-stamped while one runs, and "stopped" when it ends. Its own
+ * function so the stamping is tested without Linear.
+ */
+export async function triggerPasses(opts: {
   once: () => Promise<number>;
-  intervalS: number;
+  /** Settles at the next trigger, or at once on a stop. */
+  next: () => Promise<void>;
   stopped: () => boolean;
   stamper: PassStamper | null;
-  sleep?: (ms: number) => Promise<void>;
 }): Promise<number> {
-  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
   let code = 0;
   while (!opts.stopped()) {
     console.log(`▸ ${new Date().toISOString()}`);
     try { code = await (opts.stamper ? opts.stamper.during(opts.once()) : opts.once()); } catch (e) { code = 1; console.error(`  pass failed: ${(e as Error).message}`); }
     await opts.stamper?.stamp(code === 0 ? "ok" : "failed");
-    for (let waited = 0; waited < opts.intervalS && !opts.stopped(); waited++) await sleep(1000);
+    if (!opts.stopped()) await opts.next();
   }
   await opts.stamper?.end("stopped");
   return code;

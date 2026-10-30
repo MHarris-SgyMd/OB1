@@ -10,12 +10,14 @@
  * Runs preflight as a subprocess so real exit codes are observed. The connectivity
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
- * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
+ * OB1_PREFLIGHT_SHARD=first|rest runs one shard of the sections (SHARDS
+ * below); unset, every section runs. CI runs the two side by side (SMD-3468):
+ * the first beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195). What the cluster
- * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
- * here to the current database, or named for this suite (pf_*,
- * ob1_pf_capture, "pf reader's").
+ * while the data-layer job's other suites run (SMD-3195), and the rest on a
+ * Postgres of its own. What the cluster shares — a role and its settings,
+ * pg_locks, pg_stat_activity — is scoped here to the current database, or
+ * named for this suite (pf_*, ob1_pf_capture, "pf reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -45,7 +47,48 @@ const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MOD
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
-const { assert, skip: skipRaw, report } = createAssert();
+const { assert, skip: skipRaw, total, skipped, docCheck, report } = createAssert();
+
+/**
+ * The suite's shards (SMD-3468), as test-live.ts's SHARDS: the sections each
+ * runs, by the id in its header. A section no shard here lists is the rest's,
+ * so a new section runs in CI unless it is listed. Split by section time: [5]
+ * was most of the suite, so it ends at its full re-apply and [5b] goes on from
+ * a fresh one; first takes [5] and [9], whose local endpoints wait out
+ * their timeouts, and the rest the others, [5b] and [12] the long ones among
+ * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
+ * whole; [10] went to the rest to even them).
+ * server-portable/README.md states each shard's assertion count beside the
+ * full run's, and [doc] checks, on every run, that they add up.
+ */
+const SHARDS: Readonly<Record<string, readonly string[]>> = {
+  first: ["5", "9"],
+};
+/** Every shard's name: SHARDS' and the rest. */
+const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
+const SHARD = process.env.OB1_PREFLIGHT_SHARD;
+if (SHARD !== undefined && SHARD !== "rest" && !Object.hasOwn(SHARDS, SHARD)) {
+  console.error(`OB1_PREFLIGHT_SHARD=${JSON.stringify(SHARD)} names no shard: ${SHARD_NAMES.join(", ")}, or unset for every section`);
+  process.exit(2);
+}
+const LISTED_ALL = Object.values(SHARDS).flat();
+const LISTED = new Set(LISTED_ALL);
+// A section listed twice would run in two shards and count in both, while a full run counts it once.
+if (LISTED.size !== LISTED_ALL.length) {
+  console.error(`SHARDS lists a section in more than one shard: ${LISTED_ALL.filter((id, i) => LISTED_ALL.indexOf(id) !== i).map((id) => `[${id}]`).join(", ")}`);
+  process.exit(2);
+}
+/** The sections this run has begun, by id: [doc] checks a shard's are all there. */
+const begun = new Set<string>();
+/** Every id a header has asked about, in order: [doc] checks no two headers share one. */
+const headed: string[] = [];
+/** Whether section `id` runs here, noting it begun: every section with no shard named, else the shard's. Each section's header reads it. */
+function want(id: string): boolean {
+  headed.push(id);
+  const runs = SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
+  if (runs) begun.add(id);
+  return runs;
+}
 /** A literal for a RegExp source — model names carry dots and colons. */
 const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
@@ -91,8 +134,10 @@ async function migrate(args: string[], env: Record<string, string | undefined> =
 
 const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined };
 
-console.log("[1] Missing configuration fails, with an actionable fix");
-{
+if (SHARD !== undefined) console.log(`  shard: ${SHARD} (OB1_PREFLIGHT_SHARD)\n`);
+
+if (want("1")) {
+  console.log("[1] Missing configuration fails, with an actionable fix");
   const r = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql" });
   assert(r.code === 1, "OB1_STORE=sql without DATABASE_URL exits 1");
   assert(/DATABASE_URL/.test(r.out) && /→/.test(r.out), "…names the variable and suggests a fix");
@@ -148,8 +193,8 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   }
 }
 
-console.log("\n[2] A short raw access key is refused (SMD-2309)");
-{
+if (want("2")) {
+  console.log("\n[2] A short raw access key is refused (SMD-2309)");
   const base = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OPENROUTER_API_KEY: "k", MCP_ACCESS_KEYS: undefined };
   const r = await run({ ...base, MCP_ACCESS_KEY: "short" });
   assert(/✗\s+access key strength\s/.test(row(r.out, "access key strength")) && /alone opens the endpoint/.test(r.out), `a short access key fails its row: ${row(r.out, "access key strength")}`);
@@ -165,8 +210,8 @@ console.log("\n[2] A short raw access key is refused (SMD-2309)");
   assert(row(listedOnly.out, "legacy access key") === "" && row(listedOnly.out, "access key strength") === "", "MCP_ACCESS_KEYS alone prints neither row");
 }
 
-console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2382)");
-{
+if (want("2a")) {
+  console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2382)");
   const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x" };
   const on = await run({ ...base, COMPOSE_PROFILES: "local-models,auth", OB1_PUBLIC_ORIGIN: "https://brain.example.com/" });
   assert(/✓\s+public origin\s+https:\/\/brain\.example\.com — configured for OAuth: the MCP server advertises https:\/\/brain\.example\.com\/mcp while it reaches the authorization server/.test(row(on.out, "public origin")), `configured with a sound origin: an ok row naming the resource (${row(on.out, "public origin")})`);
@@ -194,8 +239,8 @@ console.log("\n[2a] The public origin: configured for OAuth, or keys only (SMD-2
   assert(row(neither.out, "public origin") === "", "neither set: no row");
 }
 
-console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a capturer, not a writer, and a list of forwarders alone fails");
-{
+if (want("2b")) {
+  console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a capturer, not a writer, and a list of forwarders alone fails");
   const base = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OPENROUTER_API_KEY: "k", MCP_ACCESS_KEY: undefined };
   const line = (name: string, scope: string) => `${name}:${scope}:${createHash("sha256").update(name.repeat(8)).digest("hex")}`;
   const scopeRows = (out: string) => out.split("\n").filter((l) => /^\s*[✓✗!·]\s+access keys scope\s/.test(l));
@@ -219,8 +264,8 @@ console.log("\n[2b] A forwarder key (SMD-2284) counts as no client: not a captur
   assert(scopeRows(hook.out).length === 0, `a forwarder beside a capture key: no scope row (${scopeRows(hook.out).join(" | ")})`);
 }
 
-console.log("\n[3] Credentials are not echoed");
-{
+if (want("3")) {
+  console.log("\n[3] Credentials are not echoed");
   const r = await run({ ...NO_DB, OB1_STORE: "sql", MCP_ACCESS_KEY: "s3cr3t-key-value-abcdefghijklmnop",
                         OPENROUTER_API_KEY: "sk-live-should-not-appear",
                         DATABASE_URL: "postgres://dbuser:hunter2@db.example:5432/ob" });
@@ -230,8 +275,8 @@ console.log("\n[3] Credentials are not echoed");
   assert(/db\.example/.test(r.out), "…while the host stays visible for debugging");
 }
 
-console.log("\n[3b] The chunk window is derived from the model, and named");
-{
+if (want("3b")) {
+  console.log("\n[3b] The chunk window is derived from the model, and named");
   // Configuration checks print whether or not the database answers, so a
   // refused port is enough; the model is set explicitly because the suite
   // exports the default one to every run.
@@ -260,8 +305,8 @@ console.log("\n[3b] The chunk window is derived from the model, and named");
          "a tagged local name finds its untagged entry — a miss here would be the silent cut");
 }
 
-console.log("\n[3c] The extraction window is derived from the METADATA model's served context, and named (SMD-1879)");
-{
+if (want("3c")) {
+  console.log("\n[3c] The extraction window is derived from the METADATA model's served context, and named (SMD-1879)");
   // The embedding model is the default here and the metadata model varies, so
   // the row that moves is the extraction window's — and the chunk window row
   // beside it must not move, since the two models are two tables.
@@ -300,8 +345,8 @@ console.log("\n[3c] The extraction window is derived from the METADATA model's s
          "…while the embedding model's chunk window row does not move with the metadata model: two models, two tables");
 }
 
-console.log("\n[4] Unreachable database fails rather than hanging");
-{
+if (want("4")) {
+  console.log("\n[4] Unreachable database fails rather than hanging");
   const r = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql",
                         DATABASE_URL: "postgres://u:p@127.0.0.1:1/nope" });
   assert(r.code === 1, "a refused connection exits 1");
@@ -326,8 +371,8 @@ console.log("\n[4] Unreachable database fails rather than hanging");
          "…the first carrying the error and the later ones saying they were not reached");
 }
 
-console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242)");
-{
+if (want("4b")) {
+  console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242)");
   // Each as Postgres's SplitIdentifierString resolves it. A connection
   // string, set_config and FROM CURRENT store the text raw, so every one of
   // these can reach the schema row's probe.
@@ -383,8 +428,9 @@ console.log("\n[4b] A search_path setting is read as Postgres reads it (SMD-2242
          "…and as a connection string's options it has no space between names, escapes a space or backslash inside one, and is percent-encoded, a shell's characters included");
 }
 
-console.log("\n[5] Against a real database");
-if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
+if (want("5")) console.log("\n[5] Against a real database");
+if (!begun.has("5")) { /* another shard's (OB1_PREFLIGHT_SHARD) */ }
+else if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
 else {
   const { SQL } = await import("bun");
   // Shared by the SMD-2237 ledger-row checks below: a connection whose search_path
@@ -2977,6 +3023,26 @@ else {
       await claims.unsafe("DROP TABLE IF EXISTS schema_migrations");
     }
   }
+  // [5] leaves a brain preflight passes, as [5b] checks at its own end: [9]
+  // reads it, after [5] in the first shard and after [5b] in a full run.
+  await claims.unsafe("DELETE FROM thoughts");
+  await claims.close();
+  const left = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(left.ok === true, `[5] leaves a brain preflight passes, the state [9] reads after it (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
+}
+
+if (want("5b")) console.log("\n[5b] Against a real database, from a fresh apply: the capturing role, the fingerprint backfill, the version and ledger rows as other roles read them, the tier and the workers' heartbeats");
+if (!begun.has("5b")) { /* another shard's (OB1_PREFLIGHT_SHARD) */ }
+else if (!LIVE) { skip("the capturing role, the version, ledger and heartbeat rows"); }
+else {
+  const { SQL } = await import("bun");
+  const SQL_ENV = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE };
+  const claims = new SQL({ url: LIVE, max: 1 });
+  // [5]'s second half until SMD-3468 split it here, so the two run in two
+  // shards. It starts from a dropped schema, one state in either: a guard, as
+  // the full apply below took nothing from what [5] left (a full run passes
+  // without the drop).
+  await dropSchema(LIVE);
 
   // The capture path's SECURITY INVOKER writers run as the calling role. A role
   // that can read everything and write thoughts, but cannot INSERT/DELETE
@@ -2985,8 +3051,8 @@ else {
   // missing privilege with its GRANT. `migrate.ts --grant` then issues the whole
   // documented set (db/config.mjs's ROLE_GRANTS, the one spelling); granted, the
   // role starts and a real windowed capture and an edit through it succeed. A
-  // full apply first, so upsert_thought is the shipped 4-argument form whatever
-  // state the reapply blocks above left. A role is cluster-wide and dropSchema
+  // full apply first, onto the schema dropped above, so upsert_thought is the
+  // shipped 4-argument form. A role is cluster-wide and dropSchema
   // does not touch it, so an interrupted run's leftover is dropped first and the
   // fixture cleans up whatever happens inside it.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
@@ -4007,7 +4073,7 @@ else {
     assert(/!\s+workers\s+board-sync stale \(last stamped 16 min ago, every 300 s\); extract/m.test(stale.out), `a heartbeat past three intervals is stale, a warning (${row(stale.out, "workers")})`);
     assert(/board-sync has not stamped for 16 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'\./.test(fix(stale.out, "workers")),
       `…whose fix names the restart command and how to retire it (${fix(stale.out, "workers")})`);
-    assert(/up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && bun sync-linear\.ts --url \$DATABASE_URL --loop\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
+    assert(/up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator\.ts, or one pass: bun sync-linear\.ts --url \$DATABASE_URL\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
     // A worker that said it ended is stopped at once, not alive for three intervals (review pass 1).
     await beat("heartbeat:board-sync", v({ outcome: "stopped" }), 60);
     const stopped = await run(SQL_ENV);
@@ -4588,8 +4654,8 @@ else {
 const DB_DOWN = { ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", MCP_ACCESS_KEY: "x".repeat(64), OB1_LLM_BASE_URL: LOCAL_STUB };
 const NO_KEYS = { OPENROUTER_API_KEY: undefined, OB1_LLM_API_KEY: undefined, OB1_CHAT_BASE_URL: undefined, OB1_CHAT_API_KEY: undefined };
 
-console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
-{
+if (want("6")) {
+  console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-1902)");
   const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
 
@@ -4633,8 +4699,8 @@ console.log("\n[6] Two provider endpoints are reported and gated by name (SMD-19
          "…while the chat probe fails by its own name, naming the chat endpoint and its host");
 }
 
-console.log("\n[7] The supersession judge's model is reported, and probed under its own row when it is not the metadata model (SMD-1901)");
-{
+if (want("7")) {
+  console.log("\n[7] The supersession judge's model is reported, and probed under its own row when it is not the metadata model (SMD-1901)");
   // A stub serves both paths and logs the model each chat probe names, so
   // "probed once" and "probed under its own row" are facts about the requests.
   const chatModels: string[] = [];
@@ -4688,8 +4754,8 @@ console.log("\n[7] The supersession judge's model is reported, and probed under 
   stub.stop();
 }
 
-console.log("\n[7b] The extraction escalation model is probed under its own --deep row when it is a third distinct model the worker would dial (SMD-2000)");
-{
+if (want("7b")) {
+  console.log("\n[7b] The extraction escalation model is probed under its own --deep row when it is a third distinct model the worker would dial (SMD-2000)");
   const chatModels: string[] = [];
   let refuse = "";
   const stub = Bun.serve({
@@ -4739,8 +4805,8 @@ console.log("\n[7b] The extraction escalation model is probed under its own --de
   stub.stop();
 }
 
-console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
-{
+if (want("8")) {
+  console.log("\n[8] The egress gate is reported: the mode, and per endpoint what leaves — declared local, the upgrade case, or refused (SMD-1903)");
   const LOCAL = LOCAL_STUB;
   const HOSTED = "https://openrouter.ai/api/v1";
   /** Every gate knob unset, whatever the shell has. */
@@ -4816,8 +4882,8 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
 }
 
-console.log("\n[9] A local endpoint is dialled by default: a name that does not resolve, or an endpoint that answers wrongly, fails before the server starts (SMD-1875); a resolved one with nothing answering yet warns, and the server starts degraded (SMD-2890)");
-{
+if (want("9")) {
+  console.log("\n[9] A local endpoint is dialled by default: a name that does not resolve, or an endpoint that answers wrongly, fails before the server starts (SMD-1875); a resolved one with nothing answering yet warns, and the server starts degraded (SMD-2890)");
   const THREE = (s: string) => /host\.containers\.internal:11434\/v1/.test(s) && /host\.docker\.internal:11434\/v1/.test(s) && /--profile local-models/.test(s);
 
   // The measured baseline: the code's default inside a container is the
@@ -5135,8 +5201,8 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   assert(jsonRow?.status === "warn" && THREE(jsonRow?.fix ?? ""), "--json carries the row, its status and its remedy");
 }
 
-console.log("\n[10] The typed-decision tier is dialled when configured — every run, not only --deep (SMD-2050)");
-{
+if (want("10")) {
+  console.log("\n[10] The typed-decision tier is dialled when configured — every run, not only --deep (SMD-2050)");
   // A stub tier that speaks ob1-jev/1 and counts what reaches it, so "dialled
   // without --deep" and "the refused decision sent nothing" are facts about
   // the requests, not the report.
@@ -5302,8 +5368,8 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   other.stop();
 }
 
-console.log("\n[11] --deep's provider probes are each a span and a point where a collector is named, sent before the report and said in a telemetry row; a plain preflight starts no telemetry (SMD-1849 PR 2d)");
-{
+if (want("11")) {
+  console.log("\n[11] --deep's provider probes are each a span and a point where a collector is named, sent before the report and said in a telemetry row; a plain preflight starts no telemetry (SMD-1849 PR 2d)");
   const posted: { path: string; body: string }[] = [];
   let collectorStatus = 200;
   const collector = Bun.serve({
@@ -5447,8 +5513,9 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   provider.stop(true);
 }
 
-console.log("\n[12] The indexes thoughts' reads are planned around: each missing, INVALID or of another shape is named with its remedy, the remedy followed as printed mends it; a build or drop running is waited for, a leftover INVALID index named, a schema older than the ledger sent to the re-apply, and a migration the ledger does not record not looked for (SMD-3146)");
-if (!LIVE) { skip("thought indexes: missing, INVALID, another shape"); }
+if (want("12")) console.log("\n[12] The indexes thoughts' reads are planned around: each missing, INVALID or of another shape is named with its remedy, the remedy followed as printed mends it; a build or drop running is waited for, a leftover INVALID index named, a schema older than the ledger sent to the re-apply, and a migration the ledger does not record not looked for (SMD-3146)");
+if (!begun.has("12")) { /* another shard's (OB1_PREFLIGHT_SHARD) */ }
+else if (!LIVE) { skip("thought indexes: missing, INVALID, another shape"); }
 else {
   const { SQL } = await import("bun");
   // thoughts' eight, by the migration that builds each — the row's table,
@@ -6007,6 +6074,43 @@ else {
       await db.unsafe(st).catch(() => {});
     }
     await db.close();
+  }
+}
+
+// In every shard: its doc checks count apart from the assertions, so they move no shard's count.
+{
+  console.log("\n[doc] server-portable/README.md states this suite's assertion total, and each shard's");
+  const readme = readFileSync(join(HERE, "README.md"), "utf8");
+  const n = total();
+  // Its lines that run this suite with a count: `… bun test-preflight.ts  # 994 — …`, a shard's with its variable before.
+  const lines = [...readme.matchAll(/^.*\btest-preflight\.ts\s+#\s*\d+.*$/gm)].map((m) => m[0]);
+  const counts = (ls: string[]) => ls.map((l) => Number(/test-preflight\.ts\s+#\s*(\d+)/.exec(l)![1]));
+  const shardOf = (l: string) => /\bOB1_PREFLIGHT_SHARD=(\S+)/.exec(l)?.[1];
+  const full = counts(lines.filter((l) => shardOf(l) === undefined));
+  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
+  // On every run, the README's own sum: one count a shard, adding up to the
+  // full run's. An assertion outside a want() section counts in every shard,
+  // and shows here as the shards adding up to more than the full run.
+  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0);
+  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
+  docCheck(sumHolds,
+    `server-portable/README.md quotes one count for each of test-preflight.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for an assertion outside a want() section, which runs in every shard"}`);
+  // No two headers share an id: a copied header would take its section to the other's shard unseen.
+  const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
+  docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
+  // Every section a shard lists is one this file has: a stale id would leave the shard short of what it says.
+  if (SHARD !== "rest") {
+    const listed = SHARD === undefined ? [...LISTED] : SHARDS[SHARD];
+    const absent = listed.filter((id) => !begun.has(id));
+    docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
+  }
+  const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
+  const which = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
+  if (skipped() === 0) {
+    docCheck(claims.length > 0 && claims.every((c) => c === n),
+      `server-portable/README.md quotes test-preflight.ts's ${n} assertions for ${which} (found ${[...new Set(claims)].join(", ") || "none"})`);
+  } else {
+    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), so this ${n}-assertion run is not the count the README states for ${which}`);
   }
 }
 
