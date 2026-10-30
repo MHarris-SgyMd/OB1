@@ -2198,8 +2198,9 @@ holder's own claim on overlapping work is in the way too, and a lapsed own claim
 another live claim now covers is refused and stays lapsed. A lapsed claim on
 exactly the work is taken over by any claim without its token, its own key's
 included, which is how a lost token is recovered. `release_work_claim` answers
-`already_released` to any caller, as the list shows an ended claim to anyone. `renew_work_claim` and `release_work_claim` act on the
-holder's own claim, given its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
+`already_released` to any caller, as the list shows an ended claim to anyone.
+`renew_work_claim` and `release_work_claim` act on the holder's own claim, given
+its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
 releases another holder's, for an operator key named by its agent id (a name
 alone lends no kind, SMD-2608's rule) and with a reason. The lease is 60 seconds
 to a week, four hours by default; a claim past it has lapsed, counts as free, and
@@ -2217,8 +2218,9 @@ isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for t
 rest of the transaction (029's shape). `list_work_claims` matches nothing for a
 malformed key rather than raising, and a refused forced release shares the code
 `CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
-row is 015's worker claims, not these. The partial unique index `work_claims_one_unreleased` holds the
-exact-work rule for a write made without the lock. Claims are not in
+row is 015's worker claims, not these. The partial unique index
+`work_claims_one_unreleased` holds the exact-work rule for a write made without
+the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The
 **claims** grant group (SELECT, INSERT, UPDATE on `work_claims`; no DELETE) is
 soft: a role without it gets a permission error (42501) naming `work_claims` on

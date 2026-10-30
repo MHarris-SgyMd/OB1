@@ -73,8 +73,8 @@
 --        of the call that ended it) and release_reason.
 --
 --   2. THE RULES, kept by the functions under one lock per ticket.
---      * A live claim — unreleased, unexpired — refuses another holder's claim
---        on the same work. A whole-ticket claim and a claim on one of its
+--      * A live claim — unreleased, unexpired — refuses every other claim on
+--        the same work. A whole-ticket claim and a claim on one of its
 --        pieces are the same work, either way round; two different pieces of
 --        one ticket are not.
 --      * The holder's own claim on exactly this work (key and token) is
@@ -486,7 +486,7 @@ AS $$
 DECLARE
   v_issue   text     := ob1_work_claim_issue(p_issue);
   v_piece   text     := ob1_work_claim_text(p_piece, 100, 'a piece');
-  v_key     text     := COALESCE(lower(ob1_work_claim_text(p_piece, 100, 'a piece')), '');
+  v_key     text     := COALESCE(lower(v_piece), '');
   v_label   text     := ob1_work_claim_text(p_label, 500, 'a label');
   v_lease   interval := ob1_work_claim_lease(p_lease_seconds);
   v_hash    bytea    := ob1_work_claim_token_hash(p_token);
