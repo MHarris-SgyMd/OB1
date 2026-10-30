@@ -1557,7 +1557,7 @@ export function restartWords(h: WorkerHeartbeat): string | null {
   if (!r) return null;
   // A migration seen: run again at once, and the new process waits at its start, unstamped, while the
   // migration runs — however long that is (SMD-3379 PR 1c-1).
-  if (r.code === MIGRATION_EXIT && r.inS === 0) return `restarting after a migration — its supervisor ran it again ${ago(h.ageS)} ago, and the new process stamps once migrate.ts lets ob1:migrate go`;
+  if (r.code === MIGRATION_EXIT && r.inS === 0) return `restarting after a migration — its supervisor ran it again ${ago(h.ageS)} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, or the database does not answer`;
   const why = h.refused ? `refused (${h.refused})` : `exited ${r.code}`;
   if (r.inS === null) return `held: ${why} — its supervisor runs it again only once the service is recreated`;
   const left = r.inS - h.ageS;

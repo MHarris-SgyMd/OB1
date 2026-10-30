@@ -292,7 +292,7 @@ function heldFix(h: WorkerHeartbeat, name: string): string | null {
   // long as the migration runs (SMD-3379 PR 1c-1); long past the overdue mark, a supervisor gone.
   if (r.code === MIGRATION_EXIT && r.inS === 0) {
     const recreateIt = restartCommand(h.worker, h.job);
-    return `${name} is restarting after a migration: its supervisor ran it again at once, and the new process waits at its start while migrate.ts holds ob1:migrate, stamping once it is let go${h.ageS >= RESTART_OVERDUE_S ? `. Unless a migration still runs this long, the coordinator may be gone — ${recreateIt}` : ""}.`;
+    return `${name} is restarting after a migration: its supervisor ran it again at once, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, or the database does not answer${h.ageS >= RESTART_OVERDUE_S ? `. Unless a migration still runs this long, the coordinator may be gone — ${recreateIt}` : ""}.`;
   }
   const remedy = h.refused ? startRefusalRemedy(h.refused, h.worker) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
   const recreate = restartCommand(h.worker, h.job);

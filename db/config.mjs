@@ -2737,7 +2737,7 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
      AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
 /**
  * The exit status the sleep scheduler ends with when it sees a migration —
- * MIGRATE_LOCK taken, or the ledger's newest name moved since its start —
+ * MIGRATE_LOCK held at two polls, or the ledger moved since its start —
  * and db/supervise.ts runs it again at once, no wait and no try counted:
  * the next process waits the migration out and takes its start's reads again
  * on the schema it left (SMD-3379 PR 1c-1). EX_TEMPFAIL, sysexits.h's "try

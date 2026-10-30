@@ -2347,7 +2347,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
-| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
+| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
@@ -4075,7 +4075,9 @@ has no `--job`.
 writes (SMD-3379 PR 1a). The scheduler waits it out at its start, before its
 passes' starts check the schema, saying so once, then takes the ledger's
 newest name and row count (`schema_migrations`). Each `--poll` after that it reads both: the
-lock taken, or the ledger moved, and the passes stop at once — a stop on 093,
+ledger moved, or the lock held by one run at two polls in a row (every run
+takes it where 096 cannot take PUBLIC's grant back, and a no-op is gone by
+the next poll), and the passes stop at once — a stop on 093,
 as the operator's second signal is — the row ends without the held read, and
 it exits 75 (`MIGRATION_EXIT`, `config.mjs`); a hand run is run again once the
 migration is done. `db/supervise.ts` runs the scheduler again at once on a 75,

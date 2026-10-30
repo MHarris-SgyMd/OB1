@@ -11,7 +11,7 @@
  *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
  *   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
  *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
- *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock taken or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one sleep ended, or a second signal (at once)
+ *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
  * The brain is awake while it is written: a write the audit recorded
@@ -594,7 +594,7 @@ async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Prom
 
 /**
  * A migration in progress — migrate.ts's ob1:migrate lock (SMD-3379 PR 1a),
- * its holder named — and the ledger's newest name: what the scheduler waits
+ * its holder named — and the ledger's newest name and row count: what the scheduler waits
  * out at its start and watches each poll (PR 1c-1).
  */
 async function migrationState(sql: SQL): Promise<{ holder: string | null; ledger: string }> {
@@ -793,16 +793,21 @@ export async function run(opts: SleepOptions): Promise<number> {
   }
   const sql = opts.sql ?? openSql(opts.url as string, { max: 2, session: schedulerSession(settled) });
   try {
-    // A migration seen ends the run with MIGRATION_EXIT, whichever way the loop then returned (PR 1c-1).
+    // A migration seen ends the run with MIGRATION_EXIT (PR 1c-1).
     const seen = { migration: false };
     try {
       const code = await sleepWith(sql, opts.url as string, opts, settled, out, err, seen);
-      // The watcher's stop returns 130; a run that ended of itself as the
-      // watcher acted — a refusal, a one-shot done — keeps its code (review pass 2).
-      return seen.migration && code === 130 ? MIGRATION_EXIT : code;
+      // The watcher's stop returns 130, and a refusal under --follow that met
+      // it is the next start's to check again; a one-shot that ended of
+      // itself as the watcher acted keeps its code (review passes 2 and 3).
+      return seen.migration && (code === 130 || (opts.follow === true && code === 2)) ? MIGRATION_EXIT : code;
     } catch (e) {
-      // A throw on the way down from a migration seen is that end, not a crash (review pass 1).
-      if (seen.migration) return MIGRATION_EXIT;
+      // A throw on the way down from a migration seen is that end, said, not
+      // a crash (review passes 1 and 3).
+      if (seen.migration) {
+        err(`  after the migration seen: ${(e as Error).message}`);
+        return MIGRATION_EXIT;
+      }
       throw e;
     }
   } finally {
@@ -858,7 +863,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // and the passes' starts below would meet a schema mid-change — a process
   // its supervisor restarted on a migration would read the old catalog — so
   // the scheduler waits until it is let go, before any of them, then takes
-  // the ledger's newest name as what it watches each poll (the watcher,
+  // the ledger's newest name and count as what it watches each poll (the watcher,
   // below). A stop during the wait is a stop before the run began. A dry run
   // reads on.
   let ledgerAt = "";
@@ -2173,22 +2178,29 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
 
   // ── A migration seen (SMD-3379 PR 1c-1) ──────────────────────────────────
   // Each poll, the lock migrate.ts holds while it writes and the ledger's
-  // newest name. Either moved since the start: the passes stop now — a stop
+  // newest name and count. The ledger moved since the start, or the lock held
+  // by one backend at two polls in a row — every run takes it where 096
+  // cannot take PUBLIC's grant back, and a no-op is gone by the next poll
+  // (PR 1a's follow-up, review pass 3): the passes stop now — a stop
   // on 093, as the operator's second signal is, not the scheduler's cut — the
   // row ends without the held read, as the second signal's does, and the run
   // returns MIGRATION_EXIT for its supervisor to start it again at once: the
   // next process waits the migration out and reads its start again on the
   // schema it left. A read that fails is tried at the next.
   const watchEnd = new AbortController();
+  let threw = false;
   const watching = (async () => {
     if (opts.dryRun) return;
     const wake = AbortSignal.any([onStop.signal, watchEnd.signal]);
+    let heldAt: string | null = null;
     while (!wake.aborted) {
       await sleepUnless(POLL * 1000, wake);
       if (wake.aborted || stopping) return;
       const now = await migrationState(sql).catch(() => null);
-      if (now === null || stopping || finished) continue;
-      const why = now.holder !== null ? `${now.holder} holds ob1:migrate, applying migrations`
+      if (now === null || stopping || finished || threw) continue;
+      const lockHeld = now.holder !== null && now.holder === heldAt;
+      heldAt = now.holder;
+      const why = lockHeld ? `${now.holder} holds ob1:migrate, applying migrations`
         : now.ledger !== ledgerAt ? `the migration ledger moved, ${ledgerAt} to ${now.ledger}`
         : null;
       if (why === null) continue;
@@ -2304,6 +2316,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     await endRow("stopped", malformed ?? undefined);
     return FOLLOW && !hardStopped ? 0 : 130;
   } catch (e) {
+    // The watcher does not act on the way down from a throw: the crash is the end (review pass 3).
+    threw = true;
     // Not counted as the scheduler's cut when the watcher stopped them (review pass 2).
     await stopPasses(true, !seen.migration).catch(() => {});
     // Directly: the database may be what threw, and the held read would wait

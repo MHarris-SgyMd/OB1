@@ -4378,8 +4378,8 @@ else {
       const migFix = fix((await run(LOG_ON)).out, "sleep");
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, restart: { in_s: 0, code: 75, tries: 0 } }), 3_600);
       const migLongFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/→ sleep is restarting after a migration: its supervisor ran it again at once, and the new process waits at its start while migrate\.ts holds ob1:migrate, stamping once it is let go\.$/.test(migFix)
-             && /stamping once it is let go\. Unless a migration still runs this long, the coordinator may be gone — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(migLongFix),
+      assert(/→ sleep is restarting after a migration: its supervisor ran it again at once, and the new process stamps once its start has read — it waits there while migrate\.ts holds ob1:migrate, or the database does not answer\.$/.test(migFix)
+             && /or the database does not answer\. Unless a migration still runs this long, the coordinator may be gone — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(migLongFix),
         `a scheduler restarting after a migration says so, a long one that its coordinator may be gone (${migFix} | ${migLongFix})`);
       // Its guard: no worker key, held until a recreate.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }), 10);
