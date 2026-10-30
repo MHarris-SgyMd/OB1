@@ -2738,9 +2738,10 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
 /**
  * The exit status the sleep scheduler ends with when it sees a migration —
  * MIGRATE_LOCK taken, or the ledger's newest name moved since its start —
- * and db/supervise.ts runs it again on at once, no wait and no try counted,
- * so the next process loads the code the migration came with (SMD-3379 PR
- * 1c-1). EX_TEMPFAIL, sysexits.h's "try again".
+ * and db/supervise.ts runs it again at once, no wait and no try counted:
+ * the next process waits the migration out and takes its start's reads again
+ * on the schema it left (SMD-3379 PR 1c-1). EX_TEMPFAIL, sysexits.h's "try
+ * again".
  */
 export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */

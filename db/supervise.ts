@@ -57,9 +57,11 @@
  * A migration. A follower that ends with MIGRATION_EXIT (75) — the sleep
  * scheduler, which saw migrate.ts take its lock or the ledger move (SMD-3379
  * PR 1c-1) — runs again at once, its try not counted, the row's restart
- * saying in_s 0 and code 75, so the next process loads the code the migration
- * came with: `git pull && up -d` runs the migrator, and recreates the
- * coordinator only when its image changed. More than MIGRATION_RESTARTS such
+ * saying in_s 0 and code 75: the next process waits the migration out at its
+ * start and takes its start's reads again on the schema it left. It runs the
+ * code this process has — in compose the coordinator's baked image, which
+ * `up -d` replaces by recreating the coordinator when the image changed; from
+ * a checkout, the checkout's as it then is. More than MIGRATION_RESTARTS such
  * ends in a row, each within a minute of its start, fall back to the clock.
  *
  * A stop. Each stop() goes on to the follower, whose own rules apply (the
@@ -84,7 +86,7 @@ export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as con
 /**
  * A follower that ends with MIGRATION_EXIT — the sleep scheduler, a migration
  * seen (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
- * process loads the migration's code. Past this many such ends in a row, each
+ * process waits the migration out and reads its start again. Past this many such ends in a row, each
  * within MIGRATION_QUICK_MS of its start, it is run again on the clock as any
  * end is: a follower that saw a migration at every start would otherwise spin.
  */
@@ -268,9 +270,10 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       const ranMs = Date.now() - began.getTime();
       // A migration seen: run again at once on its code, the try not counted,
       // unless it keeps ending so at once (SMD-3379 PR 1c-1).
-      migrationsInRow = code === MIGRATION_EXIT ? (ranMs < MIGRATION_QUICK_MS ? migrationsInRow + 1 : 1) : 0;
+      // Only quick ones count: a first 75 after a long run is the migration it is for (review pass 1).
+      migrationsInRow = code === MIGRATION_EXIT && ranMs < MIGRATION_QUICK_MS ? migrationsInRow + 1 : 0;
       if (code === MIGRATION_EXIT && migrationsInRow <= MIGRATION_RESTARTS) {
-        err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)} — a migration seen; restarting after a migration, at once, on the code it brought${key && opts.sql ? `, ${key} says so` : ""}`);
+        err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)} — a migration seen; restarting after a migration, at once, to wait it out and read its start again${key && opts.sql ? `, ${key} says so` : ""}`);
         await stamp(began, { in_s: 0, code, tries });
         continue;
       }

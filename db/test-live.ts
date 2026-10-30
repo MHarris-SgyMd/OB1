@@ -16096,7 +16096,7 @@ if (want("37b")) {
     migrating.stop("SIGTERM");
     const migratingCode = await within(migrating.done, 2000);
     rmSync(migrationRuns, { force: true });
-    const atOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once, on the code it brought, heartbeat:sleep says so$/.test(l)).length;
+    const atOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once, to wait it out and read its start again, heartbeat:sleep says so$/.test(l)).length;
     const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
     assert(fourRuns && runsSeen === 4 && atOnce === 3 && onTheClock === 1 && migrationRow?.restart?.code === 75 && migrationRow.restart.tries === 1 && migratingCode === 0,
       `a follower exiting 75 runs again at once, no try counted, three times, then on the clock, its first counted end (${runsSeen} run(s), ${atOnce} at once, ${onTheClock} on the clock, row ${JSON.stringify(migrationRow?.restart)}, exit ${migratingCode})`);
@@ -17843,8 +17843,8 @@ if (want("38")) {
         const migCode = await bounded(migRun, migStop);
         const migBeat = await beat();
         const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, \d{3}_\S+ to 999_smd3379_ledger_moved — the passes stop now, their leases returned, and the scheduler exits 75/.test(l));
-        assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false,
-          `a lock held at the start is waited out before the passes' starts, and the ledger moving then ends the run with 75, its row ended (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running })})`);
+        assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
+          `a lock held at the start is waited out before the passes' starts, and the ledger moving then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
         await sql`DELETE FROM schema_migrations WHERE name = '999_smd3379_ledger_moved'`;
         const lockFrom = lines.length;
         const lockStop = new AbortController();
@@ -17852,9 +17852,11 @@ if (want("38")) {
         const lockRunning = await pollUntil(async () => lines.slice(lockFrom).some((l) => /^  quiet:/.test(l)) && (await beat())?.running === true, 15_000);
         await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
         const lockCode = await bounded(lockRun, lockStop);
+        const lockBeat = await beat();
         await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
         const lockSaid = lines.slice(lockFrom).some((l) => /backend \d+ holds ob1:migrate, applying migrations — the passes stop now/.test(l));
-        assert(lockRunning && lockCode === 75 && lockSaid, `…and the lock taken while it runs ends it with 75 too (exit ${lockCode}, said ${lockSaid})`);
+        assert(lockRunning && lockCode === 75 && lockSaid && lockBeat?.ended === true && lockBeat.outcome === "stopped",
+          `…and the lock taken while it runs ends it with 75 too, its row ended stopped (exit ${lockCode}, said ${lockSaid}, ${JSON.stringify({ ended: lockBeat?.ended, outcome: lockBeat?.outcome })})`);
       } finally {
         await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});
         holder.release();

@@ -1544,6 +1544,8 @@ export function ago(s: number): string {
  * the provider first (SMD-3214).
  */
 export const RESTART_OVERDUE_S = 900;
+/** db/config.mjs's MIGRATION_EXIT, the sleep scheduler's exit on a migration seen (SMD-3379 PR 1c-1): this file takes no imports. */
+export const MIGRATION_EXIT = 75;
 
 /**
  * db/supervise.ts's word on an ended row, as a reader acts on it (SMD-3214):
@@ -1553,6 +1555,9 @@ export const RESTART_OVERDUE_S = 900;
 export function restartWords(h: WorkerHeartbeat): string | null {
   const r = h.restart;
   if (!r) return null;
+  // A migration seen: run again at once, and the new process waits at its start, unstamped, while the
+  // migration runs — however long that is (SMD-3379 PR 1c-1).
+  if (r.code === MIGRATION_EXIT && r.inS === 0) return `restarting after a migration — its supervisor ran it again ${ago(h.ageS)} ago, and the new process stamps once migrate.ts lets ob1:migrate go`;
   const why = h.refused ? `refused (${h.refused})` : `exited ${r.code}`;
   if (r.inS === null) return `held: ${why} — its supervisor runs it again only once the service is recreated`;
   const left = r.inS - h.ageS;

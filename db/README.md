@@ -4079,9 +4079,12 @@ lock taken, or the ledger moved, and the passes stop at once — a stop on 093,
 as the operator's second signal is — the row ends without the held read, and
 it exits 75 (`MIGRATION_EXIT`, `config.mjs`). `db/supervise.ts` runs a
 follower that exits 75 again at once, no try counted, its row's `restart`
-saying `in_s` 0 and code 75, so the next process loads the code the migration
-came with; past three such ends in a row, each within a minute of its start,
-it falls back to the clock (SMD-3379 PR 1c-1).
+saying `in_s` 0 and code 75: the next process waits the migration out and
+takes its start's reads again on the schema it left. Its code is the
+coordinator's — in compose the baked image, which `up -d` replaces by
+recreating the coordinator when the image changed. Past three such ends in a
+row, each within a minute of its start, it falls back to the clock (SMD-3379
+PR 1c-1).
 
 **What wakes it.** A live write — one the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background

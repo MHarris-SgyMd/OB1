@@ -598,8 +598,10 @@ async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Prom
  * out at its start and watches each poll (PR 1c-1).
  */
 async function migrationState(sql: SQL): Promise<{ holder: string | null; newest: string | null }> {
-  const [h] = (await sql.unsafe(MIGRATE_LOCK_HOLDER_SQL, [MIGRATE_LOCK])) as { pid: number }[];
+  // The ledger first: a migration that commits between the two reads is then seen by the lock's, or
+  // next time by the ledger's, never baselined as applied before it began (review pass 1).
   const [l] = (await sql`SELECT max(name) AS newest FROM public.schema_migrations`) as { newest: string | null }[];
+  const [h] = (await sql.unsafe(MIGRATE_LOCK_HOLDER_SQL, [MIGRATE_LOCK])) as { pid: number }[];
   return { holder: h ? `backend ${h.pid}` : null, newest: l?.newest ?? null };
 }
 
@@ -792,8 +794,14 @@ export async function run(opts: SleepOptions): Promise<number> {
   try {
     // A migration seen ends the run with MIGRATION_EXIT, whichever way the loop then returned (PR 1c-1).
     const seen = { migration: false };
-    const code = await sleepWith(sql, opts.url as string, opts, settled, out, err, seen);
-    return seen.migration ? MIGRATION_EXIT : code;
+    try {
+      const code = await sleepWith(sql, opts.url as string, opts, settled, out, err, seen);
+      return seen.migration ? MIGRATION_EXIT : code;
+    } catch (e) {
+      // A throw on the way down from a migration seen is that end, not a crash (review pass 1).
+      if (seen.migration) return MIGRATION_EXIT;
+      throw e;
+    }
   } finally {
     if (opts.sql == null) await sql.close().catch(() => {});
   }
@@ -842,6 +850,30 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The CLI passes no signal (its handlers come after these reads): a wait then ends only with the database. */
   const startWake = opts.signal ?? new AbortController().signal;
   const atStart = <T>(read: () => Promise<T>) => throughOutage(read, { wake: startWake, said: startSaid, out, err });
+  // ── A migration in progress, waited out (SMD-3379 PR 1c-1) ───────────────
+  // migrate.ts holds ob1:migrate while it writes (PR 1a): the start's reads
+  // and the passes' starts below would meet a schema mid-change — a process
+  // its supervisor restarted on a migration would read the old catalog — so
+  // the scheduler waits until it is let go, before any of them, then takes
+  // the ledger's newest name as what it watches each poll (the watcher,
+  // below). A stop during the wait is a stop before the run began. A dry run
+  // reads on.
+  let ledgerAt: string | null = null;
+  if (!opts.dryRun) {
+    let saidWaiting = false;
+    for (;;) {
+      const state = await atStart(() => migrationState(sql));
+      if (state === null || startWake.aborted) { err(STOPPED_EARLY); return 130; }
+      if (state.holder === null) {
+        ledgerAt = state.newest;
+        break;
+      }
+      if (!saidWaiting) out(`  migration: ${state.holder} holds ob1:migrate, applying migrations — the scheduler waits for it to finish before it starts`);
+      saidWaiting = true;
+      await sleepUnless(POLL * 1000, startWake);
+    }
+  }
+
   /** The database's clock as this run began: a claim older than it is no pass of this run's (poolOf's `mineSince`). */
   const startedAt = await atStart(async () => new Date((await sql`SELECT now() AS now`)[0].now));
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
@@ -985,28 +1017,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       else out(`  re-derive: ${census.ids.length >= 500 ? "500 or more" : census.ids.length} thought(s) with a lineage row whose artifact is gone${census.windowed ? ", in the first window of 10,001 lineage rows — the sleeps walk the rest" : ""}`);
     }
     return 0;
-  }
-
-  // ── A migration in progress, waited out (SMD-3379 PR 1c-1) ───────────────
-  // migrate.ts holds ob1:migrate while it writes (PR 1a): the passes' starts
-  // below would meet a schema mid-change, so the scheduler waits until it is
-  // let go, then takes the ledger's newest name as what it watches each poll
-  // (the watcher, below). A stop during the wait is a stop before the run
-  // began. A dry run reads on.
-  let ledgerAt: string | null = null;
-  if (!opts.dryRun) {
-    let saidWaiting = false;
-    for (;;) {
-      const state = await atStart(() => migrationState(sql));
-      if (state === null || startWake.aborted) { err(STOPPED_EARLY); return 130; }
-      if (state.holder === null) {
-        ledgerAt = state.newest;
-        break;
-      }
-      if (!saidWaiting) out(`  migration: ${state.holder} holds ob1:migrate, applying migrations — the scheduler waits for it to finish before it starts`);
-      saidWaiting = true;
-      await sleepUnless(POLL * 1000, startWake);
-    }
   }
 
   // ── The passes' starts, checked once (SMD-2752) ──────────────────────────
@@ -2163,8 +2173,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // newest name. Either moved since the start: the passes stop now — a stop
   // on 093, as the operator's second signal is, not the scheduler's cut — the
   // row ends without the held read, as the second signal's does, and the run
-  // returns MIGRATION_EXIT for its supervisor to start it again at once on
-  // the code the migration came with. A read that fails is tried at the next.
+  // returns MIGRATION_EXIT for its supervisor to start it again at once: the
+  // next process waits the migration out and reads its start again on the
+  // schema it left. A read that fails is tried at the next.
   const watchEnd = new AbortController();
   const watching = (async () => {
     if (opts.dryRun) return;
@@ -2182,7 +2193,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       stopping = true;
       hardStopped = true;
       onStop.abort();
-      err(`\n  ${why} — the passes stop now, their leases returned, and the scheduler exits ${MIGRATION_EXIT} for its supervisor to start it again at once on the code the migration came with`);
+      err(`\n  ${why} — the passes stop now, their leases returned, and the scheduler exits ${MIGRATION_EXIT} for its supervisor to start it again at once, to wait the migration out and read its start again`);
       await Promise.all(running.map((p) => hardStop(p))).catch(() => {});
       await stamper.end("stopped", malformed ?? undefined).catch(() => {});
       return;
@@ -2292,8 +2303,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   } catch (e) {
     await stopPasses(true, true).catch(() => {});
     // Directly: the database may be what threw, and the held read would wait
-    // out its connect timeout before the end did again (review pass 4).
-    await stamper.end("failed", malformed ?? undefined);
+    // out its connect timeout before the end did again (review pass 4). Not
+    // over the watcher's end, on the way down from a migration (PR 1c-1).
+    if (!seen.migration) await stamper.end("failed", malformed ?? undefined);
     throw e;
   } finally {
     finished = true;

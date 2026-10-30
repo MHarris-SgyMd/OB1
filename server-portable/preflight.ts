@@ -288,9 +288,12 @@ const fixOf = (...parts: string[]) => parts.map((p) => p.trim()).filter((p) => p
 function heldFix(h: WorkerHeartbeat, name: string): string | null {
   const r = h.restart;
   if (!r) return null;
-  // A migration seen: its supervisor runs it again at once (SMD-3379 PR 1c-1), so a row
-  // still saying so a while after is a supervisor gone, as below.
-  if (r.code === MIGRATION_EXIT && r.inS === 0 && h.ageS < RESTART_OVERDUE_S) return `${name} is restarting after a migration: its supervisor runs it again at once, on the code the migration came with.`;
+  // A migration seen: run again at once, the new process waiting at its start, unstamped, as
+  // long as the migration runs (SMD-3379 PR 1c-1); long past the overdue mark, a supervisor gone.
+  if (r.code === MIGRATION_EXIT && r.inS === 0) {
+    const recreateIt = restartCommand(h.worker, h.job);
+    return `${name} is restarting after a migration: its supervisor ran it again at once, and the new process waits at its start while migrate.ts holds ob1:migrate, stamping once it is let go${h.ageS >= RESTART_OVERDUE_S ? `. Unless a migration still runs this long, the coordinator may be gone — ${recreateIt}` : ""}.`;
+  }
   const remedy = h.refused ? startRefusalRemedy(h.refused, h.worker) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
   const recreate = restartCommand(h.worker, h.job);
   if (r.inS === null) return `${name} is held by its supervisor, never started: ${remedy}. That is deploy/.env's to mend, so recreate it then — ${recreate}.`;
