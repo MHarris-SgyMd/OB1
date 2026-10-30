@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, JUDGE_ALARM, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -6934,7 +6934,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 113's close or 111's door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed (migrations 111 and 113, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities under each rule's key, no model asked, again at an edited text; a session whose prompts name no ticket, a note's context ticket and a first line's UTF-8 left to the model; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept, a subject found under version 1's keys found again; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 113's close or 111's door and a role without its grants, as the pass meets each; the sweep from a pool, a claim finished the record of a thought asked, a failed one asked again by --retry-failed, a moved text pooled again by its edit, an out-of-date subject closed, a judge whose answers give no subject stopped (migrations 111 and 113, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key', 'subject_pool_filled')`;
   /** The judge's answer by words in the thought; any other thought, an empty subject. */
@@ -8577,6 +8577,121 @@ if (want("10h")) {
     }
     assert(emptyRenamed === "waited" && emptyRun?.code === 0 && /1 the model named nothing for/.test(tally(emptyRun!)),
       `…and for a model's empty answer's finish in flight (the rename ${emptyRenamed || "not tried"}; exit ${emptyRun?.code}: ${emptyRun === null ? "no run" : tally(emptyRun)})`);
+
+    // The garbage-judge alarm (PR 5b): a judge whose answers give no subject — unread, or naming nothing — more than a
+    // fifth of the time over its last JUDGE_ALARM.min stops the run, exit 3. On a stage of its own: the pool named first,
+    // empty, so each thought seeded after it is pooled at its own instant and claimed in the order seeded.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`;
+    const savedAlarm = { ...JUDGE_ALARM };
+    const savedGarbled = garbledAnswers;
+    owns.push(["alarm-good", '{"subject":"the alarm case work","deliverables":[]}']);
+    const seedAll = async (texts: string[]) => {
+      const ids: string[] = [];
+      for (const t of texts) ids.push(await seed(t));
+      return ids;
+    };
+    const statusOf = async (ids: string[]) => (await Promise.all(ids.map((id) => claimOf(id)))).map((c) => c?.status ?? "none");
+    const drop = (ids: string[]) => sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+    // Each run is held to a --limit it never reaches when it stops as it should: one that went on past the alarm would
+    // ask again, without end, the claims each trip hands back.
+    try {
+      JUDGE_ALARM.min = 4;
+      // A judge naming nothing: the run stops once its last four answers are in, the four claims it finished handed back
+      // to the pool, the two it never took left there, and nothing recorded.
+      const naming = await sweep({});
+      const nothingIds = await seedAll(Array.from({ length: 6 }, (_, i) => `Alarm note ${i + 1}: a note the judge names nothing for.`));
+      let asked = ownCalls;
+      const nothingRun = await sweep({ limit: 12 });
+      const nothingClaims = await statusOf(nothingIds);
+      const nothingRecorded = (await subjects()).filter((s) => nothingIds.includes(s.thought)).length;
+      assert(naming.code === 0 && nothingRun.code === 3 && ownCalls - asked === 4 && nothingClaims.every((c) => c === "pending") && nothingRecorded === 0
+        && /\n {2}4 of the judge model's last 4 answers gave no subject \(4 naming nothing a key holds\) — more than 20%/.test(nothingRun.stderr)
+        && /The 4 thought\(s\) it named nothing for are back in the pool, to be asked again\. Once the model is right, run it again\./.test(nothingRun.stderr),
+        `a judge naming nothing stops the run once its last four answers are in, exit 3: the four claims it finished back in the pool, the two it never took still there, nothing recorded (the naming's exit ${naming.code}; exit ${nothingRun.code}, ${ownCalls - asked} asked, claims ${nothingClaims.join(",")}, ${nothingRecorded} recorded): ${nothingRun.stderr.trim().slice(0, 400)}`);
+
+      // …and one whose answers are not JSON: its four claims failed, for --retry-failed, as the pass leaves its malformed
+      // rows failed.
+      await drop(nothingIds);
+      garbledAnswers = true;
+      const unreadIds = await seedAll(Array.from({ length: 6 }, (_, i) => `Alarm note ${i + 7}: garbled on purpose.`));
+      asked = ownCalls;
+      const unreadRun = await sweep({ limit: 12 });
+      const unreadClaims = await statusOf(unreadIds);
+      assert(unreadRun.code === 3 && ownCalls - asked === 4 && unreadClaims.join(",") === "failed,failed,failed,failed,pending,pending"
+        && /\n {2}4 of the judge model's last 4 answers gave no subject \(4 not JSON of the expected shape\)/.test(unreadRun.stderr)
+        && /Once the model is right, run again with --retry-failed, which asks the 4 failed claim\(s\) again\./.test(unreadRun.stderr) && !/back in the pool/.test(unreadRun.stderr),
+        `…and one whose answers are not JSON, its four claims failed, for --retry-failed (exit ${unreadRun.code}, ${ownCalls - asked} asked, claims ${unreadClaims.join(",")}): ${unreadRun.stderr.trim().slice(0, 400)}`);
+
+      // A breakage that starts late is judged over the last answers, not diluted by those before it: one empty answer in
+      // five is a fifth and no more, so the run goes on, and two in the last five stop it at the eighth. Only those two go
+      // back to the pool: the first, before them, stands finished, asked.
+      await drop(unreadIds);
+      JUDGE_ALARM.min = 5;
+      const lateIds = await seedAll(["Alarm note 13: named nothing, early.", ...Array.from({ length: 5 }, (_, i) => `Alarm note ${i + 14}: alarm-good work.`),
+        "Alarm note 19: named nothing, late.", "Alarm note 20: named nothing, last."]);
+      asked = ownCalls;
+      const lateRun = await sweep({ limit: 16 });
+      const lateClaims = await statusOf(lateIds);
+      const lateRecorded = (await subjects()).filter((s) => lateIds.includes(s.thought) && s.standing).length;
+      assert(lateRun.code === 3 && ownCalls - asked === 8 && lateClaims.join(",") === "succeeded,succeeded,succeeded,succeeded,succeeded,succeeded,pending,pending" && lateRecorded === 5
+        && /\n {2}2 of the judge model's last 5 answers gave no subject \(2 naming nothing a key holds\)/.test(lateRun.stderr)
+        && /The 2 thought\(s\) it named nothing for are back in the pool/.test(lateRun.stderr),
+        `a late breakage stops the run at the eighth answer, two of its last five empty, where one empty in five did not: those two back in the pool, the early one finished and the five subjects recorded (exit ${lateRun.code}, ${ownCalls - asked} asked, claims ${lateClaims.join(",")}, ${lateRecorded} recorded): ${lateRun.stderr.trim().slice(0, 400)}`);
+
+      // The hand-back takes a claim only while it is the run's own and finished. A thought it finished as named nothing,
+      // edited while the next is asked and so pooled again, is claimed once more and answered not as JSON: the trip on that
+      // answer leaves its claim failed, not put back over its failure.
+      await drop(lateIds);
+      JUDGE_ALARM.min = 4;
+      const [againT, ...againRest] = await seedAll(["Alarm note 31: named nothing at first.", "Alarm note 32: alarm-good work.", "Alarm note 33: alarm-good work."]);
+      onOwn = async (thought) => {
+        if (!thought.includes("Alarm note 32")) return;
+        onOwn = null;
+        await sql`SELECT update_thought(${againT}::uuid, ${"Alarm note 31: garbled on its second asking."})`;
+      };
+      asked = ownCalls;
+      const againRun = await sweep({ limit: 12 }).finally(() => { onOwn = null; });
+      const againClaim = await claimOf(againT);
+      assert(againRun.code === 3 && ownCalls - asked === 4 && againClaim?.status === "failed"
+        && /\n {2}2 of the judge model's last 4 answers gave no subject \(1 not JSON of the expected shape, 1 naming nothing a key holds\)/.test(againRun.stderr) && !/back in the pool/.test(againRun.stderr),
+        `the alarm hands back only claims still the run's and finished: one it finished as named nothing, pooled again by an edit and failed at its second asking, stays failed (exit ${againRun.code}, ${ownCalls - asked} asked, its claim ${againClaim?.status}): ${againRun.stderr.trim().slice(0, 400)}`);
+
+      // …nor a claim another run holds now: one it finished as named nothing, edited and finished since by another run,
+      // stays that run's, where the two it finished itself go back.
+      await drop([againT, ...againRest]);
+      const [otherT, ...otherRest] = await seedAll(["Alarm note 34: named nothing, then another run's.", "Alarm note 35: alarm-good work.", "Alarm note 36: named nothing.", "Alarm note 37: named nothing, last."]);
+      onOwn = async (thought) => {
+        if (!thought.includes("Alarm note 35")) return;
+        onOwn = null;
+        await sql`SELECT update_thought(${otherT}::uuid, ${"Alarm note 34: edited, and finished by another run."})`;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded', worker_id = 'another-run', finished_at = now() WHERE thought_id = ${otherT}::uuid AND work_type = ${POOL}`;
+      };
+      asked = ownCalls;
+      const otherRun = await sweep({ limit: 12 }).finally(() => { onOwn = null; });
+      const otherClaims = (await sql`SELECT thought_id::text AS id, status, worker_id FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array([otherT, ...otherRest], "TEXT")}::uuid[])`) as { id: string; status: string; worker_id: string | null }[];
+      const otherOf = (id: string) => otherClaims.find((c) => c.id === id);
+      assert(otherRun.code === 3 && ownCalls - asked === 4 && otherOf(otherT)?.status === "succeeded" && otherOf(otherT)?.worker_id === "another-run"
+        && otherRest.slice(1).every((id) => otherOf(id)?.status === "pending") && otherOf(otherRest[0])?.status === "succeeded"
+        && /The 2 thought\(s\) it named nothing for are back in the pool/.test(otherRun.stderr),
+        `…nor one another run finished since: it stays that run's, and the two the run finished itself go back (exit ${otherRun.code}, ${ownCalls - asked} asked, claims ${otherClaims.map((c) => `${c.status}/${c.worker_id === "another-run" ? "other" : c.worker_id === null ? "none" : "this"}`).join(",")}): ${otherRun.stderr.trim().slice(0, 400)}`);
+
+      // A call past the limit is no answer: a judge that times out on every thought fails each claim, exit 1, and gives the
+      // alarm nothing to judge.
+      await drop([otherT, ...otherRest]);
+      const slowIds = await seedAll(Array.from({ length: 5 }, (_, i) => `Alarm note ${i + 21}: a judge too slow for it.`));
+      judgeMode = "slow";
+      const slowRun = await sweep({ timeout: 1, limit: 10 });
+      judgeMode = "answer";
+      const slowClaims = await statusOf(slowIds);
+      assert(slowRun.code === 1 && slowClaims.every((c) => c === "failed") && !/gave no subject/.test(slowRun.stderr),
+        `…and a judge that times out on every thought gives it no answer to judge: each claim failed, exit 1, no alarm (exit ${slowRun.code}, claims ${slowClaims.join(",")}): ${slowRun.stderr.trim().slice(0, 300)}`);
+    } finally {
+      Object.assign(JUDGE_ALARM, savedAlarm);
+      garbledAnswers = savedGarbled;
+      judgeMode = "answer";
+      owns.pop();
+    }
     // The filed ticket in SQL against metadataTicket, value by value: the key's length at its edge, and what JavaScript's
     // trim takes that the locale's [[:space:]] may not (review pass 4, cold read: a no-break space about an id).
     const metas: unknown[] = [{}, { ticket: "SMD-1" }, { ticket: " SMD-2 " }, { ticket: "\tSMD-3\n" }, { ticket: "smd-4" }, { ticket: 5 }, { ticket: "S-6" },

@@ -2912,7 +2912,7 @@ bun extract-entities.ts --url … --subjects rules        # …the rules alone, 
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: more than a fifth of its last 48 answers gave no subject (PR 5b, ahead of 1) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3293,6 +3293,34 @@ thought with no current subject while its pool is not named), and reads on
 through a signal, as the pass's does; its pages go by thought id, so with
 `--limit` it counts the first by id, which a run need not take first. Sleep
 does not run the sweep yet: that is SMD-3306 PR 6, on SMD-3379's scheduler.
+
+**A judge that answers garbage stops the sweep, exit 3 (SMD-3306 PR 5b).** The
+pass's alarm (SMD-2266, above), for the judge model, and judged as the run goes,
+not at its end: a call can take 900 s, and an answer that names nothing finishes
+its claim, the record that the thought was asked. The run keeps the judge's last
+48 answers and, after each claim, stops once more than a fifth of them gave no
+subject: not JSON of the expected shape, or a subject naming nothing a key holds
+(an empty one, or only a ticket, release or PR the thought does not name, the
+model's invention or its copy of the question's example). A call past the limit
+and a row the egress gate refuses are no answers; a key the door refuses is one
+that gave a key. It says so on stderr in two lines: the counts, then what to
+check (`OB1_JUDGE_MODEL`, the chat endpoint, `OB1_SUBJECT_REASONING`) and what it
+did. The claims among those answers it finished as named nothing go back to the
+pool, while still its own and finished, since nothing else would ask them again
+(a changed judge model leaves them finished, above); those it could not read stay
+failed, for `--retry-failed`, as the pass leaves its malformed rows. It exits 3,
+ahead of the 1 of claims failed. A breakage that starts late stops the run within
+48 answers, not diluted by the good ones before it; a run of fewer than 48
+answers is not judged, so try a new judge model with `--limit 48` first. It reads
+an answer's shape, not its truth: on 100 canary thoughts the 27B had keyed,
+`qwen2.5:7b`, the judge when `OB1_JUDGE_MODEL` is unset, answered every one in
+shape and named nothing for one, and gave the 27B's key for 60 of the other 99,
+where the 27B named nothing for 1 of the 63 it was asked in the canary's first
+naming run. So a weaker judge passes it, and `--subjects rules` stays the way for
+a brain whose judge model has not been measured on the question. Nor does it
+catch a judge that never ends its answer: `qwen3.5:0.8b`, thinking, ran 3 of 3
+canary thoughts to the 300 s limit, and a call past the limit is no answer, so
+each such claim fails at the limit a call, through the pool.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5749,11 +5777,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3086 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1845 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1851 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 419 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 425 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
