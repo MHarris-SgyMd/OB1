@@ -299,8 +299,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3105 assertions: 3105 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and fourteen (114) migrations applied, and
+`bun test-schema.ts` prints `3127 assertions: 3127 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -341,7 +341,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306), 114 SMD-2608).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2243,6 +2243,72 @@ test-schema [102], test-upgrade [20bf] (refused without each prerequisite; the
 backfill onto a populated brain at 113), test-live [16] (`--reject` and `--list`
 with and without a key).
 
+Migration 115 adds work claims: who holds a ticket, or one piece of it, under a
+lease, so two agents never build the same change (SMD-3597, under SMD-3596). On
+2026-10-29 a session recommended SMD-3379 PR 1b-2 while another had its worktree
+open, and nothing any agent could read said so. `work_claims` holds one row per
+claim, kept after it ends. The work is a ticket key (`SMD-3379`, upper-cased: a
+team key of at most 16 ASCII letters and digits, a number of at most 10 digits
+with no leading zero) and an optional piece (`PR 1b-2`, its zero-width marks
+deleted, its runs of white space, Unicode's included, made one space and trimmed,
+compared case-folded by the database's collation). The holder is
+stamped from the call's actor envelope (`p_actor`, which the server passes for
+the key), never from an argument; a call with no envelope, or from a key the
+registry calls `ingested`, raises. `claim_work` returns a **token** once (`wc_`
+and 64 hex digits) and keeps only its SHA-256: a claim is the caller's own only
+when the key **and** the token match (a claim made by key name alone, by that
+name), so two agents under one key refuse each other, and nothing a refusal or a
+list shows proves ownership. To its own key the token is a bearer secret: send it
+as a bind parameter, never in a statement's text. That keeps it out of
+`pg_stat_activity` and error lines, but statement logging (`log_statement`,
+`log_min_duration_statement`, auto_explain) prints bind values whole unless
+`log_parameter_max_length = 0`, which only a superuser can set. The
+`label` is free text for people, returned as data. `claim_work` answers `claimed`
+(with the token), `renewed` (given the token of the caller's own claim on exactly
+that work) or `refused` with the code `WORK_CLAIMED`, a message naming the work
+asked for, the first holder's key and the times (never text another key wrote),
+and every claim in the way: a refusal is an answer, never an exception. A
+whole-ticket claim and a claim on one of its pieces are the same work, either way
+round; two pieces are not; a piece blank once cleaned raises (22023), never read
+as the whole ticket. No two live claims cover one work, whoever holds them: the
+holder's own claim on overlapping work is in the way too, and a lapsed own claim
+another live claim now covers is refused and stays lapsed. A lapsed claim on
+exactly the work is taken over by any claim without its token, its own key's
+included, which is how a lost token is recovered. `release_work_claim` answers
+`already_released` to any caller, as the list shows an ended claim to anyone.
+`renew_work_claim` and `release_work_claim` act on the holder's own claim, given
+its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
+releases another holder's, for an operator key named by its agent id (a name
+alone lends no kind, SMD-2608's rule) and with a reason. The lease is 60 seconds
+to a week, four hours by default; a claim past it has lapsed, counts as free, and
+is closed as taken over by the next claim on exactly its ticket and piece, so
+nothing reaps. `list_work_claims` reads the live claims of the tickets named, or
+every claim with its state (live, lapsed, released), never a token or its hash.
+Each writing call raises (0A000) in a transaction above READ COMMITTED before it
+reads, and takes an advisory lock on its ticket until its transaction ends (068's
+rule). Make one writer call (claim, renew or release) per transaction, or take
+tickets in key order: two transactions writing two tickets in opposite orders
+deadlock (40P01), and nothing enforces it. What raises, by SQLSTATE: 22023 a
+malformed argument; 42501 a call with no holder (the caller passed no key) or from
+an ingested key, and a role missing the grant (naming `work_claims`); 0A000 the
+isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for the
+rest of the transaction (029's shape). `list_work_claims` matches nothing for a
+malformed key rather than raising, and a refused forced release shares the code
+`CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
+row is 015's worker claims, not these. The partial unique index
+`work_claims_one_unreleased` holds the exact-work rule for a write made without
+the lock. Claims are not in
+`thought_audit`: they change no thought, and the table keeps its own history. The
+**claims** grant group (SELECT, INSERT, UPDATE on `work_claims`; no DELETE) is
+soft: a role without it gets a permission error (42501) naming `work_claims` on
+the calls, and nothing else; the rules hold for
+callers of the functions, while a role with the group can write the table
+directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
+The REST and MCP operations are SMD-3598, the `claimed` label on results
+SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
+the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
+(onto a populated brain at 114).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2361,6 +2427,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2434,8 +2501,8 @@ needs the privileges a real run does and shows what that run would refuse. A rol
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
-for a role that writes pages (064), and **sleep**, named in `--groups`, for
-the role the sleep scheduler connects as when a search should wake it. The
+for a role that writes pages (064), and **claims** for a role whose clients
+claim work (115). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply
@@ -5790,9 +5857,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3105 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1864 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3127 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1869 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 427 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
