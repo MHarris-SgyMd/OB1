@@ -3170,8 +3170,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const EXTRACT = "extract:stub@p1";
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written,pass_settled_at",
-    `supersession_proposals has the eighteen columns, in order — 091's pass_settled_at last (${cols.join(",")})`);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written,pass_settled_at,reviewed_by,reviewed_by_agent_id,reviewed_by_kind",
+    `supersession_proposals has the twenty-one columns, in order — 091's pass_settled_at, then 114's reviewer three last (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -3364,7 +3364,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const capRej = await review(capPid!, "reject");
   assert(capRej.ok === true && capRej.cleared === false && (await supersedesOf(capNew)) === capOld, "rejecting it clears nothing: the capture-time pointer was not this proposal's to clear");
   const chk = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c'`)).rows[0].c;
-  assert(chk === 9, `the table carries nine CHECK constraints, the state machine's among them (${chk})`);
+  assert(chk === 11, `the table carries eleven CHECK constraints, the state machine's and 114's two among them (${chk})`);
 
   // The verdict is about the texts as judged. Edit the newer thought after
   // the proposal: the queue says so, accept refuses EDITED_SINCE, --force
@@ -8703,8 +8703,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `sixteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
+    `seventeen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15750,10 +15750,13 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const KEY = "subject:qwen3.8:27b@p1";
 
-  // The shape: 111 the last definer of its four functions and of the two it carries; the sentinels; the trigger; the
-  // indexes; the CHECK; the comments.
-  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"])
-    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("111"), `one ${fn}, 111 its last definer (${lastDefinerOf(fn)})`);
+  // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
+  // with a check of the ticket a thought is filed under ([101]); the sentinels; the trigger; the indexes; the CHECK; the
+  // comments.
+  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
+    const by = fn === "record_thought_subject" ? "113" : "111";
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
+  }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
   assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src(RTS)),
     "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write");
@@ -15872,6 +15875,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
+  // 111 re-applied alone put its door back: the shipped one is 113's, which the sections after read.
+  await restoreShipped("record_thought_subject");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
@@ -15957,7 +15962,231 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
-console.log("\n[101] Migration 113: work claims — a ticket or one piece of it held under a lease by a key and the token claim_work returns once, stamped from the envelope; any other claim refused by an answer naming the holder's key, never its label, a whole ticket and its pieces the same work, two pieces not; the holder's own claim renewed with its token; a lapsed claim free and taken over; renew and release the holder's own, an operator's forced release by agent id with a reason; free text cleaned, an ingested key refused; READ COMMITTED alone; the claims grant group; a re-apply a no-op (SMD-3597)");
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one whose metadata.ticket or metadata.issue changes, nothing while none (or a blank one) is named or for any other metadata edit; the door refusing a subject the ticket a thought is filed under disagrees with (ob1_filed_ticket); close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+{
+  const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
+  const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
+  const trigger = async () => (await db.query<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('thoughts_enqueue_subject()'::regprocedure, 'pg_proc')) AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_subject_pool'`)).rows[0];
+  const trig = await trigger();
+  assert(trig.n === 1 && /Migration 113 \/ SMD-3306/.test(trig.c ?? "") && /ob1:subject-pool/.test(src), `one pool trigger on thoughts, its function's comment and the file's sentinel naming it (${trig.n})`);
+
+  const POOL = "subjects:r1.2:p2r";
+  const add = async (content: string) => (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}') RETURNING id`, [content])).rows[0].id;
+  const status = async (id: string) => (await db.query<{ s: string }>(`SELECT status AS s FROM thought_work_claims WHERE thought_id = $1 AND work_type = $2`, [id, POOL])).rows[0]?.s ?? "none";
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  const before = await add("[101] captured before a pool is named");
+  assert((await status(before)) === "none", "no pool named: a new thought joins none");
+  // A blank key names no pool, as 016's trigger reads a blank extraction key (review pass 1: no case held it).
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', '')`);
+  const blank = await add("[101] captured under a blank key");
+  assert((await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM thought_work_claims WHERE thought_id = $1 AND work_type = ''`, [blank])).rows[0].n === 0,
+    "a blank key names no pool: a new thought joins none, and the capture is not refused");
+  await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'subject_pool_key'`, [POOL]);
+  const after = await add("[101] captured after");
+  assert((await status(after)) === "pending", "a pool named: a new thought joins it, pending");
+  const finish = () => db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  await finish();
+  await db.query(`UPDATE thoughts SET metadata = '{"note": "a metadata edit"}' WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "a metadata edit does not put it back");
+  await db.query(`UPDATE thoughts SET content = content WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "nor does a write of the same text");
+  // Filed under a ticket after it was asked: the metadata rule reads metadata.ticket, else metadata.issue, so either
+  // moving puts it back (review pass 1: a ticket filed later was never read).
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"ticket": "SMD-101"}'::jsonb WHERE id = $1`, [after]);
+  const byTicket = await status(after);
+  await finish();
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-102"}'::jsonb WHERE id = $1`, [after]);
+  const byIssue = await status(after);
+  await finish();
+  assert(byTicket === "pending" && byIssue === "pending", `filing it under a ticket, or under an issue, puts a finished thought back (${byTicket}, ${byIssue})`);
+  await db.query(`UPDATE thoughts SET content = '[101] captured after, edited' WHERE id = $1`, [after]);
+  assert((await status(after)) === "pending", "an edit of its text puts a finished thought back in the pool");
+  await db.query(`UPDATE thoughts SET content = '[101] captured before, edited' WHERE id = $1`, [before]);
+  assert((await status(before)) === "pending", "…and an edit pools a thought captured before the pool was named");
+
+  // The door, 111's carried with one check more: the ticket the thought is filed under, read under its lock. A rule's
+  // subject under another ticket, or a session header's or a model's on a thought filed since, is stale (review pass 5,
+  // run-it: a sweep's answer, or the pass's rule, read before the ticket moved, replaced the subject another pass had
+  // recorded since, and no run took the thought again).
+  const fp = async (id: string) => (await db.query<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1`, [id])).rows[0].f;
+  const doorSrc = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_thought_subject(uuid, text, text, text, uuid, text, jsonb)'::regprocedure`)).rows[0].s;
+  assert(lastDefinerOf("record_thought_subject").startsWith("113") && lastDefinerOf("ob1_filed_ticket").startsWith("113") && /ob1_filed_ticket\(t\.metadata\)/.test(doorSrc) && /ob1:subject-lineage-with-its-artifact/.test(doorSrc),
+    "113 the door's last definer, its body reading ob1_filed_ticket and keeping 111's sentinel, and ob1_filed_ticket's");
+  const doorAt = async (id: string, key: string, by: string) =>
+    (await db.query<{ r: Record<string, unknown> }>(`SELECT record_thought_subject($1, $2, $3, $4, NULL, $5, NULL) AS r`, [id, key, by, `subject:${by}@r1`, await fp(id)])).rows[0].r;
+  const filedT = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[101] filed under its ticket', $1) RETURNING id`, [JSON.stringify({ ticket: " SMD-103 " })])).rows[0].id;
+  const atFiled = [await doorAt(filedT, "phrase:what the model read", "model"), await doorAt(filedT, "ticket:SMD-9", "first_line"), await doorAt(filedT, "ticket:SMD-9", "metadata"), await doorAt(filedT, "ticket:SMD-103", "metadata")];
+  assert(atFiled.slice(0, 3).every((r) => r.action === "none" && r.stale === true) && atFiled[3].action === "added",
+    `on a thought filed under SMD-103: a model's subject, a session header's and a rule's under another ticket refused as stale, the rule's at its ticket added (${atFiled.map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // Moved to its issue, behind a ticket that is not one and a no-break space: the rule's subject at the old ticket is
+  // stale now, at the issue's it replaces; taken away, a model's is added.
+  await db.query(`UPDATE thoughts SET metadata = $2 WHERE id = $1`, [filedT, JSON.stringify({ ticket: "not one", issue: "\u00a0SMD-104" })]);
+  const atIssue = [await doorAt(filedT, "ticket:SMD-103", "metadata"), await doorAt(filedT, "ticket:SMD-104", "metadata")];
+  await db.query(`UPDATE thoughts SET metadata = '{}' WHERE id = $1`, [filedT]);
+  const unfiledT = [await doorAt(filedT, "ticket:SMD-104", "metadata"), await doorAt(filedT, "phrase:what the model read", "model")];
+  assert(atIssue[0].stale === true && atIssue[1].action === "replaced" && unfiledT[0].stale === true && unfiledT[1].action === "replaced",
+    `filed under its issue: the old ticket's subject stale, the issue's replacing it; taken away: the rule's stale, a model's replacing it (${[...atIssue, ...unfiledT].map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // ob1_filed_ticket: metadataTicket in SQL (test-live [10h] holds the two together value by value; here its shape).
+  const filedOf = async (m: unknown) => (await db.query<{ t: string | null }>(`SELECT ob1_filed_ticket($1::jsonb) AS t`, [JSON.stringify(m)])).rows[0].t;
+  const filedVals = [await filedOf({ ticket: "\ufeffSMD-105\u3000" }), await filedOf({ ticket: "smd-106" }), await filedOf({ ticket: 107 }), await filedOf({ issue: ["SMD-108"] }),
+    await filedOf({ ticket: `SMD-${"9".repeat(196)}` }), await filedOf({ ticket: `SMD-${"9".repeat(197)}` }), await filedOf([]), await filedOf("SMD-109"), await filedOf(null)];
+  assert(filedVals[0] === "SMD-105" && filedVals.slice(1, 4).every((v) => v === null) && filedVals[4]?.length === 200 && filedVals.slice(5).every((v) => v === null),
+    `ob1_filed_ticket: a BOM and an ideographic space trimmed; a lower-case id, a number, an array, an id over 200 characters, metadata not an object: none (${filedVals.map((v) => v === null ? "null" : v.slice(0, 12)).join(", ")})`);
+
+  // The close: the subject read, and no other — on a thought filed under no ticket, a model's subject its own.
+  const closeT = await add("[101] the close's thought");
+  const write = async (id: string, key: string) => (await db.query<{ r: { id: string } }>(`SELECT record_thought_subject($1, $2, 'model', 'subject:x@p2', NULL, $3, NULL) AS r`, [id, key, await fp(id)])).rows[0].r.id;
+  const close = async (id: string, facet: string, f: string) => (await db.query<{ c: Record<string, unknown> }>(`SELECT close_thought_subject($1, $2, $3) AS c`, [id, facet, f])).rows[0].c;
+  const standing = async (id: string) => (await db.query<{ id: string | null }>(`SELECT max(id::text) AS id FROM thought_facets WHERE thought_id = $1 AND kind = 'subject' AND valid_until IS NULL`, [id])).rows[0].id;
+  const read = await write(closeT, "phrase:the one read");
+  const since = await write(closeT, "phrase:written since");
+  const moved = await close(closeT, read, await fp(closeT));
+  assert(moved.action === "none" && moved.moved === true && moved.id === since && (await standing(closeT)) === since,
+    `another subject written since the read: not closed, the one standing named (${JSON.stringify(moved)})`);
+  const stale = await close(closeT, since, "0".repeat(64));
+  assert(stale.action === "none" && stale.stale === true && (await standing(closeT)) === since, `a text moved since the read: not closed (${JSON.stringify(stale)})`);
+  const closed = await close(closeT, since, await fp(closeT));
+  assert(closed.action === "closed" && closed.id === since && (await standing(closeT)) === null, `the subject read, at the text read: closed (${JSON.stringify(closed)})`);
+  const none = await close(closeT, since, await fp(closeT));
+  assert(none.action === "none" && none.moved === undefined && none.stale === undefined, `none standing: none (${JSON.stringify(none)})`);
+  const gone = await close("00000000-0000-0000-0000-000000000113", since, await fp(closeT));
+  assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
+  const refused: string[] = [];
+  for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {
+    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) { refused.push((e as { code?: string }).code ?? (e as Error).message); }
+  }
+  assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
+  const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
+  assert(/Migration 113 \/ SMD-3306/.test(comment), `close_thought_subject's comment names the migration (${comment.slice(0, 60)})`);
+
+  // Re-applied, nothing moves.
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  assert(again.endsWith("_subject_pool.sql") && (await trigger()).n === 1 && (await status(after)) === "pending", `113 applied again changes nothing: one trigger, the pool as it was (${again.slice(0, 80)})`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
+}
+
+console.log("\n[102] Migration 114: who decided a proposal — reviewed_by, reviewed_by_agent_id and reviewed_by_kind, stamped by one trigger from the decision's envelope (never the statement's values), accept and reject alike; a decision with no key carries its name alone, one with no envelope none; a reopen clears them; two CHECKs; the backfill from the audit; a re-apply a no-op (SMD-2608)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const file = files.find((f) => f.endsWith("_proposal_reviewer.sql")) ?? "no _proposal_reviewer.sql";  // by name: renumbered when main takes its number
+  const src = readFileSync(join(MIGRATIONS, file), "utf8");
+  // Earlier sections leave a session-wide envelope; this one sets its own per call.
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await restoreShipped("record_supersession_proposal", "review_supersession_proposal");
+
+  // The shape: three columns with their comments, one trigger, its function's comment, the file's sentinel.
+  const colComments = await q<{ c: string; d: string | null }>(`SELECT a.attname AS c, col_description(a.attrelid, a.attnum) AS d FROM pg_attribute a
+     WHERE a.attrelid = 'supersession_proposals'::regclass AND a.attname IN ('reviewed_by', 'reviewed_by_agent_id', 'reviewed_by_kind') ORDER BY a.attnum`);
+  const trig = await one<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('ob1_stamp_proposal_reviewer()'::regprocedure, 'pg_proc')) AS c
+     FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND tgname = 'supersession_proposals_stamp_reviewer'`);
+  assert(colComments.map((r) => r.c).join() === "reviewed_by,reviewed_by_agent_id,reviewed_by_kind" && colComments.every((r) => /Migration 114 \/ SMD-2608/.test(r.d ?? ""))
+      && trig.n === 1 && /Migration 114 \/ SMD-2608/.test(trig.c ?? "") && /ob1:proposal-reviewer-from-the-envelope/.test(src),
+    `three reviewer columns, each commented; one stamping trigger, its function's comment and the file's sentinel naming it (${colComments.map((r) => r.c).join()}, ${trig.n})`);
+
+  // A corpus: four pairs, one proposal each, and two classified keys.
+  const t: string[] = [];
+  for (let i = 0; i < 8; i++)
+    t.push((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[102] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL }), unit(40 + i)])).r.id);
+  const propose = async (o: number, n: number) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`, [t[o], t[n]])).id;
+  const p1 = await propose(0, 1), p2 = await propose(2, 3), p3 = await propose(4, 5), p4 = await propose(6, 7);
+  const opId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[102] operator key', 'operator') RETURNING canonical_agent_id::text AS id`)).id;
+  const agId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[102] agent key', 'agent') RETURNING canonical_agent_id::text AS id`)).id;
+  const OP = { name: "[102] operator key", via: "consolidate", agent_id: opId };
+  const AG = { name: "[102] agent key", via: "open-brain-api", agent_id: agId };
+  const review = async (id: string, decision: "accept" | "reject", actor: unknown) =>
+    (await one<{ r: { ok: boolean; cleared?: boolean } }>(`SELECT review_supersession_proposal($1::uuid, $2, 'note', NULL, $3::jsonb, false) AS r`, [id, decision, actor === null ? null : JSON.stringify(actor)])).r;
+  const who = async (id: string) => await one<{ by: string | null; agent: string | null; kind: string | null }>(
+    `SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = $1::uuid`, [id]);
+  const whoText = async (id: string) => JSON.stringify(await who(id));
+  const NONE = JSON.stringify({ by: null, agent: null, kind: null });
+  const BY_OP = JSON.stringify({ by: OP.name, agent: opId, kind: "operator" });
+
+  // Pending: no reviewer. A reject under the operator's key records it — the case SMD-2608 found recording nothing.
+  assert((await whoText(p1)) === NONE, "a pending row has no reviewer");
+  const r1 = await review(p1, "reject", OP);
+  assert(r1.ok === true && r1.cleared === false && (await whoText(p1)) === BY_OP,
+    `a reject that clears nothing records its reviewer: the key's name, agent and the registry's kind (${await whoText(p1)})`);
+  // An accept records it too; a later decision by another key replaces it, a clearing reject included.
+  await review(p2, "accept", OP);
+  assert((await whoText(p2)) === BY_OP, `an accept records its reviewer (${await whoText(p2)})`);
+  const r2 = await review(p2, "reject", AG);
+  assert(r2.ok === true && r2.cleared === true && (await whoText(p2)) === JSON.stringify({ by: AG.name, agent: agId, kind: "agent" }),
+    `the agent's reject of the operator's accept replaces the reviewer, so a person's decision is told from an agent's (${await whoText(p2)})`);
+  // No key: db/consolidate.ts's 'consolidate' and no agent; no envelope at all: none of the three.
+  await review(p3, "reject", { name: "consolidate", via: "consolidate" });
+  assert((await whoText(p3)) === JSON.stringify({ by: "consolidate", agent: null, kind: null }), `a decision with no key carries its name alone, no agent and no kind (${await whoText(p3)})`);
+  await review(p4, "reject", null);
+  assert((await whoText(p4)) === NONE, `a decision with no envelope records none (${await whoText(p4)})`);
+  // An agent_id not in the server's form is no agent, as on the audit row (010's reading), and a name alone — anyone's
+  // to write, here a classified key's — lends the decision no kind. The name is kept as the envelope gave it.
+  await review(p4, "reject", { name: "[102] agent key ", agent_id: "not-a-uuid" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[102] agent key ", agent: null, kind: null }), `a malformed agent id is no agent, and a classified key's name alone lends no kind (${await whoText(p4)})`);
+  await review(p4, "reject", { name: "[102] agent key" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[102] agent key", agent: null, kind: null }), `…nor that name exactly, with no agent id (${await whoText(p4)})`);
+
+  // Never the statement's values: a write naming the columns is stamped from the envelope present (none here).
+  await db.query(`UPDATE supersession_proposals SET reviewed_by = 'forged', reviewed_by_kind = 'operator' WHERE id = $1::uuid`, [p1]);
+  assert((await whoText(p1)) === NONE, `a statement's own reviewer is replaced by the envelope's, here none (${await whoText(p1)})`);
+  await db.query(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(OP)]);
+  await db.query(`UPDATE supersession_proposals SET review_note = 'renoted' WHERE id = $1::uuid`, [p1]);
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  assert((await whoText(p1)) === BY_OP, `…and a raw write of the decision under an envelope is that envelope's (${await whoText(p1)})`);
+  // A write naming none of the columns leaves them; a reopen (067's statement) clears them.
+  await db.query(`UPDATE supersession_proposals SET similarity = 0.5 WHERE id = $1::uuid`, [p1]);
+  assert((await who(p1)).by === OP.name, "a write naming none of the decision's columns leaves the reviewer as it was");
+  // Under an envelope, as a pass's run holds one: the clear is the trigger's, not an empty stamp.
+  await db.query(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(AG)]);
+  let reopen = "";
+  try { await db.query(`UPDATE supersession_proposals SET status = 'stale', reviewed_at = NULL, review_note = NULL WHERE id = $1::uuid AND status IN ('pending', 'rejected')`, [p1]); } catch (e) { reopen = (e as Error).message; }
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  assert(reopen === "" && (await whoText(p1)) === NONE, `067's reopen clears the reviewer with reviewed_at, an envelope present or not (${reopen.slice(0, 80) || await whoText(p1)})`);
+
+  // The CHECKs, with the trigger out of the way: a reviewer on an unreviewed row, and a kind outside the registry's, refused.
+  await db.exec(`ALTER TABLE supersession_proposals DISABLE TRIGGER supersession_proposals_stamp_reviewer`);
+  const refused = async (sql: string) => { try { await db.exec(sql); return "applied"; } catch (e) { return (e as Error).message; } };
+  const onStale = await refused(`UPDATE supersession_proposals SET reviewed_by = 'x' WHERE id = '${p1}'`);
+  const badKind = await refused(`UPDATE supersession_proposals SET reviewed_by_kind = 'robot' WHERE id = '${p2}'`);
+  const kindNoAgent = await refused(`UPDATE supersession_proposals SET reviewed_by_kind = 'operator', reviewed_by_agent_id = NULL WHERE id = '${p2}'`);
+  await db.exec(`ALTER TABLE supersession_proposals ENABLE TRIGGER supersession_proposals_stamp_reviewer`);
+  assert(/supersession_proposals_reviewer_decided/.test(onStale) && /supersession_proposals_reviewed_by_kind/.test(badKind) && /supersession_proposals_reviewed_by_kind/.test(kindNoAgent),
+    `the CHECKs hold a write made with the trigger dropped: no reviewer on an unreviewed row, a kind the registry's and only beside an agent (${onStale.slice(0, 80)}; ${badKind.slice(0, 80)}; ${kindNoAgent.slice(0, 80)})`);
+
+  // The backfill: rows decided before 114 (reviewer emptied with the trigger off), re-applied. An accept that wrote its
+  // pointer and a reject that cleared one have an audit row naming the actor; a reject that cleared nothing has none.
+  await review(p3, "accept", AG);
+  // p5: an accept, a clearing reject, then a reject by another key clearing nothing — the clear's audit row is an
+  // earlier decision's, and the standing one has none.
+  const p5 = await propose(1, 2);
+  await review(p5, "accept", OP);
+  await review(p5, "reject", AG);
+  await review(p5, "reject", OP);
+  const before = { p2: await whoText(p2), p3: await whoText(p3), p4: await whoText(p4), p5: await whoText(p5) };
+  await db.exec(`ALTER TABLE supersession_proposals DISABLE TRIGGER supersession_proposals_stamp_reviewer`);
+  await db.query(`UPDATE supersession_proposals SET reviewed_by = NULL, reviewed_by_agent_id = NULL, reviewed_by_kind = NULL WHERE id = ANY($1::uuid[])`, [[p2, p3, p4, p5]]);
+  await db.exec(`ALTER TABLE supersession_proposals ENABLE TRIGGER supersession_proposals_stamp_reviewer`);
+  let again: string;
+  try { again = await reapply(file.slice(0, 3)); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  const trigAgain = (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND tgname = 'supersession_proposals_stamp_reviewer'`)).n;
+  assert(again.endsWith("_proposal_reviewer.sql") && (await whoText(p3)) === before.p3 && (await whoText(p2)) === before.p2 && (await whoText(p4)) === NONE && trigAgain === 1,
+    `the backfill names the reviewer the audit holds — the accept's write (${await whoText(p3)}) and the clearing reject's (${await whoText(p2)}) — and guesses none for a reject that cleared nothing (${before.p4} → ${await whoText(p4)}); one trigger after (${again.slice(0, 60)}, ${trigAgain})`);
+  assert(before.p5 === BY_OP && (await whoText(p5)) === NONE,
+    `…nor for a reject clearing nothing after an earlier decision's clear: the audit row must be the standing decision's own, by its time (${before.p5} → ${await whoText(p5)})`);
+  // Re-applied, a row already holding a reviewer is not touched — p3's audit names the agent, its row now the operator.
+  await db.query(`SELECT set_config('ob1.actor', $1, false)`, [JSON.stringify(OP)]);
+  await db.query(`UPDATE supersession_proposals SET review_note = 'renoted by the operator' WHERE id = $1::uuid`, [p3]);
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await reapply(file.slice(0, 3));
+  assert((await whoText(p3)) === BY_OP, `a re-apply leaves a row already holding a reviewer as it was, whatever its audit names (${await whoText(p3)})`);
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[102]%'`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[102]%'`);
+}
+
+console.log("\n[103] Migration 115: work claims — a ticket or one piece of it held under a lease by a key and the token claim_work returns once, stamped from the envelope; any other claim refused by an answer naming the holder's key, never its label, a whole ticket and its pieces the same work, two pieces not; the holder's own claim renewed with its token; a lapsed claim free and taken over; renew and release the holder's own, an operator's forced release by agent id with a reason; free text cleaned, an ingested key refused; READ COMMITTED alone; the claims grant group; a re-apply a no-op (SMD-3597)");
 {
   type Claim = { id: string; issue: string; piece: string | null; holder: string; holder_kind: string | null; holder_agent_id: string | null; label: string | null; claimed_at: string; renewed_at: string | null; expires_at: string; released_at: string | null; released_by: string | null; released_by_kind: string | null; release_reason: string | null; state: string };
   type Answer = { outcome: string; code: string | null; message: string | null; claim: Claim | null; held_by: Claim[]; token: string | null };
@@ -15989,7 +16218,7 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   const idx = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claims_one_unreleased')) AS d`)).rows[0].d ?? "";
   const tc = (await db.query<{ c: string | null }>(`SELECT obj_description('work_claims'::regclass, 'pg_class') AS c`)).rows[0].c ?? "";
   const cols = (await db.query<{ c: string }>(`SELECT column_name AS c FROM information_schema.columns WHERE table_name = 'work_claims'`)).rows.map((r) => r.c);
-  assert(/^CREATE UNIQUE INDEX work_claims_one_unreleased ON public\.work_claims USING btree \(issue, piece_key\) WHERE \(released_at IS NULL\)$/.test(idx) && /Migration 113 \/ SMD-3597/.test(tc)
+  assert(/^CREATE UNIQUE INDEX work_claims_one_unreleased ON public\.work_claims USING btree \(issue, piece_key\) WHERE \(released_at IS NULL\)$/.test(idx) && /Migration 115 \/ SMD-3597/.test(tc)
     && /ob1:work-claim-holder-from-the-envelope/.test(src) && /ob1:work-claim-one-per-work/.test(src) && cols.includes("token_hash") && !cols.includes("session") && !cols.includes("token"),
     `work_claims stands, its comment naming the migration, one unreleased claim per ticket and piece, the file's two sentinels, a token's hash and never the token (${idx || "no index"})`);
 
@@ -16224,7 +16453,7 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   await reapply(file);
   const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
   const ones = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
-  assert(after === before && ones.every((n) => n === 1), `113 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
+  assert(after === before && ones.every((n) => n === 1), `115 applied again changes nothing: ${after} claims stand, one of each call (${ones.join(",")})`);
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);

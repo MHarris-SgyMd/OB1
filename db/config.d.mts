@@ -426,7 +426,7 @@ export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 export const RETIRED_GRANT_GROUPS: Readonly<Record<string, string>>;
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
-/** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
+/** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set, and 113's while ob1_config.subject_pool_key names a pool — thought_work_claims SELECT/INSERT/UPDATE, upserted as the caller (INSERT … ON CONFLICT DO UPDATE reads the conflict). */
 export const EXTRACTION_TRIGGER_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** The opt-in query log (migration 034, SMD-1295): the one spelling of its env flag, table/function names, tool sets, and retention window, shared by server, preflight and tests. */
 export const QUERY_LOG: Readonly<{

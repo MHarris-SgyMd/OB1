@@ -32,6 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantStatements, quoteIdent, reembedKey } from "./config.mjs";
+import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -551,8 +552,9 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // rebuild of 071's mirror for a status-set change, SMD-3160), 109
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
   // listing pages, SMD-3249), 111 (a thought's own subject
-  // recorded, SMD-3306) and 112 (a thought's client_key, one thought
-  // per key, SMD-3314)
+  // recorded, SMD-3306), 112 (a thought's client_key, one thought
+  // per key, SMD-3314), 113 (the subject pool, SMD-3306), 114
+  // (who decided a proposal, SMD-2608) and 115 (work claims, SMD-3597)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -699,15 +701,19 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]); 113 adds work claims —
-  // a table, its index and fourteen functions — refusing by name without
-  // 008, 046 or 061 ([20be]) — all
+  // refusing by name rows that share one ([20bd]); 113 adds the subject
+  // pool's trigger on thoughts and a close of the subject read, refusing by
+  // name without 015, 016 or 111 ([20be]); 114 adds the reviewer
+  // columns, their trigger and two CHECKs, refusing by name without 008,
+  // 029, 046 or 050 ([20bf]); 115 adds work claims — a table, its index
+  // and fourteen functions — refusing by name without 008, 046 or 061
+  // ([20bg]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 84, `030 is among the last eighty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 86, `030 is among the last eighty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5005,29 +5011,227 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20be] Migration 113: onto a populated brain at the file before it — thoughts and their audit standing as they were; refused by name without 061's ob1_actor_agent_id, nothing created; then applied: a claim taken, another holder refused, the claims grant group issued by --grant; a re-apply a no-op, the claims kept (SMD-3597)");
+console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not unless it changes metadata.ticket or metadata.issue, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
 {
-  const the113 = MIGRATIONS.find((f) => /^\d{3}_work_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number ("_work_claims.sql" alone also ends 015's)
+  const the113 = MIGRATIONS.find((f) => f.endsWith("_subject_pool.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["015", "migration 113 needs 015 (claim_thoughts); this schema lacks it"],
+    ["016", "migration 113 needs 016 (requeue_thought_work); this schema lacks it"],
+    ["111", "migration 113 needs 111 (record_thought_subject); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+  // A database not UTF8 is refused by name, before anything else: the file holds no escape a SQL_ASCII server cannot
+  // read (review pass 6, run-it: it failed on them, "conversion between UTF8 and SQL_ASCII is not supported").
+  {
+    const admin = new SQL({ url: URL_, max: 1 });
+    const ascii = new URL(URL_);
+    ascii.pathname = "/ob1_up113_ascii";
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii");
+      await admin.unsafe("CREATE DATABASE ob1_up113_ascii ENCODING 'SQL_ASCII' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'");
+      const refusedAscii = await applyMigrations(ascii.toString(), { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+      assert(refusedAscii === "migration 113 needs a UTF8 database; this one's encoding is SQL_ASCII",
+        `113 on a SQL_ASCII database is refused by name (${refusedAscii.slice(0, 120)})`);
+    } finally {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii").catch(() => {});
+      await admin.close();
+    }
+  }
+
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const actor = { name: "laptop", via: "open-brain" };
+  const POOL = "subjects:r1.2:p2r";
+  // A brain before 113: the extraction pool named, so its trigger enqueues; a subject the sweep wrote.
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:x@p2')`;
+  const t: string[] = [];
+  for (let i = 0; i < 2; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const subject = (await sql`SELECT record_thought_subject(${t[0]}::uuid, 'phrase:upgrade', 'model', 'subject:x@p2', NULL::uuid, ${await fpOf(t[0])}::text, NULL::jsonb) AS r`)[0].r as { id: string };
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const claims = async () => JSON.stringify(await sql`SELECT thought_id, work_type, status FROM thought_work_claims ORDER BY thought_id, work_type`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), facetsBefore = await facets(), claimsBefore = await claims(), auditBefore = await audits();
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+
+  assert((await rows()) === before && (await facets()) === facetsBefore && (await claims()) === claimsBefore && (await audits()) === auditBefore,
+    "the file moves nothing it finds: every thought, facet, claim and audit row stands as it was");
+  const inPool = async (id: string) => String((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`)[0]?.status ?? "none");
+  const third = ((await sql`SELECT upsert_thought('upgrade 113: thought 2, before a pool is named'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string }).id;
+  assert((await inPool(third)) === "none", "no pool named: a new thought joins none");
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL})`;
+  const fourth = ((await sql`SELECT upsert_thought('upgrade 113: thought 3, after'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string }).id;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = ${fourth}::uuid AND work_type = ${POOL}`;
+  await sql`SELECT update_thought(${t[1]}::uuid, 'upgrade 113: thought 1, edited')`;
+  await sql`UPDATE thoughts SET metadata = metadata || '{"note": "a metadata edit"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(t[1])) === "pending" && (await inPool(third)) === "none" && (await inPool(fourth)) === "succeeded",
+    "after it, with a pool named, an edited thought joins it; a metadata edit does not");
+  await sql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-113"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(third)) === "pending", "…but filing it under a ticket does: the metadata rule reads it");
+  await sql`SELECT update_thought(${fourth}::uuid, 'upgrade 113: thought 3, edited after it was asked')`;
+  assert((await inPool(fourth)) === "pending", "…and a thought finished in the pool is put back in it once its text changes");
+  const closed = (await sql`SELECT close_thought_subject(${t[0]}::uuid, ${subject.id}::uuid, ${await fpOf(t[0])}::text) AS c`)[0].c as { action: string; id: string };
+  assert(closed.action === "closed" && closed.id === subject.id, `close_thought_subject closes the subject read (${JSON.stringify(closed)})`);
+  // The door 113 redefines, on the upgraded brain: a model's subject on a thought filed under a ticket is refused as
+  // stale, the ticket's rule subject written (review pass 5).
+  const door = async (id: string, key: string, by: string) =>
+    (await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${`subject:${by}@r1`}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string; stale?: boolean };
+  const [modelUp, ruleUp] = [await door(third, "phrase:an upgraded note", "model"), await door(third, "ticket:SMD-113", "metadata")];
+  assert(modelUp.action === "none" && modelUp.stale === true && ruleUp.action === "added",
+    `the door 113 redefines: a model's subject on a thought filed under a ticket refused as stale, the rule's at its ticket added (${modelUp.action}, ${ruleUp.action})`);
+  const after = await rows(), facetsAfter = await facets(), claimsAfter = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  assert((await rows()) === after && (await facets()) === facetsAfter && (await claims()) === claimsAfter, "a re-apply is a no-op: every thought, facet and claim as it was");
+  await sql.close();
+  // A naming waits for the writers of this database's thoughts alone: a template copy of the brain, its thoughts the
+  // same relation by oid, a capture open in it, holds up no naming here (review pass 7, run-it: without the lock read's
+  // database filter it listed that writer, and the wait, which has no end of its own, would wait on it). Bounded by a
+  // stop, should it wait.
+  {
+    // A brain of its own, at 113, whose copy is made with no session on it: the suite's database has the earlier
+    // sections' sessions on it.
+    const pg = new URL(URL_), brain = new URL(URL_), copy = new URL(URL_);
+    pg.pathname = "/postgres";
+    brain.pathname = "/ob1_up113_brain";
+    copy.pathname = "/ob1_up113_copy";
+    const admin = new SQL({ url: pg.toString(), max: 1 });
+    const copyClient = new SQL({ url: copy.toString(), max: 1 });
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy");
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain");
+      await admin.unsafe("CREATE DATABASE ob1_up113_brain");
+      await applyMigrations(brain.toString(), OPTS);
+      await admin.unsafe("CREATE DATABASE ob1_up113_copy TEMPLATE ob1_up113_brain");
+      const w = await copyClient.reserve();
+      await w`BEGIN`;
+      await w`SELECT upsert_thought('upgrade 113: a capture open in a copy of the brain'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(5)}::vector)`;
+      const bound = new AbortController();
+      const timer = setTimeout(() => bound.abort(), 10_000);
+      const lines: string[] = [];
+      const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_JUDGE_MODEL: "stub-judge" };
+      const code = await sweepSubjects({ url: brain.toString(), env, model: false, switchKey: true, signal: bound.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .finally(() => clearTimeout(timer));
+      await w`ROLLBACK`;
+      w.release();
+      assert(code === 0 && !lines.some((l) => /waiting for/.test(l)),
+        `a capture open in a template copy of the brain holds up no naming here (exit ${code}: ${lines.find((l) => /waiting|stopped/.test(l))?.trim().slice(0, 100) ?? "no wait"})`);
+    } finally {
+      await copyClient.close({ timeout: 5 });
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy").catch(() => {});
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain").catch(() => {});
+      await admin.close();
+    }
+  }
+}
+
+console.log("\n[20bf] Migration 114: refused by name without 008, 029, 046 or 050; onto a populated brain at the file before it — proposals decided before it, the reviewer backfilled from the audit for an accept that wrote its pointer and a reject that cleared one, none guessed for a reject that cleared nothing; no thought, audit row or decision moved; a decision after it stamped with its key; a re-apply a no-op (SMD-2608)");
+{
+  const the114 = MIGRATIONS.find((f) => f.endsWith("_proposal_reviewer.sql"))!;  // by name: renumbered when main takes its number
+  for (const [stop, needs] of [
+    ["008", "migration 114 needs 008 (ob1_current_actor); this schema lacks it"],
+    ["029", "migration 114 needs 029 (supersession_proposals); this schema lacks it"],
+    ["046", "migration 114 needs 046 (ob1_registry_kind); this schema lacks it"],
+    ["050", "migration 114 needs 050 (thought_audit.seq); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `114 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the114 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const t: string[] = [];
+  for (let i = 0; i < 10; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 114: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-114-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
+  const OPERATOR = { name: "upgrade-114-operator", via: "consolidate", agent_id: agent };
+  // A second key clears what the first accepted: the backfill must name the clear's own row, by its time.
+  const [{ id: agent2 }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-114-agent', 'agent') RETURNING canonical_agent_id::text AS id`;
+  const AGENT = { name: "upgrade-114-agent", via: "open-brain-api", agent_id: agent2 };
+  const propose = async (o: number, n: number) =>
+    String((await sql`SELECT record_supersession_proposal(${t[o]}::uuid, ${t[n]}::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`)[0].id);
+  const review = async (id: string, decision: string, actor: object = OPERATOR) =>
+    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 114', NULL, ${actor}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
+  // Before 114: an accept that writes its pointer, an accept then a clearing reject, a reject that clears nothing.
+  // reRejected: cleared by one key, then rejected again by another, clearing nothing — the clear's row is an earlier
+  // decision's, and the standing one has none.
+  const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5), reRejected = await propose(3, 5);
+  const decisions = [await review(accepted, "accept"), await review(cleared, "accept"), await review(cleared, "reject", AGENT), await review(plain, "reject"),
+    await review(reRejected, "accept"), await review(reRejected, "reject", AGENT), await review(reRejected, "reject")];
+  // The audit's kind is not always a key's at its decision: a keyless accept under a classified name (055 reads the
+  // kind by name), and a key classified after it decided, its audit row's kind filled in by 046's backfill.
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('consolidate', 'operator')`;
+  const keyless = await propose(6, 7), lateKind = await propose(8, 9);
+  const [{ id: late }] = await sql`INSERT INTO ob1_agents (label) VALUES ('upgrade-114-late') RETURNING canonical_agent_id::text AS id`;
+  const LATE = { name: "upgrade-114-late", via: "consolidate", agent_id: late };
+  decisions.push(await review(keyless, "accept", { name: "consolidate", via: "consolidate" }), await review(lateKind, "accept", LATE));
+  await sql`SELECT set_agent_kind('upgrade-114-late', 'agent')`;
+  await sql`SELECT backfill_thought_audit_events(NULL)`;
+  const auditKinds = await sql`SELECT actor_name, actor_kind, backfilled_at IS NOT NULL AS late FROM thought_audit WHERE actor_name IN ('consolidate', 'upgrade-114-late') AND diff ? 'supersedes' ORDER BY actor_name`;
+  assert(JSON.stringify(auditKinds) === JSON.stringify([{ actor_name: "consolidate", actor_kind: "operator", late: false }, { actor_name: "upgrade-114-late", actor_kind: "agent", late: true }]),
+    `before 114 the audit holds a kind for both: the keyless accept's from the name, the late key's filled in (${JSON.stringify(auditKinds)})`);
+  assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false && decisions[5].cleared === true && decisions[6].cleared === false,
+    `the decisions before 114: an accept, a clearing reject, a reject clearing nothing, and a clear then a reject clearing nothing (${JSON.stringify(decisions)})`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const decided = async () => JSON.stringify(await sql`SELECT id, status, reviewed_at::text AS r, review_note, superseding_id, pointer_written FROM supersession_proposals ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = { rows: await rows(), decided: await decided(), audits: await audits() };
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 });
+  const who = async (id: string) => JSON.stringify((await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${id}::uuid`)[0]);
+  const named = JSON.stringify({ by: OPERATOR.name, agent, kind: "operator" }), none = JSON.stringify({ by: null, agent: null, kind: null });
+  const namedAgent = JSON.stringify({ by: AGENT.name, agent: agent2, kind: "agent" });
+  assert((await who(keyless)) === JSON.stringify({ by: "consolidate", agent: null, kind: null }) && (await who(lateKind)) === JSON.stringify({ by: LATE.name, agent: late, kind: null }),
+    `the backfill takes no kind from a name alone, nor one the audit filled in after the decision (${await who(keyless)}, ${await who(lateKind)})`);
+  assert((await who(accepted)) === named && (await who(cleared)) === namedAgent && (await who(plain)) === none && (await who(reRejected)) === none,
+    `the backfill names the reviewer the audit holds — the accept's write, and the clearing reject's by the other key, not the accept before it — and none for a reject that cleared nothing, after a clear or not (${await who(accepted)}, ${await who(cleared)}, ${await who(plain)}, ${await who(reRejected)})`);
+  assert((await rows()) === before.rows && (await decided()) === before.decided && (await audits()) === before.audits,
+    "nothing else moved: every thought, every decision and the audit's rows as they were");
+  // After it, a reject that clears nothing records its key — the case SMD-2608 found recording nothing.
+  const later = await propose(1, 4);
+  await review(later, "reject");
+  assert((await who(later)) === named, `after 114 a reject that clears nothing records the key that decided it (${await who(later)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 });
+  assert((await who(later)) === named && (await who(plain)) === none, "a re-apply a no-op: the stamped row kept, none guessed");
+  await sql.close();
+}
+
+console.log("\n[20bg] Migration 115: onto a populated brain at the file before it — thoughts and their audit standing as they were; refused by name without 061's ob1_actor_agent_id, nothing created; then applied: a claim taken, another holder refused, the claims grant group issued by --grant; a re-apply a no-op, the claims kept (SMD-3597)");
+{
+  const the115 = MIGRATIONS.find((f) => /^\d{3}_work_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number ("_work_claims.sql" alone also ends 015's)
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the115 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "laptop", via: "open-brain" };
   for (const i of [0, 1, 2])
-    await sql`SELECT upsert_thought(${`upgrade 113: thought ${i} about SMD-9201`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`;
+    await sql`SELECT upsert_thought(${`upgrade 115: thought ${i} about SMD-9201`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`;
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const table = async () => String((await sql`SELECT to_regclass('work_claims')::text AS t`)[0].t ?? "");
 
   // Without 061's agent reader: refused by name, nothing created.
   await sql`ALTER FUNCTION ob1_actor_agent_id() RENAME TO ob1_actor_agent_id_away`;
-  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the115 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION ob1_actor_agent_id_away() RENAME TO ob1_actor_agent_id`;
-  assert(/^migration 113 needs 061 \(ob1_actor_agent_id\); this schema lacks it/.test(without) && (await table()) === "",
+  assert(/^migration 115 needs 061 \(ob1_actor_agent_id\); this schema lacks it/.test(without) && (await table()) === "",
     `without 061's ob1_actor_agent_id: refused by name, no table created (${without.slice(0, 80)})`);
 
   const before = await rows(), auditBefore = await audits();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the115 });
   type Answer = { outcome: string; code: string | null; claim: { id: string; holder: string } | null };
   const claimed = ((await sql`SELECT claim_work('smd-9201', NULL, NULL, 14400, NULL, ${actor}::jsonb) AS r`)[0] as { r: Answer }).r;
   const other = ((await sql`SELECT claim_work('SMD-9201', 'PR 1', NULL, 14400, NULL, ${{ name: "desktop" }}::jsonb) AS r`)[0] as { r: Answer }).r;
@@ -5036,7 +5240,7 @@ console.log("\n[20be] Migration 113: onto a populated brain at the file before i
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["claims"] });
   assert(grants.length === 1 && /^GRANT SELECT, INSERT, UPDATE ON work_claims TO "ob1_upgrade_probe";$/.test(grants[0]),
     `--grant's claims group is SELECT, INSERT and UPDATE on work_claims, no DELETE (${grants.join("; ")})`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the115 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9201'])`)[0].n);
   assert((await rows()) === before && kept === 1, `a re-apply is a no-op: the thoughts as they were, the claim kept (${kept})`);
   await sql.close();

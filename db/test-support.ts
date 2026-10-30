@@ -70,7 +70,7 @@ const TABLES = [
   // 069's durable async job registry (SMD-2318): no foreign key either way — a
   // job's record outlives the agent or thoughts it names — so its place is free.
   "jobs",
-  // 113's work claims (SMD-3597): no foreign key either way — a claim names a
+  // 115's work claims (SMD-3597): no foreign key either way — a claim names a
   // ticket by its key, not a thought — so its place is free. Its CASCADE takes
   // the helpers whose arguments are its row type.
   "work_claims",
@@ -365,7 +365,15 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
-  // 113 (SMD-3597): work claims — the four calls and their ten helpers (the
+  // 113 (SMD-3306): the subject pool — the trigger function (the trigger goes with thoughts), the safe close, and the
+  // ticket a thought is filed under, which the door 113 redefines reads (the door is 111's, above).
+  "thoughts_enqueue_subject()",
+  "close_thought_subject(uuid, uuid, text)",
+  "ob1_filed_ticket(jsonb)",
+  "ob1_js_space()",
+  // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
+  "ob1_stamp_proposal_reviewer()",
+  // 115 (SMD-3597): work claims — the four calls and their ten helpers (the
   // two taking work_claims' row type go with its CASCADE, and are named anyway).
   "claim_work(text, text, text, integer, text, jsonb)",
   "renew_work_claim(uuid, text, integer, jsonb)",

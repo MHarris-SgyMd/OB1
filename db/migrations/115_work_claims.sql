@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 113: work claims — who holds a ticket, or one piece of it, under
+-- Migration 115: work claims — who holds a ticket, or one piece of it, under
 --                a lease, so two agents never build the same change (SMD-3597)
 -- =============================================================================
 --
@@ -202,20 +202,20 @@ DO $qc$
 BEGIN
   IF to_regprocedure('ob1_current_actor()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 008 (ob1_current_actor); this schema lacks it',
+      MESSAGE = 'migration 115 needs 008 (ob1_current_actor); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_registry_kind(uuid, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 046 (ob1_registry_kind); this schema lacks it',
+      MESSAGE = 'migration 115 needs 046 (ob1_registry_kind); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_actor_agent_id()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 061 (ob1_actor_agent_id); this schema lacks it',
+      MESSAGE = 'migration 115 needs 061 (ob1_actor_agent_id); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -253,20 +253,20 @@ CREATE TABLE IF NOT EXISTS work_claims (
 );
 
 COMMENT ON TABLE work_claims IS
-  'Who holds a ticket, or one piece of it (piece: PR 1b-2), under a lease, so two agents never build one change. Live: unreleased and unexpired; lapsed: unreleased and past expires_at, which counts as free; released: ended, kept as history with who ended it. Written through claim_work, renew_work_claim and release_work_claim; read through list_work_claims. Migration 113 / SMD-3597.';
+  'Who holds a ticket, or one piece of it (piece: PR 1b-2), under a lease, so two agents never build one change. Live: unreleased and unexpired; lapsed: unreleased and past expires_at, which counts as free; released: ended, kept as history with who ended it. Written through claim_work, renew_work_claim and release_work_claim; read through list_work_claims. Migration 115 / SMD-3597.';
 COMMENT ON COLUMN work_claims.holder_name IS
-  'The name the claiming call''s actor envelope (ob1.actor) carried: the key''s name. Stamped by claim_work, never from an argument. Migration 113 / SMD-3597.';
+  'The name the claiming call''s actor envelope (ob1.actor) carried: the key''s name. Stamped by claim_work, never from an argument. Migration 115 / SMD-3597.';
 COMMENT ON COLUMN work_claims.token_hash IS
-  'SHA-256 of the token claim_work returned once. A claim is its caller''s own only when the key and the token both match, so agents under one key refuse each other; the token itself is never stored or shown again. Migration 113 / SMD-3597.';
+  'SHA-256 of the token claim_work returned once. A claim is its caller''s own only when the key and the token both match, so agents under one key refuse each other; the token itself is never stored or shown again. Migration 115 / SMD-3597.';
 COMMENT ON COLUMN work_claims.label IS
-  'Free text the client gives for people (tool, machine, session, branch), control characters made spaces. Shown as data, trusted for nothing, never put in a message. Migration 113 / SMD-3597.';
+  'Free text the client gives for people (tool, machine, session, branch), control characters made spaces. Shown as data, trusted for nothing, never put in a message. Migration 115 / SMD-3597.';
 COMMENT ON COLUMN work_claims.piece_key IS
-  'The piece compared case-folded (lower()); '''' for a whole-ticket claim. A whole-ticket claim and a piece claim of one ticket are the same work; two different pieces are not. Migration 113 / SMD-3597.';
+  'The piece compared case-folded (lower()); '''' for a whole-ticket claim. A whole-ticket claim and a piece claim of one ticket are the same work; two different pieces are not. Migration 115 / SMD-3597.';
 
 -- ob1:work-claim-one-per-work
 CREATE UNIQUE INDEX IF NOT EXISTS work_claims_one_unreleased ON work_claims (issue, piece_key) WHERE released_at IS NULL;
 COMMENT ON INDEX work_claims_one_unreleased IS
-  'One unreleased claim per ticket and piece: the exact-work half of claim_work''s rule, held for a write made without its lock. A lapsed claim stays unreleased until the next claim on exactly its ticket and piece closes it. Migration 113 / SMD-3597.';
+  'One unreleased claim per ticket and piece: the exact-work half of claim_work''s rule, held for a write made without its lock. A lapsed claim stays unreleased until the next claim on exactly its ticket and piece closes it. Migration 115 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -299,7 +299,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_text(text, int, text) IS
-  'A client''s free text (a piece, a label, a reason): control characters made spaces, the soft hyphen, zero-width space, word joiner and byte-order mark deleted, every run of white space (Unicode''s included) made one space, trimmed; NULL when blank; raises past p_max characters. Migration 113 / SMD-3597.';
+  'A client''s free text (a piece, a label, a reason): control characters made spaces, the soft hyphen, zero-width space, word joiner and byte-order mark deleted, every run of white space (Unicode''s included) made one space, trimmed; NULL when blank; raises past p_max characters. Migration 115 / SMD-3597.';
 
 -- A ticket key, or a raise naming the input.
 CREATE OR REPLACE FUNCTION ob1_work_claim_issue(p_issue text)
@@ -322,7 +322,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_issue(text) IS
-  'A ticket key upper-cased and trimmed (SMD-3379: a team key of at most 16 letters and digits, a hyphen, at most 10 digits with no leading zero); raises on anything else. Migration 113 / SMD-3597.';
+  'A ticket key upper-cased and trimmed (SMD-3379: a team key of at most 16 letters and digits, a hyphen, at most 10 digits with no leading zero); raises on anything else. Migration 115 / SMD-3597.';
 
 CREATE OR REPLACE FUNCTION ob1_work_claim_lease(p_lease_seconds int)
 RETURNS interval
@@ -339,7 +339,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_lease(int) IS
-  'A lease in seconds as an interval; raises outside 60 to 604800. Migration 113 / SMD-3597.';
+  'A lease in seconds as an interval; raises outside 60 to 604800. Migration 115 / SMD-3597.';
 
 -- A token's SHA-256, NULL for none; raises on a malformed one.
 CREATE OR REPLACE FUNCTION ob1_work_claim_token_hash(p_token text)
@@ -358,7 +358,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_token_hash(text) IS
-  'The SHA-256 of a claim token (wc_ and 64 hex digits) as work_claims keeps it; NULL for none; raises on any other text. Migration 113 / SMD-3597.';
+  'The SHA-256 of a claim token (wc_ and 64 hex digits) as work_claims keeps it; NULL for none; raises on any other text. Migration 115 / SMD-3597.';
 
 -- One claim as the functions return it: no token, no hash.
 CREATE OR REPLACE FUNCTION ob1_work_claim_json(c work_claims, p_now timestamptz)
@@ -376,7 +376,7 @@ AS $$
     'state', CASE WHEN c.released_at IS NOT NULL THEN 'released' WHEN c.expires_at <= p_now THEN 'lapsed' ELSE 'live' END)
 $$;
 COMMENT ON FUNCTION ob1_work_claim_json(work_claims, timestamptz) IS
-  'One work claim as jsonb, with its state at p_now (live, lapsed or released) and neither its token nor its hash. Migration 113 / SMD-3597.';
+  'One work claim as jsonb, with its state at p_now (live, lapsed or released) and neither its token nor its hash. Migration 115 / SMD-3597.';
 
 -- The caller's envelope, set from p_actor when given (029's shape), and the
 -- holder it names: name, agent, kind. Raises when it names nobody.
@@ -403,7 +403,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_actor(jsonb, text) IS
-  'Sets ob1.actor from p_actor when given, then returns the envelope''s holder (name, 061''s agent id, 046''s registry kind); raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 113 / SMD-3597.';
+  'Sets ob1.actor from p_actor when given, then returns the envelope''s holder (name, 061''s agent id, 046''s registry kind); raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 115 / SMD-3597.';
 
 -- READ COMMITTED alone, checked before a writer reads anything, so the reads
 -- after its lock see every claim committed before the lock was granted.
@@ -421,7 +421,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_isolation(text) IS
-  'Raises, naming p_what, in a transaction above READ COMMITTED: a claim call''s reads must postdate its lock. Migration 113 / SMD-3597.';
+  'Raises, naming p_what, in a transaction above READ COMMITTED: a claim call''s reads must postdate its lock. Migration 115 / SMD-3597.';
 
 CREATE OR REPLACE FUNCTION ob1_work_claim_lock(p_issue text)
 RETURNS void
@@ -430,7 +430,7 @@ AS $$
   SELECT pg_advisory_xact_lock(hashtextextended('ob1:work-claim:' || p_issue, 0))
 $$;
 COMMENT ON FUNCTION ob1_work_claim_lock(text) IS
-  'Takes the transaction advisory lock on one ticket''s claims; a whole-ticket claim and its pieces share it. Migration 113 / SMD-3597.';
+  'Takes the transaction advisory lock on one ticket''s claims; a whole-ticket claim and its pieces share it. Migration 115 / SMD-3597.';
 
 -- Whether a claim is the caller's own: the same token, and the same key — a
 -- claim made with an agent id by that id, a claim made by name alone by the
@@ -447,7 +447,7 @@ AS $$
                            ELSE c.holder_name = p_name END, false)
 $$;
 COMMENT ON FUNCTION ob1_work_claim_is_holder(work_claims, text, uuid, bytea) IS
-  'True when the claim is the caller''s own: this token''s hash, and the key — a claim made with an agent id by that id, one made by name alone by the name; false otherwise, never NULL. Migration 113 / SMD-3597.';
+  'True when the claim is the caller''s own: this token''s hash, and the key — a claim made with an agent id by that id, one made by name alone by the name; false otherwise, never NULL. Migration 115 / SMD-3597.';
 
 -- The live claims that cover this work, oldest first, but the one claim being
 -- renewed (p_exclude). Every other claim is in the way, the caller's own on
@@ -467,7 +467,7 @@ AS $$
    ORDER BY c.claimed_at, c.id
 $$;
 COMMENT ON FUNCTION ob1_work_claims_in_the_way(text, text, uuid, timestamptz) IS
-  'The live claims on this work but p_exclude, the one being renewed: the same piece, the whole ticket, or (for a whole-ticket claim) any piece. No two live claims cover one work, whoever holds them. Migration 113 / SMD-3597.';
+  'The live claims on this work but p_exclude, the one being renewed: the same piece, the whole ticket, or (for a whole-ticket claim) any piece. No two live claims cover one work, whoever holds them. Migration 115 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- claim_work
@@ -558,7 +558,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION claim_work(text, text, text, int, text, jsonb) IS
-  'Claims a ticket (p_issue), or one piece of it (p_piece), for the key p_actor names, for p_lease_seconds (60 to 604800, default 14400). Returns jsonb {outcome, code, message, claim, held_by, token}: claimed, with the token that proves the claim (shown this once); renewed, when p_token is the caller''s own unreleased claim on exactly this work and nothing else covers it; or refused (WORK_CLAIMED), with every live claim covering it but that one — the same piece, the whole ticket, or any piece of it for a whole-ticket claim, the caller''s own on overlapping work included. A lapsed own claim another live claim now covers is refused and stays lapsed. A lapsed claim on exactly this ticket and piece is closed as taken over, the caller''s own included (the recovery for a lost token). Raises for no holder, an ingested key, a malformed argument (a piece blank once cleaned among them), or a transaction above READ COMMITTED. Migration 113 / SMD-3597.';
+  'Claims a ticket (p_issue), or one piece of it (p_piece), for the key p_actor names, for p_lease_seconds (60 to 604800, default 14400). Returns jsonb {outcome, code, message, claim, held_by, token}: claimed, with the token that proves the claim (shown this once); renewed, when p_token is the caller''s own unreleased claim on exactly this work and nothing else covers it; or refused (WORK_CLAIMED), with every live claim covering it but that one — the same piece, the whole ticket, or any piece of it for a whole-ticket claim, the caller''s own on overlapping work included. A lapsed own claim another live claim now covers is refused and stays lapsed. A lapsed claim on exactly this ticket and piece is closed as taken over, the caller''s own included (the recovery for a lost token). Raises for no holder, an ingested key, a malformed argument (a piece blank once cleaned among them), or a transaction above READ COMMITTED. Migration 115 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- renew_work_claim
@@ -618,7 +618,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION renew_work_claim(uuid, text, int, jsonb) IS
-  'Extends the caller''s own claim (the key p_actor names, and p_token, which claim_work returned) to p_lease_seconds from now. Returns jsonb {outcome, code, message, claim, held_by, token}: renewed, or refused — CLAIM_NOT_FOUND, CLAIM_NOT_YOURS, CLAIM_RELEASED (ended, or taken over after it lapsed), WORK_CLAIMED (it lapsed and another claim covers its work). A lapsed claim nothing covers is renewed. READ COMMITTED only. Migration 113 / SMD-3597.';
+  'Extends the caller''s own claim (the key p_actor names, and p_token, which claim_work returned) to p_lease_seconds from now. Returns jsonb {outcome, code, message, claim, held_by, token}: renewed, or refused — CLAIM_NOT_FOUND, CLAIM_NOT_YOURS, CLAIM_RELEASED (ended, or taken over after it lapsed), WORK_CLAIMED (it lapsed and another claim covers its work). A lapsed claim nothing covers is renewed. READ COMMITTED only. Migration 115 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- release_work_claim
@@ -680,7 +680,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION release_work_claim(uuid, text, text, boolean, jsonb) IS
-  'Ends a claim: the caller''s own (the key p_actor names, and p_token), or with p_force another holder''s, for an operator key named by its agent id (046''s registry kind for the id; a name alone lends none) and with a reason. Returns jsonb {outcome, code, message, claim, held_by, token}: released, already_released, or refused — CLAIM_NOT_FOUND, CLAIM_NOT_YOURS. The row stays, with who ended it and why. READ COMMITTED only. Migration 113 / SMD-3597.';
+  'Ends a claim: the caller''s own (the key p_actor names, and p_token), or with p_force another holder''s, for an operator key named by its agent id (046''s registry kind for the id; a name alone lends none) and with a reason. Returns jsonb {outcome, code, message, claim, held_by, token}: released, already_released, or refused — CLAIM_NOT_FOUND, CLAIM_NOT_YOURS. The row stays, with who ended it and why. READ COMMITTED only. Migration 115 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- list_work_claims
@@ -711,4 +711,4 @@ AS $$
    LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 1000)
 $$;
 COMMENT ON FUNCTION list_work_claims(text[], text, boolean, int) IS
-  'The live work claims — or every claim with p_include_ended — of the tickets p_issues names (all when NULL; keys cleaned and upper-cased as claim_work cleans them), of one holder''s key name when p_holder is given, each with its state (live, lapsed, released), by ticket, piece and claim time; p_limit 1 to 1000 (default 100). Never a token or its hash. Migration 113 / SMD-3597.';
+  'The live work claims — or every claim with p_include_ended — of the tickets p_issues names (all when NULL; keys cleaned and upper-cased as claim_work cleans them), of one holder''s key name when p_holder is given, each with its state (live, lapsed, released), by ticket, piece and claim time; p_limit 1 to 1000 (default 100). Never a token or its hash. Migration 115 / SMD-3597.';
