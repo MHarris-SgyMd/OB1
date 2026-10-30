@@ -14545,7 +14545,7 @@ if (want("37")) {
       `board-sync --trigger with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
     const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--trigger");
     const intervalRow = await row("heartbeat:board-sync");
-    assert(badInterval.code === 2 && /must be a decimal integer >= 10 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
+    assert(badInterval.code === 2 && /must be a decimal integer >= 10 and <= 604800 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
       `…and on an interval it does not take, usage (exit ${badInterval.code}; ${JSON.stringify(intervalRow)})`);
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const unlooped = [boardRun({}), boardRun({}, "--trigger", "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];

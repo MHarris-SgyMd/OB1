@@ -130,7 +130,7 @@ import type { Derived } from "./ingest-contract.ts";
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, databaseUrlIfAny, openSql } from "./connect.ts";
-import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper, TRIGGER_SIGNAL, BOARD_INTERVAL_RULE } from "./pass-stamp.ts";
 import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
@@ -1689,13 +1689,14 @@ async function main(): Promise<void> {
   }, { hints: { url: "<postgres://…>", initiative: "<name>", interval: "<seconds>", only: "<SMD-1,SMD-2>", loop: "(retired: --trigger, the coordinator's clock)" } });
   // The loop's clock is the coordinator's since SMD-3476: --trigger passes when it says.
   if (cli.has("loop")) { console.error("--loop is retired (SMD-3476): the coordinator runs board-sync's passes every OB1_BOARD_SYNC_INTERVAL seconds — name board-sync in OB1_PASSES; from a checkout, OB1_PASSES=board-sync bun db/coordinator.ts"); process.exit(2); }
-  // The coordinator's clock (SMD-3476): each SIGUSR2 asks for a pass. Heard
-  // from here, first, since the signal's default ends the process — a trigger
-  // during a slow start (the initiative's ask) must wait, not kill. One that
-  // lands mid-pass asks for the next as soon as it ends, never for two.
-  let asked = false;
+  // The coordinator's clock (SMD-3476): a SIGUSR2 starts the next pass when
+  // it lands while the process waits for one. Heard from here, first, since
+  // the signal's default ends the process; one during the start or a pass is
+  // let go, so passes keep at least the clock's gap, as --loop's sleep did.
   let wake: (() => void) | null = null;
-  if (cli.has("trigger")) process.on(TRIGGER_SIGNAL, () => { asked = true; wake?.(); });
+  if (cli.has("trigger")) process.on(TRIGGER_SIGNAL, () => wake?.());
+  // A dry run or an audit is a run of its own: under --trigger it would wait for a clock that never comes.
+  for (const f of ["dry-run", "audit"] as const) if (cli.has("trigger") && cli.has(f)) { console.error(`--trigger takes no --${f}: it is the coordinator's mode, a pass at each of its triggers; run --${f} alone.`); process.exit(2); }
   if (cli.has("self-check")) process.exit(await selfCheck());
   // --audit is the whole board's census; --only would be read by nothing on that branch (fourth review pass).
   if (cli.has("audit") && cli.has("only")) { console.error("--audit takes no --only: the census is the whole board."); process.exit(2); }
@@ -1736,7 +1737,8 @@ async function main(): Promise<void> {
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
-  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, { min: 10 }) : DEFAULT_INTERVAL_S;
+  // The coordinator's clock reads it by the same rule (BOARD_INTERVAL_RULE), so neither runs a period the other refuses.
+  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, BOARD_INTERVAL_RULE) : DEFAULT_INTERVAL_S;
   if (typeof intervalRead !== "number") return await refuse("usage", `${intervalRead.error} (whole seconds).`);
   const interval = intervalRead;
   const dryRun = cli.has("dry-run");
@@ -1903,10 +1905,8 @@ async function main(): Promise<void> {
   // pass). The pass ends after the issue in hand; a second signal is the
   // runtime's default and kills.
   // The next trigger, or at once on a stop, which ends the wait as it ends the pass.
-  const nextTrigger = (): Promise<void> => {
-    if (asked || stopping) { asked = false; return Promise.resolve(); }
-    return new Promise<void>((resolve) => { wake = () => { wake = null; asked = false; resolve(); }; });
-  };
+  const nextTrigger = (): Promise<void> =>
+    stopping ? Promise.resolve() : new Promise<void>((resolve) => { wake = () => { wake = null; resolve(); }; });
   const stop = () => { if (stopping) process.exit(130); stopping = true; wake?.(); console.error(`  stopping after the issue in hand (a second signal kills)`); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
@@ -1924,7 +1924,7 @@ async function main(): Promise<void> {
   let code = 0;
   try {
     if (!trigger) { code = await once(); return; }
-    console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL} (the coordinator's, every ${interval} s) against ${initiative}${dryRun ? " (dry run)" : ""}; SIGTERM/SIGINT ends it after the issue in hand`);
+    console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL} the coordinator sends (every ${interval} s; nothing else sends one) against ${initiative}; SIGTERM/SIGINT ends it after the issue in hand`);
     code = await triggerPasses({ once, next: nextTrigger, stopped: () => stopping, stamper });
   } finally {
     await store.close();
@@ -1932,9 +1932,6 @@ async function main(): Promise<void> {
     process.exitCode = code;
   }
 }
-
-/** The signal the coordinator's clock sends for each pass (db/coordinator.ts, SMD-3476). */
-export const TRIGGER_SIGNAL = "SIGUSR2" as const;
 
 /**
  * --trigger: a pass, then the next trigger — the coordinator's clock, a

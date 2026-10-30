@@ -14,10 +14,13 @@
  *
  * What runs. OB1_PASSES, a list of `sleep`, `workers` and `board-sync`
  * (commas or spaces). `workers` is the two followers, `extract` and
- * `consolidate`; `board-sync` passes at its start and at each trigger,
- * every OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock,
- * where the tool kept a loop of its own before (supervise's `every`). Named beside `sleep`, it is left out and the log says so:
- * the scheduler runs extraction and consolidation itself. A name that is no
+ * `consolidate`; named beside `sleep`, `workers` is left out and the log
+ * says so: the scheduler runs extraction and consolidation itself.
+ * `board-sync` passes at its start and at each trigger, every
+ * OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock, where
+ * the tool kept a loop of its own before (supervise's `every`); the clock
+ * reads the setting from this process's environment — compose's in the
+ * stack, the shell's from a checkout, never a .env file. A name that is no
  * pass is left out the same way, the rest still run. None named, none run,
  * and the coordinator waits for its stop. A change needs the coordinator
  * recreated (`up -d coordinator`), which `up -d` does when its environment
@@ -65,7 +68,8 @@ import type { SQL } from "bun";
 import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { supervise, type Supervisor } from "./supervise.ts";
-import { andList, consoleWriter, wrapperLine, type Writer } from "./cli.ts";
+import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
+import { BOARD_INTERVAL_RULE } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 
 const HERE = import.meta.dir;
@@ -89,8 +93,8 @@ export type Child = {
   digits: readonly string[];
   /** Its argv after `bun <script>`, from its own environment. */
   args(env: Record<string, string | undefined>): string[];
-  /** A trigger's period in ms, from its own environment: the child is sent supervise's TRIGGER_SIGNAL that often, a pass each (SMD-3476). Unset, it is sent none. */
-  every?(env: Record<string, string | undefined>): number;
+  /** A trigger's period in ms, from its own environment: the child is sent TRIGGER_SIGNAL that often, a pass each (SMD-3476). None, it is sent none. */
+  every?(env: Record<string, string | undefined>): number | undefined;
   script: string;
 };
 
@@ -102,6 +106,15 @@ const or = (env: Record<string, string | undefined>, name: string, fallback: str
 
 /** board-sync's trigger period, as OB1_BOARD_SYNC_INTERVAL gives it, trimmed: 300 seconds unset or blank. */
 const boardInterval = (env: Record<string, string | undefined>): string => env.OB1_BOARD_SYNC_INTERVAL?.trim() || "300";
+/**
+ * The clock's period in ms, by the tool's own rule (BOARD_INTERVAL_RULE); none
+ * for a value it refuses, which the tool then refuses itself and is held —
+ * a clock never runs a period past setInterval's bound or under 10 s.
+ */
+const boardEvery = (env: Record<string, string | undefined>): number | undefined => {
+  const s = readNumber("OB1_BOARD_SYNC_INTERVAL", boardInterval(env), BOARD_INTERVAL_RULE);
+  return typeof s === "number" ? s * 1000 : undefined;
+};
 
 const SLEEP_DIGITS = [
   "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET",
@@ -119,7 +132,7 @@ export const CHILDREN: Record<ChildName, Child> = {
     // whatever a checkout's .env says; a value it does not take (not whole seconds, under 10) it refuses itself,
     // held as any refusal is. The findings cap it reads and refuses itself too.
     args: (env) => ["--trigger", "--interval", boardInterval(env)],
-    every: (env) => (Number(boardInterval(env)) || 300) * 1000,
+    every: boardEvery,
   },
   extract: {
     name: "extract", uid: 1102, script: "extract-entities.ts",
@@ -348,7 +361,7 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
       worker: child.name,
       cmd: l.cmd,
       ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
-      ...(child.every ? { every: child.every(l.env) } : {}),
+      ...(child.every?.(l.env) === undefined ? {} : { every: child.every!(l.env) }),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,

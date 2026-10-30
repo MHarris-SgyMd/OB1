@@ -72,15 +72,13 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { MIN_STAMP_EVERY_S, stampKey, TRIGGER_SIGNAL, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
 /** The longest a heartbeat write may take before it is left: the database may be what is down. */
 export const STAMP_TIMEOUT_MS = 10_000;
-/** What a trigger's clock sends its follower for each pass: db/sync-linear.ts's TRIGGER_SIGNAL, which db/test-coordinator.ts holds the same. */
-export const TRIGGER_SIGNAL = "SIGUSR2" as const;
 /** The longest a follower's last output is waited for once it has exited. */
 const DRAIN_MS = 2_000;
 /** The longest partial line held before it is written anyway: a pass that never ends a line holds no memory past it. */
