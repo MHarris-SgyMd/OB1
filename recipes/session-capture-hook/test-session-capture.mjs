@@ -675,11 +675,15 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     ["password flag", "psql --password hunter2 -h db"],
     ["bearer token", "Authorization: Bearer " + "Ab9".repeat(12)],
     ["password assignment", "POSTGRES_PASSWORD=hunter2"],
-    // A work claim's token (SMD-3615): bare, in JSON, mid-sentence and in a URL.
+    // A work claim's token (SMD-3615): bare, in JSON, mid-sentence, in a URL, in markdown's underscores, after a
+    // `claim_` prefix, and upper-cased.
     ["work-claim token", "wc_" + "3f9a".repeat(16)],
     ["work-claim token", '{"outcome":"claimed","token":"wc_' + "0a1b".repeat(16) + '"}'],
     ["work-claim token", "renew with token wc_" + "c0de".repeat(16) + " before the lease ends"],
     ["work-claim token", "https://brain.example.com/v1/claims?t=wc_" + "beef".repeat(16)],
+    ["work-claim token", "keep _wc_" + "d00d".repeat(16) + "_ safe"],
+    ["work-claim token", "claim_wc_" + "face".repeat(16)],
+    ["work-claim token", "WC_" + "FACE".repeat(16)],
     ["64-hex token (a raw key, or a digest out of its context)", "use this key for the hook: " + "3f9a" .repeat(16)],
     ["64-hex token (a raw key, or a digest out of its context)", "0123456789abcdef".repeat(4)],
     ["64-hex token (a raw key, or a digest out of its context)", "0x" + "0123456789abcdef".repeat(4)],
@@ -699,8 +703,8 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     assert(f.some((x) => x.reason === name), `caught: ${name}`);
   }
   assert(SECRET_PATTERNS.every(([name]) => probes.some((p) => p[0] === name)), "every named pattern has a probe above");
-  // …and a near miss is not a claim token (SMD-3615): 63 digits, upper case, or a longer run.
-  for (const near of ["wc_" + "a".repeat(63), "wc_" + "A".repeat(64), "wc_" + "a".repeat(65), "xwc_" + "a".repeat(64)]) {
+  // …and a near miss is not a claim token (SMD-3615): 63 digits, a longer run, or `wc_` inside a word.
+  for (const near of ["wc_" + "a".repeat(63), "wc_" + "a".repeat(65), "xwc_" + "a".repeat(64), "9wc_" + "a".repeat(64)]) {
     assert(!scanForSecrets(`the summary says ${near} and goes on`).some((x) => x.reason === "work-claim token"), `not a work-claim token: ${near.slice(0, 8)}… (${near.length - 3} after the prefix)`);
   }
   const highEntropy = "kQ7vX2pL9mN4rT8wZ1yB6cF3hJ5gD0sA";

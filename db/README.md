@@ -2294,8 +2294,8 @@ an ingested key, and a role missing the grant (naming `work_claims`); 0A000 the
 isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for the
 rest of the transaction (029's shape). `list_work_claims` matches nothing for a
 malformed key rather than raising, and a refused forced release shares the code
-`CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
-row is 015's worker claims, not these. The partial unique index
+`CLAIM_NOT_YOURS`, told apart by its message. Preflight's `ticket claims` row
+checks these (SMD-3598); its `worker claims` row is 015's. The partial unique index
 `work_claims_one_unreleased` holds the exact-work rule for a write made without
 the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The

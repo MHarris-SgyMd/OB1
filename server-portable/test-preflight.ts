@@ -774,7 +774,7 @@ else {
     const line = (out: string) => out.split("\n").find((l) => /ticket claims/.test(l)) ?? "";
     try {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; no statement log prints a token/.test(whole.out),
+      assert(/✓  ticket claims\s+claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; the logging settings read print no bind value/.test(whole.out),
              `on a brain at 115 the four claim functions, the claims grant and no token-printing log: ok (${line(whole.out).trim()})`);
       await ticket.unsafe("ALTER FUNCTION list_work_claims(text[], text, boolean, integer) RENAME TO list_work_claims_away");
       const missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -790,9 +790,20 @@ else {
       const capped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_duration_statement`);
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_parameter_max_length`);
-      assert(logging.code === 0 && /!  ticket claims\s+statement logging is on \(log_statement=none, log_min_duration_statement=0\) and log_parameter_max_length is -1: a renewal's or a release's token, a bind value, is logged whole/.test(logging.out)
+      // A failed statement's parameters, logged apart from log_parameter_max_length; and log_statement=mod, which
+      // logs no SELECT — a claim call is one — so no warning.
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_parameter_max_length_on_error = 100`);
+      const onError = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_parameter_max_length_on_error`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_statement = 'mod'`);
+      const mod = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_statement`);
+      assert(logging.code === 0 && /!  ticket claims\s+statement logging is on \(log_statement=none, log_min_duration_statement=0\) and log_parameter_max_length is -1: a renewal's or a release's token, a bind value, is logged/.test(logging.out)
              && /ALTER SYSTEM SET log_parameter_max_length = 0/.test(logging.out) && /✓  ticket claims/.test(capped.out),
              `statement logging with bind values whole: a warning naming the setting that stops it; with log_parameter_max_length = 0, ok (${line(logging.out).trim().slice(0, 120)} | ${line(capped.out).trim().slice(0, 40)})`);
+      assert(/!  ticket claims\s+log_parameter_max_length_on_error is 100B?, so a failed statement's parameters are logged/.test(onError.out) && /log_parameter_max_length_on_error = 0/.test(onError.out)
+             && /✓  ticket claims/.test(mod.out),
+             `a failed statement's parameters logged: a warning naming log_parameter_max_length_on_error; log_statement=mod, which logs no claim call, ok (${line(onError.out).trim().slice(0, 120)} | ${line(mod.out).trim().slice(0, 40)})`);
     } finally {
       await ticket.close();
     }
@@ -3126,7 +3137,7 @@ else {
              "…and says what each missing privilege breaks: the capture path for the chunk, audit, snapshot and lineage writes (060's and 061's triggers named), every delete for the facet one");
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
       // 115's claims group (SMD-3598): soft — a warning naming the group, never the refusal the capture set's is.
-      assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim, release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
+      assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
       // 060's snapshot writes are named too, with the trigger that makes them

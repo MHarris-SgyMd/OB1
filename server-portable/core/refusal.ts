@@ -57,6 +57,8 @@ export type Refusal =
   | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null } // a renewal of a claim that ended: released, or taken over after it lapsed
   | { code: "REFUSED_CLAIM_INPUT"; retryable: false; problem: ClaimProblem; message: string } // an argument 115 refused by its rule (SQLSTATE 22023); message: the database's words, which never carry a token
   | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
+  | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string | null } // this key's agent id is not to hand while the registry may answer, and the claim was made under it
+  | { code: "CLAIM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown"; id: string | null } // …and the registry cannot answer this server until an operator acts
   // The worker actions (SMD-2132, SMD-2272).
   | { code: "REFUSED_EMPTY_WORK_TYPE"; retryable: false }            // a work_type required, or given but blank
   | { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER"; retryable: false }    // release_stale_leases' include_live without a worker_id
@@ -133,6 +135,7 @@ const FACTS: Facts = {
   CLAIM_RELEASED: (r) => (r.releasedAt ? { releasedAt: r.releasedAt } : {}),
   REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
   REFUSED_CLAIM_KEY: none,
+  CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, ...(r.id ? { id: r.id } : {}) }),
   REFUSED_EMPTY_WORK_TYPE: none,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: none,
   RUN_WORKER_DRAIN_NOT_AVAILABLE: none,

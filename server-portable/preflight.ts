@@ -2926,7 +2926,9 @@ if (configFailed) {
          * keep two workers off one thought. Its four functions under 115's signatures; the server role's `claims`
          * grant, soft (a role without it is refused the claim calls alone, naming work_claims); and statement logging,
          * which prints a bind value whole unless log_parameter_max_length is 0 — so a renewal's or a release's token
-         * in a log. Nothing to read before 115: a skip, the ledger row says a brain is behind.
+         * in a log — and the other settings that print one: a failed statement's parameters
+         * (log_parameter_max_length_on_error), sampled statements, auto_explain's and pgaudit's. Each read with
+         * current_setting(name, true), so an extension not loaded reads as null, not a fault. Nothing to read before 115: a skip, the ledger row says a brain is behind.
          */
         {
           // Constants of this file, spelled into the statement: Bun's unsafe binds a JS array as no text[].
@@ -2941,9 +2943,23 @@ if (configFailed) {
             .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const tc = Array.isArray(tcRows) ? tcRows[0] : null;
           // The log settings, read apart: a role that may not read one says nothing here rather than failing the row.
-          const logs = await sql.unsafe(`SELECT current_setting('log_statement') AS stmt, current_setting('log_min_duration_statement') AS dur, current_setting('log_parameter_max_length') AS len`)
-            .then((r) => (r as { stmt: string; dur: string; len: string }[])[0], () => null);
-          const logging = logs && (logs.stmt === "all" || logs.stmt === "mod" || logs.dur !== "-1") && logs.len !== "0" ? logs : null;
+          const LOG_SETTINGS = ["log_statement", "log_min_duration_statement", "log_min_duration_sample", "log_statement_sample_rate", "log_transaction_sample_rate",
+            "log_parameter_max_length", "log_parameter_max_length_on_error", "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "pgaudit.log_parameter"];
+          const logs = await sql.unsafe(`SELECT ${LOG_SETTINGS.map((s, i) => `current_setting('${s}', true) AS s${i}`).join(", ")}`)
+            .then((r) => Object.fromEntries(LOG_SETTINGS.map((s, i) => [s, ((r as Record<string, string | null>[])[0] ?? {})[`s${i}`] ?? null])), () => null);
+          // Which settings print a claim call's bind values — its token among them. A claim call is a SELECT, so
+          // log_statement=mod logs none; a value 0 cuts a parameter to nothing, -1 prints it whole.
+          const printing = (len: string | null) => len !== null && len !== "0";
+          const logging = !logs ? [] : [
+            ...((logs.log_statement === "all" || (logs.log_min_duration_statement ?? "-1") !== "-1"
+                 || ((logs.log_min_duration_sample ?? "-1") !== "-1" && (logs.log_statement_sample_rate ?? "0") !== "0")
+                 || (logs.log_transaction_sample_rate ?? "0") !== "0") && printing(logs.log_parameter_max_length)
+              ? [`statement logging is on (log_statement=${logs.log_statement}, log_min_duration_statement=${logs.log_min_duration_statement}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
+            ...(printing(logs.log_parameter_max_length_on_error) ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
+            ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && printing(logs["auto_explain.log_parameter_max_length"])
+              ? [`auto_explain logs plans with parameters (auto_explain.log_parameter_max_length is ${logs["auto_explain.log_parameter_max_length"]})`] : []),
+            ...(logs["pgaudit.log_parameter"] === "on" ? ["pgaudit.log_parameter is on"] : []),
+          ];
           if (!tc) {
             add("ticket claims", "warn", `could not verify: ${(tcRows as Error).message}`, "The check reads work_claims and 115's functions in public; the message says why it failed.");
           } else if (!tc.has_table) {
@@ -2952,13 +2968,16 @@ if (configFailed) {
             add("ticket claims", "fail", `migration 115's ${tc.missing.join(", ")} missing under 115's signature; claim_work, renew_claim, release_claim and list_claims call them`,
                 ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
           } else if (tc.ungranted?.length) {
-            add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: claim_work, renew_claim, release_claim${tc.ungranted.includes("SELECT") ? " and list_claims" : ""} fail naming the table, and nothing else does`,
+            // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
+            const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
+              : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
+            add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table, and nothing else does`,
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
-          } else if (logging) {
-            add("ticket claims", "warn", `statement logging is on (log_statement=${logging.stmt}, log_min_duration_statement=${logging.dur}) and log_parameter_max_length is ${logging.len}: a renewal's or a release's token, a bind value, is logged whole`,
-                "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; SELECT pg_reload_conf(); — or turn statement logging off (SMD-3598).");
+          } else if (logging.length) {
+            add("ticket claims", "warn", `${logging.join("; ")}: a renewal's or a release's token, a bind value, is logged`,
+                "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; ALTER SYSTEM SET log_parameter_max_length_on_error = 0; (and auto_explain.log_parameter_max_length = 0, pgaudit.log_parameter = off where loaded) SELECT pg_reload_conf(); — or turn that logging off (SMD-3598).");
           } else {
-            add("ticket claims", "ok", "claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; no statement log prints a token");
+            add("ticket claims", "ok", `claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; ${logs ? "the logging settings read print no bind value" : "the logging settings could not be read"}`);
           }
         }
 

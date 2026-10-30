@@ -60,6 +60,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** A key's name, as a claim's holder: printable, no space, bounded. */
+const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
@@ -80,6 +82,8 @@ function guard(v: unknown, key = ""): unknown {
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
+  // A claim's holder (SMD-3598): a key's name — an OAuth principal's `oauth:<sub>+<client>` too — held to no space, so no sentence.
+  if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -1686,10 +1690,16 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
 // of ours.
 
 const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
-const heldLine = (c: HeldClaim) => `${workText(c.issue, c.piece)} by ${oneLine(snipText(c.holder, 80))} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${oneLine(snipText(c.holder, 80))} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. Leave it to its holder, or claim other work; a claim of your own on overlapping work is in the way too.`;
-const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message, 300))}`;
+// 115's words can quote the caller's argument (a ticket key it could not read): a token passed in the wrong one is masked.
+const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{64}/gi, "[a work-claim token]"), 300))}`;
+/** A claim id the caller gave that is no uuid names no claim, and is not echoed: an agent that swapped id and token would see its token. */
+const noClaim = (r: Extract<Refusal, { code: "CLAIM_NOT_FOUND" }>) =>
+  UUID.test(r.id) ? `Refused: no claim ${r.id}.` : "Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims.";
+const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) =>
+  `Refused: ${r.id ? `claim ${r.id}` : "the claim"} was made under this key's agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}. Your token still holds: keep it.`;
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced
     ? `Refused: only an operator key, classified operator by its agent id, may release another holder's claim; claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}.`
@@ -1700,12 +1710,14 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
     : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
-  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
+  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.`
+  : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r) : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
   (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
-  (r) => r.code === "CLAIM_NOT_FOUND" ? `Refused: no claim ${oneLine(snipText(r.id, 80))}.`
+  (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "CLAIM_RELEASED" ? `Refused: claim ${r.id} ended${r.releasedAt ? ` at ${r.releasedAt}` : ""} (released, or taken over after it lapsed); claim the work again.`
     : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
@@ -1714,8 +1726,9 @@ export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCo
   (v) => v.outcome === "released"
     ? `Released claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)}${v.claim.releaseReason ? ` (${oneLine(snipText(v.claim.releaseReason, 200))})` : ""}.`
     : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}.`,
-  (r) => r.code === "CLAIM_NOT_FOUND" ? `Refused: no claim ${oneLine(snipText(r.id, 80))}.`
+  (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
