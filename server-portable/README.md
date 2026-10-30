@@ -829,7 +829,8 @@ that decided (migration 114), so a person's decision is still told from an agent
 read or capture key does not see it.
 
 It runs the CLI's own decision (`proposal-review.ts`): in one transaction under 029's
-review lock, the guard, 029's `review_supersession_proposal`, the read of the
+review lock and the proposal row's (so the pass's in-place re-judge of a stale row waits
+for it, rather than landing between the guard and the decision), the guard, 029's `review_supersession_proposal`, the read of the
 capture-only pointers its accept cleared (082) and the read of who decided. An accept
 writes `supersedes` on the side the verdict names as current, or the one `direction`
 names (required for an undirected verdict); a reject records the decision and, on an
@@ -1178,7 +1179,7 @@ bun test-jobs.ts          # 45 — the async job registry in memory: the lifecyc
 bun run test:local        # 226 — fully local provider, no credential
 bun run test:sql          # 297 — store conformance, real Postgres in a container
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 297 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 300 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 116 — a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ```
 

@@ -3895,7 +3895,13 @@ are SMD-3322's. It runs the CLI's own
 decision (`server-portable/proposal-review.ts`, which `--accept`/`--reject`
 call too): the lineage-pair and WRITER guards, 029's review, and the reads of
 what its lapse cleared and of who decided, in one transaction that takes 029's
-lock before its first read, so what was checked is what is decided. Each check
+lock and then the proposal's row before its first read, so the row checked is
+the row decided — the pass's in-place re-judge of a stale row (063), which takes
+the row alone, waits for it. A write to a side that takes neither (a
+re-capture's trust, an edit of `derived_from`) can still land between the guard
+and the decision, as it can just after. A reject says what it undid of an
+accept (not a pointer that was there before it, nor a capture-only pointer its
+lapse cleared) and when it replaces an earlier reject. Each check
 is refused by name (`REFUSED_EDITED_SINCE` — a stale row's text moved too —
 `REFUSED_LINEAGE_PAIR`, `REFUSED_WRITER`), and `force: true` waives those
 three on an accept, as `--force` does, and nothing else; a direction or force

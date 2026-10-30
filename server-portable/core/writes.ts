@@ -851,6 +851,10 @@ export async function resetCaptureStamp(ctx: Ctx, principal: Principal, { id }: 
  */
 export type ProposalReview = {
   id: string; decision: "accept" | "reject"; status: "accepted" | "rejected"; forced: boolean;
+  /** The row's status before this decision (a reject of an accepted row undoes what it can; of a rejected row it replaces the decision, its note and its reviewer). */
+  previousStatus: string;
+  /** A reject of an accepted row: whether the accept had written the pointer (false: it was there already, and stays). */
+  previousPointerWritten: boolean | null;
   supersedingId: string | null; supersededId: string | null;
   /** An accept: whether it wrote the pointer (false: the pointer already held that value). */
   written: boolean | null;
@@ -893,14 +897,19 @@ export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal,
       case "ALREADY_ACCEPTED": return refuse({ code: "REFUSED_ALREADY_ACCEPTED", retryable: false, id, supersedingId: String(r.superseding_id) });
       case "ALREADY_SUPERSEDES": return refuse({ code: "REFUSED_ALREADY_SUPERSEDES", retryable: false, id, supersedingId: String(r.superseding_id), currentId: String(r.current) });
       // 032: update_thought's answers, passed on by 029 with the pair added.
-      case "WOULD_CYCLE": return refuse({ code: "REFUSED_PROPOSAL_WOULD_CYCLE", retryable: false, id, supersedingId: String(r.superseding_id), supersededId: String(r.superseded_id) });
+      case "WOULD_CYCLE": return refuse({ code: "REFUSED_PROPOSAL_WOULD_CYCLE", retryable: false, id, supersedingId: String(r.superseding_id), supersededId: String(r.superseded_id), chainTooLong: /chain longer/.test(r.detail ?? "") });
       case "SUPERSEDES_NOT_FOUND": return refuse({ code: "REFUSED_SUPERSEDED_GONE", retryable: false, id, supersededId: String(r.superseded_id) });
       default: return refuse({ code: "REFUSED", retryable: false, error: String(r.error) });
     }
   }
+  // A reject of an accepted row names the pair the accept stood on: 029's
+  // reject answers no ids, the row read under the lock does (review pass 2).
+  const b = r.before ?? null;
+  const stood = decision === "reject" && b?.status === "accepted" && b.supersedingId ? b.supersedingId : null;
   return ok({
     id, decision, status: decision === "accept" ? "accepted" : "rejected", forced: force === true,
-    supersedingId: r.superseding_id ?? null, supersededId: r.superseded_id ?? null,
+    previousStatus: b?.status ?? "pending", previousPointerWritten: stood ? b!.pointerWritten : null,
+    supersedingId: r.superseding_id ?? stood, supersededId: r.superseded_id ?? (stood ? (stood === b!.newerId ? b!.olderId : b!.newerId) : null),
     written: decision === "accept" ? r.written === true : null,
     cleared: decision === "reject" ? r.cleared === true : null,
     lapsed: r.lapsed ?? [],

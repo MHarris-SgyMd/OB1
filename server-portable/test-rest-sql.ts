@@ -501,10 +501,24 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   const c = await pair("c");
   const rejPending = await review(c.pid, { decision: "reject" });
   const cRow = await row(c.pid);
-  assert(rej.status === 200 && rej.body.status === "rejected" && rej.body.cleared === true && (await pointer(a.n)) === null && (await row(a.pid)).reviewed_by === "writer",
-    `a reject of the accepted row clears its pointer and records the reviewer (${rej.status} ${JSON.stringify(rej.body).slice(0, 100)})`);
-  assert(rejPending.status === 200 && rejPending.body.cleared === false && cRow.status === "rejected" && cRow.reviewed_by === "writer" && cRow.agent !== null,
+  assert(rej.status === 200 && rej.body.status === "rejected" && rej.body.cleared === true && rej.body.previousStatus === "accepted" && rej.body.supersedingId === a.n && rej.body.supersededId === a.o
+      && (await pointer(a.n)) === null && (await row(a.pid)).reviewed_by === "writer",
+    `a reject of the accepted row clears its pointer, names the pair and records the reviewer (${rej.status} ${JSON.stringify(rej.body).slice(0, 100)})`);
+  assert(rejPending.status === 200 && rejPending.body.cleared === false && rejPending.body.previousStatus === "pending" && cRow.status === "rejected" && cRow.reviewed_by === "writer" && cRow.agent !== null,
     `a reject of a pending row records the reviewer, key and agent, writing no thought (${JSON.stringify(cRow)})`);
+  // A second reject replaces the first's note and reviewer, and says so (review pass 2).
+  const reRej = await mcp("review_supersession_proposal", { id: c.pid, decision: "reject", note: "the second reason" });
+  assert(!reRej.isError && reRej.sc.previousStatus === "rejected" && reRej.text.startsWith(`Rejected proposal ${c.pid} again: this decision, its note and its reviewer replace the earlier reject's.`)
+      && (await row(c.pid)).note === "the second reason",
+    `a reject of a rejected row says it replaces the earlier one (${reRej.text.split("\n")[0]})`);
+  // An accept that found its pointer there already: the reject leaves it, and says so (review pass 2).
+  const h = await pair("h");
+  await rest("PATCH", `/v1/thoughts/${h.n}`, { supersedes: h.o });
+  const hAcc = await review(h.pid, { decision: "accept" });
+  const hRej = await mcp("review_supersession_proposal", { id: h.pid, decision: "reject" });
+  assert(hAcc.status === 200 && hAcc.body.written === false && !hRej.isError && hRej.sc.cleared === false && hRej.sc.previousPointerWritten === false
+      && hRej.text.startsWith(`Rejected proposal ${h.pid}, which was accepted: ${h.n}'s pointer onto ${h.o} was there before the accept, so it stays`) && (await pointer(h.n)) === h.o,
+    `a reject of an accept that wrote nothing leaves the pointer and says why (${hRej.text.split("\n")[0]})`);
   const again = await review(b.pid, { decision: "accept" });
   assert(again.status === 409 && again.body.code === "REFUSED_ALREADY_ACCEPTED" && again.body.supersedingId === b.n, `an accepted row's accept: 409 REFUSED_ALREADY_ACCEPTED (${again.status} ${JSON.stringify(again.body)})`);
 
@@ -547,7 +561,7 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
     `a WRITER flag: 409 REFUSED_WRITER naming the side, its rule and the pointer it would clear, the MCP reply naming force, nothing written (${wRef.status} ${JSON.stringify(wRef.body)} | ${wm.text.slice(0, 160)})`);
   // Forced through MCP: the REST answer's lapsed, as the reply words and carries it, and the pointer gone.
   const wForced = await mcp("review_supersession_proposal", { id: wpid, decision: "accept", force: true });
-  assert(!wForced.isError && wForced.text.includes(`Lapsed: ${wNext} no longer supersedes ${wn} — its capturer's capture-only pointer, cleared by this accept.`)
+  assert(!wForced.isError && wForced.text.includes(`Lapsed: ${wNext} no longer supersedes ${wn} — its capturer's capture-only pointer, cleared by this accept; a reject of this proposal does not restore it.`)
       && same(wForced.sc.lapsed, [{ id: wNext, onto: wn }]) && (await pointer(wn)) === wo && (await pointer(wNext)) === null,
     `force accepts it, the reply naming the capture-only pointer the accept cleared (${JSON.stringify(wForced.sc.lapsed)} | ${wForced.text.split("\n")[1] ?? ""})`);
 
@@ -574,6 +588,34 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   const byHook = await review(y.pid, { decision: "reject" }, KEYS.hook);
   assert(byReader.status === 403 && byReader.body.code === "FORBIDDEN" && byHook.status === 403 && byHook.body.code === "FORBIDDEN" && await untouched(y.pid, y.n),
     `a read key and a capture key: 403 FORBIDDEN, nothing written (${byReader.status} ${byHook.status})`);
+
+  // The pass re-judging a stale row in place while a decision is under way (review pass 2): it takes the row's lock
+  // alone, so the decision locks the row before its guard reads it, and judges the row as the pass left it — here a
+  // verdict flipped to the hook's side, flagged WRITER — rather than the stale one it would otherwise have read.
+  const ro = await capture("kappa race: the hook's value", KEYS.hook);
+  const rn = await capture("kappa race: the writer's value");
+  const rpid = await propose(ro, rn);
+  await rest("PATCH", `/v1/thoughts/${rn}`, { content: "kappa race: the writer's value, edited" });
+  await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${rpid}::uuid AND status = 'pending'`;
+  const passConn = new SQL({ url: URL_, max: 1 });
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let rejudged!: () => void;
+  const inPlace = new Promise<void>((r) => (rejudged = r));
+  const pass = passConn.begin(async (t) => {
+    await t`SELECT record_supersession_proposal(${ro}::uuid, ${rn}::uuid, 'older_supersedes_newer', 0.9, 'rejudged', 0.9, 'consolidate:stub@p9') AS pid`;
+    rejudged();
+    await held;
+  });
+  await inPlace;
+  const racing = review(rpid, { decision: "accept" });
+  await Bun.sleep(500);
+  release();
+  await pass;
+  const raced = await racing;
+  await passConn.close();
+  assert(raced.status === 409 && raced.body.code === "REFUSED_WRITER" && (raced.body.flags as { stands?: string }[] | undefined)?.[0]?.stands === "older" && (await pointer(ro)) === null && (await row(rpid)).status === "pending",
+    `an accept waiting on the pass's re-judge of its stale row judges the row as re-judged: WRITER on the flipped side, nothing written (${raced.status} ${JSON.stringify(raced.body).slice(0, 140)})`);
 
   // An agent's write key (the maintainer's 2026-10-26 call): the same checks
   // an operator's meets, and its decision recorded under its key, kind agent.

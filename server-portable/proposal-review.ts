@@ -7,8 +7,13 @@
 // lineage pair (070, SMD-2313) and one flagged WRITER (094, SMD-2707), each
 // waived by force alone, as --force waives them. One transaction holds the
 // guard, the decision, the read of what its lapse cleared (082) and the
-// reviewer the row records (114, SMD-2608), so what is checked is what is
-// decided, and a decision racing this one is never what this one answers.
+// reviewer the row records (114, SMD-2608), under 029's lock and the proposal
+// row's, so the row checked is the row decided — the pass's re-judge of a
+// stale row (063's record_supersession_proposal, which takes the row alone)
+// waits for it — and a decision racing this one is never what this one
+// answers. A write to a side that takes neither lock (a re-capture's trust,
+// an edit of derived_from) can still land between the guard and the decision,
+// as it can just after it.
 
 import type { SQL } from "bun";
 import type { ProposalWriter } from "./store.ts";
@@ -69,6 +74,10 @@ export type ReviewRequest = {
  * file, whose WRITER check did not run.
  */
 export type ReviewResult = {
+  /** The row as the decision found it, under its lock: what a reject undid, or that it replaced a reject; null when there is none. */
+  before?: { status: string; pointerWritten: boolean; supersedingId: string | null; olderId: string; newerId: string } | null;
+  /** update_thought's detail on a refusal 029 passes on (a WOULD_CYCLE past its walk's bound). */
+  detail?: string;
   ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; thought_id?: string;
   written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean;
   flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[]; reviewer?: Reviewer | null | "no-114";
@@ -130,6 +139,15 @@ export async function reviewProposal(sql: SQL, r: ReviewRequest): Promise<Review
   return await sql.begin(async (q) => {
     // Re-entrant: 029 takes it again, and update_thought for the pointer.
     await q`SELECT pg_advisory_xact_lock(hashtext(${REVIEW_LOCK}))`;
+    // Then the row, 029's order (review pass 2): the pass re-judges a stale
+    // row in place under the row's lock alone, not this one, and landed
+    // between the guard's reads and 029's — a WRITER flag unread, a direction
+    // flipped, a reject recorded against a verdict its reviewer never saw.
+    // Read with it: what a reject undoes, and whether it replaces one.
+    const [row] = (await q`SELECT status, pointer_written, superseding_id::text AS superseding_id, older_id::text AS older_id, newer_id::text AS newer_id
+                             FROM supersession_proposals WHERE id = ${r.id}::uuid FOR UPDATE`) as
+      { status: string; pointer_written: boolean; superseding_id: string | null; older_id: string; newer_id: string }[];
+    const before = row ? { status: row.status, pointerWritten: row.pointer_written === true, supersedingId: row.superseding_id, olderId: row.older_id, newerId: row.newer_id } : null;
     // 070 (SMD-2313): an accept on a lineage pair — one side's derived_from
     // names the other — is the harm 066 exists to prevent (the derivation
     // archives its input while still naming it). Read from the row's own
@@ -145,9 +163,9 @@ export async function reviewProposal(sql: SQL, r: ReviewRequest): Promise<Review
     // or of lower trust than the other, takes force — read on a lineage pair
     // too, so its refusal names a flag the force would also waive.
     const writers = guarded ? await writersOf(q, r.id, r.direction ?? undefined) : null;
-    if (pair?.lineage === true) return { ok: false, error: "LINEAGE_PAIR", status: pair.status, writers };
-    if (writers && writers !== "no-094" && writers.flags.some((f) => f.how !== "if")) return { ok: false, error: "WRITER", flags: writers.flags, writers };
-    const res = { ...((await q`
+    if (pair?.lineage === true) return { ok: false, error: "LINEAGE_PAIR", status: pair.status, writers, before };
+    if (writers && writers !== "no-094" && writers.flags.some((f) => f.how !== "if")) return { ok: false, error: "WRITER", flags: writers.flags, writers, before };
+    const res = { before, ...((await q`
       SELECT review_supersession_proposal(${r.id}::uuid, ${r.decision}::text, ${r.note ?? null}::text, ${r.direction ?? null}::text, ${r.actor}::jsonb, ${r.force === true}::boolean) AS r`)[0].r as Omit<ReviewResult, "writers">), writers };
     if (!res.ok) return res;
     if (r.decision === "accept") {

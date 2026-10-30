@@ -59,7 +59,7 @@ export type Refusal =
   | { code: "REFUSED_DIRECTION_REQUIRED"; retryable: false; id: string; verdict: string } // the verdict names no current side: pass a direction
   | { code: "REFUSED_ALREADY_ACCEPTED"; retryable: false; id: string; supersedingId: string } // a reject undoes it first
   | { code: "REFUSED_ALREADY_SUPERSEDES"; retryable: false; id: string; supersedingId: string; currentId: string } // the side to stand supersedes a third thought
-  | { code: "REFUSED_PROPOSAL_WOULD_CYCLE"; retryable: false; id: string; supersedingId: string; supersededId: string } // the pointer would close a loop
+  | { code: "REFUSED_PROPOSAL_WOULD_CYCLE"; retryable: false; id: string; supersedingId: string; supersededId: string; chainTooLong: boolean } // the pointer would close a loop, or the chain passes update_thought's walk (chainTooLong)
   | { code: "REFUSED_SUPERSEDED_GONE"; retryable: false; id: string; supersededId: string } // the thought to be superseded was deleted
   // The worker actions (SMD-2132, SMD-2272).
   | { code: "REFUSED_EMPTY_WORK_TYPE"; retryable: false }            // a work_type required, or given but blank
@@ -138,7 +138,7 @@ const FACTS: Facts = {
   REFUSED_DIRECTION_REQUIRED: (r) => ({ id: r.id, verdict: r.verdict }),
   REFUSED_ALREADY_ACCEPTED: (r) => ({ id: r.id, supersedingId: r.supersedingId }),
   REFUSED_ALREADY_SUPERSEDES: (r) => ({ id: r.id, supersedingId: r.supersedingId, currentId: r.currentId }),
-  REFUSED_PROPOSAL_WOULD_CYCLE: (r) => ({ id: r.id, supersedingId: r.supersedingId, supersededId: r.supersededId }),
+  REFUSED_PROPOSAL_WOULD_CYCLE: (r) => ({ id: r.id, supersedingId: r.supersedingId, supersededId: r.supersededId, chainTooLong: r.chainTooLong }),
   REFUSED_SUPERSEDED_GONE: (r) => ({ id: r.id, supersededId: r.supersededId }),
   REFUSED_EMPTY_WORK_TYPE: none,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: none,

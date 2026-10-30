@@ -11047,7 +11047,7 @@ if (want("16")) {
     const pc = await propose(top, S8);
     const bc = blk((await consolidate("--list")).out, pc);
     const refusedC = await consolidate("--accept", pc);
-    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`)
+    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full`)
         && !/WRITER|writer:/.test(bc)
         && refusedC.code === 1 && refusedC.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's — the other side's key too, but the accept would take this side from it")
         && (await supersedesOf(S8)) === null,

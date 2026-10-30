@@ -3115,7 +3115,7 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   const { normaliseProposal } = await import("./store.ts");
   const capped = render([proposal(1, op, hook, { newer: { ...proposal(1, op, hook).newer, walkCapped: true } })]);
   const cv = (capped as unknown as { structuredContent: { proposals: { older: Record<string, unknown>; newer: Record<string, unknown> }[] } }).structuredContent.proposals[0];
-  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full"
+  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full"
       && capped.content[0].text.includes(`By: session-hook (agent) · trust agent · a capture-only key's text\n      ${walkCappedLine()}`) && capped.content[0].text.split(walkCappedLine()).length === 2
       && cv.newer.walkCapped === true && !("walkCapped" in cv.older) && !r1.content[0].text.includes(walkCappedLine()),
     `a side the listing left unread says so under it, once, and the value marks it; a side read carries neither (${cv.newer.walkCapped}, ${"walkCapped" in cv.older})`);

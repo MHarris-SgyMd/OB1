@@ -395,7 +395,7 @@ export const WALK_CAP = 25;
  * would take and lapse is not shown; the accept guard reads it in full.
  */
 export function walkCappedLine(): string {
-  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`;
+  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full`;
 }
 
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
@@ -1633,10 +1633,23 @@ export function reviewerText(r: Reviewer | null, caller?: string): string {
  */
 export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCode>): Reply {
   return render(o, (v) => {
+    // A reject says what it undid of an accept, and what it did not — the
+    // pointer the accept found there, one changed since, a capture-only
+    // pointer its lapse cleared — and that it replaced an earlier reject
+    // (review pass 2: each read "Rejected proposal X." alone).
+    const pair = `${v.supersedingId} no longer supersedes ${v.supersededId}`;
     const head = v.decision === "accept"
-      ? `Accepted proposal ${v.id}: ${v.supersedingId} now supersedes ${v.supersededId}${v.written ? "" : " (the pointer already held that value)"}.`
-      : `Rejected proposal ${v.id}${v.cleared ? `: the supersedes pointer its accept had written is cleared (${v.supersedingId ?? "its superseding thought"} no longer supersedes ${v.supersededId ?? "the other"})` : ""}.`;
-    const lapsed = v.lapsed.map((l) => `Lapsed: ${l.id} no longer supersedes ${l.onto} — its capturer's capture-only pointer, cleared by this accept.`);
+      ? `Accepted proposal ${v.id}: ${v.supersedingId} now supersedes ${v.supersededId}${v.written ? "" : " (the pointer already held that value, and a reject will leave it)"}.`
+      : v.previousStatus === "accepted"
+        ? v.cleared
+          ? `Rejected proposal ${v.id}, which was accepted: the supersedes pointer its accept wrote is cleared (${pair}). A capture-only pointer that accept cleared stays cleared.`
+          : v.previousPointerWritten === false
+            ? `Rejected proposal ${v.id}, which was accepted: ${v.supersedingId}'s pointer onto ${v.supersededId} was there before the accept, so it stays — update_thought's supersedes: null clears it if it is wrong.`
+            : `Rejected proposal ${v.id}, which was accepted: ${v.supersedingId}'s pointer was changed since, so there was nothing of the accept's to clear.`
+        : v.previousStatus === "rejected"
+          ? `Rejected proposal ${v.id} again: this decision, its note and its reviewer replace the earlier reject's.`
+          : `Rejected proposal ${v.id}.`;
+    const lapsed = v.lapsed.map((l) => `Lapsed: ${l.id} no longer supersedes ${l.onto} — its capturer's capture-only pointer, cleared by this accept; a reject of this proposal does not restore it.`);
     const unread = v.writersUnread ? ["The WRITER check did not run: this brain is short of migration 094 (cd db && bun migrate.ts --url <url>)."] : [];
     const by = v.reviewerRecorded ? `Decided by: ${reviewerText(v.reviewer, v.caller)}.` : "The row records no reviewer: this brain is short of migration 114 (cd db && bun migrate.ts --url <url>); the audit trail names the key of an accept's write.";
     return [head, ...lapsed, ...unread, by].join("\n");
@@ -1647,8 +1660,9 @@ export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCo
       case "NOT_FOUND": return `No proposal with id ${JSON.stringify(snipText(r.id, 80))}, or a thought it names is gone — list_supersession_proposals gives the proposal ids (not the thoughts').`;
       case "REFUSED_EDITED_SINCE":
         return `Refused: the ${r.olderEdited && r.newerEdited ? "older and newer thoughts have" : r.olderEdited ? "older thought has" : "newer thought has"} been edited since the pair was judged (a stale proposal's has), so the verdict is about a text that is gone. Read both (fetch takes their ids) and ${force}, or reject it.`;
+      // Force is no remedy here, only a choice to write the harm (review pass 2): said so.
       case "REFUSED_LINEAGE_PAIR":
-        return `Refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${r.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : "Rejecting it is the expected decision"}; ${force} (with a direction on an undirected verdict)${r.flags.length ? ` — it also accepts over its WRITER flag: ${r.flags.map(standingFlagText).join("; ")}` : ""}.`;
+        return `Refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${r.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : "Rejecting it is the expected decision"}. force: true writes the pointer anyway, and the derivation then names an input search treats as superseded — only if that is what you mean (with a direction on an undirected verdict)${r.flags.length ? `; it also accepts over its WRITER flag: ${r.flags.map(standingFlagText).join("; ")}` : ""}.`;
       case "REFUSED_WRITER": {
         const lapses = { older: { lapses: Array(r.lapses.older) }, newer: { lapses: Array(r.lapses.newer) } };
         return `Refused: ${writerFlagsText(r.flags, lapses).replaceAll("--direction", "direction")}. Read both writers (list_supersession_proposals with status ${r.status}) and ${force}${r.edited ? " (force also accepts over a text edited since judged)" : ""}${r.status === "rejected" ? "; left as it is, it stays rejected" : ", or reject it"}.`;
@@ -1658,14 +1672,16 @@ export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCo
           : r.problem === "force_on_reject" ? "Refused: force goes with an accept — it waives an accept's checks; a reject has none to waive."
           : `Refused: a note may not begin with "${PASS_SETTLED_PREFIX}" — that marker is the consolidation pass's own (migration 067), and a rejection carrying it is read as the pass's and set stale again when a text moves.`;
       case "REFUSED_DIRECTION_REQUIRED": return `Refused: the judge did not say which is current (${r.verdict}); pass direction: "newer" or "older".`;
-      case "REFUSED_ALREADY_ACCEPTED": return `Refused: proposal ${r.id} is already accepted (${r.supersedingId} carries the pointer); reject it first to undo.`;
+      case "REFUSED_ALREADY_ACCEPTED": return `Refused: proposal ${r.id} is already accepted (its pointer is ${r.supersedingId}'s). A reject first clears that pointer if it still holds this proposal's value — not one that was there before the accept, nor a capture-only pointer the accept cleared — and the proposal can then be accepted again.`;
       case "REFUSED_ALREADY_SUPERSEDES": return `Refused: ${r.supersedingId} already supersedes a third thought, ${r.currentId}; the column holds one predecessor, so decide which — edit that thought (update_thought's supersedes), or reject this proposal.`;
-      case "REFUSED_PROPOSAL_WOULD_CYCLE": return `Refused: writing ${r.supersedingId}'s pointer onto ${r.supersededId} would close a loop — ${r.supersededId} already supersedes it, directly or through a chain. Reject this proposal, or clear the other pointer first.`;
+      case "REFUSED_PROPOSAL_WOULD_CYCLE": return r.chainTooLong
+        ? `Refused: the supersedes chain below ${r.supersededId} is longer than update_thought walks (1000 thoughts), so whether ${r.supersedingId}'s pointer would close a loop cannot be told. Reject this proposal, or shorten the chain first.`
+        : `Refused: writing ${r.supersedingId}'s pointer onto ${r.supersededId} would close a loop — ${r.supersededId} already supersedes it, directly or through a chain. Reject this proposal, or clear the other pointer first.`;
       case "REFUSED_SUPERSEDED_GONE": return `Refused: ${r.supersededId} no longer exists, so there is nothing to supersede; reject this proposal.`;
       default: return mutationRefusalText(r);
     }
   }, (v) => ({
-    id: v.id, decision: v.decision, status: v.status, forced: v.forced, supersedingId: v.supersedingId, supersededId: v.supersededId,
+    id: v.id, decision: v.decision, status: v.status, previousStatus: v.previousStatus, previousPointerWritten: v.previousPointerWritten, forced: v.forced, supersedingId: v.supersedingId, supersededId: v.supersededId,
     written: v.written, cleared: v.cleared, lapsed: v.lapsed,
     reviewer: v.reviewer ? { agentId: v.reviewer.agentId, kind: oneOf(SAID_BY, v.reviewer.kind), kindNow: oneOf(SAID_BY, v.reviewer.kindNow) } : null,
     reviewerRecorded: v.reviewerRecorded, writersUnread: v.writersUnread,
