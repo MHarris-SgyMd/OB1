@@ -831,23 +831,23 @@ read or capture key does not see it.
 
 It runs the CLI's own decision (`proposal-review.ts`): in one transaction under 029's
 review lock and the proposal row's (so the pass's in-place re-judge of a stale row waits
-for it, rather than landing between the guard and the decision), the guard, 029's `review_supersession_proposal`, the read of the
-capture-only pointers its accept cleared (082) and the read of who decided. An accept
-writes `supersedes` on the side the verdict names as current, or the one `direction`
-names (required for an undirected verdict); a reject records the decision and, on an
-accepted row, clears the pointer its accept wrote. An accept is refused by name — 409
-over REST — when a text moved since the pair was judged (`REFUSED_EDITED_SINCE`; a
-stale proposal's did), when one side's `derived_from` names the other
-(`REFUSED_LINEAGE_PAIR`, whose expected decision is a reject), or when the proposal is
-flagged WRITER (`REFUSED_WRITER`: the side to stand is a capture-only key's text, or of
+for it, rather than landing between the guard and the decision), the guard, 029's
+`review_supersession_proposal`, the read of the capture-only pointers its accept cleared
+(082) and the read of who decided. An accept writes `supersedes` on the side the verdict
+names as current, or the one `direction` names (required for an undirected verdict); a
+reject records the decision and, on an accepted row, clears the pointer its accept wrote.
+An accept is refused by name — 409 over REST — when a text moved since the pair was judged
+(`REFUSED_EDITED_SINCE`; a stale proposal's did), when one side's `derived_from` names the
+other (`REFUSED_LINEAGE_PAIR`, whose expected decision is a reject), or when the proposal
+is flagged WRITER (`REFUSED_WRITER`: the side to stand is a capture-only key's text, or of
 a lower trust than the other); `force: true` waives those three, as `--force` does, and
 nothing else. 029's own refusals keep their names: `REFUSED_DIRECTION_REQUIRED` (400),
 `REFUSED_ALREADY_ACCEPTED`, `REFUSED_ALREADY_SUPERSEDES`, `REFUSED_PROPOSAL_WOULD_CYCLE`
-(409), `REFUSED_SUPERSEDED_GONE` (422), and `NOT_FOUND` for no such proposal. A
-direction or force on a reject, and a note beginning with the pass's marker (067), are
-`REFUSED_REVIEW_ARGUMENT` (400). The reply names what was written or cleared, each
-pointer the lapse cleared, and who the row records as deciding it — with the kind the
-key had then, or else the registry's kind now, said so.
+(409), `REFUSED_SUPERSEDED_GONE` (422), and `NOT_FOUND` for no such proposal. A direction
+or force on a reject, and a note beginning with the pass's marker (067), are
+`REFUSED_REVIEW_ARGUMENT` (400). The reply names what was written or cleared, each pointer
+the lapse cleared, and who the row records as deciding it — with the kind the key had
+then, or else the registry's kind now, said so.
 
 029's review function runs as the caller (SECURITY INVOKER), so the server's role needs
 `UPDATE` on `supersession_proposals`, the server group's since SMD-3338: a role granted

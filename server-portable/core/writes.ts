@@ -905,11 +905,13 @@ export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal,
   // A reject of an accepted row names the pair the accept stood on: 029's
   // reject answers no ids, the row read under the lock does (review pass 2).
   const b = r.before ?? null;
-  const stood = decision === "reject" && b?.status === "accepted" && b.supersedingId ? b.supersedingId : null;
+  const undone = decision === "reject" && b?.status === "accepted" && b.supersedingId
+    ? { superseding: b.supersedingId, superseded: b.supersedingId === b.newerId ? b.olderId : b.newerId, written: b.pointerWritten }
+    : null;
   return ok({
     id, decision, status: decision === "accept" ? "accepted" : "rejected", forced: force === true,
-    previousStatus: b?.status ?? "pending", previousPointerWritten: stood ? b!.pointerWritten : null,
-    supersedingId: r.superseding_id ?? stood, supersededId: r.superseded_id ?? (stood ? (stood === b!.newerId ? b!.olderId : b!.newerId) : null),
+    previousStatus: b?.status ?? "pending", previousPointerWritten: undone?.written ?? null,
+    supersedingId: r.superseding_id ?? undone?.superseding ?? null, supersededId: r.superseded_id ?? undone?.superseded ?? null,
     written: decision === "accept" ? r.written === true : null,
     cleared: decision === "reject" ? r.cleared === true : null,
     lapsed: r.lapsed ?? [],

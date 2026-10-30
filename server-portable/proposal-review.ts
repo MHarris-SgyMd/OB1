@@ -78,7 +78,7 @@ export type ReviewResult = {
   before?: { status: string; pointerWritten: boolean; supersedingId: string | null; olderId: string; newerId: string } | null;
   /** update_thought's detail on a refusal 029 passes on (a WOULD_CYCLE past its walk's bound). */
   detail?: string;
-  ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; thought_id?: string;
+  ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string;
   written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean;
   flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[]; reviewer?: Reviewer | null | "no-114";
   writers: ReviewWriters | "no-094" | null;
