@@ -361,6 +361,12 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
+  // 113 (SMD-3306): the subject pool — the trigger function (the trigger goes with thoughts), the safe close, and the
+  // ticket a thought is filed under, which the door 113 redefines reads (the door is 111's, above).
+  "thoughts_enqueue_subject()",
+  "close_thought_subject(uuid, uuid, text)",
+  "ob1_filed_ticket(jsonb)",
+  "ob1_js_space()",
 ];
 
 /**
@@ -1030,6 +1036,41 @@ export function probePacedOutage(): { arm(n: number): void; clear(): void; down(
       return true;
     },
     get refused() { return refused; },
+  };
+}
+
+/**
+ * An engine's admit gate the suite holds (db/lease.ts's Admit, SMD-3379 PR
+ * 1b): open for its first `openFor` asks, then closed until open() — a closed
+ * ask waits, and is rejected when its signal aborts; close() closes it from
+ * the next ask. `asked` counts the asks and `waiting` those waiting now.
+ */
+export function heldGate(openFor: number): { admit: (signal: AbortSignal) => Promise<void>; open(): void; close(): void; readonly asked: number; readonly waiting: number } {
+  let asked = 0;
+  let isOpen = false;
+  const waiting = new Set<() => void>();
+  return {
+    admit(signal) {
+      asked++;
+      if (isOpen || asked <= openFor) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const stop = () => { waiting.delete(go); reject(new Error("stopped at the gate")); };
+        const go = () => { signal.removeEventListener("abort", stop); waiting.delete(go); resolve(); };
+        if (signal.aborted) return stop();
+        waiting.add(go);
+        signal.addEventListener("abort", stop, { once: true });
+      });
+    },
+    open() {
+      isOpen = true;
+      for (const go of [...waiting]) go();
+    },
+    close() {
+      isOpen = false;
+      openFor = asked;
+    },
+    get asked() { return asked; },
+    get waiting() { return waiting.size; },
   };
 }
 

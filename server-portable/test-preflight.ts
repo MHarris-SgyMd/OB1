@@ -25,6 +25,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
+import { consolidateKey } from "./consolidate.ts";
+import { consolidatePassKey } from "./consolidate-decide.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
@@ -1528,6 +1530,56 @@ else {
   assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
       && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
          `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
+  // A dead worker's expired lease on the scheduler's key is its work, which it reclaims when it next works the key: named,
+  // with the reclaim, no "finish it" beside it (SMD-3485). A record unlike this configuration keeps the record's words.
+  await claims`SELECT claim_thoughts(${KEY}, 'preflight-dead-beside-sleep', 1)`;
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${KEY} AND status = 'claimed'`;
+  let schedDied: { out: string } = { out: "" }, schedDiedSwitch = "", schedDiedAlone = "", setAside = 0;
+  let schedDiedDown: { out: string } = { out: "" }, schedDiedConflict: { out: string } = { out: "" }, schedDiedWorkers: { out: string } = { out: "" }, schedDiedDownWorkers: { out: string } = { out: "" };
+  const [{ value: recordedNow }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+  try {
+    schedDied = await run(SQL_ENV);
+    // Set down for the sleep, or beside a hand follower: the cause first, the reclaim once it is mended (review pass 1).
+    await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } } });
+    schedDiedDown = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true });
+    await hb(`heartbeat:${KEY}:ctx`, { job: `${KEY}:ctx`, running: true });
+    schedDiedConflict = await run(SQL_ENV);
+    await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${KEY}:ctx`}`;
+    // A workers-profile follower beside it ends it too: the reclaim waits on it, named in the fix (review pass 2);
+    // set down as well, both conditions, the follower named after the set-down's remedy (review pass 3).
+    await hb("heartbeat:extract:beside@p2", { job: "extract:beside@p2", running: true });
+    schedDiedWorkers = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } } });
+    schedDiedDownWorkers = await run(SQL_ENV);
+    await hb("heartbeat:sleep", { running: true });
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:beside@p2'`;
+    // With no failed row beside it, the expired claim alone makes the warning (the failed row set aside, by a mark, and put back).
+    setAside = ((await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = 'preflight-set-aside' WHERE work_type = ${KEY} AND status = 'failed' RETURNING thought_id`) as unknown[]).length;
+    schedDiedAlone = row((await run(SQL_ENV)).out, "re-embed pass");
+    await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL WHERE work_type = ${KEY} AND worker_id = 'preflight-set-aside'`;
+    await claims`UPDATE ob1_config SET value = 'another-recorded-model' WHERE key = 'embedding_model'`;
+    schedDiedSwitch = row((await run(SQL_ENV)).out, "re-embed pass");
+  } finally {
+    await claims`DELETE FROM ob1_config WHERE key IN (${`heartbeat:${KEY}:ctx`}, 'heartbeat:extract:beside@p2')`;
+    await claims`UPDATE ob1_config SET value = ${recordedNow} WHERE key = 'embedding_model'`;
+    await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL WHERE work_type = ${KEY} AND worker_id = 'preflight-set-aside'`;
+    await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${KEY} AND status = 'claimed'`;
+  }
+  assert(new RegExp(`!\\s+re-embed pass\\s+${rx(KEY)}: .* — the sleep scheduler runs this key, .*; 1 left by a worker that died, which the scheduler reclaims when it next works this key$`).test(row(schedDied.out, "re-embed pass"))
+      && /the release_stale_leases tool \(work_type \S+\) returns them now/.test(fix(schedDied.out, "re-embed pass")) && !/Finish it/.test(fix(schedDied.out, "re-embed pass"))
+      && /no longer the recorded model \(another-recorded-model/.test(schedDiedSwitch) && !/the sleep scheduler runs this key/.test(schedDiedSwitch)
+      && setAside > 0 && /^\s*!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*\); 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(schedDiedAlone),
+         `a dead worker's expired lease on the scheduler's key is its to reclaim, with no "finish it"; under a record that differs, the record's words (${row(schedDied.out, "re-embed pass")} | ${fix(schedDied.out, "re-embed pass")} | ${schedDiedSwitch} | ${schedDiedAlone})`);
+  assert(/\(provider\); 1 failed row\(s\) it will not retry; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once re-embed runs again$/.test(row(schedDiedDown.out, "re-embed pass"))
+      && /^\s*→ The provider refused .* returns them now\.$/.test(fix(schedDiedDown.out, "re-embed pass"))
+      && /runs beside it \(\S+:ctx\), so it refuses at its next poll and ends; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(schedDiedConflict.out, "re-embed pass"))
+      && /Stop that follower first, as the sleep row says, or the scheduler ends\. The next pass reclaims the expired claims/.test(fix(schedDiedConflict.out, "re-embed pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(schedDiedWorkers.out, "re-embed pass"))
+      && /Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims the expired claims/.test(fix(schedDiedWorkers.out, "re-embed pass"))
+      && /\(provider\); 1 failed row\(s\) it will not retry; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once re-embed runs again and the follower\(s\) beside it stop$/.test(row(schedDiedDownWorkers.out, "re-embed pass"))
+      && /^\s*→ The provider refused .*Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims .* returns them now\.$/.test(fix(schedDiedDownWorkers.out, "re-embed pass")),
+         `set down, or beside a hand follower, the cause comes first and the reclaim waits on it (${row(schedDiedDown.out, "re-embed pass")} | ${fix(schedDiedDown.out, "re-embed pass")} | ${row(schedDiedConflict.out, "re-embed pass")} | ${fix(schedDiedConflict.out, "re-embed pass")} | ${row(schedDiedWorkers.out, "re-embed pass")} | ${fix(schedDiedWorkers.out, "re-embed pass")} | ${row(schedDiedDownWorkers.out, "re-embed pass")} | ${fix(schedDiedDownWorkers.out, "re-embed pass")})`);
   // v1.9.0's scheduler runs no re-embed and writes no key: the pass is not its, "finish it" as main's (review pass 6: credited, a pass hidden).
   await hb("heartbeat:sleep", { running: true, reembedJob: undefined });
   const oldScheduler = await run(SQL_ENV);
@@ -1785,7 +1837,8 @@ else {
    * the oldest waits past OB1_PROPOSALS_WARN_DAYS — the pass proposes, a
    * reviewer decides. Before 015 or 029 there is nothing to read.
    */
-  const CONS = "consolidate:other-judge@p1";
+  // This judge's key at the current prompt version: the one the sleep scheduler runs (SMD-3485 review pass 2: @p1 read as its).
+  const CONS = consolidateKey("other-judge");
   assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out) && /✓\s+proposals\s+none pending\s*$/m.test(noRecord.out),
          `with no consolidation rows and no proposals both checks are ok and say so (${row(noRecord.out, "proposals")})`);
   // The pool's universe is thoughts with entities AND a vector; give three a vector for the count.
@@ -1815,18 +1868,25 @@ else {
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
   // Decide mode (SMD-3115): under a decider, the judge's key's remedy clears it, the judge's model being this
   // server's own, and a decide key's names its decider and writer, each the configuration that pools under that
-  // key; a decide key of this server's own models needs neither.
-  const DCONS = "consolidate:h2o-x+writer-y@p4d1";
+  // key; a decide key of this server's own models needs neither. One of an earlier decide version is no
+  // worker's — consolidate.ts runs the current key — so it reads so, with no "Finish it" (SMD-3485 review pass 3).
+  const DCONS = consolidatePassKey({ decider: "h2o-x", judgeModel: "writer-y" });
+  const DCONS_OLD = "consolidate:h2o-x+writer-y@p4d1";
   await claims.unsafe(`SELECT enqueue_thoughts('${DCONS}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  await claims.unsafe(`SELECT enqueue_thoughts('${DCONS_OLD}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
   const consDecide = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-z", OB1_JUDGE_MODEL: "other-judge" });
   const consDecideOwn = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-x", OB1_JUDGE_MODEL: "writer-y" });
-  await claims`DELETE FROM thought_work_claims WHERE work_type = ${DCONS}`;
+  await claims`DELETE FROM thought_work_claims WHERE work_type IN (${DCONS}, ${DCONS_OLD})`;
   const finishes = (out: string) => out.split("\n").filter((l) => /Finish it/.test(l)).map((l) => l.trim().slice(0, 110)).join(" | ");
   assert(/Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out)
       && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out),
          `under a decider the judge's key's remedy clears it, though its model is this server's judge, and a decide key's names its decider and writer (${finishes(consDecide.out)})`);
   assert(/Finish it: cd db && bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecideOwn.out) && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun/.test(consDecideOwn.out),
          `…and a decide key of this server's own decider and writer needs no knob (${finishes(consDecideOwn.out)})`);
+  const oldDecideRow = consDecideOwn.out.split("\n").find((l) => /consolidate pass/.test(l) && l.includes(`${DCONS_OLD}:`)) ?? "";
+  assert(DCONS !== DCONS_OLD && /✓\s+consolidate pass\s+\S+: .* — an earlier prompt or decide version's pool, which no worker runs any more: consolidate\.ts and the sleep scheduler judge these thoughts under \S+, nothing here to finish or retry$/.test(oldDecideRow)
+      && !consDecideOwn.out.includes(`${DCONS_OLD} --`) && !/Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y/.test(consDecideOwn.out),
+         `…and its earlier decide version's key, with no scheduler, is no worker's, with no "Finish it" (${oldDecideRow})`);
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   // A worker holding the pending row's live lease: running, ok, no remedy, the
@@ -1887,7 +1947,7 @@ else {
   await followerBeat(600, { running: true });
   const consKilled = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* — its follower is not running \(the workers row says so\), and 1 claim\(s\) it held keep live leases until \d\d:\d\d UTC\s*$/m.test(consKilled.out)
-      && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p1, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
+      && /Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type consolidate:other-judge@p\d+, include_live with the worker_id worker_status names\) returns them now\./.test(fix(consKilled.out, "consolidate pass")),
          `a follower whose heartbeat went stale while its claim's lease is live reads not running, pointing to the restart (${row(consKilled.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
   await followerBeat(20);
@@ -1896,7 +1956,7 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND status = 'pending'`;
   const consFollowFailed = await run(SQL_ENV);
   assert(/!\s+consolidate pass\s+\S+: .* 1 failed, .* — a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls; 1 failed row\(s\) the running pass will not retry\s*$/m.test(consFollowFailed.out)
-      && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p1\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
+      && /Once their cause is fixed, the retry_failed tool \(work_type consolidate:other-judge@p\d+\) puts the failed rows back to pending, and the running worker takes them: no second worker\./.test(fix(consFollowFailed.out, "consolidate pass")),
          `a follower beside a failed row warns, naming it and the retry (${row(consFollowFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${CONS} AND last_error = 'stub: not JSON'`;
   await followerBeat(600);
@@ -1916,13 +1976,60 @@ else {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   const consSlept = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   const consOtherJudge = await run(SQL_ENV);
-  // Only the stopped case is the scheduler's (review pass 2): a dead worker's
-  // expired lease keeps its warning and remedy beside a fresh heartbeat:sleep,
-  // and a scheduler whose last pass failed warns, with no second worker.
+  // A dead worker's expired lease beside a fresh heartbeat:sleep is the
+  // scheduler's work on the key it runs now — this judge at the current prompt
+  // version — which it reclaims when it next works the key: named, with the
+  // reclaim, no second worker (SMD-3485), a failed last pass's too. An earlier
+  // version's key, which no worker runs any more, is said so, with nothing to
+  // do (review passes 1 and 2). A scheduler whose last pass failed warns, with
+  // no second worker.
   await claims`SELECT claim_thoughts(${CONS}, 'preflight-dead-beside-sleep', 1)`;
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${CONS} AND status = 'claimed'`;
   const consSleptDied = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // Its last pass failed, the claim still expired: the clause, and the reclaim after the cause.
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptDiedFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // A workers-profile follower beside it, which ends the scheduler at its next poll: the reclaim waits on it (review pass 2).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:extract:beside@p2', ${JSON.stringify({ v: 1, job: "extract:beside@p2", every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')`;
+  const consSleptDiedBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:beside@p2'`;
+  // A hand re-embed follower beside this row, which carries no re-embed key — v1.9.0's, which does not refuse beside one: no condition.
+  await claims`INSERT INTO ob1_config (key, value, updated_at) VALUES ('heartbeat:reembed:beside@1024', ${JSON.stringify({ v: 1, job: "reembed:beside@1024", every_s: 60, running: true, outcome: null })}, now() - interval '10 seconds')`;
+  const consSleptDiedOldBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  // …the same row under a model name no row carries is this version's, kept out of re-embed, which refuses beside one (SMD-3486).
+  const consSleptDiedUnfitBeside = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge", OB1_EMBEDDING_MODEL: "my embed model" });
+  await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:reembed:beside@1024'`;
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
+  // Decide mode with a `+` in the judge's model name: the parse splits it wrongly, the current key still the scheduler's (review pass 2).
+  const PLUS_ENV = { ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-walk", OB1_JUDGE_MODEL: "walk+judge" };
+  const PLUS = consolidatePassKey({ decider: "h2o-walk", judgeModel: "walk+judge" });
+  let consPlus = "";
+  try {
+    const [{ thought_id: plusThought }] = (await claims`SELECT thought_id FROM thought_work_claims WHERE work_type = ${CONS} LIMIT 1`) as { thought_id: string }[];
+    await claims`SELECT enqueue_thoughts(${PLUS}, ARRAY[${plusThought}::uuid])`;
+    consPlus = (await run(PLUS_ENV)).out.split("\n").find((l) => /consolidate pass/.test(l) && l.includes(`${PLUS}:`)) ?? "";
+  } finally {
+    await claims`DELETE FROM thought_work_claims WHERE work_type = ${PLUS}`;
+  }
+  // An earlier prompt version of this judge's key: no worker runs it any more (review passes 1 and 2).
+  const OLD = "consolidate:other-judge@p1";
+  const consRowOf = (out: string) => {
+    const ls = out.split("\n");
+    const i = ls.findIndex((l) => /consolidate pass/.test(l) && l.includes(`${OLD}:`));
+    return { row: ls[i] ?? "", fix: /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1] : "" };
+  };
+  let consOld = { row: "", fix: "" }, consOldDied = { row: "", fix: "" };
+  try {
+    const [{ thought_id: oldThought }] = (await claims`SELECT thought_id FROM thought_work_claims WHERE work_type = ${CONS} LIMIT 1`) as { thought_id: string }[];
+    await claims`SELECT enqueue_thoughts(${OLD}, ARRAY[${oldThought}::uuid])`;
+    consOld = consRowOf((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out);
+    await claims`SELECT claim_thoughts(${OLD}, 'preflight-dead-beside-sleep', 1)`;
+    await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${OLD} AND status = 'claimed'`;
+    consOldDied = consRowOf((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out);
+  } finally {
+    await claims`DELETE FROM thought_work_claims WHERE work_type = ${OLD}`;
+  }
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "failed" })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consSleptFailed = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   // Asleep with its pass waiting for the provider at its start, the row says
@@ -1953,9 +2060,19 @@ else {
   assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 20 s ago; awake, its passes waiting for the brain to go quiet\)\s*$/m.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
-  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(consSleptDied.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptDied.out, "consolidate pass"))
+  assert(/!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped .*\); 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDied.out, "consolidate pass"))
+      && /^\s*→ The next pass reclaims the expired claims .* returns them now\.$/.test(fix(consSleptDied.out, "consolidate pass"))
+      && /, and its last pass failed; 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDiedFailed.out, "consolidate pass"))
+      && /^\s*→ The scheduler's log says why .* returns them now\.$/.test(fix(consSleptDiedFailed.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(consSleptDiedBeside.out, "consolidate pass"))
+      && /^\s*→ Stop the follower\(s\) beside it first \(extract:beside@p2\), or the scheduler ends at its next poll\. The next pass reclaims/.test(fix(consSleptDiedBeside.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDiedOldBeside.out, "consolidate pass"))
+      && /; 1 left by a worker that died, which the scheduler reclaims when it next works this key, once the follower\(s\) beside it stop$/.test(row(consSleptDiedUnfitBeside.out, "consolidate pass"))
+      && /✓\s+consolidate pass\s+consolidate:other-judge@p1: .* — an earlier prompt or decide version's pool, which no worker runs any more: consolidate\.ts and the sleep scheduler judge these thoughts under consolidate:other-judge@p\d+, nothing here to finish or retry$/.test(consOld.row)
+      && /an earlier prompt or decide version's pool, .*; 1 claim\(s\) left by a worker that died, which nothing takes up$/.test(consOldDied.row) && consOldDied.fix === "" && !/Finish it/.test(consOldDied.row)
+      && PLUS.includes("walk+judge") && /— the sleep scheduler runs this key/.test(consPlus)
       && /!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key .*, and its last pass failed/.test(consSleptFailed.out) && !/Finish it|Start it again/.test(fix(consSleptFailed.out, "consolidate pass")),
-         `…but a dead worker's expired lease keeps its warning beside it, and a failed last pass warns with no second worker (${row(consSleptDied.out, "consolidate pass")} | ${row(consSleptFailed.out, "consolidate pass")})`);
+         `…and a dead worker's expired lease on the key it runs now is the scheduler's to reclaim, with no second worker — a failed last pass's too, and beside a follower once it stops; an earlier version's key is no worker's (${row(consSleptDied.out, "consolidate pass")} | ${fix(consSleptDied.out, "consolidate pass")} | ${row(consSleptDiedFailed.out, "consolidate pass")} | ${row(consSleptDiedBeside.out, "consolidate pass")} | ${fix(consSleptDiedBeside.out, "consolidate pass")} | ${consOld.row} | ${consOldDied.row} | ${consPlus} | ${row(consSleptFailed.out, "consolidate pass")})`);
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
   const consFailed = await run(SQL_ENV);
   assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
@@ -3009,9 +3126,9 @@ else {
       const noConfig = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(noConfig.code === 1 &&
              /SELECT on ob1_config/.test(writeLine(noConfig.out)) &&
-             /016's enqueue trigger/.test(writeLine(noConfig.out)) &&
+             /016's and 113's enqueue triggers/.test(writeLine(noConfig.out)) &&
              /GRANT SELECT ON ob1_config TO ob1_pf_capture;/.test(noConfig.out),
-             `with 016's trigger present, a role lacking SELECT on ob1_config is refused, the trigger named (exit ${noConfig.code})`);
+             `with 016's and 113's triggers present, a role lacking SELECT on ob1_config is refused, the triggers named (exit ${noConfig.code})`);
       await claims.unsafe("GRANT SELECT ON ob1_config TO ob1_pf_capture");
 
       // 046's audit trigger reads the key's kind from ob1_agents as the caller
@@ -3110,17 +3227,40 @@ else {
              `with only the snapshot writes missing, the check names 060's trigger (exit ${noSnapshot.code})`);
       await claims.unsafe("GRANT INSERT, UPDATE ON ob1_embedding_snapshot TO ob1_pf_capture");
 
+      // Name a subject pool with extraction off: 113's trigger upserts a work
+      // claim as the caller on every capture, as 016's does, so the capture path
+      // needs thought_work_claims INSERT/UPDATE (SMD-3306 PR 5).
+      await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
+      const poolOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(poolOn.code === 1 && /INSERT, UPDATE on thought_work_claims/.test(writeLine(poolOn.out)) && /016's and 113's enqueue triggers/.test(writeLine(poolOn.out))
+               && /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolOn.out),
+             `with a subject pool named and extraction off, a role lacking the work-claim writes is refused, the triggers named (exit ${poolOn.code})`);
+      // …and SELECT there: requeue_thought_work's upsert reads the conflict (SMD-3306 PR 5, review pass 2: a role
+      // with INSERT and UPDATE alone passed, and its every capture failed).
+      await claims.unsafe("REVOKE SELECT ON thought_work_claims FROM ob1_pf_capture");
+      const poolNoSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON thought_work_claims TO ob1_pf_capture");
+      assert(poolNoSelect.code === 1 && /GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(poolNoSelect.out),
+             `…and one lacking SELECT there too is refused, the GRANT naming it (exit ${poolNoSelect.code})`);
+      // A blank key names no pool, as 113's trigger reads it: the work-claim writes are not asked for (review pass 4,
+      // run-it: preflight reading '' as a pool named survived every suite).
+      await claims.unsafe("UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_key'");
+      const poolBlank = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(/write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(poolBlank.out) && !/thought_work_claims/.test(writeLine(poolBlank.out)),
+             `…and under a blank key, which names no pool, the role is not asked for them (exit ${poolBlank.code}: ${writeLine(poolBlank.out).trim().slice(0, 120)})`);
+      await claims.unsafe("DELETE FROM ob1_config WHERE key = 'subject_pool_key'");
+
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims
       // INSERT/UPDATE — which this role (SELECT-everywhere, no worker DML) lacks.
-      // Preflight refuses it, naming them with the trigger as the reason.
+      // Preflight refuses it, naming them with the triggers as the reason.
       await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:test') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
       const extractOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(extractOn.code === 1 &&
              /INSERT, UPDATE on thought_work_claims/.test(writeLine(extractOn.out)) &&
-             /016's enqueue trigger/.test(writeLine(extractOn.out)) &&
+             /016's and 113's enqueue triggers/.test(writeLine(extractOn.out)) &&
              /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(extractOn.out),
-             `with entity extraction enabled, a role lacking the work-claim writes is refused, the trigger named (exit ${extractOn.code})`);
+             `with entity extraction enabled, a role lacking the work-claim writes is refused, the triggers named (exit ${extractOn.code})`);
 
       // The executable spelling: migrate.ts --grant issues the whole documented
       // set — the server, worker and extraction groups too, quoted role — so the
@@ -3146,9 +3286,13 @@ else {
       assert(sleepGrant.code === 2 && /"sleep" was retired in 2\.0\.0: a search no longer wakes the sleep scheduler, which reads no query_log \(SMD-3315\) — drop it from --groups\. Nothing was granted\./.test(sleepGrant.out)
                && !/not a group/.test(sleepGrant.out) && !/^GRANT /m.test(sleepGrant.out),
              `…and --groups naming the retired sleep group is refused by name, nothing granted (exit ${sleepGrant.code}: ${sleepGrant.out.trim().split("\n").slice(-1)[0]})`);
+      // A subject pool named beside extraction (113): the ok names both, and the
+      // capture below runs 113's trigger as the role too.
+      await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r1.2:p2r') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
-             `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out)
+               && /entity extraction is enabled and a subject pool is named, so the enqueue triggers' work-claim writes are included/.test(writeLine(okRun.out)),
+             `…and granted, the role starts, the ok noting extraction is on and a subject pool named (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
       // The query log check (034, SMD-1295): present after the migrations, and
       // off by default with OB1_QUERY_LOG unset — reported, never a refusal.
       assert(/query log\s+present; off by default/.test(okRun.out),
@@ -3177,6 +3321,8 @@ else {
         // conditional check just proved it needs.
         const [{ queued }] = (await asRole`SELECT count(*)::int AS queued FROM thought_work_claims WHERE thought_id = ${r.id} AND work_type = 'extract:test'`) as { queued: number }[];
         assert(queued === 1, "…and 016's enqueue trigger upserts a work claim as the role, extraction being on");
+        const [{ pooled }] = (await asRole`SELECT count(*)::int AS pooled FROM thought_work_claims WHERE thought_id = ${r.id} AND work_type = 'subjects:r1.2:p2r'`) as { pooled: number }[];
+        assert(pooled === 1, "…and 113's trigger pools it as the role, a subject pool being named");
         const edit = (await asRole`SELECT update_thought(${r.id}::uuid, 'the capture, edited with content'::text, NULL::jsonb, ${vecOf(4)}::vector, ${windows}::jsonb, NULL::timestamptz, NULL::jsonb, ${EMBEDDING_MODEL}::text) AS r`) as { r: { ok?: boolean } }[];
         assert(edit.length === 1 && edit[0].r?.ok !== false, "an edit with content through the role succeeds — chunks replaced as the role");
       } finally {
@@ -3185,7 +3331,7 @@ else {
     } finally {
       // Clear the shared state that later sub-blocks see first, so it runs even
       // if dropping the role throws; then drop the role.
-      await claims.unsafe("DELETE FROM ob1_config WHERE key = 'entity_extraction_key'").catch(() => {});
+      await claims.unsafe("DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key')").catch(() => {});
       await dropCaptureRole();
     }
   }
@@ -3859,9 +4005,9 @@ else {
     const stale = await run(SQL_ENV);
     const staleJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
     assert(/!\s+workers\s+board-sync stale \(last stamped 16 min ago, every 300 s\); extract/m.test(stale.out), `a heartbeat past three intervals is stale, a warning (${row(stale.out, "workers")})`);
-    assert(/board-sync has not stamped for 16 min: start it again — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'\./.test(fix(stale.out, "workers")),
+    assert(/board-sync has not stamped for 16 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'\./.test(fix(stale.out, "workers")),
       `…whose fix names the restart command and how to retire it (${fix(stale.out, "workers")})`);
-    assert(/up -d --no-deps board-sync, with the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && bun sync-linear\.ts --url \$DATABASE_URL --loop\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
+    assert(/up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; from a checkout, cd db && bun sync-linear\.ts --url \$DATABASE_URL --loop\)\./.test(fix(stale.out, "workers")), "…the checkout's form beside it");
     // A worker that said it ended is stopped at once, not alive for three intervals (review pass 1).
     await beat("heartbeat:board-sync", v({ outcome: "stopped" }), 60);
     const stopped = await run(SQL_ENV);
@@ -3893,10 +4039,10 @@ else {
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true }), 120);
     const endedOut = await run(SQL_ENV);
-    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure \(last stamped 2 min ago, every 60 s\)$/.test(row(endedOut.out, "workers")) && /ended on a failure 2 min ago — its log says why: start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts/.test(fix(endedOut.out, "workers")),
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure \(last stamped 2 min ago, every 60 s\)$/.test(row(endedOut.out, "workers")) && /ended on a failure 2 min ago — its log says why: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts/.test(fix(endedOut.out, "workers")),
       `a follower ended on a failure reads ended and names its restart (${row(endedOut.out, "workers")} | ${fix(endedOut.out, "workers")})`);
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", malformed: { answers: 48, bad: 48, alarm: true } }), 30);
-    assert(/stopped 3\d s ago: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db/.test(fix((await run(SQL_ENV)).out, "workers")),
+    assert(/stopped 3\d s ago: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a stopped follower whose last block tripped the alarm is told to check the model before the restart");
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed" }), 10);
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
@@ -3915,26 +4061,26 @@ else {
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 110, code: 2, tries: 2 } }), 30);
     const heldOut = await run(SQL_ENV);
     assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in 80 s \(last stamped 30 s ago, every 60 s\)$/.test(row(heldOut.out, "workers"))
-           && /extract:qwen2\.5:7b@p2 is held: a refusal — its log says which\. Its supervisor runs it again on its own in 80 s, then every 15 min at most while it keeps ending, so a fix outside deploy\/\.env \(a model pulled, the migrations applied\) is met at a try; one in deploy\/\.env needs the service recreated — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract/.test(fix(heldOut.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 is held: a refusal — its log says which\. Its supervisor runs it again on its own in 80 s, then every 15 min at most while it keeps ending, so a fix outside deploy\/\.env \(a model pulled, the migrations applied\) is met at a try; one in deploy\/\.env needs the coordinator recreated — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES/.test(fix(heldOut.out, "workers"))
            && !/start it again/.test(fix(heldOut.out, "workers")),
       `a held follower reads held with its next try, and its fix gives the cause and the recreate, not "start it again" (${row(heldOut.out, "workers")} | ${fix(heldOut.out, "workers")})`);
     // Its guard's refusal: no next try, the kind's remedy and the recreate it waits for.
     await beat("heartbeat:board-sync", v({ outcome: "failed", ended: true, every_s: 60, refused: "usage", restart: { in_s: null, code: 2, tries: 0 } }), 10);
     const guardFix = fix((await run(SQL_ENV)).out, "workers");
-    assert(/board-sync is held by its supervisor, never started: a setting its log names is not one the service takes — decimal digits, in its range .*set it in deploy\/\.env, then recreate the service.*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
+    assert(/board-sync is held by its supervisor, never started: a setting its log names is not one the service takes — decimal digits, in its range .*set it in deploy\/\.env, then recreate the coordinator \(up -d coordinator\).*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with board-sync in deploy\/\.env's OB1_PASSES/.test(guardFix),
       `a follower its guard holds gives the kind's remedy and the recreate (${guardFix})`);
     // Long past its try with nothing stamped: the supervisor is taken for gone, the start and the retire named.
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 60, code: 1, tries: 1 } }), 1260);
     const goneFix = fix((await run(SQL_ENV)).out, "workers");
-    assert(/extract:qwen2\.5:7b@p2's supervisor was due to run it again 20 min ago, and nothing has stamped since: if its container is gone, start it — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(goneFix),
+    assert(/extract:qwen2\.5:7b@p2's supervisor was due to run it again 20 min ago, and nothing has stamped since: if the coordinator is gone, start it — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(goneFix),
       `a held row long past its try names the start and the retire (${goneFix})`);
     // Ended on its start's refusal with no supervisor's word (a run from a
     // checkout): the kind and its remedy, then the start (SMD-3214 PR 2).
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, refused: "model" }), 40);
     const refusedRun = await run(SQL_ENV);
     assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure, refused at its start \(model\) \(last stamped 40 s ago, every 60 s\)$/.test(row(refusedRun.out, "workers"))
-           && /extract:qwen2\.5:7b@p2 ended 40 s ago on its start's refusal \(model\): pull the model its log names.*Then start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*; started before that, it refuses again\./.test(fix(refusedRun.out, "workers")),
+           && /extract:qwen2\.5:7b@p2 ended 40 s ago on its start's refusal \(model\): pull the model its log names.*Then start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES.*; started before that, it refuses again\./.test(fix(refusedRun.out, "workers")),
       `a follower ended on its start's refusal names the kind and its remedy before the start (${row(refusedRun.out, "workers")} | ${fix(refusedRun.out, "workers")})`);
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%'`;
     await beat("heartbeat:board-sync", v({ every_s: 300, outcome: "failed", ended: true, refused: "board" }), 20);
@@ -3970,7 +4116,7 @@ else {
       /** An instant `agoS` seconds before the database's now(), as pass-stamp's SleepMark writes one. */
       const at = async (agoS: number): Promise<string> => new Date((await claims`SELECT now() - make_interval(secs => ${agoS}) AS t`)[0].t).toISOString();
       const noneOut = await run(LOG_ON);
-      assert(/·\s+sleep\s+the sleep scheduler has not run on this brain — `--profile sleep` runs it, as an alternative to `--profile workers`/.test(row(noneOut.out, "sleep")),
+      assert(/·\s+sleep\s+the sleep scheduler has not run on this brain — the coordinator runs it when deploy\/\.env's OB1_PASSES names sleep, as an alternative to workers/.test(row(noneOut.out, "sleep")),
         `a brain the scheduler never ran on says so, as a skip (${row(noneOut.out, "sleep")})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null } }), 10);
@@ -4065,7 +4211,7 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write wakes it; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write wakes it; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Asleep with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
@@ -4224,12 +4370,12 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "model", restart: { in_s: 240, code: 2, tries: 3 }, slept: { from: await at(900), to: await at(700) } }), 30);
       const heldSleep = await run(LOG_ON);
       assert(/!\s+sleep\s+held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min \(last stamped 30 s ago, every 60 s\); its last sleep ended/.test(row(heldSleep.out, "sleep")) && !/refused at a pass's start/.test(row(heldSleep.out, "sleep"))
-             && /→ sleep is held: pull the model its log names.*Its supervisor runs it again on its own in 4 min.* — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(heldSleep.out, "sleep")) && !/start it again/.test(fix(heldSleep.out, "sleep")),
+             && /→ sleep is held: pull the model its log names.*Its supervisor runs it again on its own in 4 min.* — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(heldSleep.out, "sleep")) && !/start it again/.test(fix(heldSleep.out, "sleep")),
         `a scheduler its supervisor holds reads held, with the kind's remedy and its next try (${row(heldSleep.out, "sleep")} | ${fix(heldSleep.out, "sleep")})`);
       // Its guard: no worker key, held until a recreate.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }), 10);
       const guardSleep = fix((await run(LOG_ON)).out, "sleep");
-      assert(/→ sleep is held by its supervisor, never started: an unset OB1_WORKER_KEY needs a key minted .*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(guardSleep),
+      assert(/→ sleep is held by its supervisor, never started: an unset OB1_WORKER_KEY needs a key minted .*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(guardSleep),
         `a scheduler held for want of a worker key names the key's remedy and the recreate (${guardSleep})`);
       // Killed while asleep: the sleep never ended, so the row says when it began.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(900), to: null } }), 600);
@@ -4241,15 +4387,15 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true }), 20);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
       const keptDown = await run(LOG_ON);
-      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write wakes it; a search does not$/.test(row(keptDown.out, "sleep")) && /→ The workers profile's followers run here \(extract:qwen2\.5:7b@p2\), and the scheduler will not run beside them: choose one profile\..*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, take sleep out of COMPOSE_PROFILES in deploy\/\.env and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
+      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write wakes it; a search does not$/.test(row(keptDown.out, "sleep")) && /→ Followers run here outside the scheduler \(extract:qwen2\.5:7b@p2\), and it will not run beside them — the coordinator never runs both.*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, name workers and not sleep in deploy\/\.env's OB1_PASSES, recreate the coordinator \(up -d coordinator\) and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
         `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
       // …and a follower stopped for a scheduler running here is retired, not started again.
       await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: true, slept: { from: await at(60), to: null } }), 10);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "stopped", ended: true }), 30);
       const retired = await run(LOG_ON);
-      assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy\/\.env and retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
+      assert(/→ extract:qwen2\.5:7b@p2 stopped, and the sleep scheduler runs here instead, which will not run beside a follower: the coordinator runs no follower beside it, so retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2' — rather than start it again\.$/.test(fix(retired.out, "workers")),
         `a follower stopped beside a running scheduler is told to retire its row (${fix(retired.out, "workers")})`);
-      // A re-embed follower is a hand run, no workers profile's (SMD-2679 PR 4b, review pass 3): stopped beside a running
+      // A re-embed follower is a hand run, never the coordinator's (SMD-2679 PR 4b, review pass 3): stopped beside a running
       // scheduler, its fix is the row alone; running, it keeps the scheduler down, and its fix is to stop that run.
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
       await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, outcome: "stopped", ended: true }), 30);
@@ -4261,12 +4407,12 @@ else {
       await beat("heartbeat:reembed:stub-embed@1024", v({ job: "reembed:stub-embed@1024", every_s: 60, running: true, outcome: null }), 10);
       const handDown = await run(LOG_ON);
       const handDownFix = fix(handDown.out, "sleep");
-      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(handDownFix) && !/workers profile/.test(handDownFix),
-        `a scheduler kept down by a hand re-embed follower is told to stop that run, not to choose a profile (${handDownFix})`);
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(handDownFix) && !/Followers run here outside the scheduler/.test(handDownFix),
+        `a scheduler kept down by a hand re-embed follower is told to stop that run, not the followers' fix (${handDownFix})`);
       // Beside the workers' followers too, the hand run is named as well: their fix alone leaves the scheduler refusing (review pass 4).
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
       const bothDownFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /The workers profile's followers run here \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
+      assert(/A re-embed follower run by hand runs here \(reembed:stub-embed@1024\), and the scheduler will not run beside it: stop that reembed\.ts --follow/.test(bothDownFix) && /Followers run here outside the scheduler \(extract:qwen2\.5:7b@p2\)/.test(bothDownFix),
         `a scheduler kept down by a hand re-embed follower and the workers' is told of both (${bothDownFix})`);
       // Running beside a hand follower started since: it refuses at its next poll and ends, so said now (review pass 1: every row passed).
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract%'`;
@@ -4357,7 +4503,7 @@ else {
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
       assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
-        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*--profile sleep stop sleep.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*stop coordinator.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
         `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
       // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });
@@ -4398,8 +4544,8 @@ else {
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, malformed: { answers: 50, bad: 12, alarm: true } }), 600);
     await beat("heartbeat:consolidate:qwen2.5:7b@p3", v({ job: "consolidate:qwen2.5:7b@p3", every_s: 60 }), 600);
     const claimFix = fix((await run(SQL_ENV)).out, "workers");
-    assert(/extract:qwen2\.5:7b@p2 has not stamped for 10 min: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts --url \$DATABASE_URL --follow --job extract:qwen2\.5:7b@p2 .*DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(claimFix)
-        && /consolidate:qwen2\.5:7b@p3 has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps consolidate, with the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun consolidate\.ts --url \$DATABASE_URL --follow \(its job, consolidate:qwen2\.5:7b@p3, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL\)\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:qwen2\.5:7b@p3'\./.test(claimFix),
+    assert(/extract:qwen2\.5:7b@p2 has not stamped for 10 min: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts --url \$DATABASE_URL --follow --job extract:qwen2\.5:7b@p2 .*DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(claimFix)
+        && /consolidate:qwen2\.5:7b@p3 has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun consolidate\.ts --url \$DATABASE_URL --follow \(its job, consolidate:qwen2\.5:7b@p3, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL\)\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:qwen2\.5:7b@p3'\./.test(claimFix),
       `each claim worker's stale row names its own restart and row, a stale alarm its restart first (${claimFix})`);
     // ob1_config refused to this role: the row warns it could not verify.
     await claims.unsafe("CREATE ROLE pf_hb_noread LOGIN PASSWORD 'pf'");

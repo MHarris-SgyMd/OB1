@@ -95,9 +95,9 @@
  * --dry-run count them (reembed.ts --dry-run before upgrading). The
  * extraction follower runs alone until its pool is drained — nothing
  * pending, in flight or not yet in the pool — because consolidation judges a thought against neighbours that must be
- * extracted first (consolidate.ts's header; deploy/README.md's "Start extract
+ * extracted first (consolidate.ts's header; deploy/README.md's "Extraction
  * alone on a backlog", a rule there until now). The consolidation follower
- * then joins it, beside it as the workers profile runs the two (SMD-2424):
+ * then joins it, beside it as the coordinator's workers pass runs the two (SMD-2424):
  * safe for what arrives from then on, as a candidate was captured on an
  * earlier UTC date. It joins as well once extraction holds nothing but
  * thoughts that SLEEP_STALLED_JOIN (3) or more long hard stops in a row took
@@ -292,16 +292,17 @@
  * about, and preflight's
  * consolidate pass row reads it as the scheduler at work. Only --follow
  * stamps: one sleep leaves no row to go stale, as a one-shot pass does not.
- * Followers run outside sleep (the workers profile) do not yield, so the two
- * profiles are alternatives: a run refuses (2) while any of their heartbeats
+ * Followers run outside sleep (the coordinator's workers, never beside it
+ * there, or a hand run) do not yield, so the two are alternatives: a run
+ * refuses (2) while any of their heartbeats
  * is fresh — at its start, and at every awake and asleep poll, since a
  * follower brought up beside it stamps only past its own start probe — and
  * --dry-run names them, each with how to stop them and retire their rows
  * (SMD-2678). Under --follow a refusal, at the start too, ends the row on a
  * failure, its last sleep kept, so preflight names the followers keeping it
  * down. Preflight's `sleep` row reads this heartbeat, with its `slept` mark
- * and its `reads` word on the query log, and the compose service
- * (`--profile sleep`) runs `--follow`. The start's reads, like the sleep's,
+ * and its `reads` word on the query log, and the coordinator runs
+ * `--follow` when OB1_PASSES names sleep (db/coordinator.ts, SMD-3476). The start's reads, like the sleep's,
  * wait out a database not answering yet, and so does each pass's start at
  * every sleep, up to its first claim (SMD-2752).
  *
@@ -656,15 +657,16 @@ async function lastSlept(sql: SQL): Promise<SleepMark | null> {
 /**
  * The line naming followers outside the scheduler: the dry run's, or a run's
  * refusal — at its start, or found later in an awake or asleep poll (review
- * pass 1: a follower started with this, as `COMPOSE_PROFILES=workers,sleep`
- * does, stamps only after its start probe, past the start's check). The keys
+ * pass 1: a follower started beside it — a hand run, an old stack's container,
+ * never the coordinator's — stamps only after its start probe, past the
+ * start's check). The keys
  * are FOLLOWER_KEY's alphabet, so the DELETE it prints is safe to paste.
  */
 function outsideLine(outside: string[], dryRun: boolean): string {
   // A re-embed follower is a hand run — no compose service runs one — whose stop ends its row at once (review pass 1).
   const hand = outside.filter((k) => k.startsWith("heartbeat:reembed:"));
   const handFix = "a reembed.ts --follow run by hand: stop it (Ctrl-C, or its container) — its row ends as it stops — and start sleep again";
-  // Hand runs alone: the workers profile's remedy names services that are not running (review pass 2).
+  // Hand runs alone: the followers' remedy names containers that are not running (review pass 2).
   if (hand.length === outside.length) {
     return `  ${dryRun ? "a re-embed follower running outside sleep, which does not yield to a live call" : "refused: a re-embed follower is running outside sleep, and it does not yield to a live call"}: ${hand.join(", ")} — ${handFix}`;
   }
@@ -672,7 +674,7 @@ function outsideLine(outside: string[], dryRun: boolean): string {
   return `${outsideLineOf(outside, dryRun)}${handWords}`;
 }
 function outsideLineOf(outside: string[], dryRun: boolean): string {
-  return `  ${dryRun ? "followers running outside sleep, which do not yield to a live call" : "refused: followers are running outside sleep, and they do not yield to a live call"}: ${outside.join(", ")} — the workers profile's, or a --follow run by hand. The sleep and workers profiles are alternatives: stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with; and take workers out of COMPOSE_PROFILES in deploy/.env), then delete their rows (DELETE FROM ob1_config WHERE key IN (${outside.map((k) => `'${k}'`).join(", ")})) so preflight does not ask for them back. A follower stopped cleanly marks its row ended at once; one killed past its grace leaves it fresh for up to three of its intervals`;
+  return `  ${dryRun ? "followers running outside sleep, which do not yield to a live call" : "refused: followers are running outside sleep, and they do not yield to a live call"}: ${outside.join(", ")} — a stack's from before the coordinator (SMD-3476), which never runs both, or a --follow run by hand. Sleep and the workers are alternatives: stop them (podman compose -f deploy/compose.yaml up -d --remove-orphans, with the -f files and -p the stack was started with, removes the old extract and consolidate; Ctrl-C a hand run), then delete their rows (DELETE FROM ob1_config WHERE key IN (${outside.map((k) => `'${k}'`).join(", ")})) so preflight does not ask for them back. A follower stopped cleanly marks its row ended at once; one killed past its grace leaves it fresh for up to three of its intervals`;
 }
 
 const ago = (now: Date, t: Date | null): string => (t ? `${Math.max(0, Math.round((now.getTime() - t.getTime()) / 1000))} s ago` : "none");
@@ -836,8 +838,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (outside === null) { err(STOPPED_EARLY); return 130; }
   // Followers outside the scheduler do not yield to a live call, so a sleep
   // beside them is no sleep: a run refuses (2) rather than start one, and the
-  // dry run names them (SMD-2678). The workers and sleep profiles are
-  // alternatives.
+  // dry run names them (SMD-2678). The workers and sleep passes are
+  // alternatives, which the coordinator never runs together (SMD-3476).
   // A signal aborted during the start's reads — one that did not wait on an
   // outage, where the wait returns 130 itself — is a stop before the run
   // began, and wins over what the reads found, a follower included: 130 and

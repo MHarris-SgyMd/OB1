@@ -73,7 +73,7 @@
  *  - a failed extraction or embedding (a candidate needs a vector), or an
  *    import dated older than thoughts already judged, which miss their
  *    pairs with thoughts judged before they were repaired, however this runs.
- * (The `workers` compose profile, SMD-2424, deploy/README.md.) A thought's
+ * (The coordinator's `workers` pass, SMD-2424, SMD-3476, deploy/README.md.) A thought's
  * claim row is terminal once its pairs are judged, so an EDIT does not
  * re-judge it (016's trigger does re-extract it); clear the key's rows to
  * start over, and a pair already proposed is skipped either way.
@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, type Admit, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -341,6 +341,22 @@ export interface ConsolidateOptions {
    * beside `sql`, a caller's client, which it would not reach.
    */
   session?: SessionSettings;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before each
+   * claim, at the start of each pass — before its pool, the stale re-pool and
+   * its counts — and before each pair of a thought. A worker waiting between
+   * thoughts holds no claim; one waiting between pairs keeps its claim and
+   * lease. A stop while it waits ends the worker there, as does the pass
+   * ending for a reason of its own (another worker's outage, the provider's
+   * refusal, a worker's throw): between pairs the thought goes back to the
+   * pool unrecorded, the proposals written so far standing, and every pair
+   * judged again at its next claim but those it proposed. When the gate held
+   * it, the thought and every older side still to judge are read again: a
+   * thought deleted or no longer this worker's has nothing more judged, one
+   * edited goes back to the pool for its new text. Unused by --status,
+   * --dry-run and a decision.
+   */
+  admit?: Admit;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -596,6 +612,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const say: Writer["out"] = opts.banner === false ? () => {} : out;
   /** The end-of-run summary's queries, which a pass the scheduler drives leaves out (SMD-2752). */
   const SUMMARY = opts.summary !== false;
+  const ADMIT = opts.admit;
   /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
   const refused = (kind: StartRefusal, line: string): number => {
     err(line);
@@ -1536,6 +1553,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pass after the thought in hand (SMD-2599).
    */
   let halt = new AbortController();
+  /**
+   * Aborted when the pass ends for a reason of its own — the provider's
+   * refusal, a worker's throw — so a worker waiting at the admit gate wakes to
+   * it, as one pausing on a provider error wakes on `halt`. `gate`, the signal
+   * the gate waits on, is the first stop, `halt` and this, made new with each
+   * pass (SMD-3379 PR 1b-1, review pass 1).
+   */
+  let passEnds = new AbortController();
+  let gate: AbortSignal = onStop.signal;
   let done = 0;
   let failed = 0;
   /** Workers that began or joined a provider outage — the heartbeat's "failed" (SMD-2261): the provider, not a document. */
@@ -1582,11 +1608,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   /** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
-  type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean };
+  /** `metadata_hash`, `md5(metadata::text)`, is read for the thought a worker claims (claimAfterWait), not for an older side. */
+  type Row = { id: string; content: string; created_at: string | null; fingerprint: string; metadata: Record<string, unknown> | null; has_vector: boolean; metadata_hash?: string | null };
   type Candidate = { older_id: string; similarity: number; shared_entities: number };
   type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }
     /** In hand at the hard stop: nothing more written, and no longer this worker's to release. */
-    | { outcome: "abandoned" };
+    | { outcome: "abandoned" }
+    /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
+    | { outcome: "lost" }
+    /** Edited while its worker waited at the admit gate, still its claim: the worker puts it back in the pool for the new text, nothing more judged (review passes 4 and 5). */
+    | { outcome: "moved" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
@@ -1598,6 +1629,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   class WriterThrow {
     constructor(readonly error: unknown) {}
+  }
+  /**
+   * A stop that reached a worker waiting at the admit gate between a thought's
+   * pairs (SMD-3379 PR 1b): the thought goes back to the pool unrecorded, as a
+   * provider outage sends it, its proposals written so far standing.
+   */
+  class StoppedBetweenPairs extends Error {
+    constructor() {
+      super("stopped between pairs at the admit gate: the thought goes back to the pool unrecorded");
+      this.name = "StoppedBetweenPairs";
+    }
   }
   const errInRow = (line: string): void => {
     try {
@@ -1635,7 +1677,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return false;
   }
 
-  async function processRow(row: Row): Promise<Outcome> {
+  async function processRow(row: Row, workerId: string): Promise<Outcome> {
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1681,7 +1723,44 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // No early exit on `stopping` here: a thought is at most --k calls, bounded
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
-    for (const c of candidates) {
+    for (const [pairIndex, c] of candidates.entries()) {
+      if (hardStopped) return { outcome: "abandoned" };
+      // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
+      // here, its claim and lease kept.
+      if (ADMIT) {
+        let through: false | "open" | "waited";
+        try {
+          through = await admitted(ADMIT, gate);
+        } catch (e) {
+          throw new AdmitThrow(e);
+        }
+        if (!through) throw new StoppedBetweenPairs();
+        // After the gate held it both sides are read again: the live write
+        // that closed the gate may be a delete or an edit of the thought or of
+        // any older side still to judge, whose text must not go to the judge
+        // after it (review passes 3 and 4). A read that fails goes on, as before.
+        if (through === "waited") {
+          const claim = await claimAfterWait(sql, JOB, workerId, row.id, row.fingerprint, false, row.metadata_hash ?? null).catch(() => "ours" as const);
+          if (claim === "deleted") return { outcome: "vanished" };
+          if (claim === "lost" || claim === "requeued") return { outcome: "lost" };
+          // Still ours, its text moved (063 requeues a judged thought only
+          // through its proposals) or its metadata, which the egress gate reads
+          // (review pass 6): the worker puts it back in the pool.
+          if (claim === "moved") return { outcome: "moved" };
+          const rest = candidates.slice(pairIndex).map((x) => x.older_id);
+          const fresh = (await sql`
+            SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector FROM thoughts
+            WHERE id = ANY(${sql.array(rest, "TEXT")}::uuid[])`.catch(() => null)) as Row[] | null;
+          if (fresh !== null) {
+            const now = new Map(fresh.map((o) => [o.id, o]));
+            for (const id of rest) {
+              const o = now.get(id);
+              if (o) byId.set(id, o);
+              else byId.delete(id);
+            }
+          }
+        }
+      }
       if (hardStopped) return { outcome: "abandoned" };
       const older = byId.get(c.older_id);
       if (!older) continue; // deleted between the candidate query and the read
@@ -1973,6 +2052,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     });
     try {
       while (!stopping && outage.reason === null && !limitReached()) {
+        // The admit gate before each claim (SMD-3379 PR 1b): a worker waits
+        // here holding no claim, and a stop while it waits ends it.
+        if (ADMIT) {
+          if (!(await admitted(ADMIT, gate))) return;
+          if (stopping || outage.reason !== null || limitReached()) return;
+        }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
         try {
@@ -1992,7 +2077,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
           const rows = (await sql`
-            SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector
+            SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
@@ -2027,9 +2112,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row);
+                outcome = await processRow(row, workerId);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
+                // The admit gate's own error, not the thought's: the pass ends with it.
+                if (e instanceof AdmitThrow) throw e.error;
+                // A stop at the gate between pairs: back to the pool with the leases the finally returns.
+                if (e instanceof StoppedBetweenPairs) return;
                 // The database went away under the pairs: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -2066,6 +2155,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 } else if (kind === "fatal") {
                   configError = msg;
                   stopping = true;
+                  passEnds.abort();
                   err(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
                   return;
                 } else if (stopping || outage.reason !== null) {
@@ -2089,9 +2179,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               }
             }
             if (hardStopped) return;
-            judged++;
-            if (ticketCalls === null) totals.ticketCallsUnread++;
-            else totals.ticketCalls += ticketCalls;
+            // Not judged: another holds it, or it goes back for its new text (review pass 5).
+            if (outcome.outcome !== "lost" && outcome.outcome !== "moved") {
+              judged++;
+              if (ticketCalls === null) totals.ticketCallsUnread++;
+              else totals.ticketCalls += ticketCalls;
+            }
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
               let recorded = false;
@@ -2140,6 +2233,24 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           hb.held.delete(b.thought_id);
           if (outcome.outcome === "vanished") {
             vanished++;
+            continue;
+          }
+          if (outcome.outcome === "lost") {
+            lost++;
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — requeued or reaped; nothing more of it was judged`);
+            continue;
+          }
+          if (outcome.outcome === "moved") {
+            // Back to the pool for its new text, out of the heartbeat's set first;
+            // if that fails, the worker stops and its finally returns it (review pass 5).
+            const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
+            if (requeued !== null) {
+              hb.held.add(b.thought_id);
+              err(`  ${workerId}: could not put ${b.thought_id}, edited while this worker waited at the admit gate, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
+              return;
+            }
+            lost++;
+            err(`  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
             continue;
           }
           let ok: boolean;
@@ -2289,9 +2400,20 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let firstPass = true;
   async function pass(): Promise<Counts> {
     halt = new AbortController();
+    if (ADMIT) {
+      passEnds = new AbortController();
+      gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+    }
     for (const w of unreturned) {
       await sql`SELECT release_claims_for_worker(${JOB}, ${w})`;
       unreturned.delete(w);
+    }
+    // After the leases a worker could not return, a small write and no new
+    // work (review pass 6): the admit gate before the pass's pool, re-pool and counts (SMD-3379 PR
+    // 1b). A stop while it waits ends the run with no pass: the summary's
+    // counts are read only for a summary.
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
+      return SUMMARY ? counts() : { pending: 0, claimed: 0, succeeded: 0, failed: 0, unpooled: 0, thoughts: 0, proposals: 0 };
     }
     // The pool rule, every pass, from migration 029's consolidation_pool (one
     // definition for this, --status and preflight). No trigger feeds it (see
@@ -2318,6 +2440,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // still hold rows and the client.
     const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
+      passEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");

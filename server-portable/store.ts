@@ -548,7 +548,7 @@ export type WorkerStatusRow = {
   oldestStaleClaimedAt: string | null;
   /** The `worker_id` holding that oldest stale lease, or null. */
   staleWorkerId: string | null;
-  /** Whether this work_type is the brain's active pool (`ob1_config.entity_extraction_key`, or `reembed:<model>@<dim>`); null when the kind records no active key (consolidate). */
+  /** Whether this work_type is the brain's active pool (`ob1_config.entity_extraction_key` or `subject_pool_key`, or `reembed:<model>@<dim>`); null when the kind records no active key (consolidate). */
   active: boolean | null;
 };
 

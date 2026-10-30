@@ -2238,12 +2238,14 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
-  const doc = Bun.YAML.parse(await Bun.file(new URL("../deploy/compose.yaml", import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
+  const doc = Bun.YAML.parse(await Bun.file(new URL("../deploy/compose.yaml", import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; command?: string[]; stop_grace_period?: string }> };
   const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
   // The server image, built by one service and run by the others by its name.
   const serverImages = new Set(Object.values(doc.services).filter(builds).map((svc) => svc.image).filter(Boolean));
   for (const [name, svc] of Object.entries(doc.services)) {
     if (!builds(svc) && !serverImages.has(svc.image)) continue;
+    // The coordinator runs the server image but serves nothing: its grace is its passes' (SMD-3476).
+    if (svc.command?.[0] === "db/coordinator.ts") continue;
     graceFallbacks.push(`${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
   }
   // Three: the REST core (SMD-2284), which builds the image, the MCP server
