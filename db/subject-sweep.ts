@@ -17,9 +17,10 @@
  *   claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage,
  *   configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a
  *   pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model
- *   likely at fault: 10 of its last 48 answers gave no subject (JUDGE_ALARM; ahead of 1, and of a first signal's 130
- *   when the claim it let finish trips it) · 130 a signal (the first after the call in hand, which can run to the limit
- *   a call; a second at once, the claim in hand handed back), or a caller's stop during the naming's waits
+ *   likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this
+ *   run's claims began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the claim it let finish trips it) ·
+ *   130 a signal (the first after the call in hand, which can run to the limit a call; a second at once, the claim in
+ *   hand handed back, unjudged), or a caller's stop during the naming's waits
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
@@ -59,8 +60,9 @@
  * subject a pass wrote since stands. An answer that is not JSON with a subject, a timeout or the provider refusing the
  * thought's length, a row the egress gate refuses, and a key the door refuses each fail the claim, counted, the subject
  * standing; `--retry-failed` puts them back in the pool. A judge model 10 of whose last 48 answers gave no subject —
- * unread, or naming nothing — stops the run, exit 3, judged from its first answer on (JUDGE_ALARM, PR 5b): the claims
- * among those answers it finished as named nothing go back to the pool, since nothing else would ask them again, and
+ * unread, or naming nothing — stops the run, exit 3, the window the pool's, kept across runs in ob1_config
+ * (JUDGE_ALARM, PR 5b): the claims among those answers finished as named nothing, by whichever run, go back to the
+ * pool, since nothing else would ask them again, each to be asked once more and its next answer taken as given, and
  * those it could not read stay failed. A rate limit, a server error or a lost connection is paused for and retried
  * (TRANSIENT_PAUSES_MS), then ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A
  * dry run writes, pools and asks nothing, counts what a run would take (the pool's, or every thought with no current
@@ -129,16 +131,45 @@ export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
  * The garbage-judge alarm (PR 5b): a run stops, exit 3, once more than `share` of `window` — 10 of 48 — of the judge
  * model's last `window` answers gave no subject: not JSON of the expected shape, or a subject naming nothing a key
  * holds (an empty one, or only a ticket, release or PR the thought does not name), since a judge answering so, not the
- * thoughts, is likely at fault. Judged after each claim from the first answer on, so a judge answering garbage from the
- * start stops at its 10th, and a run of fewer than 48 answers is judged too (review pass 1: a floor of 48 left any
- * shorter run unjudged, a small pool, a --limit or two runs side by side, its claims named nothing finished for good).
- * The pass's fifth of 48 (db/config.mjs's malformedAlarm): the 27B named nothing for 1 of the 63 it was asked in the
- * canary's first naming run. It reads an answer's shape, not its truth: qwen2.5:7b, the metadata model's default, which
- * judges when OB1_JUDGE_MODEL is unset, answered 100 canary thoughts in shape, naming nothing for one, and gave the
- * 27B's key for 60 of the other 99 (db/README.md). Read as the run goes, so a test shortens `window`, as NAMING_WAIT
- * is.
+ * thoughts, is likely at fault. The window is the pool's, kept across runs in ob1_config (JUDGE_WINDOW_KEY), so the
+ * answers of small runs add up: a judge answering garbage stops at its 10th answer however the runs fall (review pass
+ * 2: a window of each run's own left every run of fewer than 10 answers unjudged, most runs after a pool's first
+ * naming, its claims named nothing finished for good). The pass's fifth of 48 (db/config.mjs's malformedAlarm): the
+ * 27B named nothing for 1 of the 63 it was asked in the canary's first naming run. It reads an answer's shape, not its
+ * truth: qwen2.5:7b, the metadata model's default, which judges when OB1_JUDGE_MODEL is unset, answered 100 canary
+ * thoughts in shape, naming nothing for one, and gave the 27B's key for 60 of the other 99 (db/README.md). Read as the
+ * run goes, so a test shortens `window`, as NAMING_WAIT is.
  */
 export const JUDGE_ALARM = { window: 48, share: 1 / 5 };
+
+/** Whether `noSubject` answers of a window trip the alarm: more than its share of the whole window. */
+export const judgeTrips = (noSubject: number, alarm: { window: number; share: number } = JUDGE_ALARM): boolean =>
+  noSubject > alarm.share * Math.max(1, alarm.window);
+
+/**
+ * ob1_config's key for the judge's window, kept across runs (JudgeWindow as JSON, written under the row's lock): the
+ * answers of the pool it names, and the thoughts the last trips handed back.
+ */
+export const JUDGE_WINDOW_KEY = "subject_judge_window";
+
+/** How many handed-back thoughts the window remembers: ten trips' worth of a full window. */
+const BACK_KEPT = 480;
+
+/**
+ * One of the judge's answers in the window: what it gave (`n` naming nothing, `u` unread, `k` a key) and on which
+ * thought (`t`); whether its claim was finished as named nothing (`f`) and an out-of-date subject closed then (`c`);
+ * and whether the thought was one a trip had handed back (`h`), its answer then taken as given: not counted, though
+ * handed back again should fresh answers trip the window (review pass 2: ten thoughts the model truly names nothing
+ * for, handed back together, came up together in each later run and tripped it every time).
+ */
+export type WindowAnswer = { g: "n" | "u" | "k"; t: string; f: boolean; c: boolean; h: boolean };
+
+/**
+ * The judge's window as ob1_config keeps it: the pool it is of, its answers oldest first, the thoughts handed back, and
+ * when it last tripped (the server's clock), which stops every run of the pool whose claims began before it: a run
+ * beside the one that tripped would ask the handed-back thoughts again at once, its answers on them taken as given.
+ */
+export type JudgeWindow = { pool: string; answers: WindowAnswer[]; back: string[]; tripped: string | null };
 
 /** What a watched statement answers when the caller's stop cancelled it. */
 const STOPPED = Symbol("stopped");
@@ -701,15 +732,20 @@ async function sweep(
     const watcher = second as SQL | "none" | null;
     if (watcher !== null && watcher !== "none") await watcher.close().catch(() => {});
   }
-  /** The thoughts whose failed claims --retry-failed returned: chosen for failing, which the alarm says (PR 5b). */
-  const retried = new Set<string>();
+  /**
+   * How many failed claims --retry-failed returned: chosen for failing, which the alarm says of a run that returned
+   * any, as the pass does of its first judgement after a --retry-* (review pass 2: a set of their ids grew with the
+   * pool's failures, a million at about 160 MB).
+   */
+  let retried = 0;
   if (RETRY_FAILED && !DRY_RUN) {
     // extract-entities.ts's --retry-failed statement, under the pool's key.
-    const back = (await sql`
-      UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
-       WHERE work_type = ${POOL} AND status = 'failed' RETURNING thought_id::text AS id`) as { id: string }[];
-    for (const r of back) retried.add(r.id);
-    out(`  --retry-failed: ${back.length} failed claim(s) returned to the pool`);
+    [{ n: retried }] = (await sql`
+      WITH retried AS (
+        UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
+        WHERE work_type = ${POOL} AND status = 'failed' RETURNING 1)
+      SELECT count(*)::int AS n FROM retried`) as { n: number }[];
+    out(`  --retry-failed: ${retried} failed claim(s) returned to the pool`);
   }
   // Each count by the index on (work_type, status): the pool's rows still to do, not its history. A lease run out
   // under its attempts is a gone worker's, which a run's claim takes again (claim_thoughts' reaping): counted with what
@@ -753,12 +789,11 @@ async function sweep(
   let endedBy = null as { code: number; line: string } | null;
   const said = { unread: false, unanswered: false, refusedKey: false, egress: false };
   /**
-   * The judge model's last answers, oldest first, at most JUDGE_ALARM.window: what each gave; the thought of one this
-   * run finished as named nothing, its claim the record that it was asked (PR 5b), and whether that closed an
-   * out-of-date subject; and whether its claim was one --retry-failed returned. A call that timed out or a row the
-   * egress gate refused is no answer, and is not in it; a key the door refused is one that gave a key.
+   * The judge's answer on the claim in hand, null until it answers (PR 5b): appended to the pool's window once the
+   * claim is released (`judged`). A call that timed out or a row the egress gate refused is no answer, and leaves it
+   * null; a key the door refused is one that gave a key.
    */
-  const answers: { gave: "key" | "unread" | "nothing"; finished: string | null; closed: boolean; returned: boolean }[] = [];
+  let answered: WindowAnswer | null = null;
   const started = Date.now();
   let reported = started;
 
@@ -779,6 +814,20 @@ async function sweep(
     if (k?.value === POOL) return null;
     const now = k?.value ? `now ${k.value}: another run named it while this one ran` : "no longer named: ob1_config.subject_pool_key was removed or blanked while this run ran";
     return `\n  The subject pool is ${now}, so this run, under ${POOL}, records no subject more and stops here; what it holds goes back to its pool.`;
+  };
+
+  /**
+   * When another run's alarm tripped the pool's window after this run's claims began (`since`, the server's clock at
+   * its first claim), else null: read before each claim, as the pool's name is, so a run beside the one that tripped
+   * stops before it asks again what that one handed back, its answers on them taken as given (review pass 2).
+   */
+  const trippedSince = async (c: SQL, since: string): Promise<string | null> => {
+    const [row] = (await c`
+      SELECT CASE WHEN value LIKE '{%' THEN
+               CASE WHEN value::jsonb->>'pool' = ${POOL} AND (value::jsonb->>'tripped')::timestamptz > ${since}::timestamptz THEN value::jsonb->>'tripped' END
+             END AS at
+        FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY}`) as { at: string | null }[];
+    return row?.at ?? null;
   };
 
   // The stop, as the pass's (db/lease.ts's PassStop): the first after the thought in hand; the second the call in hand
@@ -918,11 +967,9 @@ async function sweep(
         sayOnce("unanswered", `  ${row.id}: no answer (${a.unanswered.slice(0, 300)}); --retry-failed asks it again`);
         return { release: "failed", error: a.unanswered.slice(0, 500) };
       }
-      // The judge's answer, in the alarm's window, whatever becomes of its claim (PR 5b). A window shortened mid-run
-      // drops its oldest at once (review pass 1: `if` kept it at its old length).
-      const answer: (typeof answers)[number] = { gave: a.answer === null ? "unread" : a.key === null ? "nothing" : "key", finished: null, closed: false, returned: retried.has(row.id) };
-      answers.push(answer);
-      while (answers.length > Math.max(1, JUDGE_ALARM.window)) answers.shift();
+      // The judge's answer, for the alarm's window, whatever becomes of its claim (PR 5b).
+      const answer: WindowAnswer = { g: a.answer === null ? "u" : a.key === null ? "n" : "k", t: row.id, f: false, c: false, h: false };
+      answered = answer;
       // Not JSON with a subject: the model's failure for this thought, as the pass reads a malformed answer.
       if (a.answer === null) {
         n.unread++;
@@ -1010,8 +1057,8 @@ async function sweep(
             // Finished by this run, the record that it was asked: the alarm hands it back, should it trip on it, and
             // says the out-of-date subject it closed, which the hand-back does not reopen.
             if (fin.held) {
-              answer.finished = row.id;
-              answer.closed = fin.c?.action === "closed";
+              answer.f = true;
+              answer.c = fin.c?.action === "closed";
             }
           }
         }
@@ -1082,52 +1129,81 @@ async function sweep(
   };
 
   /**
-   * The garbage-judge alarm (PR 5b), judged after each claim: null while no more than JUDGE_ALARM.share of its window
-   * of the judge's last answers gave no subject, counted against the whole window from the first answer on (10 of 48),
-   * so a short run is judged as a long one is; else the line the run stops with, exit 3, ahead of the 1 of claims
-   * failed and of a first signal's 130, the claim it let finish having tripped it. The claims within the window that it
-   * finished as named nothing go back to the pool first, while still its own and finished: nothing else asks them
+   * The garbage-judge alarm (PR 5b), judged after each claim the judge answered: its answer appended to the pool's
+   * window, kept across runs in ob1_config (JUDGE_WINDOW_KEY) and written under the row's lock, so the runs of a pool,
+   * side by side or one after another, add to one window. Null while no more than JUDGE_ALARM.share of the whole window
+   * gave no subject (10 of 48), an answer on a thought a trip handed back not counted; else the run stops, exit 3,
+   * ahead of the 1 of claims failed and of a first signal's 130, the claim it let finish having tripped it. In the same
+   * transaction the window's claims finished as named nothing go back to the pool, by thought, whichever run finished
+   * them, while still finished with no subject standing (one asked again since and keyed, failed or claimed is not),
+   * and the window starts again, remembering them, so each one's next answer is taken as given. Nothing else asks them
    * again, since a changed judge model leaves them finished (the pool's key names whether a model is asked, not which).
-   * An out-of-date subject it closed on one stays closed until it is asked again, said. Those it could not read stay
-   * failed, for --retry-failed, as the pass leaves its malformed rows failed; and as the pass says of its first
-   * judgement after a --retry-*, answers on claims --retry-failed returned, chosen for failing, may be their thoughts'
-   * fault (review pass 1).
+   * An out-of-date subject one of them had closed stays closed until it is asked again, said. Those it could not read
+   * stay failed, for --retry-failed, as the pass leaves its malformed rows failed. A database lost before the trip ends
+   * the run as elsewhere, exit 1; lost at it, the window and the claims stand as they were, said (review passes 1, 2).
    */
-  const judged = async (): Promise<string | null> => {
+  const judged = async (entry: WindowAnswer): Promise<{ code: number; line: string } | null> => {
     const window = Math.max(1, JUDGE_ALARM.window);
-    const unread = answers.filter((a) => a.gave === "unread").length;
-    const nothing = answers.filter((a) => a.gave === "nothing").length;
-    if (unread + nothing <= JUDGE_ALARM.share * window) return null;
-    const finished = answers.flatMap((a) => (a.finished === null ? [] : [a.finished]));
-    const closed = answers.filter((a) => a.finished !== null && a.closed).length;
-    const chosen = answers.filter((a) => a.returned && a.gave !== "key").length;
-    let back: number | null = 0;
-    if (finished.length > 0) {
-      try {
-        [{ back }] = (await sql`
-          WITH back AS (
-            UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL,
+    /** The trip's counts once it is decided: the line a database lost at the hand-back says. Written in the transaction. */
+    let tripping = null as { bad: number; seen: number; ids: number } | null;
+    try {
+      return await sql.begin(async (tx: SQL) => {
+        await tx`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, '') ON CONFLICT (key) DO NOTHING`;
+        const [{ value }] = (await tx`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`) as { value: string }[];
+        let w: JudgeWindow = { pool: POOL, answers: [], back: [], tripped: null };
+        try {
+          const kept = JSON.parse(value) as JudgeWindow;
+          if (kept?.pool === POOL && Array.isArray(kept.answers) && Array.isArray(kept.back)) w = { ...kept, tripped: kept.tripped ?? null };
+        } catch {
+          // None kept yet, or not a window: one of the pool's own from here.
+        }
+        const at = w.back.indexOf(entry.t);
+        if (at >= 0) {
+          entry.h = true;
+          w.back.splice(at, 1);
+        }
+        w.answers.push(entry);
+        while (w.answers.length > window) w.answers.shift();
+        const unread = w.answers.filter((a) => a.g === "u" && !a.h).length;
+        const nothing = w.answers.filter((a) => a.g === "n" && !a.h).length;
+        const save = (next: JudgeWindow) => tx`UPDATE ob1_config SET value = ${JSON.stringify(next)} WHERE key = ${JUDGE_WINDOW_KEY}`;
+        if (!judgeTrips(unread + nothing)) {
+          await save(w);
+          return null;
+        }
+        const ids = [...new Set(w.answers.filter((a) => a.f).map((a) => a.t))];
+        tripping = { bad: unread + nothing, seen: w.answers.length, ids: ids.length };
+        const back = ids.length === 0 ? [] : ((await tx`
+          UPDATE thought_work_claims c SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL,
                                            finished_at = NULL, enqueued_at = now(), worker_id = NULL
-             WHERE work_type = ${POOL} AND worker_id = ${workerId} AND status = 'succeeded'
-               AND thought_id = ANY(${sql.array(finished, "TEXT")}::uuid[])
-            RETURNING 1)
-          SELECT count(*)::int AS back FROM back`) as { back: number }[];
-      } catch (e) {
-        if (!databaseUnavailable(e)) throw e;
-        back = null;
-      }
+           WHERE c.work_type = ${POOL} AND c.status = 'succeeded' AND c.thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])
+             AND NOT EXISTS (SELECT 1 FROM thought_facets f WHERE f.thought_id = c.thought_id AND f.kind = 'subject' AND f.valid_until IS NULL)
+          RETURNING c.thought_id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const backIds = new Set(back);
+        const closed = new Set(w.answers.filter((a) => a.c && backIds.has(a.t)).map((a) => a.t)).size;
+        const taken = w.answers.filter((a) => a.h && a.g !== "k").length;
+        const [{ stamp }] = (await tx`SELECT clock_timestamp()::text AS stamp`) as { stamp: string }[];
+        await save({ pool: POOL, answers: [], back: [...w.back.filter((t) => !backIds.has(t)), ...back].slice(-BACK_KEPT), tripped: stamp });
+        const failed = n.unanswered + n.unread + n.egress + n.refusedKey - n.lostFailed;
+        const gave = [unread ? `${unread} not JSON of the expected shape` : "", nothing ? `${nothing} naming nothing a key holds` : ""].filter(Boolean).join(", ");
+        return {
+          code: 3,
+          line: `\n  ${unread + nothing} of the judge model's last ${w.answers.length} answers, across runs, gave no subject (${gave}${taken ? `; ${taken} more on thoughts a trip had handed back, taken as given` : ""}), more than ${Math.round(JUDGE_ALARM.share * 100)}% of the ${window} the alarm reads (db/subject-sweep.ts, JUDGE_ALARM): the model, not the thoughts, is likely at fault, so the sweep stops here.` +
+            `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING. ` +
+            (back.length > 0 ? `The ${back.length} thought(s) it named nothing for are back in the pool, each to be asked once more and its next answer taken as given${closed ? `; the out-of-date subject it closed on ${closed} of them stays closed until each is` : ""}. ` : "") +
+            (retried > 0 ? `This run's --retry-failed returned ${retried} claim(s) chosen for failing: some of these thoughts may be at fault. ` : "") +
+            (failed > 0 ? `Once the model is right, run again with --retry-failed, which puts back the pool's failed claims, the ${failed} this run failed among them.` : "Once the model is right, run it again."),
+        };
+      });
+    } catch (e) {
+      if (!databaseUnavailable(e)) throw e;
+      if (tripping === null) return { code: 1, line: databaseDown(e) };
+      return {
+        code: 3,
+        line: `\n  ${tripping.bad} of the judge model's last ${tripping.seen} answers, across runs, gave no subject: the alarm tripped (db/subject-sweep.ts, JUDGE_ALARM), so the sweep stops here, but the database stopped answering as up to ${tripping.ids} thought(s) it named nothing for went back to the pool, and the window stands as it was.` +
+          `\n    They may stand finished, the record that each was asked. Once it answers and the model is right, \`UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_filled'\` and a --subjects run pool every thought with no current subject again, these among them.`,
+      };
     }
-    const failed = n.unanswered + n.unread + n.egress + n.refusedKey - n.lostFailed;
-    const gave = [unread ? `${unread} not JSON of the expected shape` : "", nothing ? `${nothing} naming nothing a key holds` : ""].filter(Boolean).join(", ");
-    const why = chosen > 0
-      ? `${chosen} of them on claims --retry-failed returned, chosen for failing, so their thoughts may be at fault; if not, the model is`
-      : "the model, not the thoughts, is likely at fault";
-    return `\n  ${unread + nothing} of the judge model's last ${answers.length} answers gave no subject (${gave}), more than ${Math.round(JUDGE_ALARM.share * 100)}% of the ${window} the alarm reads (db/subject-sweep.ts, JUDGE_ALARM): ${why}, so the sweep stops here.` +
-      `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING. ` +
-      (back === null
-        ? `The database stopped answering as the ${finished.length} thought(s) it named nothing for went back to the pool: they may stand finished, the record that each was asked, and \`--subjects rules --switch-key\`, then \`--subjects --switch-key\`, pools them again. `
-        : back > 0 ? `The ${back} thought(s) it named nothing for are back in the pool, to be asked again${closed ? `; the out-of-date subject it closed on ${closed} of them stays closed until each is` : ""}. ` : "") +
-      (failed > 0 ? `Once the model is right, run again with --retry-failed, which puts back the pool's failed claims, this run's ${failed} among them.` : "Once the model is right, run it again.");
   };
 
   // The stop is handed out, and the caller's signal heard, while the thoughts are taken, then let go: a signal a
@@ -1181,10 +1257,12 @@ async function sweep(
         if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break;
         let got: { thought_id: string }[];
         let moved: string | null;
+        let tripped: string | null = null;
         try {
           if (claimedSince === null) claimedSince = ((await sql`SELECT clock_timestamp()::text AS at`)[0] as { at: string }).at;
           moved = await poolMoved(sql, false);
-          got = moved === null ? (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[] : [];
+          if (moved === null) tripped = await trippedSince(sql, claimedSince);
+          got = moved === null && tripped === null ? (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[] : [];
         } catch (e) {
           if (!databaseUnavailable(e)) throw e;
           endedBy = { code: 1, line: databaseDown(e) };
@@ -1194,13 +1272,17 @@ async function sweep(
           endedBy = { code: 2, line: moved };
           break;
         }
+        if (tripped !== null) {
+          endedBy = {
+            code: 3,
+            line: `\n  Another run's garbage-judge alarm tripped at ${tripped}, after this run's claims began (db/subject-sweep.ts, JUDGE_ALARM): its judge is this run's, so this run stops here too, before it asks again what that run handed back.` +
+              `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, run it again.`,
+          };
+          break;
+        }
         if (got.length === 0) break;
         taken++;
         const id = got[0].thought_id;
-        // Claimed again, after an edit pooled it: this asking's outcome is the claim's now, so a finish the run
-        // recorded for it before is not the alarm's to hand back (review pass 1: one named nothing, then given a key at
-        // its second asking, went back to the pool).
-        for (const a of answers) if (a.finished === id) a.finished = null;
         let row: Candidate | undefined;
         try {
           [row] = (await sql`
@@ -1218,6 +1300,7 @@ async function sweep(
           n.seen++;
           continue;
         }
+        answered = null;
         const done = await one(row);
         if (done === false) break;
         // Counted before its release, so a database lost there leaves the counts adding up (review pass 1); past the
@@ -1240,11 +1323,15 @@ async function sweep(
             break;
           }
         }
-        // Judged once the claim is released, so a failed one is recorded failed before the run stops on it.
-        const alarm = await judged();
-        if (alarm !== null) {
-          endedBy = { code: 3, line: alarm };
-          break;
+        // Judged once the claim is released, so a failed one is recorded failed before the run stops on it; a claim the
+        // judge did not answer leaves the window as it was.
+        if (answered !== null) {
+          const alarm = await judged(answered);
+          answered = null;
+          if (alarm !== null) {
+            endedBy = alarm;
+            break;
+          }
         }
         progress();
       }
