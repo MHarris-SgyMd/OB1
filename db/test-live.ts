@@ -16706,9 +16706,10 @@ if (want("38")) {
     let extractedDuringSweep = false;
     sw.onExtract = async () => { extractedDuringSweep = true; };
     const acWake = new AbortController();
-    // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
-    // The mark an earlier case left on the row, ended: not this run's (review pass 1).
+    // The mark an earlier case left on the row, ended, which the run carries (lastSlept) until its first
+    // sleep stamps: not this run's (SMD-3627 review pass 1).
     const priorFrom = (await beat())?.slept?.from;
+    // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
     const wakeRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acWake.signal });
     let wokeInSweep = false;
     let leftByWake = -1;
@@ -16734,7 +16735,7 @@ if (want("38")) {
     }
     // The sleep's mark spans the sweep's reads: it read from == to before (review pass 1).
     assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && wakeMark.from !== priorFrom && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
-      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
+      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wakeMark !== undefined && wakeMark.from === priorFrom ? ", the mark on the row before the run" : ""}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
     sw.onExtract = null;
     const sweptNext = await pollUntil(async () => (await rowsBy("zz-wake")) === 0, 20_000);
     acWake.abort();
