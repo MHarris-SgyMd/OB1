@@ -425,17 +425,28 @@ async function pooled<T, R>(items: T[], width: number, f: (item: T) => Promise<R
   return out;
 }
 
+/** Text appended to $GITHUB_STEP_SUMMARY when the runner sets it; a summary that cannot be written is said, and the run stands. */
+function appendSummary(text: string): void {
+  const file = process.env.GITHUB_STEP_SUMMARY?.trim();
+  if (!file) return;
+  try {
+    appendFileSync(file, text + "\n");
+  } catch (e) {
+    console.error(`the step summary ${file} could not be written: ${(e as Error).message}`);
+  }
+}
+
 /** Seconds to a tenth, for a median that can fall between two runs. */
 const sec = (s: number) => `${Math.round(s * 10) / 10} s`;
 
 /**
  * The shifts over the runs read: each one in the window listed (as the window reads them: none in its first 13), and
- * those made at `through` (the newest run read when not named) given as `::warning`s and, where the runner sets
- * $GITHUB_STEP_SUMMARY, a table. `unreadNote` says what was not read, in both.
+ * those made at `reportOn` (reportedOn's run; the newest run read when it gives none) given as `::warning`s and,
+ * where the runner sets $GITHUB_STEP_SUMMARY, a table. `gapNote` says what was not read or being re-run, in both.
  */
-async function shiftReport(runs: { id: string; run: Run }[], through: string | undefined, repo: string[], unread: number, rerun: number, unreadNote: string): Promise<void> {
+async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | undefined, repo: string[], unread: number, rerun: number, gapNote: string): Promise<void> {
   const { ordered, series, found: shifts } = collectShifts(runs);
-  const at = through ?? ordered[ordered.length - 1].id;
+  const at = reportOn ?? ordered[ordered.length - 1].id;
   const created = new Map(ordered.map(({ id, run }) => [id, run.createdAt]));
   let repoName = repo[1];
   if (!repoName) {
@@ -462,26 +473,19 @@ async function shiftReport(runs: { id: string; run: Run }[], through: string | u
   const now = found.filter((f) => f.run === at);
   console.log(now.length ? `\n${now.length} made at run ${at}:` : `\nNone made at run ${at}.`);
   for (const line of warningLines(now.map(text), at)) console.log(line);
-  const summary = process.env.GITHUB_STEP_SUMMARY?.trim();
-  if (!summary) return;
-  const cell = tableCell;
   const range = (f: (typeof found)[number]) =>
     f.from && repoName ? `[${f.from.slice(0, 8)}..${f.to.slice(0, 8)}](https://github.com/${repoName}/compare/${f.from}...${f.to})` : `..${f.to.slice(0, 8)}`;
   const md = now.length
     ? [
       `### A job or step on main got slower at run ${at}`, "",
       `| Job or step | Before | Last ${SHIFT.after} runs | Line | Landed in |`, "|---|---|---|---|---|",
-      ...now.map((f) => `| ${cell(f.name)} | ${sec(f.sh.before)} | ${f.sh.after.join(", ")} s | ${sec(f.sh.line)} | ${range(f)}: ${cell(f.prs)} |`), "",
+      ...now.map((f) => `| ${tableCell(f.name)} | ${sec(f.sh.before)} | ${f.sh.after.join(", ")} s | ${sec(f.sh.line)} | ${range(f)}: ${tableCell(f.prs)} |`), "",
       `Before: the median of the ${SHIFT.before} runs before the last ${SHIFT.after}; the line, that plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%). Landed in: from the run before the first of the ${SHIFT.before} over the line with at least half the runs from it on over it too, to the first of the last ${SHIFT.after}.`,
     ]
     : [`No job or step on main got slower at run ${at} (${series.size} series over ${ordered.length} runs).`];
-  if (unreadNote) md.push("", `**${unreadNote}**`);
-  // The summary is the warnings again, in a table: one that cannot be written is said, and the run stands.
-  try {
-    appendFileSync(summary, md.join("\n") + "\n");
-  } catch (e) {
-    console.error(`the step summary ${summary} could not be written: ${(e as Error).message}`);
-  }
+  if (gapNote) md.push("", `**${gapNote}**`);
+  // The summary is the warnings again, in a table.
+  appendSummary(md.join("\n"));
 }
 
 function selfCheck(): number {
@@ -696,22 +700,15 @@ if (import.meta.main) {
   } catch (e) {
     refuse(`--step is not a regular expression: ${(e as Error).message}`);
   }
-  if (typeof opts["--runs"] === "string") for (const f of ["--branch", "--days", "--last", "--workflow", "--through"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
+  const runsOpt = typeof opts["--runs"] === "string" ? opts["--runs"] : undefined;
+  if (runsOpt !== undefined) for (const f of ["--branch", "--days", "--last", "--workflow", "--through"]) if (opts[f] !== undefined) refuse(`${f} does nothing with --runs: give one or the other`);
   const repo = typeof opts["--repo"] === "string" ? ["--repo", opts["--repo"]] : [];
   const workflow = String(opts["--workflow"] ?? "Fork Checks"), branch = String(opts["--branch"] ?? "main");
   // A shift reads main's own runs: a fork's pull request from a branch it named main lists as main too.
   const event = shift ? ["--event", "push"] : [];
   const where = `${workflow} on ${branch}${shift ? " (push)" : ""}`;
   // The summary's line for an exit before the report: a red run with an empty summary says nothing.
-  const summaryNote = (text: string) => {
-    const file = process.env.GITHUB_STEP_SUMMARY?.trim();
-    if (!file) return;
-    try {
-      appendFileSync(file, `**${text}**\n`);
-    } catch (e) {
-      console.error(`the step summary ${file} could not be written: ${(e as Error).message}`);
-    }
-  };
+  const summaryNote = (text: string) => appendSummary(`**${text}**`);
   // A failure: with --shift, an annotation and a line in the summary too, so a red run says why.
   const stop: (msg: string) => never = (msg) => {
     if (shift) {
@@ -724,9 +721,9 @@ if (import.meta.main) {
   let running: string[] = [];
   // Runs listed oldest first whatever their state, for shiftWindow: a run being re-run is in the window, as a gap.
   let listed: Listed[] = [];
-  if (typeof opts["--runs"] === "string") {
-    const named = opts["--runs"].split(",").map((s) => s.trim()).filter(Boolean);
-    if (named.length === 0 || !named.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${JSON.stringify(opts["--runs"])}`);
+  if (runsOpt !== undefined) {
+    const named = runsOpt.split(",").map((s) => s.trim()).filter(Boolean);
+    if (named.length === 0 || !named.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${JSON.stringify(runsOpt)}`);
     // A run named twice would be two points of each of its series; sorted, the ids are oldest first, as a listed
     // window is, whatever order they were named in.
     ids = runsNamed(named);
@@ -754,7 +751,7 @@ if (import.meta.main) {
     listed = runs.filter((r) => Date.parse(r.createdAt) >= cutoff).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
     console.log(`${where} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${listed.filter((r) => r.status === "completed").length} completed runs`);
   }
-  if (typeof opts["--runs"] !== "string") {
+  if (runsOpt === undefined) {
     // The per-job report reads completed runs alone; with --shift a run being re-run is a gap in the window.
     const window = shiftWindow(listed, through, last, shift);
     if (window === undefined) stop(`run ${through} is not among the ${listed.length} runs of ${where} listed`);
@@ -791,7 +788,8 @@ if (import.meta.main) {
       continue;
     }
     if (run.status !== "completed") {
-      // Running (a --runs id) or re-run since it was listed: its attempt has nothing to read yet, a gap as one listed so is.
+      // Running (a --runs id) or re-run since it was listed: its attempt has nothing to read yet, a gap as one
+      // listed so is.
       running.push(id);
       console.log(`${id}  not completed (running, or re-run since it was listed), passed over`);
       continue;
@@ -805,16 +803,16 @@ if (import.meta.main) {
   if (shift) {
     // A run not read, or being re-run, takes a point out of its series and can move a shift off the run that makes
     // it, so a warning could be lost: gapVerdict says which gaps fail the job.
-    const at = reportedOn(through, ids, typeof opts["--runs"] === "string");
+    const at = reportedOn(through, ids, runsOpt !== undefined);
     const verdict = gapVerdict(ids, unreadIds, running, at);
     if (verdict.early) {
-      if (verdict.code) console.log(`::error title=CI shift incomplete::${verdict.note}`);
+      if (verdict.code) console.log(`::error title=CI shift incomplete::${escapeCommand(verdict.note)}`);
       else console.log(verdict.note);
       summaryNote(verdict.note);
       process.exit(verdict.code);
     }
     await shiftReport(read, at, repo, unread, running.length, verdict.note);
-    if (verdict.note) console.log(verdict.code ? `::error title=CI shift incomplete::${verdict.note}` : `::warning title=CI shift::${verdict.note}`);
+    if (verdict.note) console.log(`::${verdict.code ? "error title=CI shift incomplete" : "warning title=CI shift"}::${escapeCommand(verdict.note)}`);
     process.exit(verdict.code);
   }
   if (read.length > 0 && read.every((r) => !r.job)) {
