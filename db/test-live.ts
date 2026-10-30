@@ -18725,10 +18725,10 @@ if (want("45")) {
 }
 
 if (want("46")) {
-  console.log("\n[46] Migration 113 on a real Postgres: two claims on one ticket at once, held — the second waits on the ticket's lock until the first commits, then reads it: a piece against the whole refused, the same piece refused by the answer (not the index's error), two pieces both claimed (SMD-3597)");
+  console.log("\n[46] Migration 113 on a real Postgres: two claims on one ticket at once, held — the second waits on the ticket's lock until the first commits, then reads it: a piece against the whole refused, the same piece refused by the answer (not the index's error), two pieces both claimed, a takeover against the holder's renewal of its lapsed claim refused (SMD-3597)");
   // Its own clients, the watcher among them: [24] closed the suite's.
   const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });
-  type Answer = { outcome: string; code: string | null; message: string | null; claim: { id: string } | null; held_by: { id: string }[] };
+  type Answer = { outcome: string; code: string | null; message: string | null; claim: { id: string } | null; held_by: { id: string }[]; token: string | null };
   const A = { name: "race-a" }, B = { name: "race-b" };
   const claimOn = (c: SQL, issue: string, actor: object, piece: string | null) => async () =>
     ((await c`SELECT claim_work(${issue}, ${piece}, NULL, 14400, NULL, ${actor}::jsonb) AS r`) as { r: Answer }[])[0].r;
@@ -18771,8 +18771,17 @@ if (want("46")) {
       `two pieces of one ticket at once: they wait on one lock and both are claimed (waited on ${p.waitedOn || "nothing"}; ${p.rb?.outcome ?? p.err})`);
     const live = Number((await watch`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9101', 'SMD-9102', 'SMD-9103'])`)[0].n);
     assert(live === 4, `four live claims stand: the whole of SMD-9101, one PR 2 of SMD-9102, both pieces of SMD-9103 (${live})`);
+    // A lapsed claim: its holder renews (A, held open) while another key claims the work (B). B waits on the
+    // lock, then reads the renewal and is refused — without renew's lock B would read the claim lapsed, wait
+    // on its row instead, and die on the index (review pass 2's surviving mutant).
+    const lapsed = await claimOn(cA, "SMD-9104", A, null)();
+    await watch`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = ${lapsed.claim!.id}::uuid`;
+    const renewOn = async () => ((await cA`SELECT renew_work_claim(${lapsed.claim!.id}::uuid, ${lapsed.token}, 14400, ${A}::jsonb) AS r`) as { r: Answer }[])[0].r;
+    const r = await race(renewOn, claimOn(cB, "SMD-9104", B, null));
+    assert(r.waitedOn === "advisory" && r.ra.outcome === "renewed" && r.rb?.outcome === "refused" && r.rb.code === "WORK_CLAIMED" && r.err === "",
+      `a takeover racing the holder's renewal of its lapsed claim: it waits on the ticket's lock, then is refused by the renewed claim, never the index's error (waited on ${r.waitedOn || "nothing"}; ${r.rb?.outcome ?? r.err})`);
   } finally {
-    await watch`UPDATE work_claims SET released_at = now(), released_by = 'test-live', release_reason = '[46]' WHERE issue IN ('SMD-9101', 'SMD-9102', 'SMD-9103') AND released_at IS NULL`;
+    await watch`UPDATE work_claims SET released_at = now(), released_by = 'test-live', release_reason = '[46]' WHERE issue IN ('SMD-9101', 'SMD-9102', 'SMD-9103', 'SMD-9104') AND released_at IS NULL`;
     await cA.close();
     await cB.close();
     await watch.close();

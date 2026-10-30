@@ -380,7 +380,7 @@ const FUNCTIONS = [
   "ob1_work_claim_isolation(text)",
   "ob1_work_claim_lock(text)",
   "ob1_work_claim_is_holder(work_claims, text, uuid, bytea)",
-  "ob1_work_claims_in_the_way(text, text, text, uuid, bytea, timestamp with time zone)",
+  "ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone)",
 ];
 
 /**

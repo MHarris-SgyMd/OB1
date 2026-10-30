@@ -17,13 +17,17 @@
 --
 -- WHAT
 --   1. work_claims, one row per claim, kept after it ends as its history.
---      * THE WORK: `issue`, a ticket key (SMD-3379: a team key of at most 16
---        letters and digits, a hyphen, a number of at most 10 digits with no
---        leading zero — the form server-portable/stated-status.ts finds, bar
---        the zero), upper-cased; `piece`, optional, the part of the ticket
---        (`PR 1b-2`), its runs of white space made one space and trimmed,
---        compared case-folded (the database's lower()) through the generated
---        `piece_key` ('' for the whole ticket).
+--      * THE WORK: `issue`, a ticket key (SMD-3379: an ASCII team key of at
+--        most 16 letters and digits, a hyphen, a number of at most 10 digits
+--        with no leading zero — the shape server-portable/stated-status.ts
+--        finds, narrowed by the caps and the zero), upper-cased; `piece`,
+--        optional, the part of the ticket (`PR 1b-2`), cleaned as all free text
+--        is (below), compared case-folded through the generated `piece_key`
+--        ('' for the whole ticket). The fold is the database's lower(), so it
+--        follows its collation: on a C-collated brain only ASCII letters fold
+--        (`Étape` and `étape` are two pieces), and an operating-system upgrade
+--        that changes the collation's case rules leaves stored keys as they
+--        were folded.
 --      * THE HOLDER: holder_name, holder_agent_id and holder_kind, stamped
 --        from the call's actor envelope (ob1.actor: the p_actor the server
 --        passes for the key, 029's shape) through 046's registry lookup —
@@ -31,18 +35,29 @@
 --        envelope names nobody raises: a claim nobody holds protects nothing.
 --        A key the registry calls `ingested` (an importer copying outside
 --        text) cannot claim.
---      * THE TOKEN: claim_work mints a random token (`wc_` and 64 hex digits)
---        and returns it once; the row keeps only its SHA-256 (token_hash). A
---        claim is the caller's own only when the key AND the token match. Two
---        agents under one key — the dogfood's Claude Code sessions share one
---        — each hold a different token, so they refuse each other. A token is
---        never shown again: a refusal, a list or a claim names the holder's
---        key, never anything that proves ownership (review pass 1: a session
---        string the refusal printed let any agent copy it and act as the
---        holder). A token is useless to another key.
+--      * THE TOKEN: claim_work mints a token — `wc_` and 64 hex digits, two
+--        gen_random_uuid() values, 244 random bits — and returns it once; the
+--        row keeps only its SHA-256 (token_hash). A claim is the caller's own
+--        only when the key AND the token match. Two agents under one key — the
+--        dogfood's Claude Code sessions share one — each hold a different
+--        token, so they refuse each other. A token is never shown again: a
+--        refusal, a list or a claim names the holder's key, never anything that
+--        proves ownership (review pass 1: a session string the refusal printed
+--        let any agent copy it and act as the holder). A token is useless to
+--        another key, but to its own key it is a bearer secret: send it as a
+--        bind parameter, never in a statement's text (which pg_stat_activity,
+--        error lines and statement logs show), and keep it out of logs and
+--        captured text. Its shape, wc_[0-9a-f]{64}, is for secret scanners.
 --      * THE LABEL: free text for people (tool, machine, session, branch),
---        control characters made spaces, at most 500. Shown as data, trusted
---        for nothing, and never put in a message.
+--        at most 500. Shown as data, trusted for nothing.
+--      * FREE TEXT (a piece, a label, a reason): control characters made
+--        spaces, the invisible marks deleted (soft hyphen, zero-width space,
+--        word joiner, byte-order mark), every run of white space, Unicode's
+--        included, made one space, trimmed. Other blank-looking characters
+--        (a Hangul filler) are kept: lookalikes are not this file's to judge.
+--        No text another key wrote is put in a message: a refusal names the
+--        work the caller asked for, the holder's key and the times, and the
+--        rest is in held_by, as data.
 --      * THE LEASE: claimed_at, renewed_at, expires_at. A claim past its
 --        expires_at, not released, has LAPSED: it counts as free, so no
 --        reaper is needed. The next claim on exactly that ticket and piece
@@ -57,15 +72,24 @@
 --        on the same work. A whole-ticket claim and a claim on one of its
 --        pieces are the same work, either way round; two different pieces of
 --        one ticket are not.
---      * The holder's own claim on the same work (key and token) is renewed,
---        not refused: claiming twice with the token is safe. Without the
---        token a claim of the same key's is in the way like anyone's.
+--      * The holder's own claim on exactly this work (key and token) is
+--        renewed, not refused: claiming twice with the token is safe. Every
+--        other claim is in the way — the same key's without its token, and the
+--        holder's own on overlapping work (a whole ticket it holds, when it
+--        claims a piece): no two live claims cover one work, whoever holds
+--        them (review pass 2).
 --      * A refusal is an ANSWER, not an error: outcome 'refused', a stable
 --        code, a message naming the first holder's key, and every claim in
 --        the way. Callers branch on it; an exception would abort their
 --        transaction. A malformed argument (not a ticket key, a malformed
---        token, a lease out of range) and a call that cannot claim at all (no
---        holder, an ingested key, a transaction above READ COMMITTED) raise.
+--        token, a lease out of range, a renew with no token) and a call that
+--        cannot claim at all (no holder, an ingested key, a transaction above
+--        READ COMMITTED) raise. A release with no token is not malformed: an
+--        operator's forced release needs none, and anyone else's answers
+--        CLAIM_NOT_YOURS.
+--      * p_actor sets ob1.actor for the rest of the calling transaction (029's
+--        shape): a later call in it that passes no p_actor is stamped with the
+--        same key.
 --
 --   3. THE FUNCTIONS (SECURITY INVOKER, PUBLIC's EXECUTE as every core
 --      function; each writer returns jsonb {outcome, code, message, claim,
@@ -89,7 +113,10 @@
 --        tickets (SMD-3599 reads it that way).
 --      The lease is p_lease_seconds, 60 to 604800 (a week), default 14400
 --      (four hours): an agent's session waits on a person for hours, and a
---      worker's fifteen minutes (015) would lapse under it.
+--      worker's fifteen minutes (015) would lapse under it. The writers judge
+--      a lapse by clock_timestamp() at their lock, the list by its statement's
+--      start: a claim lapsing while one statement runs can read live in its
+--      list and lapsed to its claim.
 --
 --   4. CONCURRENCY. Each writing call refuses a transaction above READ
 --      COMMITTED first, then takes a transaction advisory lock on its ticket
@@ -119,15 +146,20 @@
 --   The `claims` group (db/config.mjs ROLE_GRANTS): SELECT, INSERT and UPDATE
 --   on work_claims. No DELETE: an ended claim stays as history. The holder's
 --   kind is read from ob1_agents — the capture group's SELECT (046), which
---   every server role holds. Soft: a role without the group is refused the
---   claim calls with a permission error naming work_claims, and nothing else.
+--   every server role holds; a role without it fails naming ob1_agents. Soft:
+--   a role without the group is refused the claim calls with a permission
+--   error naming work_claims, and nothing else.
 --   The rules hold for callers of the functions; a role holding the group can
 --   still write the table directly, as with every core table its group
 --   writes (the pages group's convention). The server first calls them in
---   SMD-3598, whose preflight will check the group.
+--   SMD-3598, whose preflight will check the group. A forced release needs an
+--   operator key by its agent id, so board-sync (whose key is `ingested`)
+--   releasing a closed ticket's claims is a path of its own (SMD-3600), not
+--   p_force.
 --
 -- SAFETY
---   One new table, two indexes on it, fourteen functions (four calls, ten
+--   One new table, two indexes on it (its key, and the partial unique
+--   index), fourteen functions (four calls, ten
 --   helpers); nothing existing is changed. MINOR under FORK.md's version
 --   rules. test-schema [101] (the rules), test-live [46] (two claims at once,
 --   held), test-upgrade [20be].
@@ -215,20 +247,25 @@ COMMENT ON INDEX work_claims_one_unreleased IS
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- Free text a client gives: control characters made spaces, every run of
--- white space — Unicode's too: no-break, the en/em family, zero-width, the
--- byte-order mark (review pass 1: \s alone left them, so two lookalike pieces
--- were two pieces) — made one space, trimmed; NULL when blank. Raises past
--- p_max characters, naming p_what. The characters are spelled as chr() codes.
+-- Free text a client gives: control characters made spaces; the invisible
+-- marks deleted — soft hyphen, zero-width space, word joiner, byte-order mark
+-- (review pass 2: made spaces, "PR1" and "PR<zero-width>1" were two pieces);
+-- every run of white space, Unicode's too — no-break, the en/em family, the
+-- ideographic space (review pass 1: \s alone left them) — made one space;
+-- trimmed; NULL when blank. The joiners (U+200C, U+200D) are kept: they join
+-- letters and emoji, and are no space. Raises past p_max characters, naming
+-- p_what. The characters are spelled as chr() codes, which need a UTF8
+-- database (every brain is one).
 CREATE OR REPLACE FUNCTION ob1_work_claim_text(p text, p_max int, p_what text)
 RETURNS text
 LANGUAGE plpgsql
 IMMUTABLE
 AS $$
 DECLARE
-  v_space text := '[[:space:]' || chr(160) || chr(5760) || chr(8192) || '-' || chr(8205) || chr(8232) || chr(8233)
-                  || chr(8239) || chr(8287) || chr(8288) || chr(12288) || chr(65279) || ']+';
-  v text := NULLIF(btrim(regexp_replace(regexp_replace(COALESCE(p, ''), '[[:cntrl:]]', ' ', 'g'), v_space, ' ', 'g')), '');
+  v_marks text := '[' || chr(173) || chr(8203) || chr(8288) || chr(65279) || ']';
+  v_space text := '[[:space:]' || chr(160) || chr(5760) || chr(8192) || '-' || chr(8202) || chr(8232) || chr(8233)
+                  || chr(8239) || chr(8287) || chr(12288) || ']+';
+  v text := NULLIF(btrim(regexp_replace(regexp_replace(regexp_replace(COALESCE(p, ''), '[[:cntrl:]]', ' ', 'g'), v_marks, '', 'g'), v_space, ' ', 'g')), '');
 BEGIN
   IF length(v) > p_max THEN
     RAISE EXCEPTION USING MESSAGE = format('%s is at most %s characters; this one has %s', p_what, p_max, length(v)), ERRCODE = 'invalid_parameter_value';
@@ -237,7 +274,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_text(text, int, text) IS
-  'A client''s free text (a piece, a label, a reason): control characters made spaces, every run of white space (Unicode''s included) made one space, trimmed; NULL when blank; raises past p_max characters. Migration 113 / SMD-3597.';
+  'A client''s free text (a piece, a label, a reason): control characters made spaces, the soft hyphen, zero-width space, word joiner and byte-order mark deleted, every run of white space (Unicode''s included) made one space, trimmed; NULL when blank; raises past p_max characters. Migration 113 / SMD-3597.';
 
 -- A ticket key, or a raise naming the input.
 CREATE OR REPLACE FUNCTION ob1_work_claim_issue(p_issue text)
@@ -246,14 +283,17 @@ LANGUAGE plpgsql
 IMMUTABLE
 AS $$
 DECLARE
-  v text := upper(COALESCE(ob1_work_claim_text(left(p_issue, 200), 200, 'a ticket key'), ''));
+  -- Matched as ASCII before upper(), which maps some other letters onto ASCII
+  -- ones (U+017F to S); refused past 200 characters rather than cut, so text
+  -- after a key is never dropped onto it (review pass 2).
+  v text := CASE WHEN length(p_issue) > 200 THEN NULL ELSE ob1_work_claim_text(p_issue, 200, 'a ticket key') END;
 BEGIN
-  IF v !~ '^[A-Z][A-Z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
+  IF v IS NULL OR v !~ '^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,9}$' THEN
     RAISE EXCEPTION USING
       MESSAGE = format('not a ticket key: %L (a team key of at most 16 letters and digits, a hyphen and a number with no leading zero, such as SMD-3379)', left(COALESCE(p_issue, ''), 80)),
       ERRCODE = 'invalid_parameter_value';
   END IF;
-  RETURN v;
+  RETURN upper(v);
 END;
 $$;
 COMMENT ON FUNCTION ob1_work_claim_issue(text) IS
@@ -367,8 +407,10 @@ $$;
 COMMENT ON FUNCTION ob1_work_claim_lock(text) IS
   'Takes the transaction advisory lock on one ticket''s claims; a whole-ticket claim and its pieces share it. Migration 113 / SMD-3597.';
 
--- Whether a claim is the caller's own: the same token, and the same key — its
--- agent id when the call has one, else its name on a claim with no agent.
+-- Whether a claim is the caller's own: the same token, and the same key — a
+-- claim made with an agent id by that id, a claim made by name alone by the
+-- name, whatever the caller's id now (review pass 2: a key whose id resolved
+-- after it claimed was locked out of its own claim; the token is the proof).
 -- Never NULL: a NULL here read as "own" in a release (first draft).
 CREATE OR REPLACE FUNCTION ob1_work_claim_is_holder(c work_claims, p_name text, p_agent uuid, p_token_hash bytea)
 RETURNS boolean
@@ -376,14 +418,18 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
   SELECT COALESCE(c.token_hash = p_token_hash
-                  AND CASE WHEN p_agent IS NOT NULL THEN c.holder_agent_id = p_agent
-                           ELSE c.holder_agent_id IS NULL AND c.holder_name = p_name END, false)
+                  AND CASE WHEN c.holder_agent_id IS NOT NULL THEN c.holder_agent_id = p_agent
+                           ELSE c.holder_name = p_name END, false)
 $$;
 COMMENT ON FUNCTION ob1_work_claim_is_holder(work_claims, text, uuid, bytea) IS
-  'True when the claim is held by this key (its agent id when given, else its name on a claim with no agent) under this token''s hash; false otherwise, never NULL. Migration 113 / SMD-3597.';
+  'True when the claim is the caller''s own: this token''s hash, and the key — a claim made with an agent id by that id, one made by name alone by the name; false otherwise, never NULL. Migration 113 / SMD-3597.';
 
--- The live claims that cover this work and are not the caller's own, oldest first.
-CREATE OR REPLACE FUNCTION ob1_work_claims_in_the_way(p_issue text, p_piece_key text, p_name text, p_agent uuid, p_token_hash bytea, p_now timestamptz)
+-- The live claims that cover this work, oldest first, but the one claim being
+-- renewed (p_exclude). Every other claim is in the way, the caller's own on
+-- overlapping work included (review pass 2: excluding whatever the token
+-- matched let a holder of the whole ticket, passing its token, claim a piece
+-- too — two claims of one holder on one work, neither renewable).
+CREATE OR REPLACE FUNCTION ob1_work_claims_in_the_way(p_issue text, p_piece_key text, p_exclude uuid, p_now timestamptz)
 RETURNS SETOF work_claims
 LANGUAGE sql
 STABLE
@@ -392,11 +438,11 @@ AS $$
    WHERE c.issue = p_issue
      AND c.released_at IS NULL AND c.expires_at > p_now
      AND (c.piece_key = p_piece_key OR c.piece_key = '' OR p_piece_key = '')
-     AND NOT ob1_work_claim_is_holder(c, p_name, p_agent, p_token_hash)
+     AND c.id IS DISTINCT FROM p_exclude
    ORDER BY c.claimed_at, c.id
 $$;
-COMMENT ON FUNCTION ob1_work_claims_in_the_way(text, text, text, uuid, bytea, timestamptz) IS
-  'The live claims on this work that are not the caller''s own (key and token): the same piece, the whole ticket, or (for a whole-ticket claim) any piece. Migration 113 / SMD-3597.';
+COMMENT ON FUNCTION ob1_work_claims_in_the_way(text, text, uuid, timestamptz) IS
+  'The live claims on this work but p_exclude, the one being renewed: the same piece, the whole ticket, or (for a whole-ticket claim) any piece. No two live claims cover one work, whoever holds them. Migration 113 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- claim_work
@@ -436,32 +482,35 @@ BEGIN
   PERFORM ob1_work_claim_lock(v_issue);
   v_now := clock_timestamp();
 
-  SELECT jsonb_agg(ob1_work_claim_json(w, v_now) ORDER BY w.claimed_at, w.id) INTO v_held
-    FROM ob1_work_claims_in_the_way(v_issue, v_key, v_who.name, v_who.agent_id, v_hash, v_now) w;
-  IF v_held IS NOT NULL THEN
-    -- The message names the holder's key and the times, never its label: free
-    -- text another key wrote stays in held_by, as data (review pass 1).
-    RETURN jsonb_build_object(
-      'outcome', 'refused', 'code', 'WORK_CLAIMED',
-      'message', format('%s%s is held by %s since %s, until %s',
-                        v_held->0->>'issue', COALESCE(' ' || (v_held->0->>'piece'), ''), v_held->0->>'holder',
-                        to_char((v_held->0->>'claimed_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"'),
-                        to_char((v_held->0->>'expires_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"')),
-      'claim', NULL, 'held_by', v_held, 'token', NULL);
-  END IF;
-
-  -- The caller's own unreleased claim on exactly this work, live or lapsed
-  -- (the token names it): renewed. Nothing else covers it (read above).
+  -- The caller's own unreleased claim on exactly this work, live or lapsed,
+  -- that its token names: the one claim the read below leaves out.
   IF v_hash IS NOT NULL THEN
     SELECT * INTO v_mine FROM work_claims c
      WHERE c.issue = v_issue AND c.piece_key = v_key AND c.released_at IS NULL
        AND ob1_work_claim_is_holder(c, v_who.name, v_who.agent_id, v_hash)
      FOR UPDATE;
-    IF FOUND THEN
-      UPDATE work_claims SET expires_at = v_now + v_lease, renewed_at = v_now, label = COALESCE(v_label, label)
-       WHERE id = v_mine.id RETURNING * INTO v_row;
-      RETURN jsonb_build_object('outcome', 'renewed', 'code', NULL, 'message', NULL, 'claim', ob1_work_claim_json(v_row, v_now), 'held_by', '[]'::jsonb, 'token', NULL);
-    END IF;
+  END IF;
+
+  SELECT jsonb_agg(ob1_work_claim_json(w, v_now) ORDER BY w.claimed_at, w.id) INTO v_held
+    FROM ob1_work_claims_in_the_way(v_issue, v_key, v_mine.id, v_now) w;
+  IF v_held IS NOT NULL THEN
+    -- The message names the work the caller asked for, the first holder's key
+    -- and the times — never text another key wrote (its piece, its label),
+    -- which stays in held_by as data (review passes 1 and 2).
+    RETURN jsonb_build_object(
+      'outcome', 'refused', 'code', 'WORK_CLAIMED',
+      'message', format('%s%s is covered by a claim of %s since %s, until %s',
+                        v_issue, COALESCE(' ' || v_piece, ''), v_held->0->>'holder',
+                        to_char((v_held->0->>'claimed_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"'),
+                        to_char((v_held->0->>'expires_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"')),
+      'claim', NULL, 'held_by', v_held, 'token', NULL);
+  END IF;
+
+  -- The caller's own claim, nothing else covering it: renewed.
+  IF v_mine.id IS NOT NULL THEN
+    UPDATE work_claims SET expires_at = v_now + v_lease, renewed_at = v_now, label = COALESCE(v_label, label)
+     WHERE id = v_mine.id RETURNING * INTO v_row;
+    RETURN jsonb_build_object('outcome', 'renewed', 'code', NULL, 'message', NULL, 'claim', ob1_work_claim_json(v_row, v_now), 'held_by', '[]'::jsonb, 'token', NULL);
   END IF;
 
   -- A lapsed claim on exactly this ticket and piece: taken over. (Nothing live
@@ -522,13 +571,13 @@ BEGIN
   END IF;
   IF v_row.released_at IS NOT NULL THEN
     RETURN jsonb_build_object('outcome', 'refused', 'code', 'CLAIM_RELEASED',
-      'message', format('claim %s ended at %s (%s); claim the work again', p_claim,
-                        to_char(v_row.released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"'), COALESCE(v_row.release_reason, 'released')),
+      'message', format('claim %s ended at %s; claim the work again', p_claim,
+                        to_char(v_row.released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI"Z"')),
       'claim', ob1_work_claim_json(v_row, v_now), 'held_by', '[]'::jsonb, 'token', NULL);
   END IF;
   -- Lapsed meanwhile, another holder may have claimed a piece or the whole.
   SELECT jsonb_agg(ob1_work_claim_json(w, v_now) ORDER BY w.claimed_at, w.id) INTO v_held
-    FROM ob1_work_claims_in_the_way(v_row.issue, v_row.piece_key, v_who.name, v_who.agent_id, v_hash, v_now) w;
+    FROM ob1_work_claims_in_the_way(v_row.issue, v_row.piece_key, v_row.id, v_now) w;
   IF v_held IS NOT NULL THEN
     RETURN jsonb_build_object('outcome', 'refused', 'code', 'WORK_CLAIMED',
       'message', format('claim %s lapsed and a claim of %s now covers its work', p_claim, v_held->0->>'holder'),
@@ -578,7 +627,7 @@ BEGIN
   IF NOT ob1_work_claim_is_holder(v_row, v_who.name, v_who.agent_id, v_hash) THEN
     IF p_force IS NOT TRUE THEN
       RETURN jsonb_build_object('outcome', 'refused', 'code', 'CLAIM_NOT_YOURS',
-        'message', format('claim %s is held by %s, not by this key with this token; an operator key may release it with p_force and a reason', p_claim, v_row.holder_name),
+        'message', format('claim %s is held by %s, not by this key with this token', p_claim, v_row.holder_name),
         'claim', ob1_work_claim_json(v_row, v_now), 'held_by', '[]'::jsonb, 'token', NULL);
     END IF;
     -- The operator's kind by its agent id alone: a name is anyone's to write
@@ -625,11 +674,11 @@ AS $$
          c.released_at, c.released_by, c.released_by_kind, c.release_reason,
          CASE WHEN c.released_at IS NOT NULL THEN 'released' WHEN c.expires_at <= statement_timestamp() THEN 'lapsed' ELSE 'live' END
     FROM work_claims c
-   WHERE (p_issues IS NULL OR c.issue = ANY (ARRAY(SELECT upper(btrim(k)) FROM unnest(p_issues) k)))
+   WHERE (p_issues IS NULL OR c.issue = ANY (ARRAY(SELECT upper(ob1_work_claim_text(left(k, 200), 200, 'a ticket key')) FROM unnest(p_issues) k)))
      AND (p_holder IS NULL OR c.holder_name = p_holder)
      AND (p_include_ended OR (c.released_at IS NULL AND c.expires_at > statement_timestamp()))
    ORDER BY c.issue, c.piece_key, c.claimed_at, c.id
    LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 1000)
 $$;
 COMMENT ON FUNCTION list_work_claims(text[], text, boolean, int) IS
-  'The live work claims — or every claim with p_include_ended — of the tickets p_issues names (all when NULL; keys upper-cased and trimmed), of one holder''s key name when p_holder is given, each with its state (live, lapsed, released), by ticket, piece and claim time; p_limit 1 to 1000 (default 100). Never a token or its hash. Migration 113 / SMD-3597.';
+  'The live work claims — or every claim with p_include_ended — of the tickets p_issues names (all when NULL; keys cleaned and upper-cased as claim_work cleans them), of one holder''s key name when p_holder is given, each with its state (live, lapsed, released), by ticket, piece and claim time; p_limit 1 to 1000 (default 100). Never a token or its hash. Migration 113 / SMD-3597.';

@@ -299,7 +299,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3082 assertions: 3082 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3085 assertions: 3085 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -2171,22 +2171,26 @@ lease, so two agents never build the same change (SMD-3597, under SMD-3596). On
 2026-10-29 a session recommended SMD-3379 PR 1b-2 while another had its worktree
 open, and nothing any agent could read said so. `work_claims` holds one row per
 claim, kept after it ends. The work is a ticket key (`SMD-3379`, upper-cased: a
-team key of at most 16 letters and digits, a number of at most 10 digits with no
-leading zero) and an optional piece (`PR 1b-2`, its runs of white space, Unicode's
-included, made one space and trimmed, compared case-folded). The holder is
+team key of at most 16 ASCII letters and digits, a number of at most 10 digits
+with no leading zero) and an optional piece (`PR 1b-2`, its zero-width marks
+deleted, its runs of white space, Unicode's included, made one space and trimmed,
+compared case-folded by the database's collation). The holder is
 stamped from the call's actor envelope (`p_actor`, which the server passes for
 the key), never from an argument; a call with no envelope, or from a key the
 registry calls `ingested`, raises. `claim_work` returns a **token** once (`wc_`
 and 64 hex digits) and keeps only its SHA-256: a claim is the caller's own only
-when the key **and** the token match, so two agents under one key refuse each
-other, and nothing a refusal or a list shows proves ownership. The `label` is
-free text for people, control characters made spaces, returned as data and never
-put in a message. `claim_work` answers `claimed` (with the token), `renewed`
-(given the token of the caller's own claim on the same work) or `refused` with
-the code `WORK_CLAIMED`, a message naming the first holder's key and times, and
-every claim in the way: a refusal is an answer, never an exception. A
+when the key **and** the token match (a claim made by key name alone, by that
+name), so two agents under one key refuse each other, and nothing a refusal or a
+list shows proves ownership. To its own key the token is a bearer secret: send it
+as a bind parameter, never in a statement's text, and keep it out of logs. The
+`label` is free text for people, returned as data. `claim_work` answers `claimed`
+(with the token), `renewed` (given the token of the caller's own claim on exactly
+that work) or `refused` with the code `WORK_CLAIMED`, a message naming the work
+asked for, the first holder's key and the times (never text another key wrote),
+and every claim in the way: a refusal is an answer, never an exception. A
 whole-ticket claim and a claim on one of its pieces are the same work, either way
-round; two pieces are not. `renew_work_claim` and `release_work_claim` act on the
+round; two pieces are not. No two live claims cover one work, whoever holds them:
+the holder's own claim on overlapping work is in the way too. `renew_work_claim` and `release_work_claim` act on the
 holder's own claim, given its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
 releases another holder's, for an operator key named by its agent id (a name
 alone lends no kind, SMD-2608's rule) and with a reason. The lease is 60 seconds
@@ -5676,7 +5680,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3082 assertions, PGlite, no container
+bun test-schema.ts                          # 3085 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1782 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1033 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
