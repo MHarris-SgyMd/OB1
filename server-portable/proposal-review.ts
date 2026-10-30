@@ -12,7 +12,7 @@
 
 import type { SQL, TransactionSQL } from "bun";
 import { WRITERS_MISSING, type ProposalWriter } from "./store.ts";
-import { standingFlags, type StandingFlag } from "./render.ts";
+import { standingFlags, type StandingFlag } from "./standing.ts";
 
 /**
  * Who decided a row (114's columns, which its trigger stamps from the key

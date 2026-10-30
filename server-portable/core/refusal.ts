@@ -6,7 +6,7 @@
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
 import type { Citation } from "../store.ts";
-import type { StandingFlag } from "../render.ts";
+import type { StandingFlag } from "../standing.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
 /**

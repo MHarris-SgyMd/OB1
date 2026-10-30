@@ -327,57 +327,10 @@ export function actorLine(m: Record<string, unknown>): string | null {
 // the trust words, where the operator GUI reads it too (SMD-2280).
 export { INGESTED_NOTICE, ingestedNotice };
 
-/** 074's ladder as a rank — operator 3, agent 2, ingested 1 — and 0 for no trust recorded or a word off it, below every word (filter.ts). */
-export function trustRank(t: string | null | undefined): number {
-  const i = (TRUST as readonly string[]).indexOf(t ?? "");
-  return i < 0 ? 0 : TRUST.length - i;
-}
-
-/**
- * Why a proposal is flagged WRITER (SMD-2707): the side that stands, which of
- * the two rules it meets, and how sure the side is — `stood` on an accepted
- * row (its superseding_id), `would` when the verdict or --direction names it,
- * `if` for each side an undirected verdict leaves to the reviewer.
- */
-export type StandingFlag = { stands: "newer" | "older"; captureOnly: boolean; lowerTrust: boolean; how: "stood" | "would" | "if"; sameKey?: true };
-
-/**
- * The WRITER flags on a proposal (SMD-2707). The side that stands is the
- * superseding one: on an accepted row the one its superseding_id names;
- * else `direction` when given (review_supersession_proposal takes it over
- * the verdict, 029), else the verdict's, and both sides for an undirected
- * verdict, each the reviewer may pick. It is flagged when its text is a
- * capture-only key's and the accept would pass another's standing to it —
- * the other side's capturer is another, or the accept would take the side
- * (ob1_accept_takes) though one key captured both — or both sides have a
- * trust recorded and its ranks below the other's — a side with none recorded
- * is not flagged for it (the maintainer's choice, review pass 1: an
- * unclassified key's, a raw write's or an unbackfilled row's is not a lower
- * one). Nothing on a row from before 094, which carries no writer. One rule
- * for the reply, `--list` and the CLI's accept guard.
- */
-export function standingFlags(
-  p: { verdict: string; sameCapturer: boolean; status?: string; supersedingId?: string | null; older: { id?: string; writer: ProposalWriter | null; takes?: boolean }; newer: { id?: string; writer: ProposalWriter | null; takes?: boolean } },
-  direction?: "newer" | "older",
-): StandingFlag[] {
-  const stood = p.status === "accepted" && p.supersedingId ? (p.supersedingId === p.newer.id ? "newer" : p.supersedingId === p.older.id ? "older" : null) : null;
-  const named = stood ?? direction ?? (p.verdict === "newer_supersedes_older" ? "newer" : p.verdict === "older_supersedes_newer" ? "older" : null);
-  const how: StandingFlag["how"] = stood ? "stood" : named ? "would" : "if";
-  const sides: ("newer" | "older")[] = named ? [named] : ["newer", "older"];
-  return sides.flatMap((stands) => {
-    const me = p[stands].writer, other = p[stands === "newer" ? "older" : "newer"].writer;
-    if (!me || !other) return [];
-    // One capturer's two thoughts pass nobody's standing — unless the accept
-    // would take the side all the same: the other side taken since (a write
-    // key's edit, its chain accepted over a third's), as 092 reads it
-    // (review pass 4).
-    const captureOnly = me.captureOnly && (!p.sameCapturer || p[stands].takes === true);
-    const lowerTrust = trustRank(me.trust) > 0 && trustRank(other.trust) > 0 && trustRank(me.trust) < trustRank(other.trust);
-    // sameKey: flagged though one key captured both — said, or the two By:
-    // lines read alike with no reason shown (review pass 5).
-    return captureOnly || lowerTrust ? [{ stands, captureOnly, lowerTrust, how, ...(captureOnly && p.sameCapturer ? { sameKey: true as const } : {}) }] : [];
-  });
-}
+// 074's rank and SMD-2707's WRITER rule live in standing.ts, which the
+// decision's guard (proposal-review.ts) reads without this file's imports.
+export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -901,7 +854,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
-    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; force where the CLI line says --force), or the CLI line under each.${unread}\n\n${results.join("\n\n")}${next}`;
+    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; its arguments the CLI line's under each), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "filters" && r.made
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
