@@ -4251,6 +4251,16 @@ if (want("9f")) {
         IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN RAISE EXCEPTION '${words}' USING ERRCODE = '${errcode}'; END IF; RETURN NULL; END $$;
       CREATE TRIGGER zz_reembed_deadlock AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_deadlock()`);
     const claimOf = async (id: string) => (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${OWN_KEY}`)[0] as { status: string; last_error: string | null } | undefined;
+    /**
+     * The claim once it is out of hand, polled for up to 5 s: a follower says a row's fate, or writes its
+     * vector, before the claim's release reaches the row (SMD-3612). The value the poll saw is returned,
+     * so it is the one asserted; at the bound, the last read.
+     */
+    const claimOutOfHand = async (id: string) => {
+      let claim = undefined as Awaited<ReturnType<typeof claimOf>>;
+      await pollUntil(async () => (claim = await claimOf(id)) !== undefined && claim.status !== "claimed", 5_000);
+      return claim;
+    };
 
     // The provider not answering at the start is waited out, its line said; once it answers the follower pools.
     providerDown503 = true;
@@ -4281,11 +4291,8 @@ if (want("9f")) {
     providerDown503 = true;
     await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${midThought}::uuid`;
     const sentBackAgain = await pollUntil(async () => mid2.lines.filter((l) => l.includes(`${midThought} goes back to the pool unrecorded`)).length >= 2, 15_000);
-    // The line comes before the claim goes back (the worker's finally returns it), so the claim is
-    // polled out of hand, bounded; the value the poll saw is the one asserted. Read at once, it was
-    // still claimed (SMD-3612).
-    let claimAgain = undefined as Awaited<ReturnType<typeof claimOf>>;
-    await pollUntil(async () => (claimAgain = await claimOf(midThought)) !== undefined && claimAgain.status !== "claimed", 5_000);
+    // The line comes before the worker's finally hands the claim back: read at once, it was still claimed (SMD-3612).
+    const claimAgain = await claimOutOfHand(midThought);
     providerDown503 = false;
     const midAgain = await pollUntil(() => atModel(midThought), 15_000);
     const mid2Exit = await mid2.stop();
@@ -4404,10 +4411,8 @@ if (want("9f")) {
     }
     const seen = waits().slice(0, 3);
     const throttledEmbedded = await pollUntil(() => atModel(throttledThought), 15_000);
-    // The vector's write commits before the claim's release, a statement apart, so the claim is polled
-    // out of hand, as the outage case's is (SMD-3612 review pass 1).
-    let throttledClaim = undefined as Awaited<ReturnType<typeof claimOf>>;
-    await pollUntil(async () => (throttledClaim = await claimOf(throttledThought)) !== undefined && throttledClaim.status !== "claimed", 5_000);
+    // The vector's write commits a statement before the claim's release (SMD-3612 review pass 1).
+    const throttledClaim = await claimOutOfHand(throttledThought);
     const throttledExit = await throttledFollower.stop();
     assert(seen.length === 3 && seen[1] > seen[0] && seen[2] > seen[1] && throttledEmbedded && throttledClaim?.status === "succeeded" && throttledExit === "exit 0",
       `outages that come back at once wait longer each time, the thought re-embedded once the limit lifts, nothing recorded failed (waits ${JSON.stringify(seen)} s; claim ${throttledClaim?.status}; ${throttledExit})`);
