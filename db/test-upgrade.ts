@@ -18,11 +18,10 @@
  * CI runs this suite beside test-preflight.ts's first shard, each in its own
  * database of one Postgres, as the same role (SMD-2219, SMD-3468), a Postgres
  * the two have to themselves while the data-layer job's other suites run
- * (SMD-3195). What the cluster
- * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
- * here to the current database, or named for this suite (ob1_upgrade_*,
- * ob1_notemp, tu_*). [12] opens a session in `postgres` on purpose, to hold a
- * lock its count must not see.
+ * (SMD-3195). What the cluster shares — a role and its settings, pg_locks,
+ * pg_stat_activity — is scoped here to the current database, or named for
+ * this suite (ob1_upgrade_*, ob1_notemp, tu_*). [12] opens a session in
+ * `postgres` on purpose, to hold a lock its count must not see.
  *
  *   ./with-postgres.sh bun test-upgrade.ts
  */

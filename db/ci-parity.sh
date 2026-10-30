@@ -155,8 +155,9 @@ main() {
   run server-portable    test-chunking.ts
   run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
-  # CI runs its two shards side by side, each on a Postgres of its own
-  # (SMD-3468); here in series, each dropping its schema first.
+  # CI runs its two shards side by side, the first beside test-upgrade.ts on
+  # pair-postgres, the rest on preflight-postgres (SMD-3468); here in series,
+  # each dropping the schema before its first database section.
   OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
   OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
   run compat/supabase-sql test-compat.ts

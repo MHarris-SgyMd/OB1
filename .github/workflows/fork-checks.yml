@@ -180,7 +180,7 @@ jobs:
 
       # Two suites that spend most of their time waiting on a real clock,
       # started here and run in the background while the job's other steps run
-      # (SMD-3470), as the data layer runs its pair (SMD-3195). One after
+      # (SMD-3470), as the data layer runs its legs (SMD-3195). One after
       # another they were ~50 s and ~33 s of a job whose median was ~215–220 s.
       # - test-server.ts, the real server's suite (SMD-2287 PR 4b and 4c): its
       #   request lines, its refusals, its mirrors, its stop's count of tool
@@ -535,7 +535,7 @@ jobs:
 
       # The two suites the job started after the installs (SMD-3470), waited
       # on up to their limit and the kill after it, and printed as the data
-      # layer prints its pair: a passing log folded, a failing one open, and
+      # layer prints its legs: a passing log folded, a failing one open, and
       # the two summary lines last. It runs when a step before it failed too,
       # so a failure beside one of theirs is seen beside it.
       - name: The real server's suite and the vocabulary rules (started at the job's start)
@@ -882,7 +882,8 @@ jobs:
         ports:
           - 5433:5432
         options: --shm-size=1g
-      # test-preflight's second shard's, on 5434 (SMD-3468), with the same /dev/shm.
+      # test-preflight's second shard's, on 5434 (SMD-3468). The same /dev/shm:
+      # one suite alone builds here, but its build takes all of the default.
       preflight-postgres:
         image: pgvector/pgvector:0.8.6-pg16
         env:
@@ -942,10 +943,10 @@ jobs:
       # preflight runs, a subprocess each. A Postgres of their own, not
       # databases beside ob1test: a cluster's databases share its transaction
       # horizon, and an open transaction of theirs hid test-plugins-sql.ts's new
-      # index from the planner (review pass 1, 9 runs in 30). The two connect as
-      # one role to one cluster, so what the cluster shares — a role and its
-      # settings, pg_locks, pg_stat_activity — is scoped in each to its own
-      # database, or named for the suite; both headers say so, and a fixture
+      # index from the planner (review pass 1, 9 runs in 30). The first two
+      # connect as one role to one cluster, so what the cluster shares — a role
+      # and its settings, pg_locks, pg_stat_activity — is scoped in each to its
+      # own database, or named for the suite; both headers say so, and a fixture
       # added to either keeps to it. Each leg runs in a subshell that outlives
       # this step (the runner ends a job's leftover processes only at its end)
       # and writes its log, then its exit code by a rename, so the last step
@@ -962,7 +963,7 @@ jobs:
           # The first shard's database; the services create test-upgrade's and the rest's.
           bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
           limit_s=600
-          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/pair.started"
+          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/data-layer.started"
           # Each line stamped +<seconds>s since here, to a tenth (bash's own
           # clock, in microseconds); a leg's code, written by a rename.
           started_us=${EPOCHREALTIME//[!0-9]/}
@@ -974,26 +975,33 @@ jobs:
             done
           }
           finish() { echo "$2" > "$RUNNER_TEMP/$1.rc.part" && mv "$RUNNER_TEMP/$1.rc.part" "$RUNNER_TEMP/$1.rc"; }
-          # Each suite written out, as checks 34 and 35 read what a step runs.
+          # Each leg's name, written as it is launched and used for its log and
+          # code, is what the last step waits on: one list, so a leg cannot run
+          # unread. Each suite written out, as checks 34 and 35 read what a step
+          # runs.
+          launch() { leg=$1; echo "$leg" >> "$RUNNER_TEMP/data-layer.legs"; }
+          launch test-upgrade
           (
             set +e
             DATABASE_URL=$UPGRADE_DATABASE_URL \
-              timeout --kill-after=10s "${limit_s}s" bun test-upgrade.ts 2>&1 | stamp > "$RUNNER_TEMP/test-upgrade.log"
-            finish test-upgrade "${PIPESTATUS[0]}"
+              timeout --kill-after=10s "${limit_s}s" bun test-upgrade.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
+            finish "$leg" "${PIPESTATUS[0]}"
           ) < /dev/null > /dev/null 2>&1 &
+          launch test-preflight-first
           (
             set +e
             cd ../server-portable
             DATABASE_URL=$PREFLIGHT_DATABASE_URL OB1_PREFLIGHT_SHARD=first \
-              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/test-preflight-first.log"
-            finish test-preflight-first "${PIPESTATUS[0]}"
+              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
+            finish "$leg" "${PIPESTATUS[0]}"
           ) < /dev/null > /dev/null 2>&1 &
+          launch test-preflight-rest
           (
             set +e
             cd ../server-portable
             DATABASE_URL=$PREFLIGHT_REST_DATABASE_URL OB1_PREFLIGHT_SHARD=rest \
-              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/test-preflight-rest.log"
-            finish test-preflight-rest "${PIPESTATUS[0]}"
+              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts 2>&1 | stamp > "$RUNNER_TEMP/$leg.log"
+            finish "$leg" "${PIPESTATUS[0]}"
           ) < /dev/null > /dev/null 2>&1 &
         env:
           UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1upgrade
@@ -1201,10 +1209,11 @@ jobs:
       - name: Incremental upgrade and preflight (started at the job's start)
         if: ${{ !cancelled() }}
         run: |
-          read -r started limit_s < "$RUNNER_TEMP/pair.started" || { echo "::error title=SQL data layer::the pair was never started: its start step did not run, or failed before it wrote $RUNNER_TEMP/pair.started"; exit 1; }
+          read -r started limit_s < "$RUNNER_TEMP/data-layer.started" || { echo "::error title=SQL data layer::the legs were never started: their start step did not run, or failed before it wrote $RUNNER_TEMP/data-layer.started"; exit 1; }
           # The limit, the 10 s kill after it, and 20 s for each leg's subshell to write its code.
           deadline=$((started + limit_s + 30))
-          legs=(test-upgrade test-preflight-first test-preflight-rest)
+          # The legs the start step launched, by the names their logs and codes carry.
+          mapfile -t legs < "$RUNNER_TEMP/data-layer.legs" || { echo "::error title=SQL data layer::the start step named no leg in $RUNNER_TEMP/data-layer.legs"; exit 1; }
           waiting() { local l; for l in "${legs[@]}"; do [ -f "$RUNNER_TEMP/$l.rc" ] || return 0; done; return 1; }
           while waiting && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
           summaries=""

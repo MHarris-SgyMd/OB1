@@ -134,6 +134,8 @@ async function migrate(args: string[], env: Record<string, string | undefined> =
 
 const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined };
 
+if (SHARD !== undefined) console.log(`  shard: ${SHARD} (OB1_PREFLIGHT_SHARD)\n`);
+
 if (want("1")) {
   console.log("[1] Missing configuration fails, with an actionable fix");
   const r = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql" });
@@ -3021,7 +3023,12 @@ else {
       await claims.unsafe("DROP TABLE IF EXISTS schema_migrations");
     }
   }
+  // [5] leaves a brain preflight passes, as [5b] checks at its own end: [9]
+  // reads it, after [5] in the first shard and after [5b] in a full run.
+  await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
+  const left = JSON.parse((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(left.ok === true, `[5] leaves a brain preflight passes, the state [9] reads after it (failed: ${left.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
 }
 
 if (want("5b")) console.log("\n[5b] Against a real database, from a fresh apply: the capturing role, the fingerprint backfill, the version and ledger rows as other roles read them, the tier and the workers' heartbeats");
