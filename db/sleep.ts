@@ -605,8 +605,8 @@ const CANCEL_EVERY_MS = 250;
 
 /**
  * A migration in progress — migrate.ts's ob1:migrate lock (SMD-3379 PR 1a),
- * its holder named — and the ledger's newest name and row count: what the scheduler waits
- * out at its start and watches each poll (PR 1c-1).
+ * its holder named — and the ledger's newest name and row count: what the
+ * scheduler waits out at its start and watches each poll (PR 1c-1).
  */
 async function migrationState(sql: SQL): Promise<{ holder: string | null; ledger: string }> {
   // The ledger first: a migration that commits between the two reads is then seen by the lock's, or
@@ -877,9 +877,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // and the passes' starts below would meet a schema mid-change — a process
   // its supervisor restarted on a migration would read the old catalog — so
   // the scheduler waits until it is let go, before any of them, then takes
-  // the ledger's newest name and count as what it watches each poll (the watcher,
-  // below). A stop during the wait is a stop before the run began. A dry run
-  // reads on.
+  // the ledger's newest name and count as what it watches each poll (the
+  // watcher, below). A stop during the wait is a stop before the run began.
+  // A dry run reads on.
   let ledgerAt = "";
   if (!opts.dryRun) {
     let saidWaiting = false;
@@ -2199,9 +2199,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // newest name and count. The ledger moved since the start, or the lock held
   // by one backend at two polls in a row — every run takes it where 096
   // cannot take PUBLIC's grant back, and a no-op is gone by the next poll
-  // (PR 1a's follow-up, review pass 3): the passes stop now — a stop
-  // on 093, as the operator's second signal is, not the scheduler's cut — the
-  // row ends without the held read, as the second signal's does, and the run
+  // (PR 1a's follow-up, review pass 3): the passes stop now — a stop on 093,
+  // as the operator's second signal is, not the scheduler's cut — the row
+  // ends without the held read, as the second signal's does, and the run
   // returns MIGRATION_EXIT for its supervisor to start it again at once: the
   // next process waits the migration out and reads its start again on the
   // schema it left. A read that fails is tried at the next.

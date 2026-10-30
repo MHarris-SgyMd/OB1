@@ -56,13 +56,14 @@
  *
  * A migration. The sleep scheduler, ended with MIGRATION_EXIT (75) — it saw
  * migrate.ts take its lock or the ledger move (SMD-3379 PR 1c-1) — runs again
- * at once, its try not counted, the ends before it forgotten after a long run, the row's restart
- * saying in_s 0 and code 75: the next process waits the migration out at its
- * start and takes its start's reads again on the schema it left. It runs the
- * code this process has — in compose the coordinator's baked image, which
- * `up -d --build` replaces by recreating the coordinator; from
- * a checkout, the checkout's as it then is. More than MIGRATION_RESTARTS such
- * ends in a row, each within a minute of its start, fall back to the clock.
+ * at once, its try not counted, the ends before it forgotten after a long
+ * run, the row's restart saying in_s 0 and code 75: the next process waits
+ * the migration out at its start and takes its start's reads again on the
+ * schema it left. It runs the code this process has — in compose the
+ * coordinator's baked image, which `up -d --build` replaces by recreating the
+ * coordinator; from a checkout, the checkout's as it then is. More than
+ * MIGRATION_RESTARTS such ends in a row, each within a minute of its start,
+ * fall back to the clock.
  *
  * A stop. Each stop() goes on to the follower, whose own rules apply (the
  * first SIGTERM stops it after the work in hand, the second hard); once it
@@ -86,9 +87,10 @@ export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as con
 /**
  * The sleep scheduler, ended with MIGRATION_EXIT — a migration seen
  * (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
- * process waits the migration out and reads its start again. Past this many such ends in a row, each
- * within MIGRATION_QUICK_MS of its start, it is run again on the clock as any
- * end is: a follower that saw a migration at every start would otherwise spin.
+ * process waits the migration out and reads its start again. Past this many
+ * such ends in a row, each within MIGRATION_QUICK_MS of its start, it is run
+ * again on the clock as any end is: a follower that saw a migration at every
+ * start would otherwise spin.
  */
 export const MIGRATION_RESTARTS = 3;
 export const MIGRATION_QUICK_MS = 60_000;

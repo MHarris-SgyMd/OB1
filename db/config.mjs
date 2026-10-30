@@ -2717,8 +2717,8 @@ export const GRANT_LOCK = "ob1:grants";
  * holds until it returns; never for `--dry-run`, `--grant` or a run with nothing
  * to write. A second run meanwhile is refused by name, where before it raced the
  * first on the ledger's rows and the catalog's; the sleep scheduler reads it
- * to stop its passes (SMD-3379 PR 1c-1). A signal, not a barrier: migrate waits for nothing
- * else to stop.
+ * to stop its passes (SMD-3379 PR 1c-1). A signal, not a barrier: migrate
+ * waits for nothing else to stop.
  */
 export const MIGRATE_LOCK = "ob1:migrate";
 /**

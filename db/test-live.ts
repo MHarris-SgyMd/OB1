@@ -17891,45 +17891,44 @@ if (want("38")) {
         const lockSaid = lines.slice(lockFrom).some((l) => /backend \d+ holds ob1:migrate, applying migrations — the passes stop now/.test(l));
         assert(lockRunning && lockCode === 75 && lockSaid && lockBeat?.ended === true && lockBeat.outcome === "stopped",
           `…and the lock taken while it runs ends it with 75 too, its row ended stopped (exit ${lockCode}, said ${lockSaid}, ${JSON.stringify({ ended: lockBeat?.ended, outcome: lockBeat?.outcome })})`);
+        /**
+         * A run under way (`ready`), `table` locked as a migration would, a
+         * statement of the scheduler's waiting on it, then ob1:migrate taken:
+         * the run's code — -1 when not within 10 s, the lock still held — and
+         * how long after the take.
+         */
+        const whileLocked = async (table: string, ready: () => Promise<boolean>) => {
+          const stop = new AbortController();
+          const run = sleepRun({ follow: true, signal: stop.signal, pollMs: 200 });
+          const running = await pollUntil(ready, 20_000);
+          await holder`BEGIN`;
+          await holder.unsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
+          const waited = await pollUntil(async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name LIKE 'ob1-sleep %' AND wait_event_type = 'Lock'`)[0].c) > 0, 10_000);
+          const at = Date.now();
+          await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+          const code = await Promise.race([run, Bun.sleep(10_000).then(() => -1)]);
+          const ms = Date.now() - at;
+          await holder`ROLLBACK`;
+          await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+          if (code === -1) { stop.abort(); await run; }
+          return { running, waited, code, ms };
+        };
         // A pass's statement waiting on a lock the migration holds: cancelled,
         // so the run ends while the migration still runs, where it waited for
         // it and could deadlock it; no thought failed (review pass 4, run).
         const failedBefore = (await claims(EX)).failed ?? 0;
         for (let i = 0; i < 6; i++) await capture(`Ada Lovelace wrote the first program, note ${i} of the blocked run`, null);
         sw.slowExtract = 400;
-        const blockStop = new AbortController();
-        const blockRun = sleepRun({ follow: true, signal: blockStop.signal, pollMs: 200 });
-        const blockRunning = await pollUntil(async () => (await beat())?.running === true && modelCalls.some((c) => c.kind === "extract" && Date.now() - c.at < 2000), 20_000);
-        await holder`BEGIN`;
-        await holder`LOCK TABLE thought_entities IN ACCESS EXCLUSIVE MODE`;
-        const passWaiting = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name LIKE 'ob1-sleep %' AND wait_event_type = 'Lock'`)[0].c) > 0;
-        const blocked = await pollUntil(passWaiting, 10_000);
-        const blockAt = Date.now();
-        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
-        const blockCode = await Promise.race([blockRun, Bun.sleep(10_000).then(() => -1)]);
-        const blockMs = Date.now() - blockAt;
-        await holder`ROLLBACK`;
-        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
-        if (blockCode === -1) { blockStop.abort(); await blockRun; }
+        const pass = await whileLocked("thought_entities", async () => (await beat())?.running === true && modelCalls.some((c) => c.kind === "extract" && Date.now() - c.at < 2000));
         sw.slowExtract = 0;
         const blockFailed = ((await claims(EX)).failed ?? 0) - failedBefore;
-        assert(blockRunning && blocked && blockCode === 75 && blockFailed === 0,
-          `…and a pass's statement waiting on the migration's lock is cancelled, the run ending 75 while the migration holds it, no thought failed (running ${blockRunning}, a pass waited ${blocked}, exit ${blockCode} after ${blockMs} ms, ${blockFailed} failed)`);
+        assert(pass.running && pass.waited && pass.code === 75 && blockFailed === 0,
+          `…and a pass's statement waiting on the migration's lock is cancelled, the run ending 75 while the migration holds it, no thought failed (running ${pass.running}, a pass waited ${pass.waited}, exit ${pass.code} after ${pass.ms} ms, ${blockFailed} failed)`);
         // The scheduler's own read waiting on it — the live-write read on
         // thought_audit, each poll — is cancelled too (review pass 5, run).
-        const readStop = new AbortController();
-        const readRun = sleepRun({ follow: true, signal: readStop.signal, pollMs: 200 });
-        const readRunning = await pollUntil(async () => (await beat())?.running === true, 20_000);
-        await holder`BEGIN`;
-        await holder`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`;
-        const readBlocked = await pollUntil(passWaiting, 10_000);
-        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
-        const readCode = await Promise.race([readRun, Bun.sleep(10_000).then(() => -1)]);
-        await holder`ROLLBACK`;
-        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
-        if (readCode === -1) { readStop.abort(); await readRun; }
-        assert(readRunning && readBlocked && readCode === 75,
-          `…and the scheduler's own read waiting on it is cancelled too, the run ending 75 while the migration holds it (running ${readRunning}, a read waited ${readBlocked}, exit ${readCode})`);
+        const read = await whileLocked("thought_audit", async () => (await beat())?.running === true);
+        assert(read.running && read.waited && read.code === 75,
+          `…and the scheduler's own read waiting on it is cancelled too, the run ending 75 while the migration holds it (running ${read.running}, a read waited ${read.waited}, exit ${read.code} after ${read.ms} ms)`);
       } finally {
         await holder`ROLLBACK`.catch(() => {});
         await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});

@@ -4074,34 +4074,34 @@ has no `--job`.
 **A migration.** `migrate.ts` holds the `ob1:migrate` advisory lock while it
 writes (SMD-3379 PR 1a). The scheduler waits it out at its start, before its
 passes' starts check the schema, saying so once, then takes the ledger's
-newest name and row count (`schema_migrations`). Each `--poll` after that it reads both: the
-ledger moved, or the lock held by one run at two polls in a row (every run
-takes it where 096 cannot take PUBLIC's grant back, and a no-op is gone by
-the next poll), and the passes stop at once — a stop on 093,
-as the operator's second signal is — the row ends without the held read, and
-it exits 75 (`MIGRATION_EXIT`, `config.mjs`); a hand run is run again once the
-migration is done. `db/supervise.ts` runs the scheduler again at once on a 75,
-no try counted, its row's `restart`
-saying `in_s` 0 and code 75: the next process waits the migration out and
-takes its start's reads again on the schema it left. Its code is the
-coordinator's — in compose the baked image, which `up -d --build` replaces
-by recreating the coordinator, stopping the scheduler before the migrate
-service runs; so a 75 is seen in compose when the server image did not
-change, or the migrator runs beside a running stack. Past three such ends in
-a row, each within a minute of its start, it falls back to the clock
-(SMD-3379 PR 1c-1). Once the passes have returned their leases, a
-statement of the scheduler's or its passes' waiting on a lock — the
-migration's, as a rule, which it would wait out and could deadlock — is
-cancelled until the run ends, on its own connections alone: each carries
-`application_name` `ob1-sleep <id>`, one id a process. A lease return is
-not cancelled (one cancelled kept its lease to its TTL, 15 min), so a
-migration that locks `thought_work_claims` still holds the exit until it
-ends. The lock is a signal, not a barrier: the passes stop a poll or two
-after it is taken, and until then a migration that needs a lock a pass holds
-may still fail, at its `lock_timeout` or at once on a deadlock — at the
-default 5 s poll two polls outlast Postgres' 1 s `deadlock_timeout`, so
-there the cancel ends the wait more often than it spares the deadlock. For a
-migration that alters a table the passes write, stop the coordinator first.
+newest name and row count (`schema_migrations`). Each `--poll` after that it
+reads both: the ledger moved, or the lock held by one run at two polls in a
+row (every run takes it where 096 cannot take PUBLIC's grant back, and a
+no-op is gone by the next poll), and the passes stop at once — a stop on
+093, as the operator's second signal is — the row ends without the held
+read, and it exits 75 (`MIGRATION_EXIT`, `config.mjs`); a hand run is run
+again once the migration is done. `db/supervise.ts` runs the scheduler again
+at once on a 75, no try counted, its row's `restart` saying `in_s` 0 and
+code 75: the next process waits the migration out and takes its start's
+reads again on the schema it left. Its code is the coordinator's — in
+compose the baked image, which `up -d --build` replaces by recreating the
+coordinator, stopping the scheduler before the migrate service runs; so a 75
+is seen in compose when the server image did not change, or the migrator
+runs beside a running stack. Past three such ends in a row, each within a
+minute of its start, it falls back to the clock (SMD-3379 PR 1c-1). Once the
+passes have returned their leases, a statement of the scheduler's or its
+passes' waiting on a lock — the migration's, as a rule, which it would wait
+out and could deadlock — is cancelled until the run ends, on its own
+connections alone: each carries `application_name` `ob1-sleep <id>`, one id
+a process. A lease return is not cancelled (one cancelled kept its lease to
+its TTL, 15 min), so a migration that locks `thought_work_claims` still
+holds the exit until it ends. The lock is a signal, not a barrier: the
+passes stop a poll or two after it is taken, and until then a migration that
+needs a lock a pass holds may still fail, at its `lock_timeout` or at once
+on a deadlock — at the default 5 s poll two polls outlast Postgres' 1 s
+`deadlock_timeout`, so there the cancel ends the wait more often than it
+spares the deadlock. For a migration that alters a table the passes write,
+stop the coordinator first.
 
 **What wakes it.** A live write — one the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
