@@ -545,16 +545,17 @@ export class SqlStore implements ThoughtStore {
       FROM thought_work_claims
       GROUP BY work_type
       ORDER BY work_type`;
-    // The active pools, from ob1_config: the extraction key verbatim, and the reembed
-    // key built from the recorded embedding model and dim. consolidate records no key,
-    // so its work_types report active: null rather than a false negative.
+    // The active pools, from ob1_config: the extraction key and the subject pool's
+    // (113, SMD-3306) verbatim, and the reembed key built from the recorded embedding
+    // model and dim. consolidate records no key, so its work_types report active: null
+    // rather than a false negative.
     const cfg = Object.fromEntries(
-      (await this.sql`SELECT key, value FROM ob1_config WHERE key IN ('entity_extraction_key', 'embedding_model', 'embedding_dim')`)
+      (await this.sql`SELECT key, value FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key', 'embedding_model', 'embedding_dim')`)
         .map((r: { key: string; value: string }) => [r.key, r.value]),
     ) as Record<string, string | undefined>;
     const reembedKey = cfg.embedding_model && cfg.embedding_dim ? `reembed:${cfg.embedding_model}@${cfg.embedding_dim}` : null;
     const activeOf = (wt: string): boolean | null => {
-      if (wt === cfg.entity_extraction_key) return true;
+      if (wt === cfg.entity_extraction_key || wt === cfg.subject_pool_key) return true;
       if (reembedKey !== null && wt === reembedKey) return true;
       if (wt.startsWith("consolidate:")) return null;
       return false;
