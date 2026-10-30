@@ -68,16 +68,16 @@ echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # 6 s, so a search's SSE stream carries the server's 5 s keepalive
 # frame before its result (deploy-stack-auth's proxy step, SMD-1846).
 # Each connection has a thread of its own, and up to 128 wait to be
-# taken, not 5 (SMD-3567). A container stopped while its request body
+# taken, not 5 (SMD-3567). A container removed while its request body
 # is still unsent leaves the stub a connection that never ends: the
 # rest of the body and the close go with the container's network, and
 # a 1 MB body is enough. With one thread, such a connection held the
 # stub for the rest of the job, most likely what left a step with no
 # provider on 2026-10-29, after the GUI step's 800 kB thought and the
 # recreated `api` beside it. A read silent for 10 s drops one, the log
-# saying "Request timed out", so dead connections don't pile up; the
-# reply is written with no timeout, which Python would put on the
-# whole write.
+# saying "Request timed out", so it doesn't keep its thread. The reply
+# is written with no timeout, which Python would put on the whole
+# write; a client that stops reading holds its thread until it goes.
 nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
 import json, math, os, re, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
