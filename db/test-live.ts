@@ -17876,7 +17876,7 @@ if (want("38")) {
         await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('000_smd3379_ledger_moved', 'test')`;
         const migCode = await bounded(migRun, migStop);
         const migBeat = await beat();
-        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned \(a statement already waiting on the migration's lock goes on waiting with it\), and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned and a statement of theirs waiting on a lock cancelled, and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
         assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
           `a lock held at the start is waited out before the start's reads, and a row added to the ledger then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
         await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
@@ -17891,7 +17891,32 @@ if (want("38")) {
         const lockSaid = lines.slice(lockFrom).some((l) => /backend \d+ holds ob1:migrate, applying migrations — the passes stop now/.test(l));
         assert(lockRunning && lockCode === 75 && lockSaid && lockBeat?.ended === true && lockBeat.outcome === "stopped",
           `…and the lock taken while it runs ends it with 75 too, its row ended stopped (exit ${lockCode}, said ${lockSaid}, ${JSON.stringify({ ended: lockBeat?.ended, outcome: lockBeat?.outcome })})`);
+        // A pass's statement waiting on a lock the migration holds: cancelled,
+        // so the run ends while the migration still runs, where it waited for
+        // it and could deadlock it; no thought failed (review pass 4, run).
+        const failedBefore = (await claims(EX)).failed ?? 0;
+        for (let i = 0; i < 6; i++) await capture(`Ada Lovelace wrote the first program, note ${i} of the blocked run`, null);
+        sw.slowExtract = 400;
+        const blockStop = new AbortController();
+        const blockRun = sleepRun({ follow: true, signal: blockStop.signal, pollMs: 200 });
+        const blockRunning = await pollUntil(async () => (await beat())?.running === true && modelCalls.some((c) => c.kind === "extract" && Date.now() - c.at < 2000), 20_000);
+        await holder`BEGIN`;
+        await holder`LOCK TABLE thought_entities IN ACCESS EXCLUSIVE MODE`;
+        const passWaiting = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name LIKE 'ob1-sleep %' AND wait_event_type = 'Lock'`)[0].c) > 0;
+        const blocked = await pollUntil(passWaiting, 10_000);
+        const blockAt = Date.now();
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const blockCode = await Promise.race([blockRun, Bun.sleep(10_000).then(() => -1)]);
+        const blockMs = Date.now() - blockAt;
+        await holder`ROLLBACK`;
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        if (blockCode === -1) { blockStop.abort(); await blockRun; }
+        sw.slowExtract = 0;
+        const blockFailed = ((await claims(EX)).failed ?? 0) - failedBefore;
+        assert(blockRunning && blocked && blockCode === 75 && blockFailed === 0,
+          `…and a pass's statement waiting on the migration's lock is cancelled, the run ending 75 while the migration holds it, no thought failed (running ${blockRunning}, a pass waited ${blocked}, exit ${blockCode} after ${blockMs} ms, ${blockFailed} failed)`);
       } finally {
+        await holder`ROLLBACK`.catch(() => {});
         await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});
         holder.release();
         await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;

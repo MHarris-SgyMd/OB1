@@ -4089,10 +4089,12 @@ by recreating the coordinator, stopping the scheduler before the migrate
 service runs; so a 75 is seen in compose when the server image did not
 change, or the migrator runs beside a running stack. Past three such ends in
 a row, each within a minute of its start, it falls back to the clock
-(SMD-3379 PR 1c-1). The lock is a signal, not a barrier: the passes stop a
-poll or two after it is taken, a statement already waiting on the
-migration's lock goes on waiting (the scheduler exits once it is let go),
-and a migration that needs a lock a pass holds may still fail, at its
+(SMD-3379 PR 1c-1). A pass's statement waiting on a lock as they stop —
+the migration's, as a rule, which it would wait out and could deadlock — is
+cancelled, on the passes' own connections alone: each carries
+`application_name` `ob1-sleep <id>`, one id a run. The lock is a signal, not
+a barrier: the passes stop a poll or two after it is taken, and until then a
+migration that needs a lock a pass holds may still fail, at its
 `lock_timeout` or at once on a deadlock — for one that alters a table the
 passes write, stop the coordinator first.
 
@@ -5818,9 +5820,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3105 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1866 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1867 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 119 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 120 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 427 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)

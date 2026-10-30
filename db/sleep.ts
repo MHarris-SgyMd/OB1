@@ -592,6 +592,9 @@ async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Prom
   return { total: rows[0]?.total ?? 0, thoughts: rows.map(({ total: _t, ...r }) => ({ ...r, windows: r.windows ?? null })) };
 }
 
+/** How often a migration's stop cancels a pass's statement waiting on a lock, until the passes have returned. */
+const CANCEL_EVERY_MS = 250;
+
 /**
  * A migration in progress — migrate.ts's ob1:migrate lock (SMD-3379 PR 1a),
  * its holder named — and the ledger's newest name and row count: what the scheduler waits
@@ -826,7 +829,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const QUIET = opts.quietMs !== undefined ? opts.quietMs / 1000 : n.quiet;
   const POLL = opts.pollMs !== undefined ? opts.pollMs / 1000 : n.poll;
   /** Each pass's session settings, and the sleep's clock and grace (SMD-2679). */
-  const SESSION = budgetSession(n);
+  /** This run's passes' connections by name, so a migration's stop cancels their statements alone (SMD-3379 PR 1c-1). */
+  const PASS_TAG = `ob1-sleep ${crypto.randomUUID().slice(0, 8)}`;
+  const SESSION: SessionSettings = { ...budgetSession(n), application_name: PASS_TAG };
   const BUDGET_MS = opts.budgetMs ?? n.budget * 60_000;
   const GRACE_MS = opts.budgetGraceMs ?? BUDGET_GRACE_S * 1000;
   /** The clock on the row, in whole minutes: a test's milliseconds round up to one. */
@@ -2210,13 +2215,22 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       stopping = true;
       hardStopped = true;
       onStop.abort();
-      err(`\n  ${why} — the passes stop now, their leases returned (a statement already waiting on the migration's lock goes on waiting with it), and the scheduler exits ${MIGRATION_EXIT}: under the coordinator its supervisor starts it again at once, to wait the migration out and read its start again; run by hand, start it again once the migration is done`);
+      err(`\n  ${why} — the passes stop now, their leases returned and a statement of theirs waiting on a lock cancelled, and the scheduler exits ${MIGRATION_EXIT}: under the coordinator its supervisor starts it again at once, to wait the migration out and read its start again; run by hand, start it again once the migration is done`);
       const passes = [...running];
       await Promise.all(passes.map((p) => hardStop(p))).catch(() => {});
-      // The row ends once they have: a pass's statement waiting on the
-      // migration's lock holds it until the migration lets go, and "stopped"
-      // meanwhile told preflight to start it again (review pass 4, run).
-      await Promise.allSettled(passes.map((p) => p.done));
+      // A pass's statement waiting on a lock — the migration's, as a rule —
+      // held the stop until the migration let go, and the locks its
+      // transaction held deadlocked a migration that needed them (review
+      // pass 4, run): cancelled, on the passes' own connections (PASS_TAG),
+      // until every pass has returned. The row ends after: "stopped" while
+      // one waited told preflight to start it again.
+      const returned = Promise.allSettled(passes.map((p) => p.done));
+      let over = false;
+      void returned.then(() => { over = true; });
+      while (!over) {
+        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE application_name = ${PASS_TAG} AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`.catch(() => {});
+        await Promise.race([returned, Bun.sleep(CANCEL_EVERY_MS)]);
+      }
       await stamper.end("stopped", malformed ?? undefined).catch(() => {});
       return;
     }
