@@ -17,6 +17,8 @@ import { canRead, type Principal } from "../auth.ts";
 import { citeRows, type Ctx } from "./context.ts";
 import { META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS, ok, refuse, type MetadataProblem, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
+import { PASS_SETTLED_PREFIX } from "../consolidate.ts";
+import type { Reviewer } from "../proposal-review.ts";
 
 // A caller-set metadata key (SMD-2014): lower-case, starts with a letter, 2-40
 // characters — the shape a reader can filter on. The server owns some keys of
@@ -838,4 +840,71 @@ export async function resetCaptureStamp(ctx: Ctx, principal: Principal, { id }: 
   // No action-log row: 034's log is click-through relevance, and a reset is
   // a ruling on a label, not a sign the caller found what it searched for.
   return ok({ id, reset: result.reset, restored: result.restored, movedBy: result.movedBy, declines: result.declines, declinedBy: result.declinedBy, stamp: result.stamp, caller: principal.name });
+}
+
+/**
+ * A proposal's decision (SMD-3338): what it wrote or cleared, the pointers its
+ * lapse cleared (082), and who the row records as deciding it (114) — null
+ * where it records none, `reviewerRecorded` false on a brain short of 114.
+ * `writersUnread`: an unforced accept on a brain short of 094, whose WRITER
+ * check did not run.
+ */
+export type ProposalReview = {
+  id: string; decision: "accept" | "reject"; status: "accepted" | "rejected"; forced: boolean;
+  supersedingId: string | null; supersededId: string | null;
+  /** An accept: whether it wrote the pointer (false: the pointer already held that value). */
+  written: boolean | null;
+  /** A reject: whether it cleared the pointer this proposal had written. */
+  cleared: boolean | null;
+  lapsed: { id: string; onto: string }[];
+  reviewer: Reviewer | null; reviewerRecorded: boolean; writersUnread: boolean; caller: string;
+};
+export type ProposalReviewCode = "NOT_FOUND" | "REFUSED_EDITED_SINCE" | "REFUSED_LINEAGE_PAIR" | "REFUSED_WRITER" | "REFUSED_REVIEW_ARGUMENT" | "REFUSED_DIRECTION_REQUIRED"
+  | "REFUSED_ALREADY_ACCEPTED" | "REFUSED_ALREADY_SUPERSEDES" | "REFUSED_PROPOSAL_WOULD_CYCLE" | "REFUSED_SUPERSEDED_GONE" | "REFUSED";
+
+/**
+ * Accept or reject a supersession proposal (SMD-3338): the CLI's
+ * --accept/--reject over the contract, open to any write key, agents
+ * included (the maintainer's call, 2026-10-26) — the row records who decided
+ * (114). Its checks are the CLI's, each refused by name, and `force` waives
+ * on an accept what --force waives: a text edited since judged (a stale row's
+ * is one), a lineage pair, a WRITER flag.
+ */
+export async function reviewSupersessionProposal(ctx: Ctx, principal: Principal, { id, decision, direction, note, force }: Input<"review_supersession_proposal">): Promise<Outcome<ProposalReview, ProposalReviewCode>> {
+  // The CLI's argument rules (reviewProblem): a reject takes neither a
+  // direction nor force, and a note may not begin with the pass's marker —
+  // rebuild_derived reads a rejection carrying it as the pass's own and sets
+  // it stale again when a text moves (067).
+  if (decision === "reject" && direction !== undefined) return refuse({ code: "REFUSED_REVIEW_ARGUMENT", retryable: false, problem: "direction_on_reject" });
+  if (decision === "reject" && force === true) return refuse({ code: "REFUSED_REVIEW_ARGUMENT", retryable: false, problem: "force_on_reject" });
+  if (note !== undefined && note.trimStart().startsWith(PASS_SETTLED_PREFIX)) return refuse({ code: "REFUSED_REVIEW_ARGUMENT", retryable: false, problem: "note_marker" });
+  // A string that is no uuid names no proposal; the function's cast would raise it as a fault.
+  if (!UUID_RE.test(id)) return refuse({ code: "NOT_FOUND", retryable: false, id });
+  const r = await (await ctx.store()).reviewProposal({ id, decision, note, direction, force, actor: actorOf(ctx, principal) });
+  if (!r.ok) {
+    const w = r.writers && r.writers !== "no-094" ? r.writers : null;
+    switch (r.error) {
+      case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
+      case "EDITED_SINCE": return refuse({ code: "REFUSED_EDITED_SINCE", retryable: false, id, olderEdited: r.older_edited === true, newerEdited: r.newer_edited === true });
+      case "LINEAGE_PAIR": return refuse({ code: "REFUSED_LINEAGE_PAIR", retryable: false, id, status: w?.status ?? null, flags: w?.flags ?? [] });
+      case "WRITER": return refuse({ code: "REFUSED_WRITER", retryable: false, id, status: w?.status ?? "pending", flags: r.flags ?? [], edited: w?.edited === true,
+        lapses: { older: w?.sides.older.lapses.length ?? 0, newer: w?.sides.newer.lapses.length ?? 0 } });
+      case "DIRECTION_REQUIRED": return refuse({ code: "REFUSED_DIRECTION_REQUIRED", retryable: false, id, verdict: String(r.verdict) });
+      case "ALREADY_ACCEPTED": return refuse({ code: "REFUSED_ALREADY_ACCEPTED", retryable: false, id, supersedingId: String(r.superseding_id) });
+      case "ALREADY_SUPERSEDES": return refuse({ code: "REFUSED_ALREADY_SUPERSEDES", retryable: false, id, supersedingId: String(r.superseding_id), currentId: String(r.current) });
+      // 032: update_thought's answers, passed on by 029 with the pair added.
+      case "WOULD_CYCLE": return refuse({ code: "REFUSED_PROPOSAL_WOULD_CYCLE", retryable: false, id, supersedingId: String(r.superseding_id), supersededId: String(r.superseded_id) });
+      case "SUPERSEDES_NOT_FOUND": return refuse({ code: "REFUSED_SUPERSEDED_GONE", retryable: false, id, supersededId: String(r.superseded_id) });
+      default: return refuse({ code: "REFUSED", retryable: false, error: String(r.error) });
+    }
+  }
+  return ok({
+    id, decision, status: decision === "accept" ? "accepted" : "rejected", forced: force === true,
+    supersedingId: r.superseding_id ?? null, supersededId: r.superseded_id ?? null,
+    written: decision === "accept" ? r.written === true : null,
+    cleared: decision === "reject" ? r.cleared === true : null,
+    lapsed: r.lapsed ?? [],
+    reviewer: r.reviewer === "no-114" ? null : r.reviewer ?? null, reviewerRecorded: r.reviewer !== "no-114",
+    writersUnread: r.writers === "no-094", caller: principal.name,
+  });
 }

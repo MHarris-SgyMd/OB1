@@ -169,8 +169,9 @@ import {
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
-import { actorPayload, isoDay, normaliseProposal, timeCastFailed, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
+import { actorPayload, isoDay, normaliseProposal, timeCastFailed, withWriters, WRITERS_MISSING, type ProposalSide } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
+import { reviewersOf, reviewProposal, type Reviewer } from "../server-portable/proposal-review.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
@@ -829,8 +830,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** SMD-2707: the row's WRITER line — the flags, and while the row is the reviewer's, the accept it takes (the reply's words). */
   const writerFlagLine = (status: string, flags: StandingFlag[], p: { older: ProposalSide; newer: ProposalSide }) =>
     `     writer: ${writerFlagsText(flags, p)}${status === "pending" || status === "stale" ? writerFlagAdvice(flags) : ""}`;
-  /** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR (070) and WRITER (SMD-2707) refusals. */
-  type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean; flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[]; reviewer?: Map<string, Reviewer> | "no-114" };
   // Thought content, the judge's reason, a review note and entity names are
   // untrusted; snipText (the MCP replies' cleaner) puts each on one line —
   // every break a reader may take, NEL among them, a space — and strips what
@@ -847,76 +846,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
     : "one is out of date, which not stated";
 
-  /**
-   * SMD-2707: a row's writers and its WRITER flags for this accept, read as
-   * the listing reads them (list_proposal_writers, 094), its takes and
-   * lapses in full past the listing's cap (107, SMD-3036) — pending, stale or
-   * rejected, each of which 029 accepts (review pass 1: a rejected flagged
-   * row was accepted without --force); null on an accepted row (029 answers
-   * it); "no-094" on a brain short of the file. On an undirected verdict
-   * with no --direction the flags are each open side's (`how: "if"`): the
-   * WRITER refusal defers to 029's request for a direction, and a lineage
-   * refusal still names them (review pass 3). `edited`: a text moved since
-   * judged, the other check a --force would also waive; `sides`: what each
-   * side's accept would lapse, for the refusal's words.
-   */
-  async function writersOf(id: string): Promise<{ flags: StandingFlag[]; older: ProposalWriter; newer: ProposalWriter; edited: boolean; status: string; sides: { older: { lapses: unknown[] }; newer: { lapses: unknown[] } } } | "no-094" | null> {
-    let rows: Record<string, unknown>[];
-    try {
-      rows = (await sql`
-        SELECT p.verdict, p.status AS proposal_status,
-               p.older_fingerprint IS NOT NULL AND p.older_fingerprint IS DISTINCT FROM content_fingerprint_of(o.content) AS older_moved,
-               p.newer_fingerprint IS NOT NULL AND p.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(n.content) AS newer_moved,
-               w.older_actor_name, w.older_actor_kind, w.older_trust, w.older_capture_only,
-               w.newer_actor_name, w.newer_actor_kind, w.newer_trust, w.newer_capture_only, w.same_capturer,
-               -- 107 (SMD-3036): the listing caps its walks; the guard reads its
-               -- one row's in full, so its refusal and the pointers it names are
-               -- never the cap's.
-               ob1_accept_takes(p.older_id, p.newer_id) AS older_takes, ob1_accept_lapses(p.older_id, p.newer_id) AS older_lapses,
-               ob1_accept_takes(p.newer_id, p.older_id) AS newer_takes, ob1_accept_lapses(p.newer_id, p.older_id) AS newer_lapses
-          FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
-          CROSS JOIN LATERAL list_proposal_writers(ARRAY[p.id]) w
-         WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as Record<string, unknown>[];
-    } catch (e) {
-      if (WRITERS_MISSING.test((e as Error).message)) return "no-094";
-      throw e;
-    }
-    if (!rows.length) return null;
-    const r = rows[0];
-    const text = (v: unknown) => (v == null ? null : String(v));
-    const w = (side: "older" | "newer"): ProposalWriter =>
-      ({ name: text(r[`${side}_actor_name`]), kind: text(r[`${side}_actor_kind`]), trust: text(r[`${side}_trust`]), captureOnly: r[`${side}_capture_only`] === true });
-    const older = w("older"), newer = w("newer");
-    const flags = standingFlags({ verdict: String(r.verdict), sameCapturer: r.same_capturer === true, older: { writer: older, takes: r.older_takes === true }, newer: { writer: newer, takes: r.newer_takes === true } },
-      DIRECTION === "newer" || DIRECTION === "older" ? DIRECTION : undefined);
-    // A row goes stale when a text moved under its verdict (063), and what a
-    // --force waives there is that move, 029's edit check (review pass 2).
-    const arr = (v: unknown): unknown[] => { const a = typeof v === "string" ? JSON.parse(v) : v; return Array.isArray(a) ? a : []; };
-    return { flags, older, newer, edited: r.older_moved === true || r.newer_moved === true, status: String(r.proposal_status),
-      sides: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
-  }
-
-  /**
-   * SMD-2608: who decided each of these rows (114's columns, which its trigger
-   * stamps from the key that decided), by id — the listing (110) does not
-   * carry them, so they are read beside it as the writers are — and, for an
-   * agent, the registry's kind now, beside the kind it had when it decided.
-   * "no-114" on a brain short of the file, found by a probe rather than by
-   * the read failing: a decision reads this inside its own transaction,
-   * which a failed statement would roll back.
-   */
-  type Reviewer = { name: string | null; agentId: string | null; kind: string | null; kindNow: string | null };
-  async function reviewersOf(ids: string[], q: typeof sql = sql): Promise<Map<string, Reviewer> | "no-114"> {
-    if (!ids.length) return new Map();
-    const [{ has }] = (await q`SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                             WHERE table_schema = 'public' AND table_name = 'supersession_proposals' AND column_name = 'reviewed_by_kind') AS has`) as { has: boolean }[];
-    if (!has) return "no-114";
-    const rows = (await q`SELECT id::text AS id, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind,
-                                 CASE WHEN reviewed_by_agent_id IS NOT NULL THEN ob1_registry_kind(reviewed_by_agent_id, reviewed_by) END AS kind_now
-                            FROM supersession_proposals WHERE id = ANY(${sql.array(ids, "UUID")}::uuid[])`) as
-      { id: string; reviewed_by: string | null; agent: string | null; reviewed_by_kind: string | null; kind_now: string | null }[];
-    return new Map(rows.map((r) => [r.id, { name: r.reviewed_by, agentId: r.agent, kind: r.reviewed_by_kind, kindNow: r.kind_now }]));
-  }
   const SHORT_OF_114 = "this brain is short of migration 114 (cd db && bun migrate.ts --url <url>)";
   const REVIEWERS_UNREAD = `Who decided each row is not shown: ${SHORT_OF_114}.`;
   /**
@@ -1005,7 +934,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (!read) out(`  ${WRITERS_UNREAD}\n`);
     // SMD-2608: who decided each decided row, said once on a brain short of 114.
     const decided = (p: Listed) => p.status === "accepted" || p.status === "rejected";
-    const reviewers = await reviewersOf(rows.filter(decided).map((p) => p.id));
+    const reviewers = await reviewersOf(sql, rows.filter(decided).map((p) => p.id));
     if (reviewers === "no-114" && rows.some(decided)) out(`  ${REVIEWERS_UNREAD}\n`);
     rows.forEach((p, i) => {
       const np = proposals[i];
@@ -1080,63 +1009,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (stoppedEarly()) return 130;
       const decision = ACCEPT ? "accept" : "reject";
       const id = (ACCEPT ?? REJECT)!;
-      // 070 (SMD-2313): an accept on a lineage pair — one side's derived_from
-      // names the other — is the harm 066 exists to prevent (the derivation
-      // archives its input while still naming it), so it is refused here
-      // unless --force says the reviewer has read both texts and means it —
-      // 029's rule for a text edited since judged, applied CLI-side (this is
-      // the one accept door; the stores and the tool have none). Read from the
-      // row's own predicate, not the 200-capped listing, and only while the
-      // row is unreviewed — a decided row is 029's to answer (ALREADY_ACCEPTED
-      // on an accepted one; fourth review pass: the guard described a pointer
-      // as not yet written). A guard, not a verdict — nothing is written
-      // (definitions probe, second review pass: the accept went through under
-      // the reject's own advice).
-      const lineageRow = decision === "accept" && !FORCE
-        ? (await sql`SELECT (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false)) AS lineage
-                       FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
-                      WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as { lineage: boolean }[]
-        : [];
-      // SMD-2707: an accept whose standing side is a capture-only key's text,
-      // or of lower trust than the other, is refused unless --force — the
-      // maintainer's choice, 070's rule for a lineage pair: the reviewer reads
-      // both writers first. The same rule the listing flags by (standingFlags),
-      // with --direction as the review takes it; read on a lineage pair too,
-      // so its refusal names a flag the --force would also waive (pass 2).
-      const writers = decision === "accept" && !FORCE ? await writersOf(id) : null;
-      const review = async (q: typeof sql) => (await q`
-        SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${passActor()}::jsonb, ${FORCE}::boolean) AS r`)[0].r as ReviewResult;
+      // The guard, the decision, what its lapse cleared and the reviewer the
+      // row records, in one transaction under 029's lock — the REST core's
+      // review_supersession_proposal runs the same (SMD-3338): an accept on a
+      // lineage pair (070) or flagged WRITER (094) is refused unless --force
+      // says the reviewer has read both texts and both writers and means it,
+      // 029's rule for a text edited since judged. A refusal writes nothing.
+      const res = await reviewProposal(sql, { id, decision, note: NOTE ?? null, direction: DIRECTION === "newer" || DIRECTION === "older" ? DIRECTION : null, force: FORCE, actor: passActor(), actorName });
+      const writers = res.writers;
       // A brain short of 094: said, and the other checks answer as before.
       if (writers === "no-094") err(`  ${WRITERS_UNREAD} The writer check did not run: cd db && bun migrate.ts --url <url>`);
-      const res: ReviewResult = lineageRow[0]?.lineage === true
-        ? { ok: false, error: "LINEAGE_PAIR" }
-        : writers !== "no-094" && writers?.flags.some((f) => f.how !== "if")
-            ? { ok: false, error: "WRITER", flags: writers.flags }
-            // SMD-2707: the accept and a read of what its lapse cleared, in one
-            // transaction — 082's lapse writes each cleared pointer as an update
-            // event of this transaction's, under this actor. SMD-2608: and the
-            // reviewer the row records, read in that transaction too, so a
-            // decision racing this one is never what this one prints.
-            : await sql.begin(async (tx) => {
-                const q = tx as unknown as typeof sql;
-                const r = await review(q);
-                if (r.ok && decision === "accept") {
-                  // This transaction's own events (xmin, review pass 4: two
-                  // accepts under one actor name sharing now() each read the
-                  // other's); the write path writes nothing inside a
-                  // subtransaction, and test-live's lapse cell fails if it
-                  // ever does. In the order the lapse cleared them, which is
-                  // the order --list named them (SMD-3035's one walk).
-                  r.lapsed = (await q`
-                    SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
-                     WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
-                       AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
-                       AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
-                     ORDER BY seq`) as { id: string; onto: string }[];
-                }
-                if (r.ok) r.reviewer = await reviewersOf([id], q);
-                return r;
-              });
       if (res.ok) {
         if (decision === "accept") {
           out(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -1149,7 +1031,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           out(`  rejected ${id}${res.cleared ? `: the supersedes pointer this proposal had set is cleared` : ""}`);
         }
         // SMD-2608: what the row records as its reviewer — a brain short of 114 records none, said so.
-        out(res.reviewer === "no-114" ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_114}` : `  decided by: ${reviewerText(res.reviewer?.get(id))}`);
+        out(res.reviewer === "no-114" ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_114}` : `  decided by: ${reviewerText(res.reviewer ?? undefined)}`);
       } else {
         code = 1;
         const why: Record<string, string> = {

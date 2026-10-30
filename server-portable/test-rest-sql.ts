@@ -147,12 +147,13 @@ const ids: string[] = [];
 
 // Data each comparison has something to say about: two logged searches, a
 // pending supersession proposal, failed rows in two pools and two stale leases.
+const proposalIds: string[] = [];
 {
   for (const q of ["seeded search one", "seeded search two"]) {
     await sql`INSERT INTO query_log (kind, tool, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, arm)
               VALUES ('search', 'search_thoughts', ${q}, 10, 0, 0, '{}'::jsonb, ARRAY[${ids[0]}::uuid], ARRAY[0.9::real], 'hybrid')`;
   }
-  await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL)`;
+  proposalIds.push(String((await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL) AS pid`)[0].pid));
   // SMD-3249: a second, under another pass, so a page of one has a next page to list.
   await sql`SELECT record_supersession_proposal(${ids[1]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'a second seeded reason', 0.9, 'consolidate:stub@p3', NULL)`;
   // Judged ahead of every read, so brain_info's oldest pending age is 0 s at
@@ -453,6 +454,139 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   }
 }
 
+console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through either door, recorded under the caller's key; each check refused by name, force waiving those alone, on an accept alone");
+{
+  type Row = { status: string; reviewed_by: string | null; agent: string | null; kind: string | null };
+  const capture = async (content: string, key: string = KEYS.writer, extra: Record<string, unknown> = {}) =>
+    String((await rest("POST", "/v1/thoughts", { content, source: "rest-suite", ...extra }, key)).body.id);
+  const propose = async (older: string, newer: string, verdict = "newer_supersedes_older") =>
+    String((await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, ${verdict}, 0.9, 'a review case', 0.9, 'consolidate:stub@p9') AS pid`)[0].pid);
+  const pair = async (tag: string, verdict?: string) => {
+    const o = await capture(`kappa ${tag}: the value was one`);
+    const n = await capture(`kappa ${tag}: the value is two`);
+    return { o, n, pid: await propose(o, n, verdict) };
+  };
+  const review = (pid: string, body: Record<string, unknown>, key: string = KEYS.writer) => rest("POST", `/v1/proposals/${pid}/review`, body, key);
+  const pointer = async (id: string) => ((await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0]?.s ?? null) as string | null;
+  const row = async (pid: string) => (await sql`SELECT status, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${pid}::uuid`)[0] as Row;
+  const untouched = async (pid: string, n: string) => { const r = await row(pid); return r.status === "pending" && r.reviewed_by === null && (await pointer(n)) === null; };
+
+  // An accept through REST: the pointer on the side the verdict names, the
+  // audit row and the proposal's row under the caller's key.
+  const a = await pair("a");
+  const acc = await review(a.pid, { decision: "accept", note: "the newer value stands" });
+  const [audit] = await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${a.n}::uuid AND action = 'update' AND diff ? 'supersedes' ORDER BY seq DESC LIMIT 1`;
+  const aRow = await row(a.pid);
+  assert(acc.status === 200 && acc.body.status === "accepted" && acc.body.supersedingId === a.n && acc.body.supersededId === a.o && acc.body.written === true
+      && (await pointer(a.n)) === a.o && audit?.actor_name === "writer" && audit?.origin === "open-brain-api"
+      && aRow.status === "accepted" && aRow.reviewed_by === "writer" && aRow.agent !== null && (acc.body.reviewer as { name?: string } | null)?.name === "writer",
+    `an accept through REST sets the newer's supersedes, audited under the caller's key, the row recording it as the reviewer (${acc.status} ${JSON.stringify(acc.body).slice(0, 120)} | ${JSON.stringify(audit)} | ${JSON.stringify(aRow)})`);
+  // The same decision through MCP renders from the REST answer, ids swapped.
+  const b = await pair("b");
+  const bm = await mcp("review_supersession_proposal", { id: b.pid, decision: "accept", note: "the newer value stands" });
+  const swapped = Object.fromEntries(Object.entries(acc.body).map(([k, x]) => [k, k === "id" ? b.pid : k === "supersedingId" ? b.n : k === "supersededId" ? b.o : x]));
+  const br = rendered((v) => say.renderReviewProposal(ok(v)), swapped);
+  assert(!bm.isError && (await pointer(b.n)) === b.o && br.content[0].text === bm.text && same(br.structuredContent, bm.sc) && /^Decided by: writer \(your key\), /m.test(bm.text),
+    `…and through MCP the same reply, the caller named as the reviewer (first difference: ${firstDiff(br.structuredContent, bm.sc)} | ${bm.text.split("\n").pop()})`);
+  // A core of this suite's own says the same, the REST answer its value's whole shape.
+  const c0 = await pair("c0");
+  const cdo = await (direct.reviewSupersessionProposal as unknown as (p: unknown, i: unknown) => Promise<{ ok: boolean; value?: unknown }>)(writer, { id: c0.pid, decision: "accept", note: "the newer value stands" });
+  // Its reviewer's fields by name: a core in process resolves no agent, so its ids and kinds are null where REST's are set.
+  const shapeAside = (v: unknown) => { const o = JSON.parse(JSON.stringify(v ?? null)) as Record<string, unknown>; return shapeOf({ ...o, reviewer: Object.keys((o.reviewer ?? {}) as object).sort() }) as Record<string, unknown>; };
+  assert(cdo.ok && same(shapeAside(cdo.value), shapeAside(acc.body)), `…and a core of this suite's own answers the same shape (${firstDiff(shapeAside(cdo.value), shapeAside(acc.body))})`);
+
+  // A reject records its reviewer (SMD-2608) — on an accepted row it clears the
+  // pointer the accept wrote; on a pending row it writes no thought at all.
+  const rej = await review(a.pid, { decision: "reject", note: "wrong pair after all" });
+  const c = await pair("c");
+  const rejPending = await review(c.pid, { decision: "reject" });
+  const cRow = await row(c.pid);
+  assert(rej.status === 200 && rej.body.status === "rejected" && rej.body.cleared === true && (await pointer(a.n)) === null && (await row(a.pid)).reviewed_by === "writer",
+    `a reject of the accepted row clears its pointer and records the reviewer (${rej.status} ${JSON.stringify(rej.body).slice(0, 100)})`);
+  assert(rejPending.status === 200 && rejPending.body.cleared === false && cRow.status === "rejected" && cRow.reviewed_by === "writer" && cRow.agent !== null,
+    `a reject of a pending row records the reviewer, key and agent, writing no thought (${JSON.stringify(cRow)})`);
+  const again = await review(b.pid, { decision: "accept" });
+  assert(again.status === 409 && again.body.code === "REFUSED_ALREADY_ACCEPTED" && again.body.supersedingId === b.n, `an accepted row's accept: 409 REFUSED_ALREADY_ACCEPTED (${again.status} ${JSON.stringify(again.body)})`);
+
+  // The checks force waives, each refused by name, nothing written; force then accepts.
+  const e = await pair("e");
+  await rest("PATCH", `/v1/thoughts/${e.o}`, { content: "kappa e: the value was one, edited" });
+  const eRef = await review(e.pid, { decision: "accept" });
+  const eUntouched = await untouched(e.pid, e.n);
+  const eForced = await review(e.pid, { decision: "accept", force: true });
+  assert(eRef.status === 409 && eRef.body.code === "REFUSED_EDITED_SINCE" && eRef.body.olderEdited === true && eRef.body.newerEdited === false && eUntouched
+      && eForced.status === 200 && eForced.body.forced === true && (await pointer(e.n)) === e.o,
+    `a text edited since judged: 409 REFUSED_EDITED_SINCE, nothing written; force accepts (${eRef.status} ${JSON.stringify(eRef.body)} → ${eForced.status})`);
+  const st = await pair("st");
+  await rest("PATCH", `/v1/thoughts/${st.n}`, { content: "kappa st: the value is two, edited" });
+  await sql`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${st.pid}::uuid AND status = 'pending'`;
+  const stRef = await review(st.pid, { decision: "accept" });
+  const stForced = await review(st.pid, { decision: "accept", force: true });
+  assert(stRef.status === 409 && stRef.body.code === "REFUSED_EDITED_SINCE" && stRef.body.newerEdited === true && stForced.status === 200 && (await pointer(st.n)) === st.o,
+    `a stale row: 409 REFUSED_EDITED_SINCE; force accepts (${stRef.status} ${JSON.stringify(stRef.body)} → ${stForced.status})`);
+  const lo = await capture("kappa lineage: the evidence");
+  const ln = await capture("kappa lineage: the page made of it", KEYS.writer, { derived_from: [lo] });
+  const lpid = await propose(lo, ln);
+  const lRef = await review(lpid, { decision: "accept" });
+  const lUntouched = await untouched(lpid, ln);
+  const lForced = await review(lpid, { decision: "accept", force: true });
+  assert(lRef.status === 409 && lRef.body.code === "REFUSED_LINEAGE_PAIR" && lRef.body.status === "pending" && lUntouched && lForced.status === 200 && (await pointer(ln)) === lo,
+    `a lineage pair: 409 REFUSED_LINEAGE_PAIR, nothing written; force accepts (${lRef.status} ${JSON.stringify(lRef.body)} → ${lForced.status})`);
+  const wo = await capture("kappa writer: the writer's value");
+  const wn = await capture("kappa writer: the hook's value", KEYS.hook);
+  const wpid = await propose(wo, wn);
+  const wRef = await review(wpid, { decision: "accept" });
+  const wm = await mcp("review_supersession_proposal", { id: wpid, decision: "accept" });
+  const wUntouched = await untouched(wpid, wn);
+  const flags = wRef.body.flags as { stands?: string; captureOnly?: boolean; how?: string }[] | undefined;
+  assert(wRef.status === 409 && wRef.body.code === "REFUSED_WRITER" && flags?.[0]?.stands === "newer" && flags[0].captureOnly === true && flags[0].how === "would" && wUntouched
+      && wm.isError && wm.sc.code === "REFUSED_WRITER" && /capture-only key's/.test(wm.text) && /force: true/.test(wm.text),
+    `a WRITER flag: 409 REFUSED_WRITER naming the side and its rule, the MCP reply naming force, nothing written (${wRef.status} ${JSON.stringify(wRef.body)} | ${wm.text.slice(0, 160)})`);
+
+  // What the decision does not take, as the CLI refuses it; nothing written.
+  const x = await pair("x");
+  const xForce = await review(x.pid, { decision: "reject", force: true });
+  const xDir = await review(x.pid, { decision: "reject", direction: "newer" });
+  const xNote = await review(x.pid, { decision: "accept", note: "settled by the pass: not really" });
+  assert([xForce, xDir, xNote].every((r) => r.status === 400 && r.body.code === "REFUSED_REVIEW_ARGUMENT")
+      && [xForce.body.problem, xDir.body.problem, xNote.body.problem].join() === "force_on_reject,direction_on_reject,note_marker" && await untouched(x.pid, x.n),
+    `force or a direction on a reject, a note in the pass's marker: 400 REFUSED_REVIEW_ARGUMENT, nothing written (${[xForce, xDir, xNote].map((r) => `${r.status} ${r.body.problem}`).join(" | ")})`);
+  const d = await pair("d", "conflict_undirected");
+  const dRef = await review(d.pid, { decision: "accept" });
+  const dOk = await review(d.pid, { decision: "accept", direction: "older" });
+  assert(dRef.status === 400 && dRef.body.code === "REFUSED_DIRECTION_REQUIRED" && dRef.body.verdict === "conflict_undirected" && dOk.status === 200 && (await pointer(d.o)) === d.n,
+    `an undirected verdict: 400 REFUSED_DIRECTION_REQUIRED; with direction older the older stands (${dRef.status} → ${dOk.status})`);
+  const none = await review("00000000-0000-4000-8000-000000003338", { decision: "reject" });
+  const bad = await review("not-a-uuid", { decision: "reject" });
+  assert(none.status === 404 && none.body.code === "NOT_FOUND" && bad.status === 404 && bad.body.code === "NOT_FOUND", `no such proposal, or no uuid: 404 NOT_FOUND (${none.status} ${bad.status})`);
+
+  // Write scope: a read key and a capture key are refused, nothing written.
+  const y = await pair("y");
+  const byReader = await review(y.pid, { decision: "reject" }, KEYS.reader);
+  const byHook = await review(y.pid, { decision: "reject" }, KEYS.hook);
+  assert(byReader.status === 403 && byReader.body.code === "FORBIDDEN" && byHook.status === 403 && byHook.body.code === "FORBIDDEN" && await untouched(y.pid, y.n),
+    `a read key and a capture key: 403 FORBIDDEN, nothing written (${byReader.status} ${byHook.status})`);
+
+  // An agent's write key (the maintainer's 2026-10-26 call): the same checks
+  // an operator's meets, and its decision recorded under its key, kind agent.
+  await sql`SELECT set_agent_kind('writer', 'agent')`;
+  try {
+    const wo2 = await capture("kappa agent: the writer's value");
+    const wn2 = await capture("kappa agent: the hook's value", KEYS.hook);
+    const w2 = await propose(wo2, wn2);
+    const agentWriter = await review(w2, { decision: "accept" });
+    const g = await pair("g");
+    const agentAccept = await review(g.pid, { decision: "accept" });
+    const [gAudit] = await sql`SELECT actor_name FROM thought_audit WHERE thought_id = ${g.n}::uuid AND action = 'update' AND diff ? 'supersedes' ORDER BY seq DESC LIMIT 1`;
+    const gRow = await row(g.pid);
+    assert(agentWriter.status === 409 && agentWriter.body.code === "REFUSED_WRITER" && agentAccept.status === 200 && (await pointer(g.n)) === g.o
+        && gAudit?.actor_name === "writer" && gRow.reviewed_by === "writer" && gRow.kind === "agent" && (agentAccept.body.reviewer as { kind?: string } | null)?.kind === "agent",
+      `an agent-kind key: refused the WRITER-flagged accept as an operator's is; its accept audited under its key, the row recording kind agent (${agentWriter.body.code} | ${JSON.stringify(gRow)})`);
+  } finally {
+    await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'writer'`;
+  }
+}
+
 console.log("\n[3b] A GET sent with a body, as curl or n8n may send it: Bun drops the body, the REST core refuses the request rather than answer without it");
 {
   // Bun's fetch will not send a GET body, so a raw request on a socket.
@@ -513,6 +647,10 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
     // The writer is unclassified: the database refuses it the reset (SMD-2744).
     ["reset_capture_stamp", { id: ids[0] }, "POST", `/v1/thoughts/${ids[0]}/reset-capture-stamp`, {}],
     ["reset_capture_stamp", { id: "not-a-uuid" }, "POST", "/v1/thoughts/not-a-uuid/reset-capture-stamp", {}],
+    // SMD-3338: refusals that write nothing — the seeded undirected proposal, no such proposal, an argument a reject does not take.
+    ["review_supersession_proposal", { id: proposalIds[0], decision: "accept" }, "POST", `/v1/proposals/${proposalIds[0]}/review`, { decision: "accept" }],
+    ["review_supersession_proposal", { id: missing, decision: "reject" }, "POST", `/v1/proposals/${missing}/review`, { decision: "reject" }],
+    ["review_supersession_proposal", { id: proposalIds[0], decision: "reject", force: true }, "POST", `/v1/proposals/${proposalIds[0]}/review`, { decision: "reject", force: true }],
     ["retry_failed", { work_type: "  " }, "POST", "/v1/workers/retry", { work_type: "  " }],
     ["release_stale_leases", { include_live: true }, "POST", "/v1/workers/release-leases", { include_live: true }],
     ["run_worker", { work_type: "extract:none@p1" }, "POST", "/v1/workers/run", { work_type: "extract:none@p1" }],
@@ -553,7 +691,7 @@ console.log("\n[5] A refusal is the same code and facts through both doors, at t
   const renderOf: Record<string, (o: never) => say.Reply> = {
     fetch: say.renderFetch, thought_changes: say.renderThoughtChanges, list_thought_ids: say.renderThoughtIds, list_logged_searches: say.renderLoggedSearches,
     search_thoughts: (o) => say.renderSearchThoughts(o, false), capture_thought: say.renderCapture, update_thought: say.renderUpdate, delete_thought: say.renderDelete,
-    reset_capture_stamp: say.renderResetCaptureStamp, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
+    reset_capture_stamp: say.renderResetCaptureStamp, review_supersession_proposal: say.renderReviewProposal, retry_failed: say.renderRetryFailed, release_stale_leases: say.renderReleaseStaleLeases, run_worker: say.renderRunWorker,
   };
   // A capture-only key's refusals too (review pass 1), the words its facts
   // leave out included — the value quoted back, a malformed key named — as

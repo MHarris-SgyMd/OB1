@@ -2436,11 +2436,15 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT"]),                   since: "053" }),
     // brain_info (and so keyed /health and GET /v1/brain) counts the proposal
     // queue, list_supersession_proposals lists it, and preflight's proposals
-    // row reads it, all as the server's role (SMD-2680).
-    // Soft as the rest of this group — without it brain_info reports the queue
-    // unread, preflight's proposals row names this grant and the listing tool
-    // is refused; a capture and every other read go on. The writes stay the worker group's.
-    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT"]),          since: "029" }),
+    // row reads it, all as the server's role (SMD-2680); and
+    // review_supersession_proposal decides one (SMD-3338) through 029's
+    // SECURITY INVOKER review function, which updates the row as the caller.
+    // Soft as the rest of this group — without SELECT brain_info reports the
+    // queue unread, preflight's proposals row names this grant and the listing
+    // tool is refused; without UPDATE a decision is refused, its reply naming
+    // this grant; a capture and every other read go on. Recording a proposal
+    // stays the worker group's (INSERT).
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "029" }),
     // brain_info reads what became of the findings board-sync posted to the
     // board (SMD-2682). Soft as the rest: without it the Findings row says
     // the table is not readable by this role, and nothing else changes.

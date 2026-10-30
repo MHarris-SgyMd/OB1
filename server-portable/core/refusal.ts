@@ -6,6 +6,7 @@
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
 import type { Citation } from "../store.ts";
+import type { StandingFlag } from "../render.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
 /**
@@ -19,7 +20,7 @@ import type { ProposalSelection } from "./list-cursor.ts";
  */
 export type Refusal =
   // The read tools.
-  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key
+  | { code: "NOT_FOUND"; retryable: false; id: string }               // fetch, update_thought, delete_thought, reset_capture_stamp: no such thought; job_status: no such job for this key; review_supersession_proposal: no such proposal, or a thought it names is gone
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
@@ -49,10 +50,24 @@ export type Refusal =
   // reset_capture_stamp (086, SMD-2744).
   | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
+  // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
+  // `force` waives on an accept, as the CLI's --force does.
+  | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
+  | { code: "REFUSED_LINEAGE_PAIR"; retryable: false; id: string; status: string | null; flags: StandingFlag[] } // one side's derived_from names the other (070); flags: a WRITER flag the force would also waive
+  | { code: "REFUSED_WRITER"; retryable: false; id: string; status: string; flags: StandingFlag[]; edited: boolean; lapses: { older: number; newer: number } } // the side to stand is a capture-only key's text or of a lower trust (094)
+  | { code: "REFUSED_REVIEW_ARGUMENT"; retryable: false; problem: ReviewArgumentProblem } // an argument the decision does not take
+  | { code: "REFUSED_DIRECTION_REQUIRED"; retryable: false; id: string; verdict: string } // the verdict names no current side: pass a direction
+  | { code: "REFUSED_ALREADY_ACCEPTED"; retryable: false; id: string; supersedingId: string } // a reject undoes it first
+  | { code: "REFUSED_ALREADY_SUPERSEDES"; retryable: false; id: string; supersedingId: string; currentId: string } // the side to stand supersedes a third thought
+  | { code: "REFUSED_PROPOSAL_WOULD_CYCLE"; retryable: false; id: string; supersedingId: string; supersededId: string } // the pointer would close a loop
+  | { code: "REFUSED_SUPERSEDED_GONE"; retryable: false; id: string; supersededId: string } // the thought to be superseded was deleted
   // The worker actions (SMD-2132, SMD-2272).
   | { code: "REFUSED_EMPTY_WORK_TYPE"; retryable: false }            // a work_type required, or given but blank
   | { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER"; retryable: false }    // release_stale_leases' include_live without a worker_id
   | { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE"; retryable: false };    // run_worker without dry_run: true — the executing drain is deferred (SMD-2304)
+
+/** What a decision does not take (SMD-3338), as the CLI refuses it: a direction or force on a reject, or a note beginning with the pass's own marker (067). */
+export type ReviewArgumentProblem = "direction_on_reject" | "force_on_reject" | "note_marker";
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
@@ -114,6 +129,17 @@ const FACTS: Facts = {
   // env's, not a token, and the kind is the registry's word about the key.
   REFUSED_NOT_OPERATOR: none,
   REFUSED_NOT_CAPTURE_STAMP: none,
+  // A decision's refusals: the proposal's and its thoughts' ids, the flags as
+  // tokens and the counts — the writers' names are in the text.
+  REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),
+  REFUSED_LINEAGE_PAIR: (r) => ({ id: r.id, ...(r.status ? { status: r.status } : {}), flags: r.flags }),
+  REFUSED_WRITER: (r) => ({ id: r.id, status: r.status, flags: r.flags, edited: r.edited, lapses: r.lapses }),
+  REFUSED_REVIEW_ARGUMENT: (r) => ({ problem: r.problem }),
+  REFUSED_DIRECTION_REQUIRED: (r) => ({ id: r.id, verdict: r.verdict }),
+  REFUSED_ALREADY_ACCEPTED: (r) => ({ id: r.id, supersedingId: r.supersedingId }),
+  REFUSED_ALREADY_SUPERSEDES: (r) => ({ id: r.id, supersedingId: r.supersedingId, currentId: r.currentId }),
+  REFUSED_PROPOSAL_WOULD_CYCLE: (r) => ({ id: r.id, supersedingId: r.supersedingId, supersededId: r.supersededId }),
+  REFUSED_SUPERSEDED_GONE: (r) => ({ id: r.id, supersededId: r.supersededId }),
   REFUSED_EMPTY_WORK_TYPE: none,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: none,
   RUN_WORKER_DRAIN_NOT_AVAILABLE: none,

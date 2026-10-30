@@ -48,6 +48,8 @@ import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findin
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
+import { reviewProposal } from "../server-portable/proposal-review.ts";
+import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
@@ -9533,6 +9535,44 @@ if (want("16")) {
     `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
   assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
     "…and 114 put back, its backfill names the keyless accept from its audit row");
+
+  // SMD-3338: the REST core decides as its own role — the capture and server groups, not the worker's: the guard, 029's
+  // review and the pointer it writes and clears, the lapse's read and the reviewer's, all under that role; without the
+  // server group's UPDATE on the queue the decision is refused whole, and the tool's fault hint names the grant. Under
+  // a name of its own, so the worker's audit rows below stay the ones they count; the row left rejected, as it was.
+  const GROLE = "ob1_live_reviewer";
+  const gUrl = URL_.replace(/\/\/[^@]*@/, `//${GROLE}:ob1reviewer@`);
+  const [{ mayCreate: mayCreateG }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+  if (gUrl === URL_ || !mayCreateG) {
+    skip("the REST core's role (capture and server groups) decides a proposal, and is refused without the server group's UPDATE", gUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+  } else {
+    const dropG = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${GROLE}') THEN EXECUTE 'DROP OWNED BY ${GROLE}'; EXECUTE 'DROP ROLE ${GROLE}'; END IF; END $$`);
+    await dropG();
+    try {
+      await sql.unsafe(`CREATE ROLE ${GROLE} LOGIN PASSWORD 'ob1reviewer'`);
+      const granted = await migrateInProcess({ grant: GROLE, groups: "capture,server" });
+      const asRole = new SQL({ url: gUrl, max: 1 });
+      try {
+        const actor = actorPayload({ name: "rest-core-reviewer", via: "open-brain-api" });
+        const accepted = await reviewProposal(asRole, { id: directed.id, decision: "accept", force: true, actor, actorName: "rest-core-reviewer" });
+        const acceptedPointer = await supersedesOf(reversal);
+        const rejected = await reviewProposal(asRole, { id: directed.id, decision: "reject", note: "the REST core's role", actor, actorName: "rest-core-reviewer" });
+        assert(granted.code === 0 && accepted.ok && acceptedPointer !== null && rejected.ok && rejected.cleared === true && (await supersedesOf(reversal)) === null
+            && (rejected.reviewer as { name?: string } | null)?.name === "rest-core-reviewer" && (await reviewerOf(directed.id)).by === "rest-core-reviewer",
+          `a role holding the capture and server groups alone accepts and rejects a proposal, recorded under its actor (${granted.code}; ${JSON.stringify(accepted).slice(0, 80)} | ${JSON.stringify(rejected).slice(0, 80)})`);
+        await sql.unsafe(`REVOKE UPDATE ON supersession_proposals FROM ${GROLE}`);
+        let fault = "";
+        try { await reviewProposal(asRole, { id: directed.id, decision: "accept", force: true, actor, actorName: "rest-core-reviewer" }); } catch (e) { fault = (e as Error).message; }
+        const [after] = await sql`SELECT status FROM supersession_proposals WHERE id = ${directed.id}::uuid`;
+        assert(/permission denied for table supersession_proposals/.test(fault) && reviewHint(fault).includes("--grant") && after.status === "rejected" && (await supersedesOf(reversal)) === null,
+          `…and without the server group's UPDATE the accept is refused whole, the fault's hint naming the grant (${fault.slice(0, 80)}; ${after.status})`);
+      } finally {
+        await asRole.close();
+      }
+    } finally {
+      await dropG();
+    }
+  }
 
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;
