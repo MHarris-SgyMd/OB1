@@ -8,6 +8,11 @@
 # is what this project's authors run. The container is named distinctly and removed
 # on exit, so it will not collide with or outlive anything else you have running.
 #
+# The host port is picked at random in 10000–19999, below the kernels' default
+# ranges for port 0, and a start that loses it anyway is retried on another, up
+# to five starts (SMD-3592); OB1_PG_PORT=<port> names the port instead, without
+# a retry.
+#
 #   OB1_PG_KEEP=<name> ./with-postgres.sh bun bench-hnsw.ts
 #
 # keeps the database instead: the container's data directory is a NAMED volume,
@@ -36,14 +41,39 @@ if [ -n "$KEEP" ]; then NAME="ob1-pg-keep-$KEEP"; else NAME="ob1-test-pg-$$"; fi
 # Pick a free port rather than a fixed one: a leftover container from an
 # interrupted run would otherwise fail every later run with "address already in
 # use", and two suites cannot run at once.
+#
+# The pick is in 10000–19999: below the kernels' default ranges for port 0
+# (Linux 32768–60999, macOS 49152–65535), and apart from the suites' quietPort
+# (20000–29999, SMD-3296), whose ports must refuse while a suite runs. The
+# runtime binds the port only at `start`, and until then any process binding
+# port 0 could be handed it — macOS hands port 0 out from one cursor every
+# process shares — so a start on a port picked inside macOS's range, as this
+# script once picked (49152–64151), failed "address already in use" in 5 of 20
+# runs under load (SMD-3592). The number comes from /dev/urandom, not $RANDOM:
+# bash 3.2 seeds $RANDOM from the time and the pid, and two runs launched
+# together picked the same port in 3 of 20 pairs.
+#
+# A port is free when a connect to 127.0.0.1 at it, the address DATABASE_URL
+# dials, is refused: on macOS podman's bind on every address succeeds beside a
+# listener on 127.0.0.1 or 0.0.0.0 alone, which would then take DATABASE_URL's
+# connections (reproduced: the command's connect timed out on it). Such a
+# listener bound after the pick, before the start or during the run, is
+# neither seen nor fails the start; below the port-0 ranges only a process
+# binding that port by number can be one. A listener on :: does fail the start
+# — one bound after the pick, or one no 127.0.0.1 connect reaches — and the
+# start is retried on a new pick (below). 11434 is never picked: it is
+# Ollama's, the provider db/config.mjs defaults to, and a connect finds it only
+# while Ollama runs. Fifty picks all answered end the run with a message: any
+# port handed out then would be answered too.
 pick_port() {
   if [ -n "${OB1_PG_PORT:-}" ]; then echo "$OB1_PG_PORT"; return; fi
   for _ in $(seq 1 50); do
-    p=$(( 49152 + RANDOM % 15000 ))
+    p=$(( 10000 + $(od -An -N2 -tu2 /dev/urandom) % 10000 ))
+    case "$p" in 11434) continue ;; esac
     if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then echo "$p"; return; fi
-    exec 3>&- 2>/dev/null || true
   done
-  echo 55432
+  echo "No free port in 10000–19999: 50 picks were all answered on 127.0.0.1. Name one with OB1_PG_PORT=<port>." >&2
+  return 2
 }
 PORT="$(pick_port)"
 PASSWORD="ob1test"
@@ -116,7 +146,10 @@ cleanup() {
     fi
     "$RUNTIME" stop -t "$STOP_TIMEOUT" "$CID" >/dev/null 2>&1 || true
     discard "$CID"
-    [ "$STARTED" = 1 ] && echo "— done"
+    # An `if`, not `&&`: as cleanup's last command a false test would make
+    # the EXIT trap, under `set -e`, exit 1 in place of the status given to
+    # `exit` (review pass, reproduced: a failed start under OB1_PG_KEEP).
+    if [ "$STARTED" = 1 ]; then echo "— done"; fi
   else
     discard "$CID"
   fi
@@ -222,17 +255,38 @@ if [ -n "$KEEP" ]; then
   if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; KEPT_VOLUME_EXISTS=1; else VOLUME_NOTE=", new volume $NAME kept"; KEPT_VOLUME_EXISTS=0; fi
 fi
 
-echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
-CID="$("$RUNTIME" create --name "$NAME" \
-  -e POSTGRES_PASSWORD="$PASSWORD" \
-  -e POSTGRES_DB="$DB" \
-  -p "$PORT:5432" \
-  --shm-size "$SHM_SIZE" \
-  ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
-  "$IMAGE" \
-  ${PG_ARGS[@]+"${PG_ARGS[@]}"})"
-"$RUNTIME" start "$CID" >/dev/null
-STARTED=1
+# A start that loses its port is retried on a new pick, up to START_TRIES
+# starts in all: between the pick and the bind, a process binding that port by
+# number (another with-postgres.sh starting at once) can still take it
+# (SMD-3592). Only that failure is retried, known by the runtime's words for it
+# ("address already in use", or docker's "port is already allocated"), and
+# only on a picked port: a start on OB1_PG_PORT's fails as before. Each loser
+# is removed by its ID before the next `create` takes the name. What a start
+# prints on stderr is printed, whether it fails or not (a podman WARN line).
+START_TRIES=5
+for try in $(seq 1 "$START_TRIES"); do
+  echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
+  CID="$("$RUNTIME" create --name "$NAME" \
+    -e POSTGRES_PASSWORD="$PASSWORD" \
+    -e POSTGRES_DB="$DB" \
+    -p "$PORT:5432" \
+    --shm-size "$SHM_SIZE" \
+    ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
+    "$IMAGE" \
+    ${PG_ARGS[@]+"${PG_ARGS[@]}"})"
+  START_STATUS=0
+  START_ERR="$("$RUNTIME" start "$CID" 2>&1 >/dev/null)" || START_STATUS=$?
+  [ -z "$START_ERR" ] || echo "$START_ERR" >&2
+  if [ "$START_STATUS" = 0 ]; then STARTED=1; break; fi
+  if [ -n "${OB1_PG_PORT:-}" ] || [ "$try" = "$START_TRIES" ] \
+    || ! grep -qiE 'address already in use|port is already allocated' <<< "$START_ERR"; then
+    exit "$START_STATUS"
+  fi
+  discard "$CID"
+  CID=""
+  PORT="$(pick_port)"
+  echo "▸ the port was taken before the start (start $try of $START_TRIES); picking another"
+done
 
 # A fresh data directory is ready in seconds. A kept one may start into crash
 # recovery (a host that slept, a machine restarted) and replay WAL for minutes

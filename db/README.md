@@ -6037,8 +6037,11 @@ schemas Postgres reads in the raw path (SMD-2247).
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the
 macOS `/opt/podman/bin` location that is often off `PATH`) and falls back to
-docker. CI does not use it — GitHub Actions supplies the database as a service
-container.
+docker. The host port is picked at random in 10000–19999, below the kernels'
+default ranges for port 0, so no process binding port 0 can take it before the
+container binds it, and a start that loses it anyway is retried on another, up
+to five starts; `OB1_PG_PORT=<port>` names the port instead (SMD-3592). CI does
+not use it — GitHub Actions supplies the database as a service container.
 
 `OB1_PG_KEEP=<name>` keeps the database instead: the container's data
 directory is a named volume, `ob1-pg-keep-<name>`, which the removal on exit
