@@ -181,7 +181,7 @@ assert(writer !== null, "the writer's key authenticates in process");
 const CORE_OP: Record<string, keyof typeof direct> = {
   search: "search", fetch: "fetch", search_thoughts: "searchThoughts", search_thoughts_keyword: "searchThoughtsKeyword", list_thoughts: "listThoughts",
   list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals",
-  thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus",
+  thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus", task_status: "taskStatus",
   capture_thought: "capture", update_thought: "updateThought", delete_thought: "deleteThought",
 };
 const directly = async (tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown }> => {
@@ -244,6 +244,26 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
   assert(providerOf(b.body)?.status === "answering" && providerOf(b.body)?.by === "call" && providerOf(m.sc)?.status === "answering" && /^Provider:\s+answering \(an embedding call answered /m.test(m.text),
     `…and the REST core's provider state answering, by a call, after the searches above, through either door (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
   covered.add("brain_info");
+  // task_status (SMD-3476 PR 3): over a planted heartbeat row, the same tasks
+  // through either door and a core of this suite's own — the ages aside, each
+  // door reading at its own moment.
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:board-sync', ${JSON.stringify({ v: 1, every_s: 300, running: false, outcome: "ok" })})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+  try {
+    const s = await rest("GET", "/v1/status");
+    const sm = await mcp("task_status", {});
+    const sd = await directly("task_status", {});
+    const AGES = /\b\d+ (?:s|min|h|d) ago\b/g;
+    const noAges = (v: unknown): unknown => JSON.parse(JSON.stringify(v ?? null), (k, x) => (k === "ageS" ? 0 : typeof x === "string" ? x.replace(AGES, "<n> ago") : x));
+    const st = rendered((v) => say.renderTaskStatus(ok(v)), s.body);
+    const tasks = (s.body as { tasks?: { task: string; state: string }[] }).tasks ?? [];
+    assert(s.status === 200 && !sm.isError && JSON.stringify(tasks.map((t) => [t.task, t.state])) === JSON.stringify([["board-sync", "idle"]])
+        && st.content[0].text.replace(AGES, "<n> ago") === sm.text.replace(AGES, "<n> ago") && same(noAges(st.structuredContent), noAges(sm.sc)) && sd.ok && same(noAges(s.body), noAges(sd.value)),
+      `task_status: the same tasks through either door and in process, the ages aside (${s.status}; ${JSON.stringify(tasks)}; ${sm.text.slice(0, 80)})`);
+    covered.add("task_status");
+  } finally {
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+  }
   // SMD-2995: list_thoughts a page at a time. The first page's cursor, from
   // REST, takes either door to the same next page — text, structuredContent
   // and cursor — in each sort; and a cursor that is no cursor, or one made
@@ -340,7 +360,7 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const r = await rest("GET", `/v1/thoughts?limit=${bad}`);
     assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `list_thoughts limit=${bad}: REST's 400 REFUSED_INPUT (${r.status} ${String(r.body.code)})`);
   }
-  const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "brain_info"];
+  const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "task_status", "brain_info"];
   assert(reads.every((t) => covered.has(t)), "every read operation but the job pair is compared here; the job pair is [4]");
 }
 

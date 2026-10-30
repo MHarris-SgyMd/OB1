@@ -1001,6 +1001,15 @@ that is not digits, holds that pass until that recreate, the follower never
 started. Preflight's `workers` and `sleep` rows say a held pass is held, its
 cause and its next try, rather than "start it again".
 
+The coordinator stamps a row of its own, `heartbeat:coordinator`: the passes
+`OB1_PASSES` asks for and each child's state, every minute and on each
+change (SMD-3476 PR 3). The status surface reads it beside the passes' own
+rows: `task_status` (`GET /v1/status`, a read key) says each task in one word —
+running, idle, starting, restarting, refused, failed, stale, stopped, or
+missing when the coordinator started a pass that has written no heartbeat —
+and preflight's `tasks` row and `brain_info` read the same states. After a
+reboot, `task_status` is the one read that says whether everything came back.
+
 `jev` is `unless-stopped` as well, and needs no supervisor: serving, it
 never exits on its own. A fetch that fails or hashes wrong, an engine that does
 not load and a port taken are tried again on the same clock, the service

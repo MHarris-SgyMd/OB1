@@ -3411,6 +3411,52 @@ else {
     await claims.unsafe(`INSERT INTO ob1_config (key, value) VALUES ('schema_version', '${FORK_VERSION}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   }
 
+  // The status surface (SMD-3476 PR 3): one set of rows — the coordinator's,
+  // a pass it runs that stamps, one it started ten minutes ago that wrote no
+  // row, one waiting for its next try — read alike by preflight's tasks row,
+  // brain_info's record and the task_status operation's own function.
+  {
+    const { brainInfo, readDatabaseFacts, readHeartbeats, taskStates } = await import("./brain-info.ts");
+    const put = (key: string, value: object, agoS: number) =>
+      claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${key}, ${JSON.stringify(value)}, now() - make_interval(secs => ${agoS}))
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const skipped = await run(SQL_ENV);
+    assert(/·\s+tasks\s+no task has stamped a heartbeat on this brain\.$/m.test(skipped.out), `a brain no task ran on: the tasks row is a skip (${row(skipped.out, "tasks")})`);
+    await put("heartbeat:coordinator", {
+      v: 1, every_s: 60, passes: ["board-sync", "workers"],
+      children: {
+        "board-sync": { key: "heartbeat:board-sync", state: "running", for_s: 600 },
+        extract: { key: "heartbeat:extract:qwen2.5:7b@p2", state: "running", for_s: 600 },
+        consolidate: { state: "waiting", for_s: 30, in_s: 90, code: 2, tries: 2 },
+      },
+    }, 10);
+    await put("heartbeat:board-sync", { v: 1, every_s: 300, running: false, outcome: "ok" }, 60);
+    try {
+      const out = await run(SQL_ENV);
+      const json = JSON.parse((await run(SQL_ENV, "--json")).out) as { checks: { name: string; status: string; detail: string; fix?: string }[] };
+      const check = json.checks.find((c) => c.name === "tasks");
+      const words = (ts: { task: string; job: string | null; state: string }[]) => ts.map((t) => `${t.job ?? t.task} ${t.state}`).join(", ");
+      const route = words(taskStates(await readHeartbeats(claims as never)).tasks);
+      const record = await brainInfo({ version: "0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 } } as never,
+        (p) => readDatabaseFacts(claims as never, { stats: false }, p), 10_000);
+      const recordTasks = "error" in record.database ? "(no database)" : words(record.database.tasks ?? []);
+      const want = "coordinator running, board-sync idle, extract:qwen2.5:7b@p2 missing, consolidate restarting";
+      assert(check?.status === "warn" && check.detail === want && route === want && recordTasks === want,
+        `preflight's tasks row, task_status's function and brain_info's record agree on each task's state (${check?.detail} | ${route} | ${recordTasks})`);
+      assert(/extract:qwen2\.5:7b@p2: started by its coordinator 10 min ago, and it has written no heartbeat since — the coordinator's log says why \(compose logs coordinator\)\./.test(fix(out.out, "tasks"))
+          && /consolidate: exited 2, 2 end\(s\) in a row — its coordinator runs it again in [78]\d s — the workers row says what to do\./.test(fix(out.out, "tasks")),
+        `…and its fix names the coordinator's log for the missing pass, the workers row for the one restarting (${fix(out.out, "tasks")})`);
+      // The coordinator gone quiet: said so, its restart named, and its children read from their own rows alone.
+      await claims`UPDATE ob1_config SET updated_at = now() - interval '10 minutes' WHERE key = 'heartbeat:coordinator'`;
+      const quiet = await run(SQL_ENV);
+      assert(/!\s+tasks\s+coordinator stale, board-sync idle$/m.test(quiet.out) && /The coordinator has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(fix(quiet.out, "tasks")),
+        `a coordinator past three intervals is stale, its restart named, and only rows of their own speak for its children (${row(quiet.out, "tasks")})`);
+    } finally {
+      await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    }
+  }
+
   // SMD-2041: `vector extension`, `migration ledger` and `schema version` read
   // brain-info.ts's readDatabaseFacts — the read brain_info and the keyed
   // /health body make — so a change to that read moves these rows and the

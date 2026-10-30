@@ -738,6 +738,19 @@ discovers through `tools/list` (a capture-only key sees none of them):
   `subject_pool_key` (113), or `reembed:<model>@<dim>`; `null` for consolidate). For
   the subject pool, once its pooling has finished, unpooled counts the thoughts that
   had a current subject when it was named, which are no backlog. Read-only.
+- **`task_status`** (SMD-3476 PR 3; REST `GET /v1/status`) — the status surface
+  (docs/brain-coordinator.md row 13): each of the brain's background tasks in one
+  word, from the heartbeat rows. The coordinator first, from its own row
+  (`heartbeat:coordinator`: the passes `OB1_PASSES` asks for and each child's state),
+  then the passes it runs, then any other long-running worker (a re-embed follower
+  run by hand). Each task's `state` is `running`, `idle`, `starting`, `restarting`,
+  `refused`, `failed`, `stale`, `stopped` or `missing` — the coordinator started it
+  and it has written no heartbeat — with `words` saying the same as preflight and
+  `brain_info` do, `coordinated`, and its row's `at`/`ageS`. A live coordinator speaks
+  for its children (a guard's hold, a wait for the next try, a stop); a child it runs
+  is read from its own row when that row was stamped since the child's start; any
+  other row is read alone. `brain-info.ts`'s one function, `taskStates`, builds
+  it, and `brain_info` and preflight read the same. Read-only.
 
 `worker_status` also has a keyed **`GET /worker-status`** — the same authentication as
 `/health` (a read or write key gets the JSON array, a capture/wrong/no/revoked key or a
@@ -965,6 +978,9 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   with the worker group can write, which `parseHeartbeats` carries only in full
   (a known worker's key and job of a bounded alphabet, counts, the enums as
   written, the database's own instant) and otherwise counts as ignored.
+  `task_status` answers its whole value beside its text the same way: its states
+  are built from those rows and the coordinator's, which `parseCoordinator` reads
+  as strictly, refused whole when not of the shape.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
   `REFUSED_CURSOR` (list_thoughts' with its `reason`, `shape` or `sort`, and for
