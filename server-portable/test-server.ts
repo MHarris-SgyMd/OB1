@@ -1458,7 +1458,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const { MIGRATION_EXIT: configExit } = await import("../db/config.mjs");
   assert(infoExit === configExit, `brain-info.ts' MIGRATION_EXIT is config.mjs' (${infoExit}, ${configExit})`);
   const migrating = [20, 2_000].map((age) => heldState(heldRow(age, { in_s: 0, code: 75, tries: 0 })));
-  assert(migrating.every((m, i) => m.startsWith(`restarting after a migration — its supervisor ran it again ${["20 s", "33 min"][i]} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, or the database does not answer`))
+  assert(migrating.every((m, i) => m.startsWith(`restarting after a migration — its supervisor ran it again ${["20 s", "33 min"][i]} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, the database does not answer, or its passes' start checks run`))
       && /^held: exited 75, 1 end\(s\) in a row — its supervisor runs it again in 60 s/.test(heldState(heldRow(0, { in_s: 60, code: 75, tries: 1 }))),
     `a 75 run again at once reads restarting after a migration at any age, one on the clock reads held (${migrating.join(" | ")})`);
   // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).

@@ -16060,6 +16060,11 @@ if (want("37b")) {
     assert(own?.job === EXTRACT_KEY.slice("heartbeat:".length) && own.ended === true && own.outcome === "failed" && !("malformed" in own) && own.restart?.code === 1
         && facts !== null && (await readDatabaseFacts(ssql as never, { stats: false })).workers?.heartbeats.some((h) => h.key === EXTRACT_KEY && h.restart?.inS === 60),
       `a row older than the follower's start is replaced by the supervisor's own, its job the configuration's, read as held (${JSON.stringify(own)})`);
+    // The scheduler restarted on a migration keeps its "stopped": no failure (SMD-3379 PR 1c-1, review pass 4).
+    await ssql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true })}, updated_at = now() WHERE key = 'heartbeat:sleep'`;
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 0, code: 75, tries: 0 } });
+    const migrated = await row("heartbeat:sleep");
+    assert(migrated?.outcome === "stopped" && migrated.restart?.code === 75, `a migration's at-once restart keeps the scheduler's "stopped" (${JSON.stringify(migrated)})`);
     // A follower that exited 0 on its own keeps its outcome; a value not JSON is replaced, never a reason to fail.
     await ssql`UPDATE ob1_config SET value = 'not json', updated_at = now() WHERE key = 'heartbeat:sleep'`;
     await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 0, tries: 1 } });
@@ -16097,7 +16102,7 @@ if (want("37b")) {
     const migratingCode = await within(migrating.done, 2000);
     rmSync(migrationRuns, { force: true });
     const atOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once, to wait it out and read its start again, heartbeat:sleep says so$/.test(l)).length;
-    const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
+    const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen at each of its last 4 starts; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
     assert(fourRuns && runsSeen === 4 && atOnce === 3 && onTheClock === 1 && migrationRow?.restart?.code === 75 && migrationRow.restart.tries === 1 && migratingCode === 0,
       `a follower exiting 75 runs again at once, no try counted, three times, then on the clock, its first counted end (${runsSeen} run(s), ${atOnce} at once, ${onTheClock} on the clock, row ${JSON.stringify(migrationRow?.restart)}, exit ${migratingCode})`);
     // The row the at-once restart writes, as preflight and brain_info read
@@ -17871,7 +17876,7 @@ if (want("38")) {
         await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('000_smd3379_ledger_moved', 'test')`;
         const migCode = await bounded(migRun, migStop);
         const migBeat = await beat();
-        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned, and the scheduler exits 75 for its supervisor/.test(l));
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned \(a statement already waiting on the migration's lock goes on waiting with it\), and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
         assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
           `a lock held at the start is waited out before the start's reads, and a row added to the ledger then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
         await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;

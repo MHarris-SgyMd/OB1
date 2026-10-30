@@ -4045,7 +4045,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (its supervisor starts it again at once) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
@@ -4084,10 +4084,17 @@ migration is done. `db/supervise.ts` runs the scheduler again at once on a 75,
 no try counted, its row's `restart`
 saying `in_s` 0 and code 75: the next process waits the migration out and
 takes its start's reads again on the schema it left. Its code is the
-coordinator's — in compose the baked image, which `up -d` replaces by
-recreating the coordinator when the image changed. Past three such ends in a
-row, each within a minute of its start, it falls back to the clock (SMD-3379
-PR 1c-1).
+coordinator's — in compose the baked image, which `up -d --build` replaces
+by recreating the coordinator, stopping the scheduler before the migrate
+service runs; so a 75 is seen in compose when the server image did not
+change, or the migrator runs beside a running stack. Past three such ends in
+a row, each within a minute of its start, it falls back to the clock
+(SMD-3379 PR 1c-1). The lock is a signal, not a barrier: the passes stop a
+poll or two after it is taken, a statement already waiting on the
+migration's lock goes on waiting (the scheduler exits once it is let go),
+and a migration that needs a lock a pass holds may still fail, at its
+`lock_timeout` or at once on a deadlock — for one that alters a table the
+passes write, stop the coordinator first.
 
 **What wakes it.** A live write — one the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -5389,9 +5396,9 @@ row's `updated_at`, the database's `now()`.
   when it holds until the service is recreated: no `OB1_WORKER_KEY`, or a
   setting that is not digits), `code`, the follower's exit status, and
   `tries`, the ends in a row — 1, 2, 4, 8, then every 15 minutes; a follower
-  that exits 75, the sleep scheduler on a migration seen, runs again at once,
-  `in_s` 0 and no try counted, past three quick ones in a row on the clock
-  again (SMD-3379 PR 1c-1). It keeps
+  the sleep scheduler, exiting 75 on a migration seen, runs again at once,
+  `in_s` 0 and no try counted — past three in a row, each within a minute of
+  its start, on the clock again (SMD-3379 PR 1c-1). It keeps
   what the follower wrote last, its `refused` included, and writes a row of
   its own for one that wrote none. The follower's next stamp replaces it.
 
@@ -5811,11 +5818,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3105 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1865 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1866 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 119 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 426 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 427 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

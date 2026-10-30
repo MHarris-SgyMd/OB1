@@ -60,7 +60,7 @@
  * saying in_s 0 and code 75: the next process waits the migration out at its
  * start and takes its start's reads again on the schema it left. It runs the
  * code this process has — in compose the coordinator's baked image, which
- * `up -d` replaces by recreating the coordinator when the image changed; from
+ * `up -d --build` replaces by recreating the coordinator; from
  * a checkout, the checkout's as it then is. More than MIGRATION_RESTARTS such
  * ends in a row, each within a minute of its start, fall back to the clock.
  *
@@ -164,7 +164,9 @@ function jobOf(worker: StampingWorker, key: string): string | undefined {
 export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: string; since: Date; restart: RestartMark; refused?: string }): Promise<void> {
   // Objects, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
   const fresh = { v: 1, ...(jobOf(opts.worker, opts.key) === undefined ? {} : { job: jobOf(opts.worker, opts.key) }), every_s: MIN_STAMP_EVERY_S, running: false, outcome: "failed" };
-  const set = { running: false, ended: true, restart: opts.restart, ...(opts.restart.code === 0 ? {} : { outcome: "failed" }), ...(opts.refused ? { refused: opts.refused } : {}) };
+  // The scheduler's migration seen (in_s 0) is no failure: its own "stopped" kept (SMD-3379 PR 1c-1, review pass 4).
+  const ok = opts.restart.code === 0 || (opts.restart.code === MIGRATION_EXIT && opts.restart.in_s === 0);
+  const set = { running: false, ended: true, restart: opts.restart, ...(ok ? {} : { outcome: "failed" }), ...(opts.refused ? { refused: opts.refused } : {}) };
   await sql`
     INSERT INTO ob1_config (key, value)
     SELECT ${opts.key}, ((CASE WHEN c.updated_at >= ${opts.since} AND c.value IS JSON OBJECT THEN c.value::jsonb ELSE ${fresh}::jsonb END
@@ -286,7 +288,7 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);
-      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
+      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : code === MIGRATION_EXIT && opts.worker === "sleep" ? ` — a migration seen at each of its last ${MIGRATION_RESTARTS + 1} starts` : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }

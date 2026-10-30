@@ -601,7 +601,9 @@ async function migrationState(sql: SQL): Promise<{ holder: string | null; ledger
   // The ledger first: a migration that commits between the two reads is then seen by the lock's, or
   // next time by the ledger's, never baselined as applied before it began (review pass 1). Its count
   // beside its newest name: a stranger's row named past the core's hides no new core file (review pass 2).
-  const [l] = (await sql`SELECT max(name) AS newest, count(*)::int AS n FROM public.schema_migrations`) as { newest: string | null; n: number }[];
+  // No ledger (a schema applied by hand): nothing to read, and no crash at the start (review pass 4, run).
+  const [{ has }] = (await sql`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS has`) as { has: boolean }[];
+  const [l] = has ? ((await sql`SELECT max(name) AS newest, count(*)::int AS n FROM public.schema_migrations`) as { newest: string | null; n: number }[]) : [];
   const [h] = (await sql.unsafe(MIGRATE_LOCK_HOLDER_SQL, [MIGRATE_LOCK])) as { pid: number }[];
   return { holder: h ? `backend ${h.pid}` : null, ledger: `${l?.newest ?? "empty"} (${l?.n ?? 0} applied)` };
 }
@@ -2208,8 +2210,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       stopping = true;
       hardStopped = true;
       onStop.abort();
-      err(`\n  ${why} — the passes stop now, their leases returned, and the scheduler exits ${MIGRATION_EXIT} ${FOLLOW ? "for its supervisor to start it again at once, to wait the migration out and read its start again" : "— run it again once the migration is done"}`);
-      await Promise.all(running.map((p) => hardStop(p))).catch(() => {});
+      err(`\n  ${why} — the passes stop now, their leases returned (a statement already waiting on the migration's lock goes on waiting with it), and the scheduler exits ${MIGRATION_EXIT}: under the coordinator its supervisor starts it again at once, to wait the migration out and read its start again; run by hand, start it again once the migration is done`);
+      const passes = [...running];
+      await Promise.all(passes.map((p) => hardStop(p))).catch(() => {});
+      // The row ends once they have: a pass's statement waiting on the
+      // migration's lock holds it until the migration lets go, and "stopped"
+      // meanwhile told preflight to start it again (review pass 4, run).
+      await Promise.allSettled(passes.map((p) => p.done));
       await stamper.end("stopped", malformed ?? undefined).catch(() => {});
       return;
     }
