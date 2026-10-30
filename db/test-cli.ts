@@ -257,7 +257,7 @@ const entries = sources.filter((f) => {
   ok(subjectsWord.code === 2 && /^extract-entities\.ts: --subjects takes "rules" or no value/m.test(subjectsWord.err) && !subjectsWord.err.includes("s3cret"),
     `extract-entities.ts refuses a --subjects value but "rules", without repeating it (exit ${subjectsWord.code})`);
   const subjectsPass = run("extract-entities.ts", "--url", DEAD, "--subjects", "--workers", "2", "--follow");
-  ok(subjectsPass.code === 2 && /goes with --url, --limit, --timeout, --retry-failed, --switch-key and --dry-run alone, not --workers, --follow\.$/m.test(subjectsPass.err),
+  ok(subjectsPass.code === 2 && /goes with --url, --limit, --timeout, --retry-failed, --switch-key, --judge-checked and --dry-run alone, not --workers, --follow\.$/m.test(subjectsPass.err),
     `extract-entities.ts refuses a pass's flags beside --subjects, naming them (exit ${subjectsPass.code}: ${subjectsPass.err.split("\n")[0].slice(0, 120)})`);
   // The sweep's own flags pass --subjects' check and reach the sweep, which says what it will do before it dials
   // (review pass 1: without a URL the case stopped at databaseUrl, before the check it named).
@@ -271,6 +271,13 @@ const entries = sources.filter((f) => {
   const offSweep = runWith({ ...sweepEnv, OB1_SUBJECT_REASONING: "off" }, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run");
   ok(timedSweep.code !== 2 && /, reasoning on, at most 9 s a call \(subject:j@p2r\)$/m.test(timedSweep.out) && offSweep.code !== 2 && /, reasoning off, at most 300 s a call \(subject:j@p2\)$/m.test(offSweep.out),
     `--subjects passes --timeout to the sweep, and without it the sweep's own default, 300 s with reasoning off (exits ${timedSweep.code}, ${offSweep.code}: ${offSweep.out.split("\n")[0].slice(-60)})`);
+  // --judge-checked, the sweep's alarm off (SMD-3306 PR 5b, review pass 3): it reaches the sweep, which says so before it
+  // dials, and without --subjects the pass, which would drop it, refuses it.
+  const checkedSweep = runWith(sweepEnv, "extract-entities.ts", "--url", DEAD, "--subjects", "--dry-run", "--judge-checked");
+  const checkedPass = run("extract-entities.ts", "--url", DEAD, "--judge-checked");
+  ok(checkedSweep.code !== 2 && /\(subject:j@p2r\); the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedSweep.out)
+      && checkedPass.code === 2 && /^extract-entities\.ts: --judge-checked goes with --subjects alone/m.test(checkedPass.err),
+    `--judge-checked reaches the sweep, said, and the pass refuses it without --subjects (exits ${checkedSweep.code}, ${checkedPass.code}: ${checkedSweep.out.split("\n")[0].slice(-60)})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
   for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
     const bare = run(script, ...argv);

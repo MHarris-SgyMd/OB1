@@ -2950,7 +2950,8 @@ bun extract-entities.ts --url … --subjects rules        # …the rules alone, 
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run's claims began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
+bun extract-entities.ts --url … --subjects --judge-checked # the garbage-judge alarm off, for a judge model checked and found right
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3347,42 +3348,49 @@ model's invention or its copy of the question's example). A judge answering
 garbage stops at its 10th answer however the runs fall. A call past the limit, a
 row the egress gate refuses and a thought the rules key or find current are no
 answers; a key the door refuses is one that gave a key. It says so on stderr in
-two lines: the counts, then what to check (`OB1_JUDGE_MODEL`, the chat
-endpoint, `OB1_SUBJECT_REASONING`) and what it did. In one transaction the
+two lines: the counts, then what to check (`OB1_JUDGE_MODEL`, naming the judge
+models whose answers gave no subject when another run's was not this one's, the
+chat endpoint, `OB1_SUBJECT_REASONING`) and what it did. In one transaction the
 window's claims finished as named nothing, by whichever run, go back to the pool
-while still finished with no subject standing, and the window starts again,
-stamped with the trip, which stops every other run of the pool whose claims
-began before it, exit 3, said: it would ask the handed-back thoughts again at
-once. Nothing else would ask them again (a changed judge model leaves them
-finished, above). Each is asked once more, and that answer taken as given: not
-counted, though handed back again should fresh answers trip the window, since
-ten thoughts the model truly names nothing for, handed back together, would
-otherwise come up together and trip every later run. So run again only once the
-judge is right. An out-of-date subject it closed on one stays closed until that
-thought is asked again, which the line says. Those it could not read stay
-failed, as the pass leaves its malformed rows, and `--retry-failed` puts back
-the pool's failed claims, this run's among them; a trip in a run whose
-`--retry-failed` returned any says those were chosen for failing, as the pass
-says of its first judgement after a `--retry-*`. It exits 3, ahead of the 1 of
-claims failed, and of a first signal's 130 when the claim the signal let finish
-trips it; a second signal at once exits 130, unjudged. A database lost at the
-hand-back leaves the claims and the window as they were, said: once it answers,
-blank `ob1_config.subject_pool_filled`, and a `--subjects` run pools every
-thought with no current subject again, these among them. It reads an answer's
-shape, not its truth: on 100 canary thoughts the 27B had keyed, `qwen2.5:7b`,
-the metadata model's default, which judges when `OB1_JUDGE_MODEL` is unset,
-answered every one in shape and named nothing for one, and gave the 27B's key
-for 60 of the other 99, where the 27B named nothing for 1 of the 63 it was asked
-in the canary's first naming run. So a weaker judge passes it, as does one
-answering a placeholder (`none`, `unknown`), which keys as a phrase (no canary
-subject is one), and `--subjects rules` stays the way for a brain whose judge
-model has not been measured on the question. A working judge that often names
-nothing trips it now and then: by a Monte Carlo of the rule, one naming nothing
-for 5% of its thoughts trips within 1,000 answers 1.4% of the time, for 10%
-75%, and for 15% always. Nor does it catch a judge that never ends its answer:
-`qwen3.5:0.8b`, thinking, ran 3 of 3 canary thoughts to the 300 s limit, and a
-call past the limit is no answer, so each such claim fails at the limit a call,
-through the pool.
+while still finished with no subject standing (one another transaction holds is
+that one's to end), and the window starts again, stamped with the trip. Nothing
+else would ask them again (a changed judge model leaves them finished, above). A
+claim a run finishes as named nothing is judged in the finish's own transaction,
+so it is in the window or not finished at all. Every other run of the pool that
+began before the stamp, read as written from the run's start, stops at its next
+claim, or at the answer in hand, whose claim, finished as named nothing, goes
+back with the rest, exit 3, said. Every answer counts, on a thought asked again
+as on a new one, so a judge left as it was trips again at the next run, and what
+it named nothing for goes back each time. A judge that is right can trip it too,
+on thoughts that truly have no subject asked together: a trip's hand-back brings
+them up together, as does a pooling again (`subject_pool_filled` blanked, a
+switch of key and back, `OB1_SUBJECT_REASONING` turned off), which asks again
+every thought the model named nothing for. Once the judge is checked,
+`--judge-checked` runs with the alarm off, reading none of that run's answers.
+An out-of-date subject it closed on one stays closed until that thought is asked
+again, which the line says. Those it could not read stay failed, as the pass
+leaves its malformed rows, and `--retry-failed` puts back the pool's failed
+claims, this run's among them; a trip in a run whose `--retry-failed` returned
+any says those were chosen for failing, as the pass says of its first judgement
+after a `--retry-*`. It exits 3, ahead of the 1 of claims failed, and of a first
+signal's 130 when the claim the signal let finish trips it; a second signal at
+once exits 130, unjudged. A database lost as a trip is written leaves none of
+it, said, exit 3: the window still holds the answers before, so the next answer
+giving no subject trips it again. It reads an answer's shape, not its truth: on
+100 canary thoughts the 27B had keyed, `qwen2.5:7b`, the metadata model's
+default, which judges when `OB1_JUDGE_MODEL` is unset, answered every one in
+shape and named nothing for one, and gave the 27B's key for 60 of the other 99,
+where the 27B named nothing for 1 of the 63 it was asked in the canary's first
+naming run. So a weaker judge passes it, as does one answering a placeholder
+(`none`, `unknown`), which keys as a phrase (no canary subject is one), and
+`--subjects rules` stays the way for a brain whose judge model has not been
+measured on the question. A working judge that often names nothing trips it now
+and then: by a Monte Carlo of the rule, one naming nothing for 5% of the
+thoughts it is asked, in random order, trips within 1,000 answers 1.4% of the
+time, for 10% 75%, and for 15% always. Nor does it catch a judge that never ends
+its answer: `qwen3.5:0.8b`, thinking, ran 3 of 3 canary thoughts to the 300 s
+limit, and a call past the limit is no answer, so each such claim fails at the
+limit a call, through the pool.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5843,11 +5851,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3105 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1888 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1898 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 451 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 461 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
