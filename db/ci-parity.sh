@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
-# the database-backed suites in CI's order against ONE shared Postgres, and
-# beside them, in a lane of their own, the suites and self-checks that need none
-# and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638). Each
-# row says how long it took.
+# the database-backed suites in CI's order against ONE shared Postgres, but for
+# test-upgrade and test-preflight, which run beside them on a second as CI's do;
+# and beside both, in a lane of their own, the suites and self-checks that need
+# none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
+# Each row says how long it took.
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
