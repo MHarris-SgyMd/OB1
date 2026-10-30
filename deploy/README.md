@@ -1904,7 +1904,7 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 
 Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
 (SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
-read it. The row warns at once when the loop says it stopped (`compose stop`)
+read it. The row warns at once when it says it stopped (`compose stop coordinator`)
 or its supervisor holds it — a refusal, which it tries again on its own, the
 row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
 board, an interval or findings cap it does not take, an endpoint the egress
@@ -1916,13 +1916,14 @@ it; such a warning in the start-up log clears on the next `bun preflight.ts`.
 `db/README.md`, "Long-running workers report their liveness", has the row's
 shape.
 
-Every `OB1_BOARD_SYNC_INTERVAL` seconds (300) it runs `bun db/sync-linear.ts`
-once: a few requests list every issue's identifier, last-updated time and names
-(a hundred a page), one query reads the brain's ticket rows, and the difference
-is the work — a new
-issue is captured (vector, tags, and the facets Linear knows: project, status,
-priority, labels, parent), a moved or edited one is updated in place with a
-fresh vector, an unchanged one costs nothing. There is no state file: the brain
+Every `OB1_BOARD_SYNC_INTERVAL` seconds (300), on the coordinator's clock
+(SMD-3476; the tool's own `--loop` is retired), `bun db/sync-linear.ts
+--trigger`, which the coordinator starts and signals, runs a pass: a few
+requests list every issue's identifier, last-updated time and names (a hundred
+a page), one query reads the brain's ticket rows, and the difference is the
+work — a new issue is captured (vector, tags, and the facets Linear knows:
+project, status, priority, labels, parent), a moved or edited one is updated in
+place with a fresh vector, an unchanged one costs nothing. There is no state file: the brain
 is the state, so a pass that dies is finished by the next one. The same command
 runs from a checkout against any brain (`bun db/sync-linear.ts --url … --audit`
 is the lockstep census alone; `db/README.md`, "The board in the brain"). The
@@ -2154,8 +2155,10 @@ proposing which thoughts supersede which").
 podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run consolidate --list
 ```
 
-An accept is audited under the agent of the key in `OB1_WORKER_KEY`, which in
-this container is the workers' key. To have it recorded as yours, give your
+A decision, accept or reject, is recorded under the agent of the key in
+`OB1_WORKER_KEY` — on the proposal's row since migration 114, and in
+`thought_audit` too when it writes or clears a pointer — which in this
+container is the workers' key. To have it recorded as yours, give your
 own key, one `MCP_ACCESS_KEYS` holds, to that one command: set before it on
 the same line, it reaches neither your shell nor the next command, and the
 bare `-e` passes it into the container without putting it on the command
@@ -2171,8 +2174,22 @@ every later compose command in that shell — an `up -d` included — would
 start the followers under your key. Without the prefix, the decision is the
 workers' key's.
 
-A reject records no reviewer whichever key runs it (SMD-2608). Accepting
-unattended waits on a judge that can tell conflicts apart (SMD-1873).
+The decision then prints `decided by: <your key's name> (<its kind>)`, and
+`--list accepted` or `--list rejected` shows the same line on each row
+(SMD-2608); `--list` is the only place that shows it for now — the
+`list_supersession_proposals` tool, `GET /v1/proposals` and the GUI's
+`/dashboard/proposals` do not yet (SMD-3338). The kind is the one the registry
+held for the key when it decided: classify your key and the workers' key first
+(`SELECT set_agent_kind('<key name>', 'operator')`, as `SETUP.md` says, and
+`'agent'` for the workers' key), or the line reads "a key the
+registry has not classified", and a kind given later reads "classified after it
+decided". A decision under the workers' key — yours without the prefix, or the
+pass settling a stale row it no longer finds in conflict (067) — reads
+`decided by: <the workers' key's name> (…)` either way; the pass's settle carries a note beginning
+`settled by the pass:`. A row decided before migration 114 reads "not
+recorded" unless its decision wrote or cleared a pointer, whose audit row names
+the key. Accepting unattended waits on a judge that can tell conflicts apart
+(SMD-1873).
 
 ### The `sleep` pass instead
 

@@ -367,6 +367,8 @@ const FUNCTIONS = [
   "close_thought_subject(uuid, uuid, text)",
   "ob1_filed_ticket(jsonb)",
   "ob1_js_space()",
+  // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
+  "ob1_stamp_proposal_reviewer()",
 ];
 
 /**

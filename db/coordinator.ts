@@ -14,8 +14,13 @@
  *
  * What runs. OB1_PASSES, a list of `sleep`, `workers` and `board-sync`
  * (commas or spaces). `workers` is the two followers, `extract` and
- * `consolidate`. Named beside `sleep`, it is left out and the log says so:
- * the scheduler runs extraction and consolidation itself. A name that is no
+ * `consolidate`; named beside `sleep`, `workers` is left out and the log
+ * says so: the scheduler runs extraction and consolidation itself.
+ * `board-sync` passes at its start and at each trigger, every
+ * OB1_BOARD_SYNC_INTERVAL seconds (300) on the coordinator's clock, where
+ * the tool kept a loop of its own before (supervise's `every`); the clock
+ * reads the setting from this process's environment — compose's in the
+ * stack, the shell's from a checkout, never a .env file. A name that is no
  * pass is left out the same way, the rest still run. None named, none run,
  * and the coordinator waits for its stop. A change needs the coordinator
  * recreated (`up -d coordinator`), which `up -d` does when its environment
@@ -63,7 +68,8 @@ import type { SQL } from "bun";
 import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { supervise, type Supervisor } from "./supervise.ts";
-import { andList, consoleWriter, wrapperLine, type Writer } from "./cli.ts";
+import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
+import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 
 const HERE = import.meta.dir;
@@ -87,6 +93,8 @@ export type Child = {
   digits: readonly string[];
   /** Its argv after `bun <script>`, from its own environment. */
   args(env: Record<string, string | undefined>): string[];
+  /** A trigger's period in ms, from its own environment: the child is sent TRIGGER_SIGNAL that often, a pass each (SMD-3476). None, it is sent none. */
+  every?(env: Record<string, string | undefined>): number | undefined;
   script: string;
 };
 
@@ -95,6 +103,18 @@ const WORKER_OWN = ["OB1_WORKER_KEY", "MCP_ACCESS_KEYS"] as const;
 
 /** A setting, or the pass's default when it is unset or empty. */
 const or = (env: Record<string, string | undefined>, name: string, fallback: string): string => env[name] || fallback;
+
+/** board-sync's trigger period, as OB1_BOARD_SYNC_INTERVAL gives it, trimmed: the tool's default unset or blank. */
+const boardInterval = (env: Record<string, string | undefined>): string => env.OB1_BOARD_SYNC_INTERVAL?.trim() || String(DEFAULT_BOARD_INTERVAL_S);
+/**
+ * The clock's period in ms, by the tool's own rule (BOARD_INTERVAL_RULE); none
+ * for a value it refuses, which the tool then refuses itself and is held —
+ * a clock never runs a period past setInterval's bound or under 10 s.
+ */
+const boardEvery = (env: Record<string, string | undefined>): number | undefined => {
+  const s = readNumber("OB1_BOARD_SYNC_INTERVAL", boardInterval(env), BOARD_INTERVAL_RULE);
+  return typeof s === "number" ? s * 1000 : undefined;
+};
 
 const SLEEP_DIGITS = [
   "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET",
@@ -107,8 +127,12 @@ export const CHILDREN: Record<ChildName, Child> = {
     name: "board-sync", uid: 1101, script: "sync-linear.ts",
     own: ["LINEAR_API_KEY", "OB1_LINEAR_INITIATIVE", "OB1_BOARD_SYNC_INTERVAL", "LINEAR_COMMENT_API_KEY", "OB1_FINDINGS_POST_CAP"],
     requireKey: false, digits: [],
-    // The interval and the findings cap are read and refused by the tool itself.
-    args: () => ["--loop"],
+    // One process, a pass at its start and at each of the coordinator's triggers (SMD-3476), where the tool kept
+    // a clock of its own (--loop). The interval goes to it as --interval, so its heartbeat's period is the clock's
+    // whatever a checkout's .env says; a value it does not take (not whole seconds, under 10, past setInterval's
+    // bound) runs no clock, and the tool refuses it, held as any refusal is. The findings cap it reads and refuses too.
+    args: (env) => ["--trigger", "--interval", boardInterval(env)],
+    every: boardEvery,
   },
   extract: {
     name: "extract", uid: 1102, script: "extract-entities.ts",
@@ -333,10 +357,12 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
+    const every = child.every?.(l.env);
     return supervise({
       worker: child.name,
       cmd: l.cmd,
       ...(l.uid === undefined ? {} : { uid: l.uid, gid: l.uid }),
+      ...(every === undefined ? {} : { every }),
       label: `[${child.name}] `,
       requireKey: child.requireKey,
       digits: child.digits,
@@ -404,6 +430,11 @@ if (import.meta.main) {
     const child = name !== undefined && Object.hasOwn(CHILDREN, name) ? CHILDREN[name as ChildName] : undefined;
     if (child === undefined) {
       console.error(USAGE);
+      process.exit(2);
+    }
+    // A trigger's mode is the coordinator's own: a one-off of it would wait on a clock nothing runs, beside the coordinator's.
+    if (child.every && rest.includes("--trigger")) {
+      console.error(`coordinator.ts run ${child.name} takes no --trigger: that is the coordinator's own mode, its clock the coordinator's; a one-off is one pass, without it`);
       process.exit(2);
     }
     process.exit(await runOnce(child, rest, { onSignal: (s) => { stop = s; for (const signal of heard) s(signal); } }));

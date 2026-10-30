@@ -299,8 +299,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3086 assertions: 3086 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
+`bun test-schema.ts` prints `3105 assertions: 3105 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and fourteen (114) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -341,7 +341,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306), 114 SMD-2608).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2205,6 +2205,44 @@ named, the redefined door), test-live
 [10h] (the sweep from the pool),
 `server-portable/test-preflight.ts`.
 
+Migration 114 records who decided a proposal, accept and reject alike
+(SMD-2608). An accept was audited under the reviewer's key through its
+`thought_audit` row, but a reject wrote no row unless it cleared a pointer, so
+who rejected a proposal was recorded nowhere. Three columns on
+`supersession_proposals` mirror the audit row's: `reviewed_by` (the actor's
+name, as the audit row records it), `reviewed_by_agent_id` and
+`reviewed_by_kind` (the registry's kind when it decided, so a person's decision
+can be told from a machine's — read only when the decision names an agent, so an
+envelope naming no agent, which anyone can write, gets none). One trigger writes
+them from the decision's actor envelope, never from a statement's values (050's
+rule), on any write that names the decision's columns:
+`review_supersession_proposal` sets the envelope from its `p_actor`, so its
+accept and reject, and 067's settle through it, are stamped with the key that
+decided, and 067's reopen clears them with `reviewed_at`. `db/consolidate.ts`
+run with no key decides as `consolidate` with no agent and no kind, as its audit
+row says, and so does a run whose key did not resolve; a raw call with no
+envelope records none. They describe the decision that stands, as `reviewed_at`
+and `review_note` do. Columns and not a reject event in `thought_audit`, because
+that log is the thoughts' and a reject that clears nothing changes no thought.
+Rows decided before 114 are backfilled from the audit where a decision wrote a
+pointer (an accept that set one, a reject that cleared one), the kind only where
+the audit row names an agent and stamped it at the write; the rest stay NULL.
+Two CHECKs hold a kind to the registry's and to a row naming an agent, and an
+unreviewed row to no reviewer. `--list` prints `decided by:` on an accepted or
+rejected row, read beside the listing by the page's ids (the listing is not
+redefined, so the tool, `GET /v1/proposals` and the GUI do not show it yet:
+SMD-3338), with the kind the key had when it decided, else the registry's now
+("classified after it decided"); `--accept`/`--reject` print it after deciding,
+read in the decision's transaction. Needs 008, 029, 046 and 050; a re-apply
+fills only rows with no reviewer. No grant moves: every role this README has
+decide holds the capture group's `SELECT` on `ob1_agents`; a role granted the
+worker group alone is refused a keyed reject it could make before (it could make
+no other part of a review). A data-only reload with the trigger enabled empties
+every reviewer (a full `pg_restore` creates triggers after the data).
+test-schema [102], test-upgrade [20bf] (refused without each prerequisite; the
+backfill onto a populated brain at 113), test-live [16] (`--reject` and `--list`
+with and without a key).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2305,7 +2343,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
-| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
@@ -3881,9 +3919,12 @@ rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
-`MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is
-audited under the key's name with the pass key as session. Without it the run
-says so and proceeds unattributed.
+`MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and a decision is
+recorded on the proposal's row under the key's name, agent and kind (114,
+SMD-2608) — an accept, and a reject that clears a pointer, are audited under the
+key's name with the pass key as session too. Without it the run says so and
+proceeds, its proposals carrying no agent id and its decisions recorded as
+`consolidate` with no agent.
 
 **What preflight sees.** `consolidate pass` warns while a pass under any
 `consolidate:` key has rows pending, leased or failed — the counts over the
@@ -5284,9 +5325,10 @@ board-sync was down for four days (2026-09-27 to 10-01) and nothing noticed:
 its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
-whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
-(SMD-2679) — and
+whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
+a pass at its start and at each of the coordinator's triggers (SMD-3476),
+and the `--follow` of `extract-entities.ts`, `consolidate.ts` and
+`reembed.ts` (SMD-2679) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
@@ -5320,7 +5362,7 @@ row's `updated_at`, the database's `now()`.
 - **`refused`:** on an ended row, the start refusal that ended it, by kind
   (db/worker-bootstrap.ts's `START_REFUSALS`): the sleep scheduler's at a
   pass's start (SMD-2752); since SMD-3214 a claim follower's at its own start
-  under `--follow`, board-sync's under `--loop` — `linear-key`, `board`,
+  under `--follow`, board-sync's under `--trigger` — `linear-key`, `board`,
   `usage`, `egress` — and `db/supervise.ts`'s guard's. Preflight gives the
   kind's remedy. The scheduler's check, and a pass it drives, end no
   follower's row: the refusal is the scheduler's.
@@ -5380,7 +5422,7 @@ should read Done. `sync-linear.ts` is that sweep, and the coordinator's
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
-bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300), each stamping a heartbeat
+bun sync-linear.ts --url … --trigger                 # the coordinator's mode: a pass at its start and at each SIGWINCH, its heartbeat stamped; the coordinator sends one every OB1_BOARD_SYNC_INTERVAL seconds (300); --loop is retired (SMD-3476)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
@@ -5475,9 +5517,9 @@ says of them, and names one the census lacks; `--audit` takes no `--only`. The
 scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
 and adds the header scan over every thought's text — a sequential scan — only
 when that plan has a *missing* identifier, since a hand paste is the one thing
-that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
-ends the pass after the issue in hand (the compose service allows 60 s); the next
-pass finds what was left.
+that could hold it; `--full` and `--audit` always scan. SIGTERM ends the pass
+after the issue in hand (the coordinator allows 120 s); the next pass finds what
+was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, and since SMD-1958 they write the same
@@ -5748,12 +5790,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3086 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1845 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3105 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1864 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 419 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 427 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -5923,6 +5965,24 @@ signal says, so a gate that never closes runs as none. Re-embed claims one
 thought at a time under it unless `batch` says otherwise, so a closed gate
 holds a worker after the thought in hand. A run given none runs as before. The
 sleep scheduler is to close it while its brain is live (SMD-3379 PR 1c).
+
+`onPass` hands the caller a second function beside the pass's stop:
+`abortInHand(olderThanMs)` (`lease.ts`'s `InHandAbort`, SMD-3379 PR 1b-2)
+aborts each worker's model call that has run at least that long — since the
+worker took up its thought, last passed the admit gate or ended a provider
+pause, a worker with no call to abort (at the gate, in a provider pause, in
+the decider's call) passed over — and every one with no argument, and returns
+how many. The thought goes behind every thought queued before it (`setBack`:
+pending, the attempt not counted, `enqueued_at` now; the sleep scheduler is to
+order its own stopped thoughts after, PR 1c), or, deleted or no longer this
+worker's meanwhile, is counted so; extraction keeps the windows it has
+answered and counts the stop on it, as a wake's (093); and the worker goes on
+with its next claim, with no restart, no start probe and no pool. A thought
+past its last call when the abort comes finishes as it was; one aborted
+between its calls is set back at its next call — before the admit gate, at a
+window or pair, when one is given. It is inert once the pass is stopping. The
+summary counts the thoughts set back. The sleep scheduler is to call it while
+its gate is closed (SMD-3379 PR 1c, N12).
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket

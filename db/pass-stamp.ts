@@ -38,7 +38,7 @@
  * backlog can run for an hour, far past three of its 15-second polls. The
  * timer says the process is alive, as lease renewal does (lease.ts); a model
  * call hung inside a live process is not what it catches. Only the
- * long-running modes stamp — sync-linear.ts --loop, the --follow of
+ * long-running modes stamp — sync-linear.ts --trigger (a pass at each of the coordinator's triggers, SMD-3476), the --follow of
  * extract-entities.ts, consolidate.ts and reembed.ts (SMD-2679), and sleep.ts --follow, through whose
  * row its followers stamp (SMD-1794) — so a one-shot run never leaves a row
  * that goes stale behind it.
@@ -51,6 +51,14 @@ import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
 import type { BudgetStop, SleepAside, SleepBudget, SleepHeld } from "../server-portable/brain-info.ts";
 
+/**
+ * What the coordinator's clock sends board-sync for each pass (db/supervise.ts's
+ * `every`, db/sync-linear.ts --trigger, SMD-3476): SIGWINCH, whose default is
+ * to be ignored, so one that lands before the tool's handler is in — a slow
+ * start — does nothing, where SIGUSR2's default would end the process.
+ */
+export const TRIGGER_SIGNAL = "SIGWINCH" as const;
+
 /** The workers that stamp, as the key and preflight's row name them. */
 export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed"] as const;
 export type StampingWorker = (typeof STAMPING_WORKERS)[number];
@@ -59,6 +67,17 @@ export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 export const MIN_STAMP_EVERY_S = 60;
 /** The longest a row records: what a timer holds in seconds, and what the reader takes (brain-info.ts). */
 export const MAX_STAMP_EVERY_S = Math.floor(MAX_TIMER_MS / 1000);
+
+/** board-sync's interval when OB1_BOARD_SYNC_INTERVAL is unset: the tool's and the coordinator's clock's (SMD-3476). */
+export const DEFAULT_BOARD_INTERVAL_S = 300;
+/**
+ * board-sync's interval under --trigger, in whole seconds, as the tool and the
+ * coordinator's clock both read it: at least 10, and at most what a timer
+ * holds (MAX_STAMP_EVERY_S, 24.8 days) — a clock past setInterval's 2^31 ms
+ * would fire every millisecond. The interval is the period between passes'
+ * starts: one tick a pass, at most.
+ */
+export const BOARD_INTERVAL_RULE = { min: 10, max: MAX_STAMP_EVERY_S } as const;
 
 /**
  * How a pass ended. `ok`: it ran — whatever its rows came to, a document the
@@ -191,7 +210,7 @@ export const REFUSAL_STAMP_TIMEOUT_MS = 10_000;
 
 /**
  * A follower's row ended on its start's refusal, the kind on it (SMD-3214):
- * the claim workers' under `--follow`, board-sync's under `--loop`, so
+ * the claim workers' under `--follow`, board-sync's under `--trigger`, so
  * preflight gives the kind's remedy — and, under db/supervise.ts, which keeps
  * the follower's own word, says it is held for that cause — where the row
  * said only "ended on a failure". Bounded by REFUSAL_STAMP_TIMEOUT_MS; a

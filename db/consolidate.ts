@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -312,7 +312,7 @@ export interface ConsolidateOptions {
   retryFailed?: boolean;
   writer?: Writer;
   signal?: AbortSignal;
-  onPass?: (stop: PassStop) => void;
+  onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
    * A follower's heartbeat in place of its own `heartbeat:consolidate:<job>`
    * row (db/pass-stamp.ts): sleep.ts's, so a wake does not end a row
@@ -830,7 +830,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const writerFlagLine = (status: string, flags: StandingFlag[], p: { older: ProposalSide; newer: ProposalSide }) =>
     `     writer: ${writerFlagsText(flags, p)}${status === "pending" || status === "stale" ? writerFlagAdvice(flags) : ""}`;
   /** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR (070) and WRITER (SMD-2707) refusals. */
-  type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean; flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[] };
+  type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean; flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[]; reviewer?: Map<string, Reviewer> | "no-114" };
   // Thought content, the judge's reason, a review note and entity names are
   // untrusted; snipText (the MCP replies' cleaner) puts each on one line —
   // every break a reader may take, NEL among them, a space — and strips what
@@ -895,6 +895,43 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return { flags, older, newer, edited: r.older_moved === true || r.newer_moved === true, status: String(r.proposal_status),
       sides: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
   }
+
+  /**
+   * SMD-2608: who decided each of these rows (114's columns, which its trigger
+   * stamps from the key that decided), by id — the listing (110) does not
+   * carry them, so they are read beside it as the writers are — and, for an
+   * agent, the registry's kind now, beside the kind it had when it decided.
+   * "no-114" on a brain short of the file, found by a probe rather than by
+   * the read failing: a decision reads this inside its own transaction,
+   * which a failed statement would roll back.
+   */
+  type Reviewer = { name: string | null; agentId: string | null; kind: string | null; kindNow: string | null };
+  async function reviewersOf(ids: string[], q: typeof sql = sql): Promise<Map<string, Reviewer> | "no-114"> {
+    if (!ids.length) return new Map();
+    const [{ has }] = (await q`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                             WHERE table_schema = 'public' AND table_name = 'supersession_proposals' AND column_name = 'reviewed_by_kind') AS has`) as { has: boolean }[];
+    if (!has) return "no-114";
+    const rows = (await q`SELECT id::text AS id, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind,
+                                 CASE WHEN reviewed_by_agent_id IS NOT NULL THEN ob1_registry_kind(reviewed_by_agent_id, reviewed_by) END AS kind_now
+                            FROM supersession_proposals WHERE id = ANY(${sql.array(ids, "UUID")}::uuid[])`) as
+      { id: string; reviewed_by: string | null; agent: string | null; reviewed_by_kind: string | null; kind_now: string | null }[];
+    return new Map(rows.map((r) => [r.id, { name: r.reviewed_by, agentId: r.agent, kind: r.reviewed_by_kind, kindNow: r.kind_now }]));
+  }
+  const SHORT_OF_114 = "this brain is short of migration 114 (cd db && bun migrate.ts --url <url>)";
+  const REVIEWERS_UNREAD = `Who decided each row is not shown: ${SHORT_OF_114}.`;
+  /**
+   * SMD-2608: a decided row's reviewer — the key's name and its kind (the
+   * kind it had when it decided, else the registry's now, said so), a
+   * decision with no agent said so, and none recorded said so. The name
+   * through the replies' cleaner: a key's name is the operator's, but one line.
+   */
+  const reviewerText = (r: Reviewer | undefined): string => {
+    const kind = (k: Reviewer) => k.kind ?? (k.kindNow ? `${k.kindNow} — classified after it decided` : "a key the registry has not classified");
+    return r?.name && r.agentId ? `${snippet(r.name, 80)} (${kind(r)})`
+      : r?.name ? `${snippet(r.name, 80)}, no agent id recorded (run with no key, or a key that did not resolve)`
+      : r?.agentId ? `agent ${r.agentId} (${kind(r)}), no name`
+      : "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
+  };
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 110's seven-argument form, always: 029, 070 or 109 re-applied by hand
@@ -966,6 +1003,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
     const proposals = withWriters(rows as unknown as Record<string, unknown>[], writers, read).map(normaliseProposal);
     if (!read) out(`  ${WRITERS_UNREAD}\n`);
+    // SMD-2608: who decided each decided row, said once on a brain short of 114.
+    const decided = (p: Listed) => p.status === "accepted" || p.status === "rejected";
+    const reviewers = await reviewersOf(rows.filter(decided).map((p) => p.id));
+    if (reviewers === "no-114" && rows.some(decided)) out(`  ${REVIEWERS_UNREAD}\n`);
     rows.forEach((p, i) => {
       const np = proposals[i];
       const flags = standingFlags(np);
@@ -979,6 +1020,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
       out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
+      if (reviewers !== "no-114" && decided(p)) out(`     decided by: ${reviewerText(reviewers.get(p.id))}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1070,29 +1112,31 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         ? { ok: false, error: "LINEAGE_PAIR" }
         : writers !== "no-094" && writers?.flags.some((f) => f.how !== "if")
             ? { ok: false, error: "WRITER", flags: writers.flags }
-            : decision === "accept"
-              // SMD-2707: the accept and a read of what its lapse cleared, in one
-              // transaction — 082's lapse writes each cleared pointer as an update
-              // event of this transaction's, under this actor.
-              ? await sql.begin(async (tx) => {
-                  const r = await review(tx as unknown as typeof sql);
-                  if (r.ok) {
-                    // This transaction's own events (xmin, review pass 4: two
-                    // accepts under one actor name sharing now() each read the
-                    // other's); the write path writes nothing inside a
-                    // subtransaction, and test-live's lapse cell fails if it
-                    // ever does. In the order the lapse cleared them, which is
-                    // the order --list named them (SMD-3035's one walk).
-                    r.lapsed = (await tx`
-                      SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
-                       WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
-                         AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
-                         AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
-                       ORDER BY seq`) as { id: string; onto: string }[];
-                  }
-                  return r;
-                })
-              : await review(sql);
+            // SMD-2707: the accept and a read of what its lapse cleared, in one
+            // transaction — 082's lapse writes each cleared pointer as an update
+            // event of this transaction's, under this actor. SMD-2608: and the
+            // reviewer the row records, read in that transaction too, so a
+            // decision racing this one is never what this one prints.
+            : await sql.begin(async (tx) => {
+                const q = tx as unknown as typeof sql;
+                const r = await review(q);
+                if (r.ok && decision === "accept") {
+                  // This transaction's own events (xmin, review pass 4: two
+                  // accepts under one actor name sharing now() each read the
+                  // other's); the write path writes nothing inside a
+                  // subtransaction, and test-live's lapse cell fails if it
+                  // ever does. In the order the lapse cleared them, which is
+                  // the order --list named them (SMD-3035's one walk).
+                  r.lapsed = (await q`
+                    SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
+                     WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
+                       AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
+                       AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
+                     ORDER BY seq`) as { id: string; onto: string }[];
+                }
+                if (r.ok) r.reviewer = await reviewersOf([id], q);
+                return r;
+              });
       if (res.ok) {
         if (decision === "accept") {
           out(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -1104,6 +1148,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         } else {
           out(`  rejected ${id}${res.cleared ? `: the supersedes pointer this proposal had set is cleared` : ""}`);
         }
+        // SMD-2608: what the row records as its reviewer — a brain short of 114 records none, said so.
+        out(res.reviewer === "no-114" ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_114}` : `  decided by: ${reviewerText(res.reviewer?.get(id))}`);
       } else {
         code = 1;
         const why: Record<string, string> = {
@@ -1570,6 +1616,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let lastPassIdle = false;
   let vanished = 0;
   let lost = 0;
+  /** Thoughts whose judge call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
+  let abortedInHand = 0;
+  /** Each worker's judge call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
   let beats = 0;
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
@@ -1617,7 +1667,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     /** Requeued or reaped while its worker waited at the admit gate: nothing more judged, and not this worker's to release (review passes 3 and 4). */
     | { outcome: "lost" }
     /** Edited while its worker waited at the admit gate, still its claim: the worker puts it back in the pool for the new text, nothing more judged (review passes 4 and 5). */
-    | { outcome: "moved" };
+    | { outcome: "moved" }
+    /** Its judge call in hand aborted by the pass's caller (abortInHand): set back in the queue, its proposals so far standing (SMD-3379 PR 1b-2); `gone`, found deleted or another's instead, and said so (reportLost). */
+    | { outcome: "setBack"; gone?: "deleted" | "lost" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
   type StaleRow = { id: string; older_id: string; older_fingerprint: string; older_vectorless: boolean; newer_vectorless: boolean; similarity: number | null; shared: number; superseded: boolean; lineage_pair: boolean };
 
@@ -1723,14 +1775,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // No early exit on `stopping` here: a thought is at most --k calls, bounded
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
+    const call = inCall.get(workerId);
     for (const [pairIndex, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
       // here, its claim and lease kept.
       if (ADMIT) {
         let through: false | "open" | "waited";
+        // An abort that came between pairs — in a proposal's write — sets the
+        // thought back here, before the wait, not after it; it wins over a
+        // first stop that follows it (review passes 3 and 4).
+        if (call?.aborted) throw new AbortedInHand();
         try {
-          through = await admitted(ADMIT, gate);
+          through = await idleWhile(call, admitted(ADMIT, gate));
         } catch (e) {
           throw new AdmitThrow(e);
         }
@@ -1774,7 +1831,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // the operator typed" is a proposal it can decline on that ground.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
-        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]);
+        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
         // deadline for all three calls, as for the judge's one.
@@ -1784,6 +1841,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         llmMs += Date.now() - t0;
         // The hard stop aborted the call: the thought is abandoned, not failed.
         if (hardStopped) return { outcome: "abandoned" };
+        // The pass's caller aborted it (abortInHand): the worker sets the thought back.
+        if (call?.aborted) throw new AbortedInHand();
         // A timeout is a fact about this pair (the longest thoughts); anything
         // else is the provider's and is classified by the caller.
         if (timedOut(e)) {
@@ -2018,10 +2077,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
    * back unfinished — and the claims in flight, so two workers cannot each
    * take one on a limit of one. A row a worker hands back unfinished as it
-   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
-   * claimed again; a claim that never answered took nothing; a dead worker's
-   * leases are not this run's until a claim returns them (review pass 3: a
-   * reserved count patched at three sites, each with its own edge).
+   * ends (an outage, a stop), or sets back when its call is aborted
+   * (abortInHand, SMD-3379 PR 1b-2), leaves `taken`, and counts again only if
+   * it is claimed again; a claim that never answered took nothing; a dead
+   * worker's leases are not this run's until a claim returns them (review
+   * pass 3: a reserved count patched at three sites, each with its own edge).
    */
   const taken = new Set<string>();
   let claiming = 0;
@@ -2110,6 +2170,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // and added when the thought is finished — not again for a retry after a pause, nor for one the hard stop abandons.
             // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
+            inCall.begin(workerId);
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row, workerId);
@@ -2119,6 +2180,25 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                 if (e instanceof AdmitThrow) throw e.error;
                 // A stop at the gate between pairs: back to the pool with the leases the finally returns.
                 if (e instanceof StoppedBetweenPairs) return;
+                // The pass's caller aborted the judge call in hand (abortInHand): the
+                // thought to the back of the queue, its proposals so far standing, and
+                // the worker goes on with its next claim; a set-back the database
+                // refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2).
+                if (e instanceof AbortedInHand) {
+                  hb.held.delete(b.thought_id);
+                  let back: boolean;
+                  try {
+                    back = await setBack(sql, JOB, workerId, b.thought_id);
+                  } catch (re) {
+                    hb.held.add(b.thought_id);
+                    err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its judge call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+                    return;
+                  }
+                  // Not ours to set back: deleted, or edited or reaped meanwhile, and said so (review pass 1).
+                  if (back && LIMIT > 0) taken.delete(b.thought_id);
+                  outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
+                  continue;
+                }
                 // The database went away under the pairs: not the thought's, so
                 // nothing is recorded; the worker ends, and the follower waits
                 // for the database before its next pass (SMD-2599).
@@ -2170,7 +2250,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                   // the same way: main slept the pause out, called again, and
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
+                  await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
                   if (stopping || outage.reason !== null) return;
                 } else {
                   outcome = { outcome: "failed", error: `provider error after ${attempt} retries: ${msg}` };
@@ -2179,8 +2260,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
               }
             }
             if (hardStopped) return;
-            // Not judged: another holds it, or it goes back for its new text (review pass 5).
-            if (outcome.outcome !== "lost" && outcome.outcome !== "moved") {
+            inCall.end(workerId);
+            // Not judged: another holds it, it goes back for its new text, or its call was aborted (review passes 5, and 1b-2's).
+            if (outcome.outcome !== "lost" && outcome.outcome !== "moved" && outcome.outcome !== "setBack") {
               judged++;
               if (ticketCalls === null) totals.ticketCallsUnread++;
               else totals.ticketCalls += ticketCalls;
@@ -2238,6 +2320,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           if (outcome.outcome === "lost") {
             lost++;
             err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — requeued or reaped; nothing more of it was judged`);
+            continue;
+          }
+          if (outcome.outcome === "setBack") {
+            if (outcome.gone === "deleted") vanished++;
+            else if (outcome.gone === "lost") lost++;
+            else abortedInHand++;
             continue;
           }
           if (outcome.outcome === "moved") {
@@ -2300,6 +2388,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         }
       }
     } finally {
+      inCall.end(workerId);
       hb.stop();
       beats += hb.beats;
       // Rows still held are handed back unfinished: out of --limit's count
@@ -2357,7 +2446,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   // Through the start: the provider answered its probe, at once or after the wait (SMD-2752).
   opts.onStart?.({ ok: true, provider: "up" });
-  opts.onPass?.(stop);
+  opts.onPass?.(stop, inCall.abortInHand);
 
   /**
    * Workers whose leases could not be returned as they ended — the database
@@ -2516,7 +2605,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
   const elapsed = (Date.now() - started) / 1000;
   out(
-    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed.toFixed(1)}s ` +
+    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller` : ""}, in ${elapsed.toFixed(1)}s ` +
       `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
   );
   out(
