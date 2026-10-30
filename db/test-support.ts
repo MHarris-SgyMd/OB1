@@ -365,21 +365,22 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
-  // 113 (SMD-3597): work claims — the four calls and their helpers (the two
-  // taking work_claims' row type go with its CASCADE, and are named anyway).
-  "claim_work(text, text, text, text, integer, jsonb)",
+  // 113 (SMD-3597): work claims — the four calls and their ten helpers (the
+  // two taking work_claims' row type go with its CASCADE, and are named anyway).
+  "claim_work(text, text, text, integer, text, jsonb)",
   "renew_work_claim(uuid, text, integer, jsonb)",
   "release_work_claim(uuid, text, text, boolean, jsonb)",
   "list_work_claims(text[], text, boolean, integer)",
+  "ob1_work_claim_text(text, integer, text)",
   "ob1_work_claim_issue(text)",
-  "ob1_work_claim_piece(text)",
-  "ob1_work_claim_session(text)",
   "ob1_work_claim_lease(integer)",
+  "ob1_work_claim_token_hash(text)",
   "ob1_work_claim_json(work_claims, timestamp with time zone)",
   "ob1_work_claim_actor(jsonb, text)",
-  "ob1_work_claim_lock(text, text)",
-  "ob1_work_claim_is_holder(work_claims, text, uuid, text)",
-  "ob1_work_claims_in_the_way(text, text, text, uuid, text, timestamp with time zone)",
+  "ob1_work_claim_isolation(text)",
+  "ob1_work_claim_lock(text)",
+  "ob1_work_claim_is_holder(work_claims, text, uuid, bytea)",
+  "ob1_work_claims_in_the_way(text, text, text, uuid, bytea, timestamp with time zone)",
 ];
 
 /**

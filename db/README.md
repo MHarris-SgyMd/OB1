@@ -299,7 +299,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3081 assertions: 3081 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3082 assertions: 3082 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -1695,7 +1695,7 @@ that reads each event's diff once instead of four times. It refuses to apply
 without 095; 095 re-applied puts its unbounded body back and 098 after it the
 bounds, so after an older tree's `--reapply` over a 098 brain run this tree's
 `--reapply` (a plain run skips 098, recorded as applied). test-schema [88],
-test-upgrade [20ar], test-live [46] (the lock).
+test-upgrade [20ar], test-live [45] (the lock).
 
 Migration 099 has an unlink take the review lock (SMD-3045). 088's
 `update_thought` took `ob1:supersession-review` only for a pointer onto a
@@ -2170,33 +2170,44 @@ Migration 113 adds work claims: who holds a ticket, or one piece of it, under a
 lease, so two agents never build the same change (SMD-3597, under SMD-3596). On
 2026-10-29 a session recommended SMD-3379 PR 1b-2 while another had its worktree
 open, and nothing any agent could read said so. `work_claims` holds one row per
-claim, kept after it ends. The work is a ticket key in the form the readers find
-(`SMD-3379`, upper-cased and trimmed) and an optional piece (`PR 1b-2`, compared
-case-folded with its spaces collapsed). The holder is stamped from the call's actor
-envelope (`p_actor`, which the server passes for the key), never from an argument;
-a call with no envelope is refused. A claim is the caller's own only when the key
-**and** the client's `session` match, so sessions under one key refuse each other;
-the `label` is for people and trusted for nothing. `claim_work` answers `claimed`,
-`renewed` (the holder's own claim on the same work) or `refused` with the code
-`WORK_CLAIMED`, a message naming the first holder, and every claim in the way: a
-refusal is an answer, never an exception. A whole-ticket claim and a claim on one
-of its pieces are the same work, either way round; two pieces are not.
-`renew_work_claim` and `release_work_claim` act on the holder's own claim
-(`CLAIM_NOT_YOURS` otherwise); `p_force` releases another holder's, for an
-operator key and with a reason. The lease is 60 seconds to a week, four hours by
-default; a claim past it has lapsed, counts as free, and is closed as taken over by
-the next claim on the work, so nothing reaps. `list_work_claims` reads the live
-claims of the tickets named, or every claim with its state (live, lapsed,
-released). Each writing call takes an advisory lock on its ticket and runs under
-READ COMMITTED alone (068's rule; refused by name above it); the partial unique
-index `work_claims_one_unreleased` holds the exact-work rule for a write made
-without the lock. Claims are not in `thought_audit`: they change no thought, and the
-table keeps its own history. The **claims** grant group (SELECT, INSERT, UPDATE on
-`work_claims`; no DELETE) is soft: a role without it is refused the calls and
-nothing else. Needs 008, 046 and 061; a re-apply is a no-op. The REST and MCP
-operations are SMD-3598, the `claimed` label on results SMD-3599. test-schema
-[101] (every rule, the group, the re-apply), test-live [46] (two claims at once,
-held), test-upgrade [20be] (onto a populated brain at 112).
+claim, kept after it ends. The work is a ticket key (`SMD-3379`, upper-cased: a
+team key of at most 16 letters and digits, a number of at most 10 digits with no
+leading zero) and an optional piece (`PR 1b-2`, its runs of white space, Unicode's
+included, made one space and trimmed, compared case-folded). The holder is
+stamped from the call's actor envelope (`p_actor`, which the server passes for
+the key), never from an argument; a call with no envelope, or from a key the
+registry calls `ingested`, raises. `claim_work` returns a **token** once (`wc_`
+and 64 hex digits) and keeps only its SHA-256: a claim is the caller's own only
+when the key **and** the token match, so two agents under one key refuse each
+other, and nothing a refusal or a list shows proves ownership. The `label` is
+free text for people, control characters made spaces, returned as data and never
+put in a message. `claim_work` answers `claimed` (with the token), `renewed`
+(given the token of the caller's own claim on the same work) or `refused` with
+the code `WORK_CLAIMED`, a message naming the first holder's key and times, and
+every claim in the way: a refusal is an answer, never an exception. A
+whole-ticket claim and a claim on one of its pieces are the same work, either way
+round; two pieces are not. `renew_work_claim` and `release_work_claim` act on the
+holder's own claim, given its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
+releases another holder's, for an operator key named by its agent id (a name
+alone lends no kind, SMD-2608's rule) and with a reason. The lease is 60 seconds
+to a week, four hours by default; a claim past it has lapsed, counts as free, and
+is closed as taken over by the next claim on exactly its ticket and piece, so
+nothing reaps. `list_work_claims` reads the live claims of the tickets named, or
+every claim with its state (live, lapsed, released), never a token or its hash.
+Each writing call refuses a transaction above READ COMMITTED before it reads,
+takes an advisory lock on its ticket (068's rule), and should claim one ticket
+per transaction: two callers taking two tickets' locks in opposite orders
+deadlock. The partial unique index `work_claims_one_unreleased` holds the
+exact-work rule for a write made without the lock. Claims are not in
+`thought_audit`: they change no thought, and the table keeps its own history. The
+**claims** grant group (SELECT, INSERT, UPDATE on `work_claims`; no DELETE) is
+soft: a role without it is refused the calls and nothing else; the rules hold for
+callers of the functions, while a role with the group can write the table
+directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
+The REST and MCP operations are SMD-3598, the `claimed` label on results
+SMD-3599. test-schema [101] (the rules, the cleaning, the refusals, the group,
+the re-apply), test-live [46] (two claims at once, held), test-upgrade [20be]
+(onto a populated brain at 112).
 
 ## What changed relative to the guide
 
@@ -5665,7 +5676,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3081 assertions, PGlite, no container
+bun test-schema.ts                          # 3082 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1782 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1033 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell

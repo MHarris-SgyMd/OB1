@@ -700,7 +700,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
   // refusing by name rows that share one ([20bd]); 113 adds work claims —
-  // a table, its index and thirteen functions — refusing by name without
+  // a table, its index and fourteen functions — refusing by name without
   // 008, 046 or 061 ([20be]) — all
   // recorded by the
   // planted ledger with their
@@ -5029,8 +5029,8 @@ console.log("\n[20be] Migration 113: onto a populated brain at the file before i
   const before = await rows(), auditBefore = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
   type Answer = { outcome: string; code: string | null; claim: { id: string; holder: string } | null };
-  const claimed = ((await sql`SELECT claim_work('smd-9201', 'session-1', NULL, NULL, 14400, ${actor}::jsonb) AS r`)[0] as { r: Answer }).r;
-  const other = ((await sql`SELECT claim_work('SMD-9201', 'session-2', 'PR 1', NULL, 14400, ${{ name: "desktop" }}::jsonb) AS r`)[0] as { r: Answer }).r;
+  const claimed = ((await sql`SELECT claim_work('smd-9201', NULL, NULL, 14400, NULL, ${actor}::jsonb) AS r`)[0] as { r: Answer }).r;
+  const other = ((await sql`SELECT claim_work('SMD-9201', 'PR 1', NULL, 14400, NULL, ${{ name: "desktop" }}::jsonb) AS r`)[0] as { r: Answer }).r;
   assert((await rows()) === before && (await audits()) === auditBefore && claimed.outcome === "claimed" && claimed.claim?.holder === "laptop" && other.outcome === "refused" && other.code === "WORK_CLAIMED",
     `applied, the file moves no thought nor audit row; a claim is taken under the envelope's key, and another holder's piece of it refused (${claimed.outcome}, ${other.code})`);
   const grants = grantStatements("ob1_upgrade_probe", { groups: ["claims"] });

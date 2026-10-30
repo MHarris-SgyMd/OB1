@@ -18730,8 +18730,8 @@ if (want("46")) {
   const cA = new SQL({ url: URL_!, max: 1 }), cB = new SQL({ url: URL_!, max: 1 }), watch = new SQL({ url: URL_!, max: 1 });
   type Answer = { outcome: string; code: string | null; message: string | null; claim: { id: string } | null; held_by: { id: string }[] };
   const A = { name: "race-a" }, B = { name: "race-b" };
-  const claimOn = (c: SQL, issue: string, session: string, actor: object, piece: string | null) => async () =>
-    ((await c`SELECT claim_work(${issue}, ${session}, ${piece}, NULL, 14400, ${actor}::jsonb) AS r`) as { r: Answer }[])[0].r;
+  const claimOn = (c: SQL, issue: string, actor: object, piece: string | null) => async () =>
+    ((await c`SELECT claim_work(${issue}, ${piece}, NULL, 14400, NULL, ${actor}::jsonb) AS r`) as { r: Answer }[])[0].r;
   // Held, not timed (SMD-2475's heldRace): A claims inside an open transaction,
   // B's claim is dispatched, and A commits only once B is seen waiting on a
   // lock, or after 100 polls (about 5 s). Watched by B's pid from `watch`,
@@ -18758,15 +18758,15 @@ if (want("46")) {
   };
   try {
     // The whole ticket and a piece of it: B waits on the advisory lock, then reads A's claim and is refused by it.
-    const w = await race(claimOn(cA, "SMD-9101", "s-a", A, null), claimOn(cB, "SMD-9101", "s-b", B, "PR 1"));
+    const w = await race(claimOn(cA, "SMD-9101", A, null), claimOn(cB, "SMD-9101", B, "PR 1"));
     assert(w.waitedOn === "advisory" && w.ra.outcome === "claimed" && w.rb?.outcome === "refused" && w.rb.code === "WORK_CLAIMED" && w.rb.held_by[0]?.id === w.ra.claim?.id,
       `a piece claimed while another session holds the whole ticket uncommitted: it waits on the ticket's advisory lock, then is refused naming the first claim (waited on ${w.waitedOn || "nothing"}; ${w.rb?.outcome ?? w.err})`);
     // The same piece: refused by the answer, not by the unique index's error.
-    const s = await race(claimOn(cA, "SMD-9102", "s-a", A, "PR 2"), claimOn(cB, "SMD-9102", "s-b", B, "pr 2"));
+    const s = await race(claimOn(cA, "SMD-9102", A, "PR 2"), claimOn(cB, "SMD-9102", B, "pr 2"));
     assert(s.waitedOn === "advisory" && s.ra.outcome === "claimed" && s.rb?.outcome === "refused" && s.rb.code === "WORK_CLAIMED" && s.err === "",
       `the same piece at once: one claimed, the other refused by the answer, never the index's duplicate-key error (waited on ${s.waitedOn || "nothing"}; ${s.rb?.outcome ?? s.err})`);
     // Two pieces of one ticket: they share the lock, and both are claimed.
-    const p = await race(claimOn(cA, "SMD-9103", "s-a", A, "PR 1"), claimOn(cB, "SMD-9103", "s-b", B, "PR 2"));
+    const p = await race(claimOn(cA, "SMD-9103", A, "PR 1"), claimOn(cB, "SMD-9103", B, "PR 2"));
     assert(p.waitedOn === "advisory" && p.ra.outcome === "claimed" && p.rb?.outcome === "claimed",
       `two pieces of one ticket at once: they wait on one lock and both are claimed (waited on ${p.waitedOn || "nothing"}; ${p.rb?.outcome ?? p.err})`);
     const live = Number((await watch`SELECT count(*)::int AS n FROM list_work_claims(ARRAY['SMD-9101', 'SMD-9102', 'SMD-9103'])`)[0].n);
