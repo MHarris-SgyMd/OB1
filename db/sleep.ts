@@ -1102,7 +1102,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // ── The heartbeat ────────────────────────────────────────────────────────
   // Only --follow stamps, as only a follower does: one sleep leaves no row to go stale.
   const stamper: PassStamper = FOLLOW
-    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
+    ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => seen.migration || err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
   stamper.aside?.(asideWord());
   /** The sleeps stopped on the budget since this process began, on the row with the budget in force (SMD-2679). */
@@ -1150,14 +1150,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // A later failure is said again (review pass 2).
       saidHeld = false;
     } catch (e) {
-      if (!saidHeld) err(`  could not read the thoughts the wakes hold back (${(e as Error).message}) — the row keeps its last word on them`);
+      // After a migration seen, its own cancel of the read: no news (review pass 6).
+      if (!saidHeld && !seen.migration) err(`  could not read the thoughts the wakes hold back (${(e as Error).message}) — the row keeps its last word on them`);
       saidHeld = true;
     }
   };
   // No read here: the first awake stamp reads them, as does the first asleep poll.
   let saidStalled = false;
   const stalledUnread = (e: Error): void => {
-    if (!saidStalled) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once extraction is drained while it stays unreadable; every poll reads it again`);
+    if (!saidStalled && !seen.migration) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once extraction is drained while it stays unreadable; every poll reads it again`);
     saidStalled = true;
   };
   /** The row's end, the held thoughts read first: an operator's hand run since may have finished one. */
@@ -1960,7 +1961,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         // (a statement timeout) leaves the claims where they are, and the
         // wake goes on.
         const held = await reading(heldHere).catch((e: Error) => {
-          err(`  could not read the claims the wake leaves (${e.message}) — the next sleep takes them first again`);
+          if (!seen.migration) err(`  could not read the claims the wake leaves (${e.message}) — the next sleep takes them first again`);
           return [];
         });
         await stopPasses(true);
@@ -2239,14 +2240,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // connection of its own, untagged: the scheduler's two may be the
       // waiting ones (review pass 5).
       const canceller = openSql(url, { max: 1 });
+      /** The row's end below is the scheduler's too: the loop runs past the run's return until it lands (review pass 6). */
+      let rowEnded = false;
       const cancelling = (async () => {
         try {
-          while (!finished) {
+          while (!(finished && rowEnded)) {
             await canceller`
               SELECT pg_cancel_backend(a.pid) FROM pg_stat_activity a
                WHERE a.application_name = ${SCHEDULER_TAG} AND a.wait_event_type = 'Lock'
                  AND NOT (pg_blocking_pids(a.pid) <@ ARRAY(SELECT o.pid FROM pg_stat_activity o WHERE o.application_name = ${SCHEDULER_TAG}))`.catch(() => {});
-            await sleepUnless(CANCEL_EVERY_MS, watchEnd.signal);
+            await Bun.sleep(CANCEL_EVERY_MS);
           }
         } finally {
           await canceller.close({ timeout: 1 }).catch(() => {});
@@ -2256,6 +2259,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // preflight to start it again (review pass 4, run).
       await Promise.allSettled(passes.map((p) => p.done));
       await stamper.end("stopped", malformed ?? undefined).catch(() => {});
+      rowEnded = true;
       await cancelling;
       return;
     }
