@@ -1141,7 +1141,7 @@ OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # 441 â€
 OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 553 â€” every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
 ```
 
-`test:sql`, `test:e2e`, `test-rest-sql.ts` and `test-plugins-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
+`test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`
 to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing

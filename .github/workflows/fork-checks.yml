@@ -930,13 +930,14 @@ jobs:
       # started here and run in the background while the job's other suites run
       # on ob1test (SMD-3195). They were the job's last long step, a median 179
       # s after 106 s of suites, on the run's critical path. Then test-preflight
-      # was the job's floor, a median ~219 s of its 242, so it runs as its two
-      # shards (OB1_PREFLIGHT_SHARD, SMD-3468): first beside test-upgrade, rest
-      # on the third service, preflight-postgres, a Postgres of its own.
-      # test-upgrade.ts applies migrations INCREMENTALLY, onto a database that
-      # already holds data — the one situation every other suite avoids by
-      # resetting first, and the only one a real deployment is ever in; most of
-      # its time is three waits on the migrator's 10 s lock_timeout.
+      # was the job's floor, the long leg of a pair whose median was ~219 s of
+      # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
+      # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first beside
+      # test-upgrade, rest on the third service, preflight-postgres, a Postgres
+      # of its own. test-upgrade.ts applies migrations INCREMENTALLY, onto a
+      # database that already holds data — the one situation every other suite
+      # avoids by resetting first, and the only one a real deployment is ever
+      # in; most of its time is three waits on the migrator's 10 s lock_timeout.
       # test-preflight.ts is the deploy gate: without it a misconfigured server
       # starts, answers the MCP handshake, passes every HTTP liveness probe, and
       # fails only when a user captures their first thought; its time is its
@@ -1205,7 +1206,8 @@ jobs:
       # it failed too, so a failure beside one of the legs' is seen beside it.
       # A leg that fails here and passes alone (db/with-postgres.sh) is load,
       # or a leak between legs: replay the start step's legs against
-      # with-postgres.sh databases, the first two in one.
+      # with-postgres.sh, the first two in two databases of one Postgres
+      # (CREATE DATABASE, as the start step does), the rest in another.
       - name: Incremental upgrade and preflight (started at the job's start)
         if: ${{ !cancelled() }}
         run: |
