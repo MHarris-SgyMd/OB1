@@ -17876,7 +17876,7 @@ if (want("38")) {
         await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('000_smd3379_ledger_moved', 'test')`;
         const migCode = await bounded(migRun, migStop);
         const migBeat = await beat();
-        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned and a statement of theirs waiting on a lock cancelled, and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned and a statement of the scheduler's waiting on a lock cancelled, and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
         assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
           `a lock held at the start is waited out before the start's reads, and a row added to the ledger then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
         await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
@@ -17915,6 +17915,21 @@ if (want("38")) {
         const blockFailed = ((await claims(EX)).failed ?? 0) - failedBefore;
         assert(blockRunning && blocked && blockCode === 75 && blockFailed === 0,
           `…and a pass's statement waiting on the migration's lock is cancelled, the run ending 75 while the migration holds it, no thought failed (running ${blockRunning}, a pass waited ${blocked}, exit ${blockCode} after ${blockMs} ms, ${blockFailed} failed)`);
+        // The scheduler's own read waiting on it — the live-write read on
+        // thought_audit, each poll — is cancelled too (review pass 5, run).
+        const readStop = new AbortController();
+        const readRun = sleepRun({ follow: true, signal: readStop.signal, pollMs: 200 });
+        const readRunning = await pollUntil(async () => (await beat())?.running === true, 20_000);
+        await holder`BEGIN`;
+        await holder`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`;
+        const readBlocked = await pollUntil(passWaiting, 10_000);
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const readCode = await Promise.race([readRun, Bun.sleep(10_000).then(() => -1)]);
+        await holder`ROLLBACK`;
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        if (readCode === -1) { readStop.abort(); await readRun; }
+        assert(readRunning && readBlocked && readCode === 75,
+          `…and the scheduler's own read waiting on it is cancelled too, the run ending 75 while the migration holds it (running ${readRunning}, a read waited ${readBlocked}, exit ${readCode})`);
       } finally {
         await holder`ROLLBACK`.catch(() => {});
         await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});

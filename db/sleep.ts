@@ -447,8 +447,15 @@ export function budgetMemory(n: Pick<Numbers, "workMem" | "maintenanceWorkMem">)
  * own, which there would end the scheduler on its poll's scan (review pass 2).
  */
 export function schedulerSession(n: Pick<Numbers, "workMem" | "maintenanceWorkMem">): SessionSettings {
-  return { statement_timeout: "0", ...budgetMemory(n) };
+  return { statement_timeout: "0", ...budgetMemory(n), application_name: SCHEDULER_TAG };
 }
+
+/**
+ * Every connection of this process's scheduler and its passes, by name in
+ * pg_stat_activity, so a migration's stop cancels their statements alone
+ * (SMD-3379 PR 1c-1). A startup setting: it beats a URL's own (measured).
+ */
+export const SCHEDULER_TAG = `ob1-sleep ${crypto.randomUUID().slice(0, 8)}`;
 
 /**
  * Each pass's session settings, from the budget's numbers: what every
@@ -463,7 +470,8 @@ export function budgetSession(n: Pick<Numbers, "statementTimeout" | "workMem" | 
 /**
  * A statement statement_timeout cancelled: 57014 in Postgres's words for it.
  * An operator's pg_cancel_backend is 57014 too, "due to user request": no
- * budget's, so it ends the scheduler as any error a pass throws does (review pass 1).
+ * budget's, so it ends the scheduler as any error a pass throws does (review pass 1);
+ * the scheduler's own, on a migration seen, ends it with 75 (SMD-3379 PR 1c-1).
  */
 export const statementTimedOut = (e: unknown): boolean => (e as { errno?: unknown } | null)?.errno === "57014" && /statement timeout/i.test((e as Error).message ?? "");
 
@@ -592,7 +600,7 @@ async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Prom
   return { total: rows[0]?.total ?? 0, thoughts: rows.map(({ total: _t, ...r }) => ({ ...r, windows: r.windows ?? null })) };
 }
 
-/** How often a migration's stop cancels a pass's statement waiting on a lock, until the passes have returned. */
+/** How often a migration's stop cancels a statement of this process's waiting on a lock, until the run has returned. */
 const CANCEL_EVERY_MS = 250;
 
 /**
@@ -810,7 +818,8 @@ export async function run(opts: SleepOptions): Promise<number> {
       // A throw on the way down from a migration seen is that end, said, not
       // a crash (review passes 1 and 3).
       if (seen.migration) {
-        err(`  after the migration seen: ${(e as Error).message}`);
+        // Its own cancel of a read waiting on the migration is no news (review pass 5).
+        if (!/due to user request/.test((e as Error).message)) err(`  after the migration seen: ${(e as Error).message}`);
         return MIGRATION_EXIT;
       }
       throw e;
@@ -828,10 +837,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The quiet and the poll in seconds: a test's milliseconds in place of the flags' whole seconds (SMD-3196). */
   const QUIET = opts.quietMs !== undefined ? opts.quietMs / 1000 : n.quiet;
   const POLL = opts.pollMs !== undefined ? opts.pollMs / 1000 : n.poll;
-  /** Each pass's session settings, and the sleep's clock and grace (SMD-2679). */
-  /** This run's passes' connections by name, so a migration's stop cancels their statements alone (SMD-3379 PR 1c-1). */
-  const PASS_TAG = `ob1-sleep ${crypto.randomUUID().slice(0, 8)}`;
-  const SESSION: SessionSettings = { ...budgetSession(n), application_name: PASS_TAG };
+  /** Each pass's session settings, named as the scheduler's own (SCHEDULER_TAG), and the sleep's clock and grace (SMD-2679). */
+  const SESSION: SessionSettings = { ...budgetSession(n), application_name: SCHEDULER_TAG };
   const BUDGET_MS = opts.budgetMs ?? n.budget * 60_000;
   const GRACE_MS = opts.budgetGraceMs ?? BUDGET_GRACE_S * 1000;
   /** The clock on the row, in whole minutes: a test's milliseconds round up to one. */
@@ -1278,6 +1285,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   let passEnded = new AbortController();
   const start = (name: PassName, workers = WORKERS): Running => {
     const abort = new AbortController();
+    // Once a migration is seen no pass starts: one after the watcher's stop
+    // would run unstopped, and its writes into the migration (review pass 5).
+    if (seen.migration) return { name, done: Promise.resolve(130), settled: true, code: 130, stop: null, abort, hushed: true, start: null, timedOut: false };
     const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abort, hushed: false, start: null, timedOut: false };
     // Its banner and its summary's queries are left out: the check said the
     // one at the scheduler's start, and the other is a scan the scheduler
@@ -2215,23 +2225,38 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       stopping = true;
       hardStopped = true;
       onStop.abort();
-      err(`\n  ${why} — the passes stop now, their leases returned and a statement of theirs waiting on a lock cancelled, and the scheduler exits ${MIGRATION_EXIT}: under the coordinator its supervisor starts it again at once, to wait the migration out and read its start again; run by hand, start it again once the migration is done`);
+      err(`\n  ${why} — the passes stop now, their leases returned and a statement of the scheduler's waiting on a lock cancelled, and the scheduler exits ${MIGRATION_EXIT}: under the coordinator its supervisor starts it again at once, to wait the migration out and read its start again; run by hand, start it again once the migration is done`);
       const passes = [...running];
+      // The hard stops first: their lease returns are not cancelled — one
+      // cancelled left its lease to its TTL, 15 min (review pass 5, run).
       await Promise.all(passes.map((p) => hardStop(p))).catch(() => {});
-      // A pass's statement waiting on a lock — the migration's, as a rule —
-      // held the stop until the migration let go, and the locks its
-      // transaction held deadlocked a migration that needed them (review
-      // pass 4, run): cancelled, on the passes' own connections (PASS_TAG),
-      // until every pass has returned. The row ends after: "stopped" while
-      // one waited told preflight to start it again.
-      const returned = Promise.allSettled(passes.map((p) => p.done));
-      let over = false;
-      void returned.then(() => { over = true; });
-      while (!over) {
-        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE application_name = ${PASS_TAG} AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`.catch(() => {});
-        await Promise.race([returned, Bun.sleep(CANCEL_EVERY_MS)]);
-      }
+      // Then a statement of this process's waiting on a lock — the
+      // migration's, as a rule — is cancelled until the run returns: it held
+      // the stop until the migration let go, and the locks its transaction
+      // held deadlocked a migration that needed them (review pass 4, run).
+      // The passes' writes and the scheduler's own reads alike
+      // (SCHEDULER_TAG); not a wait on another of them alone. From a
+      // connection of its own, untagged: the scheduler's two may be the
+      // waiting ones (review pass 5).
+      const canceller = openSql(url, { max: 1 });
+      const cancelling = (async () => {
+        try {
+          while (!finished) {
+            await canceller`
+              SELECT pg_cancel_backend(a.pid) FROM pg_stat_activity a
+               WHERE a.application_name = ${SCHEDULER_TAG} AND a.wait_event_type = 'Lock'
+                 AND NOT (pg_blocking_pids(a.pid) <@ ARRAY(SELECT o.pid FROM pg_stat_activity o WHERE o.application_name = ${SCHEDULER_TAG}))`.catch(() => {});
+            await sleepUnless(CANCEL_EVERY_MS, watchEnd.signal);
+          }
+        } finally {
+          await canceller.close({ timeout: 1 }).catch(() => {});
+        }
+      })();
+      // The row ends once the passes have: "stopped" while one waited told
+      // preflight to start it again (review pass 4, run).
+      await Promise.allSettled(passes.map((p) => p.done));
       await stamper.end("stopped", malformed ?? undefined).catch(() => {});
+      await cancelling;
       return;
     }
   })();
