@@ -49,9 +49,9 @@ if [ -n "$KEEP" ]; then NAME="ob1-pg-keep-$KEEP"; else NAME="ob1-test-pg-$$"; fi
 # port 0 could be handed it — macOS hands port 0 out from one cursor every
 # process shares — so a start on a port picked inside macOS's range, as this
 # script once picked (49152–64151), failed "address already in use" in 5 of 20
-# runs under load (SMD-3592). The number comes from
-# /dev/urandom, not $RANDOM: bash 3.2 seeds $RANDOM from the time and the pid,
-# and two runs launched together picked the same port in 3 of 20 pairs.
+# runs under load (SMD-3592). The number comes from /dev/urandom, not $RANDOM:
+# bash 3.2 seeds $RANDOM from the time and the pid, and two runs launched
+# together picked the same port in 3 of 20 pairs.
 #
 # A port is free when a connect to 127.0.0.1 at it, the address DATABASE_URL
 # dials, is refused: on macOS podman's bind on every address succeeds beside a
