@@ -89,8 +89,6 @@ function want(id: string): boolean {
   if (runs) begun.add(id);
   return runs;
 }
-/** A literal for a RegExp source — model names carry dots and colons. */
-const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // An age preflight reads back is a subprocess's reading a moment after the row
 // was planted, rounded to the second (brain-info.ts ago()), so under load an
 // age planted N s back reads N+1 or more, and a time still to come one less.
@@ -98,7 +96,9 @@ const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // `2\d s ago` for 20, `(?:7[1-9]|80) s` for 80 (SMD-2679 PR 4b-2, SMD-3569).
 // A minute form rounds over 30 s and is left exact, planted at least 10 s
 // inside its rounding edge; so is a plant beside a threshold (the alive edge
-// at 880 of 900).
+// at 890 of 900).
+/** A literal for a RegExp source — model names carry dots and colons. */
+const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
 /**
@@ -1978,7 +1978,7 @@ else {
   assert(/a follower is running this key \(stamped \d+ s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims/.test(row((await run(SQL_ENV)).out, "consolidate pass")),
          "a follower beside an expired claim names the dead claim");
   await claims`UPDATE thought_work_claims SET status = 'pending', worker_id = NULL, ttl_expires_at = NULL WHERE work_type = ${CONS} AND status = 'claimed'`;
-  // Stamped again right before the read: its age is asserted to the second (review pass 3).
+  // Stamped again right before the read: its age is asserted within a late read's range (review pass 3, SMD-3569).
   await followerBeat(20);
   const consFollowed = await run(SQL_ENV);
   assert(/✓\s+consolidate pass\s+\S+: .* — a follower is running this key \(stamped 2\d s ago\): 1 pending between its polls\s*$/m.test(consFollowed.out),
@@ -4088,9 +4088,9 @@ else {
     assert(/!\s+workers\s+board-sync stopped \(last stamped 6\d s ago, every 300 s\)/.test(row(stopped.out, "workers")) && /board-sync stopped 6\d s ago: start it again/.test(fix(stopped.out, "workers")),
       `a fresh stopped heartbeat warns with the restart (${row(stopped.out, "workers")})`);
     assert(staleJson.ok === true && staleJson.checks.some((c) => c.name === "workers" && c.status === "warn"), "…a warning under ok:true — a stopped worker never refuses the deploy");
-    // Just inside three intervals: alive, 20 s short of them, past a late
+    // Just inside three intervals: alive, 10 s short of them, past a late
     // read's 9 s (SMD-3569).
-    await beat("heartbeat:board-sync", v(), 880);
+    await beat("heartbeat:board-sync", v(), 890);
     assert(/✓\s+workers\s+board-sync alive/.test(row((await run(SQL_ENV)).out, "workers")), "a heartbeat inside three intervals is alive");
 
     // Fresh, but its last pass failed; fresh, but its last block passed the alarm.
