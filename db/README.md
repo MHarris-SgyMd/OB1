@@ -299,8 +299,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3063 assertions: 3063 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and twelve (112) migrations applied, and
+`bun test-schema.ts` prints `3086 assertions: 3086 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -341,7 +341,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2166,6 +2166,45 @@ duplicate refusal, the re-apply), test-upgrade [20bd] (onto a populated brain at
 111, a duplicate refused by name), `server-portable/test-e2e-sql.ts` [24] (the
 tools).
 
+Migration 113 gives a thought's own subject a pool (SMD-3306 PR 5). Until it,
+each `--subjects` run read every thought, its count and its pages, whatever was
+left to do, and asked again every thought the model had named nothing for. A
+trigger, `thoughts_subject_pool` (`AFTER INSERT OR UPDATE OF content, metadata`),
+puts each new or edited thought back in the pool `ob1_config.subject_pool_key`
+names, through 016's `requeue_thought_work`, as 016's trigger does for the
+extraction pass; with no pool named it does nothing, and a metadata edit moves
+nothing, nor reads anything as the caller, unless it changes `metadata.ticket`
+or `metadata.issue` (the metadata rule's fields, the ticket a thought is filed under):
+such an edit reads `ob1_config` as the caller from 113 on, pool or no, as a
+capture does. The sweep claims from it as the extraction
+pass claims from its own, so a claim finished is the record that a thought was
+asked at its text. `close_thought_subject(thought, facet, fingerprint)` closes
+the standing subject the model now names nothing for, under the door's advisory
+lock, only while the thought's text is the one read and that facet still stands
+(`stale`, `moved` or `none` otherwise), so a subject a pass wrote since the
+sweep read it stands. It redefines 111's door, `record_thought_subject`, to read
+under its lock the ticket the thought is filed under (`ob1_filed_ticket`,
+server-portable/subject.ts's `metadataTicket` in SQL, which the sweep reads too):
+the metadata rule's subject under another ticket than the thought is filed under
+now, or none, or a session header's or a model's on a thought filed since, is
+refused as stale, as one found in a text that moved, so a write landing after
+another pass recorded the ticket's subject replaces nothing. Refuses by name
+without 015, 016 or 111, and on a database whose encoding is not UTF8, where
+chr() cannot build all of what JavaScript's trim takes (SMD-3349 tracks such
+brains); a re-apply
+is a no-op. No grant is issued, but the
+trigger runs as the caller, as 016's does: a ticket edit reads `ob1_config`
+(above), and once a pool is named a capturing role needs `SELECT, INSERT,
+UPDATE` on `thought_work_claims`, which preflight checks (below). The sweep's
+place in sleep is SMD-3306 PR 6. test-schema [101] (the trigger, a blank key,
+the ticket filed later, each action of the close and its refusals, the door's
+refusals by the ticket a thought is filed under, `ob1_filed_ticket`'s values),
+test-upgrade [20be] (refused without each prerequisite and on a SQL_ASCII
+database; onto a populated brain at 112, nothing moved, no pool until one is
+named, the redefined door), test-live
+[10h] (the sweep from the pool),
+`server-portable/test-preflight.ts`.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2381,11 +2420,16 @@ the calling role. It **reads `ob1_config`** first, always — so on any brain at
 capture-path requirement, not a soft extra: a role without it fails every capture
 in the trigger. And once entity extraction is enabled (`extract-entities.ts` sets
 `ob1_config.entity_extraction_key`), the trigger also **upserts a
-`thought_work_claims` row** — so the server role then needs `INSERT, UPDATE` on
-`thought_work_claims` too, even though it runs no worker. Preflight's `write
-privileges` check detects the trigger (and reads the key) and enforces exactly
-these when they apply, so the gap surfaces at start-up rather than on the first
-capture. The simplest answer is to grant the server role the **worker** group as
+`thought_work_claims` row** (`INSERT … ON CONFLICT DO UPDATE`, which reads the
+conflict) — so the server role then needs `SELECT, INSERT, UPDATE` on
+`thought_work_claims` too, even though it runs no worker. Migration 113's subject
+pool trigger (SMD-3306) is the same: it reads `ob1_config` on every capture, and
+once `extract-entities.ts --subjects` names a pool (`ob1_config.subject_pool_key`)
+it upserts a work claim too. Preflight's `write privileges` check detects the
+triggers (and reads the keys) and enforces exactly these when they apply, so the
+gap surfaces at start-up rather than on the first capture; a server already
+running when a key is first written is not checked again, so grant them before
+that run. The simplest answer is to grant the server role the **worker** group as
 well on an extraction brain.
 
 **Another cross-cutting exception (055's capture read).** Migration 055 (SMD-2115)
@@ -2863,10 +2907,12 @@ OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorde
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
-bun extract-entities.ts --url … --subjects              # each thought's own subject where none is current — none at its text, or one an older rule or question found, or a model with its reasoning off while it is on: the rules, then the judge model for the rest (SMD-3306)
-bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
-bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once)
+bun extract-entities.ts --url … --subjects              # each thought in the subject pool its own subject (113: new and edited thoughts, and at a rule's, the question's or the reasoning's change every one with no current subject): the rules, then the judge model for the rest (SMD-3306)
+bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model, from a pool of their own
+bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
+bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
+bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3109,10 +3155,12 @@ no ticket, and a key is the same on every brain and every run. It goes through
 migration 111's `record_thought_subject` at the text the claim read, under its
 rule's key (`subject:metadata@r1`, `subject:first_line@r2`), and the pass asks
 no model for it. `--subjects` is the sweep for the rest (`db/subject-sweep.ts`):
-each thought with no current subject — none at its text (extracted before 111,
+each thought in its pool (migration 113, below), into which a pool's first run puts
+every thought with no current subject — none at its text (extracted before 111,
 keyed by no rule, or edited since), or one found under an older rule or question,
-or by a model with its reasoning off while it is on — gets the rules' subject,
-else the judge model's (`OB1_JUDGE_MODEL`), the door replacing the old one. The
+or by a model with its reasoning off while it is on — and the trigger each new or
+edited one, gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`),
+the door replacing the old one. The
 model is asked the subject's own question about the thought alone
 (`server-portable/subject.ts`'s `OWN_RULES`, version 2), with its reasoning on
 unless `OB1_SUBJECT_REASONING` says off, and its
@@ -3135,9 +3183,9 @@ against 0.930), though what reasoning changed was not significant alone (8
 thoughts better, 4 worse). So `OB1_SUBJECT_REASONING`, the question's own switch
 (`OB1_METADATA_REASONING` would slow every extraction too), is on when unset, at
 about 8x the time a call: a median of 71 s against 9 s, the 27B on 55 session
-summaries. A model's subject found with it off is taken again while it is on
+summaries. A model's subject found with it off is pooled again while it is on
 (`subject:<model>@p2` under `@p2r`), its recipe naming the setting; turning it
-off takes none again. An effort asked for (`low`, `high`; `none` is off) is keyed
+off pools none again. An effort asked for (`low`, `high`; `none` is off) is keyed
 as on, though only the provider's default was measured. A brain that set
 `OB1_METADATA_REASONING` asked the question with that before PR 4: set
 `OB1_SUBJECT_REASONING` to the same value to go on asking that way (its subjects
@@ -3146,19 +3194,83 @@ for: a judge model with no reasoning mode (the metadata model, `qwen2.5:7b` by
 default, when `OB1_JUDGE_MODEL` is unset) answers as before, and its subjects
 are asked again once for nothing. The default `--timeout` follows it: 900 s a
 call with reasoning on, where 2 of 200 such calls took over 300 s, else 300 s.
-The sweep takes one thought
-at a time without a lease, the door's lock and fingerprint check making a sweep
-beside the pass safe. An answer naming nothing records nothing, so the next
-sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
-its thought is asked again at every sweep, and counted in the summary, until
-SMD-3306 PR 5 records "asked, got nothing" and closes it safely; `--limit` counts
-each thought taken, in id order from the first, so such a thought is taken first
-again, as is one a `--subjects rules` run leaves to the model. A run's summary
-counts the subjects it recorded in place of a standing one, and how many of those
-took a new key. One that is not
-JSON with a subject records nothing either, is said, and exits 1, as the pass
-fails a malformed answer. A changed judge model leaves its predecessor's
-subjects standing, current at the same question: nothing asks them again yet.
+The sweep claims
+from a pool, as the pass does (migration 113, SMD-3306 PR 5): `thought_work_claims`
+under its pool's key (`subjects:r1.2:p2r`, the rules' versions and the question's
+with its reasoning; `subjects:r1.2:p2` with it off; `subjects:r1.2` for
+`--subjects rules`), named in `ob1_config.subject_pool_key`, into which 113's
+trigger puts each new or edited thought, and one whose `metadata.ticket` or
+`metadata.issue` changes. So a run costs what is in the pool, not the brain's size: before it, each
+run read every thought, its count and its pages. The first run names its pool and
+pools every thought with no current subject; once one is named, a run under
+another key — after a rule's, the question's or the reasoning's change, or
+`--subjects rules` — does so only with `--switch-key`, as the pass's own key
+change is refused without it. They are requeued, since a pool used before keeps
+its finished claims, and the pooling is marked finished in
+`ob1_config.subject_pool_filled` once it commits, so one that broke off (a thought
+deleted under it, a lost connection) is pooled again by the next run; a signal
+during it ends the CLI at once, and the server ends the statement in hand within a
+second of the CLI going (`client_connection_check_interval`), the name left as it
+was or the pooling unmarked. A naming's write of the name
+waits for each write in flight under the pool named; it then waits for the
+transactions writing thoughts as it named the pool, so what they capture is
+pooled; and the pooling waits for whatever holds a lock it needs, a claim an
+edit's trigger wrote among them. No wait has an end of its own: each names the
+pids it waits on (for a statement, those the server's `pg_blocking_pids` says
+hold it up, a request queued ahead of it among them), again every 30 s, until
+they end, and a caller's stop ends it, 130, a statement cancelled from the run's
+own second connection, opened on its url (without one, said, heard once the
+statement ends), the pooling left to the next run (a bound past which the pooling was left unfinished had
+every run after it pool again, and ask again what the model had named nothing
+for, while the writer stayed open). A capture in a transaction a client opened
+at REPEATABLE READ or SERIALIZABLE can read the pool from before the naming and
+is not waited for; preflight checks only the writers' default level, so blank
+`ob1_config.subject_pool_filled` and the next run pools again. A naming's
+pooling can deadlock with a transaction editing two thoughts it requeues: the
+server fails the one whose own deadlock check, a second after it starts to wait,
+finds the cycle — usually the later to wait, an edit joining the pooling's wait,
+failing with 40P01 for its caller to retry, or the pooling, which pools again. One run
+names and pools at a time, under a session advisory lock, a run that waits for
+another saying so. The first naming is
+refused while a login role that can capture — it reads `ob1_config`, without
+which 016's trigger refuses it already — cannot write the claims the trigger
+writes as it, which would fail its every capture. Each claim is one thought,
+leased for the limit a call and five minutes more, renewed before a call is asked
+again; a run that stops hands back what it holds, a second signal the claim in
+hand before the CLI exits, and a thought the provider stopped answering on goes to
+the end of the pool. A lease a gone worker ran out at its last attempt is failed by
+the next claim, which the pool line counts and a run says, exit 1. Within one key the claims are disjoint while their leases
+hold — a naming leaves a live lease to its run, though an edit pools its thought
+again — and whatever the claims, the door's lock, its fingerprint check and its
+check of the ticket a thought is filed under make a sweep beside the pass, or
+beside another sweep, safe; a run whose pool another run names away from it
+records and closes no subject more, since each write and close first locks the
+pool's name and reads it, and stops, exit 2, at the first of those or of its
+claims, which read the name too, that finds it moved. A claim
+finished is the record that the thought was asked at its text: one the model
+named nothing for is not asked again until its text, the ticket it is filed
+under, or the pool's key changes
+(a switch to another key and back pools it again: a claim records no
+fingerprint), and an out-of-date subject standing on it is closed through 113's
+`close_thought_subject`, which closes it only while it is still the one read at
+the text read, so a subject a pass wrote since stands; a thought given a subject
+elsewhere while the model was asked goes back to the pool, if the run still holds
+its claim, and the run reads what stands when it comes up. A thought the pass gave a
+current subject after it was pooled is finished unasked, so long as the rules
+agree now: a ticket filed on it since a model keyed it, another ticket than the
+one a rule read, or none where one was, is read again. A subject the ticket a
+thought is filed under disagrees with is no current subject at a naming either,
+so a ticket moved before 113, or under another pool, is read then. An answer that is not
+JSON with a subject, a call past the limit, a row the egress gate refuses and a
+key the door refuses each fail the claim, the subject standing, are said, and
+exit 1, as the pass fails a malformed answer; `--retry-failed` puts the failed
+claims back in the pool. `--limit` counts the claims taken, the oldest pooled
+first. A run's summary counts the subjects it recorded in place of a standing
+one, and how many of those took a new key, and a claim no longer the run's when
+it released it. A changed judge model leaves its predecessor's
+subjects standing, current at the same question, and is not asked the thoughts
+its predecessor named nothing for: the pool's key names whether a model is asked,
+not which. Nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
 been measured on the question (the stable brain's, today); its counts follow
 `OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
@@ -3173,9 +3285,14 @@ reads each row before its question, and a policy that refuses every row
 refuses the sweep before any; the rules alone send nothing. On a brain before
 111, or under a role without the door's grants, the pass records no subject and
 says so once, its entities standing; the sweep refuses either by name before
-any question, exit 2. A dry run reads on through a signal, as the pass's does.
-Sleep does not run the sweep yet: each run reads every thought, its count and its
-pages, whatever is left to do, which SMD-3306 PR 5 bounds first.
+any question, exit 2, as it refuses a brain before 113 or a role without the
+pool's grants (`SELECT, INSERT, UPDATE` on `thought_work_claims`, `INSERT, UPDATE`
+on `ob1_config`, the worker group's). A dry run writes, pools and asks nothing, counts what a run
+would take (the pool's claims, a gone worker's run-out leases among them, or every
+thought with no current subject while its pool is not named), and reads on
+through a signal, as the pass's does; its pages go by thought id, so with
+`--limit` it counts the first by id, which a run need not take first. Sleep
+does not run the sweep yet: that is SMD-3306 PR 6, on SMD-3379's scheduler.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5631,12 +5748,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3063 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1778 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 3086 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1845 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1029 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 352 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 419 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

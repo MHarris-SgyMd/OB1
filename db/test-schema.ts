@@ -8703,8 +8703,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `sixteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_subject_pool,thoughts_updated_at",
+    `seventeen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), 113 the subject pool's ([101]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15750,10 +15750,13 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
   const KEY = "subject:qwen3.8:27b@p1";
 
-  // The shape: 111 the last definer of its four functions and of the two it carries; the sentinels; the trigger; the
-  // indexes; the CHECK; the comments.
-  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"])
-    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("111"), `one ${fn}, 111 its last definer (${lastDefinerOf(fn)})`);
+  // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
+  // with a check of the ticket a thought is filed under ([101]); the sentinels; the trigger; the indexes; the CHECK; the
+  // comments.
+  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
+    const by = fn === "record_thought_subject" ? "113" : "111";
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
+  }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
   assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src(RTS)),
     "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write");
@@ -15872,6 +15875,8 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
   const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
   assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
     "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
+  // 111 re-applied alone put its door back: the shipped one is 113's, which the sections after read.
+  await restoreShipped("record_thought_subject");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
@@ -15955,6 +15960,111 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   assert(/migration 112: thoughts_client_key_unique exists but is INVALID — a CONCURRENTLY build or drop that did not finish/.test(invalid), `an INVALID index in the shape: refused, naming it (${invalid.slice(0, 120)})`);
   await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_client_key_unique'::regclass`);
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
+}
+
+console.log("\n[101] Migration 113: the subject pool — a trigger on thoughts putting a new or edited thought (back) in the pool ob1_config.subject_pool_key names, or one whose metadata.ticket or metadata.issue changes, nothing while none (or a blank one) is named or for any other metadata edit; the door refusing a subject the ticket a thought is filed under disagrees with (ob1_filed_ticket); close_thought_subject closing the subject read and no other (a subject written since, a text moved, none standing, a thought gone), refusing a missing argument; a re-apply a no-op (SMD-3306)");
+{
+  const file = files.find((f) => f.endsWith("_subject_pool.sql")) ?? "no _subject_pool.sql";
+  const src = readFileSync(new URL(`./migrations/${file}`, import.meta.url), "utf8");
+  const trigger = async () => (await db.query<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('thoughts_enqueue_subject()'::regprocedure, 'pg_proc')) AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_subject_pool'`)).rows[0];
+  const trig = await trigger();
+  assert(trig.n === 1 && /Migration 113 \/ SMD-3306/.test(trig.c ?? "") && /ob1:subject-pool/.test(src), `one pool trigger on thoughts, its function's comment and the file's sentinel naming it (${trig.n})`);
+
+  const POOL = "subjects:r1.2:p2r";
+  const add = async (content: string) => (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, '{}') RETURNING id`, [content])).rows[0].id;
+  const status = async (id: string) => (await db.query<{ s: string }>(`SELECT status AS s FROM thought_work_claims WHERE thought_id = $1 AND work_type = $2`, [id, POOL])).rows[0]?.s ?? "none";
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  const before = await add("[101] captured before a pool is named");
+  assert((await status(before)) === "none", "no pool named: a new thought joins none");
+  // A blank key names no pool, as 016's trigger reads a blank extraction key (review pass 1: no case held it).
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', '')`);
+  const blank = await add("[101] captured under a blank key");
+  assert((await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM thought_work_claims WHERE thought_id = $1 AND work_type = ''`, [blank])).rows[0].n === 0,
+    "a blank key names no pool: a new thought joins none, and the capture is not refused");
+  await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'subject_pool_key'`, [POOL]);
+  const after = await add("[101] captured after");
+  assert((await status(after)) === "pending", "a pool named: a new thought joins it, pending");
+  const finish = () => db.query(`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = $1 AND work_type = $2`, [after, POOL]);
+  await finish();
+  await db.query(`UPDATE thoughts SET metadata = '{"note": "a metadata edit"}' WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "a metadata edit does not put it back");
+  await db.query(`UPDATE thoughts SET content = content WHERE id = $1`, [after]);
+  assert((await status(after)) === "succeeded", "nor does a write of the same text");
+  // Filed under a ticket after it was asked: the metadata rule reads metadata.ticket, else metadata.issue, so either
+  // moving puts it back (review pass 1: a ticket filed later was never read).
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"ticket": "SMD-101"}'::jsonb WHERE id = $1`, [after]);
+  const byTicket = await status(after);
+  await finish();
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-102"}'::jsonb WHERE id = $1`, [after]);
+  const byIssue = await status(after);
+  await finish();
+  assert(byTicket === "pending" && byIssue === "pending", `filing it under a ticket, or under an issue, puts a finished thought back (${byTicket}, ${byIssue})`);
+  await db.query(`UPDATE thoughts SET content = '[101] captured after, edited' WHERE id = $1`, [after]);
+  assert((await status(after)) === "pending", "an edit of its text puts a finished thought back in the pool");
+  await db.query(`UPDATE thoughts SET content = '[101] captured before, edited' WHERE id = $1`, [before]);
+  assert((await status(before)) === "pending", "…and an edit pools a thought captured before the pool was named");
+
+  // The door, 111's carried with one check more: the ticket the thought is filed under, read under its lock. A rule's
+  // subject under another ticket, or a session header's or a model's on a thought filed since, is stale (review pass 5,
+  // run-it: a sweep's answer, or the pass's rule, read before the ticket moved, replaced the subject another pass had
+  // recorded since, and no run took the thought again).
+  const fp = async (id: string) => (await db.query<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1`, [id])).rows[0].f;
+  const doorSrc = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'record_thought_subject(uuid, text, text, text, uuid, text, jsonb)'::regprocedure`)).rows[0].s;
+  assert(lastDefinerOf("record_thought_subject").startsWith("113") && lastDefinerOf("ob1_filed_ticket").startsWith("113") && /ob1_filed_ticket\(t\.metadata\)/.test(doorSrc) && /ob1:subject-lineage-with-its-artifact/.test(doorSrc),
+    "113 the door's last definer, its body reading ob1_filed_ticket and keeping 111's sentinel, and ob1_filed_ticket's");
+  const doorAt = async (id: string, key: string, by: string) =>
+    (await db.query<{ r: Record<string, unknown> }>(`SELECT record_thought_subject($1, $2, $3, $4, NULL, $5, NULL) AS r`, [id, key, by, `subject:${by}@r1`, await fp(id)])).rows[0].r;
+  const filedT = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ('[101] filed under its ticket', $1) RETURNING id`, [JSON.stringify({ ticket: " SMD-103 " })])).rows[0].id;
+  const atFiled = [await doorAt(filedT, "phrase:what the model read", "model"), await doorAt(filedT, "ticket:SMD-9", "first_line"), await doorAt(filedT, "ticket:SMD-9", "metadata"), await doorAt(filedT, "ticket:SMD-103", "metadata")];
+  assert(atFiled.slice(0, 3).every((r) => r.action === "none" && r.stale === true) && atFiled[3].action === "added",
+    `on a thought filed under SMD-103: a model's subject, a session header's and a rule's under another ticket refused as stale, the rule's at its ticket added (${atFiled.map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // Moved to its issue, behind a ticket that is not one and a no-break space: the rule's subject at the old ticket is
+  // stale now, at the issue's it replaces; taken away, a model's is added.
+  await db.query(`UPDATE thoughts SET metadata = $2 WHERE id = $1`, [filedT, JSON.stringify({ ticket: "not one", issue: "\u00a0SMD-104" })]);
+  const atIssue = [await doorAt(filedT, "ticket:SMD-103", "metadata"), await doorAt(filedT, "ticket:SMD-104", "metadata")];
+  await db.query(`UPDATE thoughts SET metadata = '{}' WHERE id = $1`, [filedT]);
+  const unfiledT = [await doorAt(filedT, "ticket:SMD-104", "metadata"), await doorAt(filedT, "phrase:what the model read", "model")];
+  assert(atIssue[0].stale === true && atIssue[1].action === "replaced" && unfiledT[0].stale === true && unfiledT[1].action === "replaced",
+    `filed under its issue: the old ticket's subject stale, the issue's replacing it; taken away: the rule's stale, a model's replacing it (${[...atIssue, ...unfiledT].map((r) => r.action + (r.stale ? "/stale" : "")).join(", ")})`);
+  // ob1_filed_ticket: metadataTicket in SQL (test-live [10h] holds the two together value by value; here its shape).
+  const filedOf = async (m: unknown) => (await db.query<{ t: string | null }>(`SELECT ob1_filed_ticket($1::jsonb) AS t`, [JSON.stringify(m)])).rows[0].t;
+  const filedVals = [await filedOf({ ticket: "\ufeffSMD-105\u3000" }), await filedOf({ ticket: "smd-106" }), await filedOf({ ticket: 107 }), await filedOf({ issue: ["SMD-108"] }),
+    await filedOf({ ticket: `SMD-${"9".repeat(196)}` }), await filedOf({ ticket: `SMD-${"9".repeat(197)}` }), await filedOf([]), await filedOf("SMD-109"), await filedOf(null)];
+  assert(filedVals[0] === "SMD-105" && filedVals.slice(1, 4).every((v) => v === null) && filedVals[4]?.length === 200 && filedVals.slice(5).every((v) => v === null),
+    `ob1_filed_ticket: a BOM and an ideographic space trimmed; a lower-case id, a number, an array, an id over 200 characters, metadata not an object: none (${filedVals.map((v) => v === null ? "null" : v.slice(0, 12)).join(", ")})`);
+
+  // The close: the subject read, and no other — on a thought filed under no ticket, a model's subject its own.
+  const closeT = await add("[101] the close's thought");
+  const write = async (id: string, key: string) => (await db.query<{ r: { id: string } }>(`SELECT record_thought_subject($1, $2, 'model', 'subject:x@p2', NULL, $3, NULL) AS r`, [id, key, await fp(id)])).rows[0].r.id;
+  const close = async (id: string, facet: string, f: string) => (await db.query<{ c: Record<string, unknown> }>(`SELECT close_thought_subject($1, $2, $3) AS c`, [id, facet, f])).rows[0].c;
+  const standing = async (id: string) => (await db.query<{ id: string | null }>(`SELECT max(id::text) AS id FROM thought_facets WHERE thought_id = $1 AND kind = 'subject' AND valid_until IS NULL`, [id])).rows[0].id;
+  const read = await write(closeT, "phrase:the one read");
+  const since = await write(closeT, "phrase:written since");
+  const moved = await close(closeT, read, await fp(closeT));
+  assert(moved.action === "none" && moved.moved === true && moved.id === since && (await standing(closeT)) === since,
+    `another subject written since the read: not closed, the one standing named (${JSON.stringify(moved)})`);
+  const stale = await close(closeT, since, "0".repeat(64));
+  assert(stale.action === "none" && stale.stale === true && (await standing(closeT)) === since, `a text moved since the read: not closed (${JSON.stringify(stale)})`);
+  const closed = await close(closeT, since, await fp(closeT));
+  assert(closed.action === "closed" && closed.id === since && (await standing(closeT)) === null, `the subject read, at the text read: closed (${JSON.stringify(closed)})`);
+  const none = await close(closeT, since, await fp(closeT));
+  assert(none.action === "none" && none.moved === undefined && none.stale === undefined, `none standing: none (${JSON.stringify(none)})`);
+  const gone = await close("00000000-0000-0000-0000-000000000113", since, await fp(closeT));
+  assert(gone.action === "none" && gone.gone === true, `a thought gone: none (${JSON.stringify(gone)})`);
+  const refused: string[] = [];
+  for (const args of [[null, since, "x"], [after, null, "x"], [after, since, " "]]) {
+    try { await db.query(`SELECT close_thought_subject($1, $2, $3)`, args); refused.push("accepted"); } catch (e) { refused.push((e as { code?: string }).code ?? (e as Error).message); }
+  }
+  assert(refused.every((c) => c === "22023"), `a missing thought, facet or fingerprint is refused as a parameter error (${refused.join(", ")})`);
+  const comment = (await db.query<{ c: string | null }>(`SELECT obj_description('close_thought_subject(uuid, uuid, text)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
+  assert(/Migration 113 \/ SMD-3306/.test(comment), `close_thought_subject's comment names the migration (${comment.slice(0, 60)})`);
+
+  // Re-applied, nothing moves.
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  assert(again.endsWith("_subject_pool.sql") && (await trigger()).n === 1 && (await status(after)) === "pending", `113 applied again changes nothing: one trigger, the pool as it was (${again.slice(0, 80)})`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'subject_pool_key'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

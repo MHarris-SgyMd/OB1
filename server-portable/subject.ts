@@ -335,6 +335,14 @@ export const subjectReasoningOn = (cfg: Pick<EmbedConfig, "subjectReasoning">): 
 export const subjectModelSuffix = (reasoning: boolean): string => `@p${SUBJECT_PROMPT_VERSION}${reasoning ? "r" : ""}`;
 /** The pass key of a subject the judge model found, beside extraction's `extract:<model>@p<n>`. */
 export const subjectModelKey = (model: string, reasoning: boolean): string => `${SUBJECT_KEY_PREFIX}${model}${subjectModelSuffix(reasoning)}`;
+/**
+ * The subject pool's key (migration 113: thought_work_claims's work_type, ob1_config.subject_pool_key): what a sweep
+ * applies, each rule's version and, when it asks the model, the question's with its reasoning, so a change to any of
+ * them pools again every thought with no current subject. The judge model is not in it, as it is not in what is current
+ * (subjectCurrent).
+ */
+export const subjectPoolKey = (model: boolean, reasoning: boolean): string =>
+  `subjects:r${SUBJECT_RULE_VERSIONS.metadata}.${SUBJECT_RULE_VERSIONS.first_line}${model ? `:p${SUBJECT_PROMPT_VERSION}${reasoning ? "r" : ""}` : ""}`;
 
 /**
  * Whether a standing subject was found under the current rules and question: a rule's under that rule's key now, a

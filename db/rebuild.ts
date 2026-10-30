@@ -106,9 +106,21 @@ type Report = {
   irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[];
 };
 
-/** The worker that drains a pool, by the key's prefix (db/config.mjs's three key shapes). */
-function drainer(pool: string): string {
+/**
+ * The worker that drains a pool, by the key's prefix (db/config.mjs's three key shapes, and subject.ts's
+ * subjectPoolKey). A subject pool (113, SMD-3306) is drained only while ob1_config.subject_pool_key names it, by the
+ * run its key's question names: none for the rules', reasoning off for one without its `r`. Any other subject pool
+ * is one no run takes (review pass 5: a pool left by a switch read as the rules' run, which --switch-key would name
+ * again, sending the model's next run back to pool and ask again what it had named nothing for).
+ */
+export function drainer(pool: string, subjectPool: string | null = null): string {
   if (pool.startsWith("reembed:")) return "bun db/reembed.ts --url <url>";
+  if (pool.startsWith("subjects:")) {
+    if (pool !== subjectPool) return "(not the subject pool ob1_config.subject_pool_key names: no run takes it)";
+    const question = /:p\d+(r?)$/.exec(pool);
+    if (question === null) return "bun db/extract-entities.ts --url <url> --subjects rules";
+    return `${question[1] ? "" : "OB1_SUBJECT_REASONING=off "}bun db/extract-entities.ts --url <url> --subjects`;
+  }
   if (pool.startsWith("extract:")) return "bun db/extract-entities.ts --url <url>";
   if (pool.startsWith("consolidate:")) return "bun db/consolidate.ts --url <url>";
   return "(no worker in this tree drains this key)";
@@ -435,8 +447,19 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       out(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
       out(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
       const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
+      // The named subject pool, read for the drainer: a role that cannot read ob1_config is told so on a subject
+      // pool's line, and the rest stand (review pass 6: its status failed on the read).
+      let named: string | null | undefined;
+      try {
+        named = ((await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_key'`) as { value: string }[])[0]?.value || null;
+      } catch (e) {
+        if ((e as { errno?: string }).errno !== "42501") throw e;
+        named = undefined;
+      }
       out(`  pools:       ${pools.length ? pools.map((p) => `${p.w} (${p.n} pending)`).join(", ") : "nothing pending"}`);
-      for (const p of pools) out(`    ${p.w}  →  ${drainer(p.w)}`);
+      for (const p of pools) {
+        out(`    ${p.w}  →  ${named === undefined && p.w.startsWith("subjects:") ? "(--subjects, if ob1_config.subject_pool_key names it: this role cannot read which it names)" : drainer(p.w, named ?? null)}`);
+      }
       return 0;
     }
     if (INPUT !== undefined) {
