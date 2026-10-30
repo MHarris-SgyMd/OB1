@@ -94,9 +94,11 @@ const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // An age preflight reads back is a subprocess's reading a moment after the row
 // was planted, rounded to the second (brain-info.ts ago()), so under load an
 // age planted N s back reads N+1 or more, and a time still to come one less.
-// Each is matched as a range that holds the lateness: `2\d s ago` for 20,
-// `(?:7\d|80) s` for 80 (SMD-2679 PR 4b-2, SMD-3569). A minute form rounds
-// over 30 s, so one planted on a whole minute is left exact.
+// Each is matched as a range of ten values, which holds 9 s of lateness:
+// `2\d s ago` for 20, `(?:7[1-9]|80) s` for 80 (SMD-2679 PR 4b-2, SMD-3569).
+// A minute form rounds over 30 s and is left exact, planted at least 10 s
+// inside its rounding edge; so is a plant beside a threshold (the alive edge
+// at 880 of 900).
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
 /**
@@ -4086,8 +4088,9 @@ else {
     assert(/!\s+workers\s+board-sync stopped \(last stamped 6\d s ago, every 300 s\)/.test(row(stopped.out, "workers")) && /board-sync stopped 6\d s ago: start it again/.test(fix(stopped.out, "workers")),
       `a fresh stopped heartbeat warns with the restart (${row(stopped.out, "workers")})`);
     assert(staleJson.ok === true && staleJson.checks.some((c) => c.name === "workers" && c.status === "warn"), "…a warning under ok:true — a stopped worker never refuses the deploy");
-    // Just inside three intervals: alive.
-    await beat("heartbeat:board-sync", v(), 890);
+    // Just inside three intervals: alive, 20 s short of them, past a late
+    // read's 9 s (SMD-3569).
+    await beat("heartbeat:board-sync", v(), 880);
     assert(/✓\s+workers\s+board-sync alive/.test(row((await run(SQL_ENV)).out, "workers")), "a heartbeat inside three intervals is alive");
 
     // Fresh, but its last pass failed; fresh, but its last block passed the alarm.
@@ -4132,8 +4135,8 @@ else {
     // recreate a fix in deploy/.env needs; never "start it again".
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 110, code: 2, tries: 2 } }), 30);
     const heldOut = await run(SQL_ENV);
-    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in (?:7\d|80) s \(last stamped 3\d s ago, every 60 s\)$/.test(row(heldOut.out, "workers"))
-           && /extract:qwen2\.5:7b@p2 is held: a refusal — its log says which\. Its supervisor runs it again on its own in (?:7\d|80) s, then every 15 min at most while it keeps ending, so a fix outside deploy\/\.env \(a model pulled, the migrations applied\) is met at a try; one in deploy\/\.env needs the coordinator recreated — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES/.test(fix(heldOut.out, "workers"))
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in (?:7[1-9]|80) s \(last stamped 3\d s ago, every 60 s\)$/.test(row(heldOut.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 is held: a refusal — its log says which\. Its supervisor runs it again on its own in (?:7[1-9]|80) s, then every 15 min at most while it keeps ending, so a fix outside deploy\/\.env \(a model pulled, the migrations applied\) is met at a try; one in deploy\/\.env needs the coordinator recreated — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES/.test(fix(heldOut.out, "workers"))
            && !/start it again/.test(fix(heldOut.out, "workers")),
       `a held follower reads held with its next try, and its fix gives the cause and the recreate, not "start it again" (${row(heldOut.out, "workers")} | ${fix(heldOut.out, "workers")})`);
     // Its guard's refusal: no next try, the kind's remedy and the recreate it waits for.
@@ -4440,7 +4443,8 @@ else {
       // kind and the next try said once, by the supervisor's words; the fix
       // the kind's remedy and the recreate, never "start it again". Its next
       // try, 270 s on from a stamp 30 s old, is 4 min whole: at 240 it was
-      // 3.5 min, on the rounding edge, and a read 3 s late said 3 (SMD-3569).
+      // 3.5 min, on the rounding edge, and a read half a second late said 3
+      // (SMD-3569).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "model", restart: { in_s: 270, code: 2, tries: 3 }, slept: { from: await at(900), to: await at(700) } }), 30);
       const heldSleep = await run(LOG_ON);
       assert(/!\s+sleep\s+held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min \(last stamped 3\d s ago, every 60 s\); its last sleep ended/.test(row(heldSleep.out, "sleep")) && !/refused at a pass's start/.test(row(heldSleep.out, "sleep"))
