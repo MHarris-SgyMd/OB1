@@ -2343,7 +2343,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
-| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --loop` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
@@ -5377,9 +5377,10 @@ board-sync was down for four days (2026-09-27 to 10-01) and nothing noticed:
 its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
-whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
-(SMD-2679) — and
+whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
+a pass at its start and at each of the coordinator's triggers (SMD-3476),
+and the `--follow` of `extract-entities.ts`, `consolidate.ts` and
+`reembed.ts` (SMD-2679) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
@@ -5413,7 +5414,7 @@ row's `updated_at`, the database's `now()`.
 - **`refused`:** on an ended row, the start refusal that ended it, by kind
   (db/worker-bootstrap.ts's `START_REFUSALS`): the sleep scheduler's at a
   pass's start (SMD-2752); since SMD-3214 a claim follower's at its own start
-  under `--follow`, board-sync's under `--loop` — `linear-key`, `board`,
+  under `--follow`, board-sync's under `--trigger` — `linear-key`, `board`,
   `usage`, `egress` — and `db/supervise.ts`'s guard's. Preflight gives the
   kind's remedy. The scheduler's check, and a pass it drives, end no
   follower's row: the refusal is the scheduler's.
@@ -5473,7 +5474,7 @@ should read Done. `sync-linear.ts` is that sweep, and the coordinator's
 bun sync-linear.ts --url postgres://…                # one pass
 bun sync-linear.ts --url … --dry-run                 # what a pass would write
 bun sync-linear.ts --url … --audit                   # the lockstep census: missing / stale / extra; exit 1 when any of the three
-bun sync-linear.ts --url … --loop                    # a pass every OB1_BOARD_SYNC_INTERVAL seconds (300), each stamping a heartbeat
+bun sync-linear.ts --url … --trigger                 # the coordinator's mode: a pass at its start and at each SIGWINCH, its heartbeat stamped; the coordinator sends one every OB1_BOARD_SYNC_INTERVAL seconds (300); --loop is retired (SMD-3476)
 bun sync-linear.ts --url … --full                    # re-render and compare every issue, not only the moved ones
 bun sync-linear.ts --url … --only SMD-1954,SMD-1865  # these identifiers, whatever the plan says of them
 bun sync-linear.ts --self-check                      # the pure rules and the write decisions, no network, no database
@@ -5568,9 +5569,9 @@ says of them, and names one the census lacks; `--audit` takes no `--only`. The
 scheduled path reads ticket rows by their claim (`metadata ? 'issue'`, indexable)
 and adds the header scan over every thought's text — a sequential scan — only
 when that plan has a *missing* identifier, since a hand paste is the one thing
-that could hold it; `--full` and `--audit` always scan. Under `--loop`, SIGTERM
-ends the pass after the issue in hand (the compose service allows 60 s); the next
-pass finds what was left.
+that could hold it; `--full` and `--audit` always scan. SIGTERM ends the pass
+after the issue in hand (the coordinator allows 120 s); the next pass finds what
+was left.
 
 **Two writers of one identity.** `ingest-records.ts --linear <dump>` and this tool
 both key a ticket on `metadata.issue`, and since SMD-1958 they write the same
@@ -5842,11 +5843,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3105 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1884 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1888 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1040 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 447 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 451 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
