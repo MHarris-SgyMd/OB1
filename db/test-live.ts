@@ -9473,6 +9473,67 @@ if (want("16")) {
   const statusAfter = await consolidate("--status");
   assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
 
+  // SMD-2608 (114): who decided, on the row — the worker's key on its accept and its reject, said by each and by
+  // --list; a reject run with no key carries 'consolidate' and no agent, said so; a key classified after it decided
+  // reads the registry's kind now, said so.
+  const reviewerOf = async (id: string) =>
+    (await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent FROM supersession_proposals WHERE id = ${id}::uuid`)[0] as { by: string | null; agent: string | null };
+  /** consolidate.ts run with no worker key, as the keyless cases above run it. */
+  const consolidateKeyless = (...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: keyless, cwd: HERE });
+  /** The decided-by lines a run printed, trimmed. */
+  const decidedBy = (out: string) => out.split("\n").filter((l) => /decided by:/.test(l)).map((l) => l.trim());
+  assert(/decided by: consolidator \(/.test(forced.out) && /decided by: consolidator \(/.test(unforced.out)
+      && JSON.stringify(await reviewerOf(directed.id)) === JSON.stringify({ by: "consolidator", agent: agent.id }),
+    `the accept and the reject each say who decided, and the row records the worker's key and agent (${decidedBy(unforced.out)[0]})`);
+  const noKeyReject = await consolidateKeyless("--reject", undirected.id, "--note", "no key");
+  assert(noKeyReject.code === 0 && /decided by: consolidate, no agent id recorded \(run with no key, or a key that did not resolve\)/.test(noKeyReject.out)
+      && JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    `a reject run with no key records 'consolidate' and no agent, and says so (${decidedBy(noKeyReject.out)[0]})`);
+  const listRejected = await consolidate("--list", "rejected");
+  const decidedLines = decidedBy(listRejected.out);
+  assert(decidedLines.length === 2 && decidedLines.includes("decided by: consolidator (a key the registry has not classified)") && decidedLines.includes("decided by: consolidate, no agent id recorded (run with no key, or a key that did not resolve)"),
+    `--list rejected shows who decided each row (${decidedLines.join(" | ")})`);
+  await sql`UPDATE ob1_agents SET kind = 'operator' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const listClassified = await consolidate("--list", "rejected");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(listClassified.out.includes("decided by: consolidator (operator — classified after it decided)") && listClassified.out.includes("decided by: consolidate, no agent id recorded"),
+    `a key classified after it decided reads the registry's kind now, said so; a decision with no agent lends none (${decidedBy(listClassified.out).join(" | ")})`);
+  const reAccepted = await consolidate("--accept", undirected.id, "--direction", "newer");
+  assert(reAccepted.code === 0 && (await supersedesOf(green)) === blue && (await reviewerOf(undirected.id)).by === "consolidator",
+    "…and accepted again under the key, the reviewer replaced and the pointer back as the cells below expect it");
+  const listAccepted = await consolidate("--list", "accepted");
+  const acceptedLines = decidedBy(listAccepted.out);
+  assert(listAccepted.code === 0 && acceptedLines.length === 1 && acceptedLines[0] === "decided by: consolidator (a key the registry has not classified)",
+    `--list accepted shows who decided the accepted row (${acceptedLines.join(" | ")})`);
+  // A key classified before it decides: its kind at the decision, with no "since" (the reject clears nothing).
+  await sql`UPDATE ob1_agents SET kind = 'agent' WHERE canonical_agent_id = ${agent.id}::uuid`;
+  const classifiedReject = await consolidate("--reject", directed.id, "--note", "classified first");
+  await sql`UPDATE ob1_agents SET kind = NULL WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(classifiedReject.code === 0 && classifiedReject.out.includes("decided by: consolidator (agent)\n"),
+    `a key classified before it decides is recorded with its kind then, and still says it once the registry forgets it (${decidedBy(classifiedReject.out)[0]})`);
+  // A brain short of 114 (its columns gone, the trigger with them): a decision still lands, says the row records no
+  // reviewer, and rolls nothing back; --list says once that it cannot show who decided. Keyless, so the worker's
+  // audit rows below stay the reviews they count. 114 put back after, its backfill naming the keyless accept.
+  await sql`ALTER TABLE supersession_proposals DROP COLUMN reviewed_by CASCADE, DROP COLUMN reviewed_by_agent_id CASCADE, DROP COLUMN reviewed_by_kind CASCADE`;
+  let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
+  let shortStatus: string, shortPointer: string | null;
+  try {
+    shortReject = await consolidateKeyless("--reject", undirected.id, "--note", "short of 114");
+    shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
+    shortList = await consolidateKeyless("--list", "rejected");
+    shortAccept = await consolidateKeyless("--accept", undirected.id, "--direction", "newer");
+    shortPointer = await supersedesOf(green);
+  } finally {
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_proposal_reviewer.sql") });
+  }
+  assert(shortReject.code === 0 && shortReject.out.includes("  the reject records no reviewer on the row: this brain is short of migration 114") && shortStatus === "rejected"
+      && shortAccept.code === 0 && shortAccept.out.includes("  the accept records no reviewer on the row: this brain is short of migration 114") && shortPointer === blue,
+    `on a brain short of 114 a reject and an accept each land and say the row records no reviewer (${shortReject.out.split("\n").filter((l) => /reviewer/.test(l)).map((l) => l.trim()).join(" | ")}; ${shortStatus}, pointer ${shortPointer === blue ? "back" : shortPointer})`);
+  assert(shortList.code === 0 && shortList.out.split("Who decided each row is not shown: this brain is short of migration 114").length === 2 && !/decided by:/.test(shortList.out),
+    `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
+  assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
+    "…and 114 put back, its backfill names the keyless accept from its audit row");
+
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;
   const retried = await consolidate("--retry-failed");
@@ -9526,10 +9587,11 @@ if (want("16")) {
   assert(widest.code === 0 && /no entity has gone 2000000 days/.test(widest.out) && /timestamp out of range/.test(pastFloor) && claimMax === "claimed" && /does not exist/.test(claimPast),
     `--stale ${MAX_STALE_DAYS} lists where 3,000,000 days is out of Postgres's range (${pastFloor}), and claim_thoughts takes MAX_BATCH where one more matches no signature (${claimPast.slice(0, 60)})`);
 
-  // The worker never wrote thought_audit itself: the three rows under its name
-  // are the two acceptances and the rejection's clearing.
+  // The worker never wrote thought_audit itself: the rows under its name are
+  // the reviews — four accepts (the fourth SMD-2608's, after a keyless reject
+  // whose clearing is under 'consolidate') and two cleared rejects.
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
-  assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
+  assert(Number(actorRows) === 6, `the worker's audit rows are exactly the reviews: four accepts and two cleared rejects (${actorRows})`);
 
   // 067 (SMD-2297): a stale proposal — 063's rebuild set it stale when a text
   // moved under the verdict — is the pass's to settle or replace. Through the
@@ -9693,7 +9755,7 @@ if (want("16")) {
     const beaconOut = await proposalRow(beacon.id);
     assert(fellOut.code === 0 && /stale proposals: 1 settled by the pass \(1 no longer a candidate pair\)/.test(fellOut.out) && beaconOut.status === "rejected" && beaconOut.review_note === passSettledNote("no longer a candidate pair — no shared entity", KEY) && (await lineageOf(beacon.id))[0].recipe.settled === "not-a-candidate" && (await lineageOf(beacon.id))[0].recipe.reason === "no shared entity",
            `a stale pair with no shared entity left is settled as no longer a candidate, at the current texts (exit ${fellOut.code}: ${staleLine(fellOut.out)}; ${JSON.stringify(beaconOut)})`);
-    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
+    assert(beaconOut.review_note!.startsWith(PASS_SETTLED_PREFIX) && (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "every settle carries the marker, and none appended an audit row: the pass never wrote thoughts");
     // A stale pair whose judge call TIMES OUT was reached, not left out: the
     // row stays stale, the thought is recorded failed, --retry-failed
     // revisits it — and a run meanwhile does not re-pool a failed thought
@@ -9793,7 +9855,7 @@ if (want("16")) {
       `the consolidation follower stamped one heartbeat under its key, stopped, with no malformed block (${cb.map((b) => `${b.key} ${b.value}`).join("; ")})`);
     const olderBack = await consolidate("--status");
     assert(olderBack.code === 0 && !/stale/.test(olderBack.out.split("\n").find((l) => /queue:/.test(l)) ?? "x stale"), `no stale row is left (${olderBack.out.split("\n").find((l) => /queue:/.test(l))?.trim().slice(0, 160)})`);
-    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 5, "…still without an audit row");
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`)[0].n === 6, "…still without an audit row");
     // A person may not borrow the marker: rebuild_derived would read the
     // rejection as the pass's and reopen it on a move.
     const borrowed = await consolidate("--reject", cedar.id, "--note", `${PASS_SETTLED_PREFIX} by hand`);

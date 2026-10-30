@@ -830,7 +830,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const writerFlagLine = (status: string, flags: StandingFlag[], p: { older: ProposalSide; newer: ProposalSide }) =>
     `     writer: ${writerFlagsText(flags, p)}${status === "pending" || status === "stale" ? writerFlagAdvice(flags) : ""}`;
   /** review_supersession_proposal's answer (029/036), plus the CLI's own LINEAGE_PAIR (070) and WRITER (SMD-2707) refusals. */
-  type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean; flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[] };
+  type ReviewResult = { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean; flags?: StandingFlag[]; lapsed?: { id: string; onto: string }[]; reviewer?: Map<string, Reviewer> | "no-114" };
   // Thought content, the judge's reason, a review note and entity names are
   // untrusted; snipText (the MCP replies' cleaner) puts each on one line —
   // every break a reader may take, NEL among them, a space — and strips what
@@ -895,6 +895,43 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return { flags, older, newer, edited: r.older_moved === true || r.newer_moved === true, status: String(r.proposal_status),
       sides: { older: { lapses: arr(r.older_lapses) }, newer: { lapses: arr(r.newer_lapses) } } };
   }
+
+  /**
+   * SMD-2608: who decided each of these rows (114's columns, which its trigger
+   * stamps from the key that decided), by id — the listing (110) does not
+   * carry them, so they are read beside it as the writers are — and, for an
+   * agent, the registry's kind now, beside the kind it had when it decided.
+   * "no-114" on a brain short of the file, found by a probe rather than by
+   * the read failing: a decision reads this inside its own transaction,
+   * which a failed statement would roll back.
+   */
+  type Reviewer = { name: string | null; agentId: string | null; kind: string | null; kindNow: string | null };
+  async function reviewersOf(ids: string[], q: typeof sql = sql): Promise<Map<string, Reviewer> | "no-114"> {
+    if (!ids.length) return new Map();
+    const [{ has }] = (await q`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                             WHERE table_schema = 'public' AND table_name = 'supersession_proposals' AND column_name = 'reviewed_by_kind') AS has`) as { has: boolean }[];
+    if (!has) return "no-114";
+    const rows = (await q`SELECT id::text AS id, reviewed_by, reviewed_by_agent_id::text AS agent, reviewed_by_kind,
+                                 CASE WHEN reviewed_by_agent_id IS NOT NULL THEN ob1_registry_kind(reviewed_by_agent_id, reviewed_by) END AS kind_now
+                            FROM supersession_proposals WHERE id = ANY(${sql.array(ids, "UUID")}::uuid[])`) as
+      { id: string; reviewed_by: string | null; agent: string | null; reviewed_by_kind: string | null; kind_now: string | null }[];
+    return new Map(rows.map((r) => [r.id, { name: r.reviewed_by, agentId: r.agent, kind: r.reviewed_by_kind, kindNow: r.kind_now }]));
+  }
+  const SHORT_OF_114 = "this brain is short of migration 114 (cd db && bun migrate.ts --url <url>)";
+  const REVIEWERS_UNREAD = `Who decided each row is not shown: ${SHORT_OF_114}.`;
+  /**
+   * SMD-2608: a decided row's reviewer — the key's name and its kind (the
+   * kind it had when it decided, else the registry's now, said so), a
+   * decision with no agent said so, and none recorded said so. The name
+   * through the replies' cleaner: a key's name is the operator's, but one line.
+   */
+  const reviewerText = (r: Reviewer | undefined): string => {
+    const kind = (k: Reviewer) => k.kind ?? (k.kindNow ? `${k.kindNow} — classified after it decided` : "a key the registry has not classified");
+    return r?.name && r.agentId ? `${snippet(r.name, 80)} (${kind(r)})`
+      : r?.name ? `${snippet(r.name, 80)}, no agent id recorded (run with no key, or a key that did not resolve)`
+      : r?.agentId ? `agent ${r.agentId} (${kind(r)}), no name`
+      : "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
+  };
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 110's seven-argument form, always: 029, 070 or 109 re-applied by hand
@@ -966,6 +1003,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
     const proposals = withWriters(rows as unknown as Record<string, unknown>[], writers, read).map(normaliseProposal);
     if (!read) out(`  ${WRITERS_UNREAD}\n`);
+    // SMD-2608: who decided each decided row, said once on a brain short of 114.
+    const decided = (p: Listed) => p.status === "accepted" || p.status === "rejected";
+    const reviewers = await reviewersOf(rows.filter(decided).map((p) => p.id));
+    if (reviewers === "no-114" && rows.some(decided)) out(`  ${REVIEWERS_UNREAD}\n`);
     rows.forEach((p, i) => {
       const np = proposals[i];
       const flags = standingFlags(np);
@@ -979,6 +1020,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
       out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
+      if (reviewers !== "no-114" && decided(p)) out(`     decided by: ${reviewerText(reviewers.get(p.id))}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1070,29 +1112,31 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         ? { ok: false, error: "LINEAGE_PAIR" }
         : writers !== "no-094" && writers?.flags.some((f) => f.how !== "if")
             ? { ok: false, error: "WRITER", flags: writers.flags }
-            : decision === "accept"
-              // SMD-2707: the accept and a read of what its lapse cleared, in one
-              // transaction — 082's lapse writes each cleared pointer as an update
-              // event of this transaction's, under this actor.
-              ? await sql.begin(async (tx) => {
-                  const r = await review(tx as unknown as typeof sql);
-                  if (r.ok) {
-                    // This transaction's own events (xmin, review pass 4: two
-                    // accepts under one actor name sharing now() each read the
-                    // other's); the write path writes nothing inside a
-                    // subtransaction, and test-live's lapse cell fails if it
-                    // ever does. In the order the lapse cleared them, which is
-                    // the order --list named them (SMD-3035's one walk).
-                    r.lapsed = (await tx`
-                      SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
-                       WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
-                         AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
-                         AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
-                       ORDER BY seq`) as { id: string; onto: string }[];
-                  }
-                  return r;
-                })
-              : await review(sql);
+            // SMD-2707: the accept and a read of what its lapse cleared, in one
+            // transaction — 082's lapse writes each cleared pointer as an update
+            // event of this transaction's, under this actor. SMD-2608: and the
+            // reviewer the row records, read in that transaction too, so a
+            // decision racing this one is never what this one prints.
+            : await sql.begin(async (tx) => {
+                const q = tx as unknown as typeof sql;
+                const r = await review(q);
+                if (r.ok && decision === "accept") {
+                  // This transaction's own events (xmin, review pass 4: two
+                  // accepts under one actor name sharing now() each read the
+                  // other's); the write path writes nothing inside a
+                  // subtransaction, and test-live's lapse cell fails if it
+                  // ever does. In the order the lapse cleared them, which is
+                  // the order --list named them (SMD-3035's one walk).
+                  r.lapsed = (await q`
+                    SELECT thought_id::text AS id, diff->'supersedes'->>'before' AS onto FROM thought_audit
+                     WHERE created_at = now() AND action = 'update' AND actor_name = ${actorName}
+                       AND xmin::text = (pg_current_xact_id()::text::bigint % 4294967296)::text
+                       AND diff ? 'supersedes' AND diff->'supersedes'->>'after' IS NULL
+                     ORDER BY seq`) as { id: string; onto: string }[];
+                }
+                if (r.ok) r.reviewer = await reviewersOf([id], q);
+                return r;
+              });
       if (res.ok) {
         if (decision === "accept") {
           out(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -1104,6 +1148,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         } else {
           out(`  rejected ${id}${res.cleared ? `: the supersedes pointer this proposal had set is cleared` : ""}`);
         }
+        // SMD-2608: what the row records as its reviewer — a brain short of 114 records none, said so.
+        out(res.reviewer === "no-114" ? `  the ${decision} records no reviewer on the row: ${SHORT_OF_114}` : `  decided by: ${reviewerText(res.reviewer?.get(id))}`);
       } else {
         code = 1;
         const why: Record<string, string> = {
