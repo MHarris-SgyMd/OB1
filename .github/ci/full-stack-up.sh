@@ -67,9 +67,17 @@ echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # /tmp/provider-stub-slow-embed exists an embedding answers after
 # 6 s, so a search's SSE stream carries the server's 5 s keepalive
 # frame before its result (deploy-stack-auth's proxy step, SMD-1846).
+# Each connection has a thread of its own, and one silent for 10 s is
+# dropped, the log saying "Request timed out" (SMD-3567). A container
+# stopped while its request body is still unsent leaves the stub a
+# connection that never ends: the rest of the body and the close go
+# with the container's network, and a 1 MB body is enough. With one
+# thread, such a connection held the stub for the rest of the job: on
+# 2026-10-29, `api` recreated a second after the GUI step's 800 kB
+# thought, no later step had a provider.
 nohup python3 - <<'PY' > /tmp/provider-stub.log 2>&1 &
 import json, math, os, re, time, zlib
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 def embed(text):
     text = (text or "").split("\nQuery: ", 1)[-1]
     v = [0.0] * 1024
@@ -83,6 +91,7 @@ def wrong(text):
     n = math.sqrt(sum(x * x for x in v))
     return [x / n for x in v]
 class H(BaseHTTPRequestHandler):
+    timeout = 10
     def reply(self, body):
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
@@ -97,7 +106,7 @@ class H(BaseHTTPRequestHandler):
         f = wrong if os.path.exists("/tmp/provider-stub-wrong") else embed
         data = [{"object": "embedding", "index": i, "embedding": f(t)} for i, t in enumerate(inputs)]
         self.reply(json.dumps({"object": "list", "data": data, "model": req.get("model")}).encode())
-HTTPServer(("0.0.0.0", 11434), H).serve_forever()
+ThreadingHTTPServer(("0.0.0.0", 11434), H).serve_forever()
 PY
 # OB1_GIT_SHA reaches the image as compose's build arg (SMD-2041),
 # and the smoke step asserts the health body reports it. The quoted
