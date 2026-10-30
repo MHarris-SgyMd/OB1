@@ -1217,10 +1217,10 @@ jobs:
           # The legs the start step launched, by the names their logs and codes carry.
           { mapfile -t legs < "$RUNNER_TEMP/data-layer.legs" && [ "${#legs[@]}" -gt 0 ]; } || { echo "::error title=SQL data layer::the start step named no leg in $RUNNER_TEMP/data-layer.legs"; exit 1; }
           waiting() { local l; for l in "${legs[@]}"; do [ -f "$RUNNER_TEMP/$l.rc" ] || return 0; done; return 1; }
+          listed() { local l; for l in "${legs[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
           while waiting && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
           summaries=""
           failed=0
-          listed() { local l; for l in "${legs[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
           # A suite's log no leg wrote is a background leg started outside
           # leg() (a raw `( … ) &`, as this step's legs were before review
           # pass 3), whose code nobody reads: refused (review pass 4).

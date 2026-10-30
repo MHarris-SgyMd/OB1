@@ -3038,10 +3038,10 @@ else {
   const { SQL } = await import("bun");
   const SQL_ENV = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE };
   const claims = new SQL({ url: LIVE, max: 1 });
-  // [5]'s second half until SMD-3468, which split it here so the two run in
-  // two shards: from a dropped schema, so it starts from one state in either,
-  // [5]'s rows and keys gone; the full apply below already ignored what
-  // [5]'s reapply blocks left of the schema.
+  // [5]'s second half until SMD-3468 split it here, so the two run in two
+  // shards. It starts from a dropped schema, one state in either: a guard, as
+  // the full apply below took nothing from what [5] left (a full run passes
+  // without the drop).
   await dropSchema(LIVE);
 
   // The capture path's SECURITY INVOKER writers run as the calling role. A role
