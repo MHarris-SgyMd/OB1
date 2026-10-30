@@ -300,7 +300,7 @@ guards against the accident (`plugins/README.md`).
 ## Expected outcome
 
 `bun test-schema.ts` prints `3082 assertions: 3082 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and thirteen (113) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fourteen (114) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -341,7 +341,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-2608).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 114 SMD-2608).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2166,7 +2166,7 @@ duplicate refusal, the re-apply), test-upgrade [20bd] (onto a populated brain at
 111, a duplicate refused by name), `server-portable/test-e2e-sql.ts` [24] (the
 tools).
 
-Migration 113 records who decided a proposal, accept and reject alike
+Migration 114 records who decided a proposal, accept and reject alike
 (SMD-2608). An accept was audited under the reviewer's key through its
 `thought_audit` row, but a reject wrote no row unless it cleared a pointer, so
 who rejected a proposal was recorded nowhere. Three columns on
@@ -2185,7 +2185,7 @@ row says, and so does a run whose key did not resolve; a raw call with no
 envelope records none. They describe the decision that stands, as `reviewed_at`
 and `review_note` do. Columns and not a reject event in `thought_audit`, because
 that log is the thoughts' and a reject that clears nothing changes no thought.
-Rows decided before 113 are backfilled from the audit where a decision wrote a
+Rows decided before 114 are backfilled from the audit where a decision wrote a
 pointer (an accept that set one, a reject that cleared one), the kind only where
 the audit row names an agent and stamped it at the write; the rest stay NULL.
 Two CHECKs hold a kind to the registry's and to a row naming an agent, and an
@@ -2200,7 +2200,7 @@ decide holds the capture group's `SELECT` on `ob1_agents`; a role granted the
 worker group alone is refused a keyed reject it could make before (it could make
 no other part of a review). A data-only reload with the trigger enabled empties
 every reviewer (a full `pg_restore` creates triggers after the data).
-test-schema [101], test-upgrade [20be] (refused without each prerequisite; the
+test-schema [101], test-upgrade [20bf] (refused without each prerequisite; the
 backfill onto a populated brain at 112), test-live [16] (`--reject` and `--list`
 with and without a key).
 
@@ -3803,7 +3803,7 @@ and still offers the reviewer's decision (an accept takes `--force`).
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
 `MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and a decision is
-recorded on the proposal's row under the key's name, agent and kind (113,
+recorded on the proposal's row under the key's name, agent and kind (114,
 SMD-2608) — an accept, and a reject that clears a pointer, are audited under the
 key's name with the pass key as session too. Without it the run says so and
 proceeds, its proposals carrying no agent id and its decisions recorded as

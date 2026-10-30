@@ -552,7 +552,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
   // listing pages, SMD-3249), 111 (a thought's own subject
   // recorded, SMD-3306), 112 (a thought's client_key, one thought
-  // per key, SMD-3314) and 113 (who decided a proposal, SMD-2608)
+  // per key, SMD-3314) and 114 (who decided a proposal, SMD-2608)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -699,9 +699,9 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]); 113 adds the reviewer
+  // refusing by name rows that share one ([20bd]); 114 adds the reviewer
   // columns, their trigger and two CHECKs, refusing by name without 008,
-  // 029, 046 or 050 ([20be]) — all
+  // 029, 046 or 050 ([20bf]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -5005,38 +5005,38 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 050; onto a populated brain at the file before it — proposals decided before it, the reviewer backfilled from the audit for an accept that wrote its pointer and a reject that cleared one, none guessed for a reject that cleared nothing; no thought, audit row or decision moved; a decision after it stamped with its key; a re-apply a no-op (SMD-2608)");
+console.log("\n[20bf] Migration 114: refused by name without 008, 029, 046 or 050; onto a populated brain at the file before it — proposals decided before it, the reviewer backfilled from the audit for an accept that wrote its pointer and a reject that cleared one, none guessed for a reject that cleared nothing; no thought, audit row or decision moved; a decision after it stamped with its key; a re-apply a no-op (SMD-2608)");
 {
-  const the113 = MIGRATIONS.find((f) => f.endsWith("_proposal_reviewer.sql"))!;  // by name: renumbered when main takes its number
+  const the114 = MIGRATIONS.find((f) => f.endsWith("_proposal_reviewer.sql"))!;  // by name: renumbered when main takes its number
   for (const [stop, needs] of [
-    ["008", "migration 113 needs 008 (ob1_current_actor); this schema lacks it"],
-    ["029", "migration 113 needs 029 (supersession_proposals); this schema lacks it"],
-    ["046", "migration 113 needs 046 (ob1_registry_kind); this schema lacks it"],
-    ["050", "migration 113 needs 050 (thought_audit.seq); this schema lacks it"],
+    ["008", "migration 114 needs 008 (ob1_current_actor); this schema lacks it"],
+    ["029", "migration 114 needs 029 (supersession_proposals); this schema lacks it"],
+    ["046", "migration 114 needs 046 (ob1_registry_kind); this schema lacks it"],
+    ["050", "migration 114 needs 050 (thought_audit.seq); this schema lacks it"],
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
-    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
-    assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `114 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
   }
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the114 });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
   const t: string[] = [];
   for (let i = 0; i < 10; i++)
-    t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
-  const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
-  const OPERATOR = { name: "upgrade-113-operator", via: "consolidate", agent_id: agent };
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 114: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const [{ id: agent }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-114-operator', 'operator') RETURNING canonical_agent_id::text AS id`;
+  const OPERATOR = { name: "upgrade-114-operator", via: "consolidate", agent_id: agent };
   // A second key clears what the first accepted: the backfill must name the clear's own row, by its time.
-  const [{ id: agent2 }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-113-agent', 'agent') RETURNING canonical_agent_id::text AS id`;
-  const AGENT = { name: "upgrade-113-agent", via: "open-brain-api", agent_id: agent2 };
+  const [{ id: agent2 }] = await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-114-agent', 'agent') RETURNING canonical_agent_id::text AS id`;
+  const AGENT = { name: "upgrade-114-agent", via: "open-brain-api", agent_id: agent2 };
   const propose = async (o: number, n: number) =>
     String((await sql`SELECT record_supersession_proposal(${t[o]}::uuid, ${t[n]}::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`)[0].id);
   const review = async (id: string, decision: string, actor: object = OPERATOR) =>
-    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 113', NULL, ${actor}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
-  // Before 113: an accept that writes its pointer, an accept then a clearing reject, a reject that clears nothing.
+    (await sql`SELECT review_supersession_proposal(${id}::uuid, ${decision}, 'decided before 114', NULL, ${actor}::jsonb, false) AS r`)[0].r as { ok: boolean; cleared?: boolean };
+  // Before 114: an accept that writes its pointer, an accept then a clearing reject, a reject that clears nothing.
   // reRejected: cleared by one key, then rejected again by another, clearing nothing — the clear's row is an earlier
   // decision's, and the standing one has none.
   const accepted = await propose(0, 1), cleared = await propose(2, 3), plain = await propose(4, 5), reRejected = await propose(3, 5);
@@ -5046,22 +5046,22 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   // kind by name), and a key classified after it decided, its audit row's kind filled in by 046's backfill.
   await sql`INSERT INTO ob1_agents (label, kind) VALUES ('consolidate', 'operator')`;
   const keyless = await propose(6, 7), lateKind = await propose(8, 9);
-  const [{ id: late }] = await sql`INSERT INTO ob1_agents (label) VALUES ('upgrade-113-late') RETURNING canonical_agent_id::text AS id`;
-  const LATE = { name: "upgrade-113-late", via: "consolidate", agent_id: late };
+  const [{ id: late }] = await sql`INSERT INTO ob1_agents (label) VALUES ('upgrade-114-late') RETURNING canonical_agent_id::text AS id`;
+  const LATE = { name: "upgrade-114-late", via: "consolidate", agent_id: late };
   decisions.push(await review(keyless, "accept", { name: "consolidate", via: "consolidate" }), await review(lateKind, "accept", LATE));
-  await sql`SELECT set_agent_kind('upgrade-113-late', 'agent')`;
+  await sql`SELECT set_agent_kind('upgrade-114-late', 'agent')`;
   await sql`SELECT backfill_thought_audit_events(NULL)`;
-  const auditKinds = await sql`SELECT actor_name, actor_kind, backfilled_at IS NOT NULL AS late FROM thought_audit WHERE actor_name IN ('consolidate', 'upgrade-113-late') AND diff ? 'supersedes' ORDER BY actor_name`;
-  assert(JSON.stringify(auditKinds) === JSON.stringify([{ actor_name: "consolidate", actor_kind: "operator", late: false }, { actor_name: "upgrade-113-late", actor_kind: "agent", late: true }]),
-    `before 113 the audit holds a kind for both: the keyless accept's from the name, the late key's filled in (${JSON.stringify(auditKinds)})`);
+  const auditKinds = await sql`SELECT actor_name, actor_kind, backfilled_at IS NOT NULL AS late FROM thought_audit WHERE actor_name IN ('consolidate', 'upgrade-114-late') AND diff ? 'supersedes' ORDER BY actor_name`;
+  assert(JSON.stringify(auditKinds) === JSON.stringify([{ actor_name: "consolidate", actor_kind: "operator", late: false }, { actor_name: "upgrade-114-late", actor_kind: "agent", late: true }]),
+    `before 114 the audit holds a kind for both: the keyless accept's from the name, the late key's filled in (${JSON.stringify(auditKinds)})`);
   assert(decisions.every((d) => d.ok) && decisions[2].cleared === true && decisions[3].cleared === false && decisions[5].cleared === true && decisions[6].cleared === false,
-    `the decisions before 113: an accept, a clearing reject, a reject clearing nothing, and a clear then a reject clearing nothing (${JSON.stringify(decisions)})`);
+    `the decisions before 114: an accept, a clearing reject, a reject clearing nothing, and a clear then a reject clearing nothing (${JSON.stringify(decisions)})`);
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const decided = async () => JSON.stringify(await sql`SELECT id, status, reviewed_at::text AS r, review_note, superseding_id, pointer_written FROM supersession_proposals ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const before = { rows: await rows(), decided: await decided(), audits: await audits() };
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 });
   const who = async (id: string) => JSON.stringify((await sql`SELECT reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind FROM supersession_proposals WHERE id = ${id}::uuid`)[0]);
   const named = JSON.stringify({ by: OPERATOR.name, agent, kind: "operator" }), none = JSON.stringify({ by: null, agent: null, kind: null });
   const namedAgent = JSON.stringify({ by: AGENT.name, agent: agent2, kind: "agent" });
@@ -5074,8 +5074,8 @@ console.log("\n[20be] Migration 113: refused by name without 008, 029, 046 or 05
   // After it, a reject that clears nothing records its key — the case SMD-2608 found recording nothing.
   const later = await propose(1, 4);
   await review(later, "reject");
-  assert((await who(later)) === named, `after 113 a reject that clears nothing records the key that decided it (${await who(later)})`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  assert((await who(later)) === named, `after 114 a reject that clears nothing records the key that decided it (${await who(later)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the114 });
   assert((await who(later)) === named && (await who(plain)) === none, "a re-apply a no-op: the stamped row kept, none guessed");
   await sql.close();
 }

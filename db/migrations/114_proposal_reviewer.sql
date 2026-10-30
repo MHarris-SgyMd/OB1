@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 113: who decided a proposal — the reviewer on the row, stamped
+-- Migration 114: who decided a proposal — the reviewer on the row, stamped
 --                from the key that made the decision, accept and reject alike
 --                (SMD-2608)
 -- =============================================================================
@@ -127,9 +127,9 @@
 --   through the same functions and gets the reviewer stamped. MINOR under
 --   FORK.md's version rules: columns and a trigger added, nothing a caller
 --   passes or reads changed.
---   test-schema [101], test-upgrade [20be], test-live [16] (--accept,
+--   test-schema [101], test-upgrade [20bf], test-live [16] (--accept,
 --   --reject and --list with a key and without, a key classified before and
---   after it decided, and a brain short of 113).
+--   after it decided, and a brain short of 114).
 --
 -- Prerequisites
 --   008 (ob1_current_actor), 029 (supersession_proposals), 046
@@ -145,27 +145,27 @@ DO $qc$
 BEGIN
   IF to_regprocedure('ob1_current_actor()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 008 (ob1_current_actor); this schema lacks it',
+      MESSAGE = 'migration 114 needs 008 (ob1_current_actor); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regclass('supersession_proposals') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 029 (supersession_proposals); this schema lacks it',
+      MESSAGE = 'migration 114 needs 029 (supersession_proposals); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_registry_kind(uuid, text)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 046 (ob1_registry_kind); this schema lacks it',
+      MESSAGE = 'migration 114 needs 046 (ob1_registry_kind); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                   WHERE table_schema = 'public' AND table_name = 'thought_audit' AND column_name = 'seq') THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 113 needs 050 (thought_audit.seq); this schema lacks it',
+      MESSAGE = 'migration 114 needs 050 (thought_audit.seq); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -178,11 +178,11 @@ ALTER TABLE supersession_proposals
   ADD COLUMN IF NOT EXISTS reviewed_by_kind     text;
 
 COMMENT ON COLUMN supersession_proposals.reviewed_by IS
-  'Who decided the row: the name the decision''s actor envelope (ob1.actor) carried, as thought_audit.actor_name records it — the key''s name, or ''consolidate'' for db/consolidate.ts run with no key. NULL while unreviewed, for a decision made with no envelope, and for one made before migration 113 whose audit row does not name it. Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
+  'Who decided the row: the name the decision''s actor envelope (ob1.actor) carried, as thought_audit.actor_name records it — the key''s name, or ''consolidate'' for db/consolidate.ts run with no key. NULL while unreviewed, for a decision made with no envelope, and for one made before migration 114 whose audit row does not name it. Written only by supersession_proposals_stamp_reviewer. Migration 114 / SMD-2608.';
 COMMENT ON COLUMN supersession_proposals.reviewed_by_agent_id IS
-  'The decision''s agent (ob1_agents.canonical_agent_id) when its envelope named one in the form the server emits; NULL for a decision with no key. Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
+  'The decision''s agent (ob1_agents.canonical_agent_id) when its envelope named one in the form the server emits; NULL for a decision with no key. Written only by supersession_proposals_stamp_reviewer. Migration 114 / SMD-2608.';
 COMMENT ON COLUMN supersession_proposals.reviewed_by_kind IS
-  'The registry''s kind for the decision''s agent when it decided (ob1_registry_kind: the agent''s, else its name''s), read only when the envelope named an agent: operator, agent or ingested — so a person''s decision can be told from a machine''s. NULL for a decision with no agent, and for a key not classified when it decided (the registry holds its kind now). Written only by supersession_proposals_stamp_reviewer. Migration 113 / SMD-2608.';
+  'The registry''s kind for the decision''s agent when it decided (ob1_registry_kind: the agent''s, else its name''s), read only when the envelope named an agent: operator, agent or ingested — so a person''s decision can be told from a machine''s. NULL for a decision with no agent, and for a key not classified when it decided (the registry holds its kind now). Written only by supersession_proposals_stamp_reviewer. Migration 114 / SMD-2608.';
 
 -- The trigger goes first on a re-apply, so neither the backfill nor the
 -- CHECKs below are restamped from this transaction's empty envelope.
@@ -269,7 +269,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_stamp_proposal_reviewer() IS
-  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 113): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 113 / SMD-2608.';
+  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 114): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 114 / SMD-2608.';
 
 CREATE TRIGGER supersession_proposals_stamp_reviewer
   BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind

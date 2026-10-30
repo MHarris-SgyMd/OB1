@@ -361,7 +361,7 @@ const FUNCTIONS = [
   "ob1_drop_subject_derivation()",
   // 112 (SMD-3314): a client_key is set once — the trigger function; the trigger and the index go with thoughts.
   "ob1_client_key_set_once()",
-  // 113 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
+  // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
   "ob1_stamp_proposal_reviewer()",
 ];
 

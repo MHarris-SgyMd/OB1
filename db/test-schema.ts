@@ -3171,7 +3171,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
   assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written,pass_settled_at,reviewed_by,reviewed_by_agent_id,reviewed_by_kind",
-    `supersession_proposals has the twenty-one columns, in order — 091's pass_settled_at, then 113's reviewer three last (${cols.join(",")})`);
+    `supersession_proposals has the twenty-one columns, in order — 091's pass_settled_at, then 114's reviewer three last (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -3364,7 +3364,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const capRej = await review(capPid!, "reject");
   assert(capRej.ok === true && capRej.cleared === false && (await supersedesOf(capNew)) === capOld, "rejecting it clears nothing: the capture-time pointer was not this proposal's to clear");
   const chk = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c'`)).rows[0].c;
-  assert(chk === 11, `the table carries eleven CHECK constraints, the state machine's and 113's two among them (${chk})`);
+  assert(chk === 11, `the table carries eleven CHECK constraints, the state machine's and 114's two among them (${chk})`);
 
   // The verdict is about the texts as judged. Edit the newer thought after
   // the proposal: the queue says so, accept refuses EDITED_SINCE, --force
@@ -15957,7 +15957,7 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[100]%'`);
 }
 
-console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, reviewed_by_agent_id and reviewed_by_kind, stamped by one trigger from the decision's envelope (never the statement's values), accept and reject alike; a decision with no key carries its name alone, one with no envelope none; a reopen clears them; two CHECKs; the backfill from the audit; a re-apply a no-op (SMD-2608)");
+console.log("\n[102] Migration 114: who decided a proposal — reviewed_by, reviewed_by_agent_id and reviewed_by_kind, stamped by one trigger from the decision's envelope (never the statement's values), accept and reject alike; a decision with no key carries its name alone, one with no envelope none; a reopen clears them; two CHECKs; the backfill from the audit; a re-apply a no-op (SMD-2608)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -15972,21 +15972,21 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
      WHERE a.attrelid = 'supersession_proposals'::regclass AND a.attname IN ('reviewed_by', 'reviewed_by_agent_id', 'reviewed_by_kind') ORDER BY a.attnum`);
   const trig = await one<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('ob1_stamp_proposal_reviewer()'::regprocedure, 'pg_proc')) AS c
      FROM pg_trigger WHERE tgrelid = 'supersession_proposals'::regclass AND tgname = 'supersession_proposals_stamp_reviewer'`);
-  assert(colComments.map((r) => r.c).join() === "reviewed_by,reviewed_by_agent_id,reviewed_by_kind" && colComments.every((r) => /Migration 113 \/ SMD-2608/.test(r.d ?? ""))
-      && trig.n === 1 && /Migration 113 \/ SMD-2608/.test(trig.c ?? "") && /ob1:proposal-reviewer-from-the-envelope/.test(src),
+  assert(colComments.map((r) => r.c).join() === "reviewed_by,reviewed_by_agent_id,reviewed_by_kind" && colComments.every((r) => /Migration 114 \/ SMD-2608/.test(r.d ?? ""))
+      && trig.n === 1 && /Migration 114 \/ SMD-2608/.test(trig.c ?? "") && /ob1:proposal-reviewer-from-the-envelope/.test(src),
     `three reviewer columns, each commented; one stamping trigger, its function's comment and the file's sentinel naming it (${colComments.map((r) => r.c).join()}, ${trig.n})`);
 
   // A corpus: four pairs, one proposal each, and two classified keys.
   const t: string[] = [];
   for (let i = 0; i < 8; i++)
-    t.push((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[101] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL }), unit(40 + i)])).r.id);
+    t.push((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[102] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL }), unit(40 + i)])).r.id);
   const propose = async (o: number, n: number) =>
     (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'stub', 0.9, 'consolidate:stub@p1') AS id`, [t[o], t[n]])).id;
   const p1 = await propose(0, 1), p2 = await propose(2, 3), p3 = await propose(4, 5), p4 = await propose(6, 7);
-  const opId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[101] operator key', 'operator') RETURNING canonical_agent_id::text AS id`)).id;
-  const agId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[101] agent key', 'agent') RETURNING canonical_agent_id::text AS id`)).id;
-  const OP = { name: "[101] operator key", via: "consolidate", agent_id: opId };
-  const AG = { name: "[101] agent key", via: "open-brain-api", agent_id: agId };
+  const opId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[102] operator key', 'operator') RETURNING canonical_agent_id::text AS id`)).id;
+  const agId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[102] agent key', 'agent') RETURNING canonical_agent_id::text AS id`)).id;
+  const OP = { name: "[102] operator key", via: "consolidate", agent_id: opId };
+  const AG = { name: "[102] agent key", via: "open-brain-api", agent_id: agId };
   const review = async (id: string, decision: "accept" | "reject", actor: unknown) =>
     (await one<{ r: { ok: boolean; cleared?: boolean } }>(`SELECT review_supersession_proposal($1::uuid, $2, 'note', NULL, $3::jsonb, false) AS r`, [id, decision, actor === null ? null : JSON.stringify(actor)])).r;
   const who = async (id: string) => await one<{ by: string | null; agent: string | null; kind: string | null }>(
@@ -16013,10 +16013,10 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   assert((await whoText(p4)) === NONE, `a decision with no envelope records none (${await whoText(p4)})`);
   // An agent_id not in the server's form is no agent, as on the audit row (010's reading), and a name alone — anyone's
   // to write, here a classified key's — lends the decision no kind. The name is kept as the envelope gave it.
-  await review(p4, "reject", { name: "[101] agent key ", agent_id: "not-a-uuid" });
-  assert((await whoText(p4)) === JSON.stringify({ by: "[101] agent key ", agent: null, kind: null }), `a malformed agent id is no agent, and a classified key's name alone lends no kind (${await whoText(p4)})`);
-  await review(p4, "reject", { name: "[101] agent key" });
-  assert((await whoText(p4)) === JSON.stringify({ by: "[101] agent key", agent: null, kind: null }), `…nor that name exactly, with no agent id (${await whoText(p4)})`);
+  await review(p4, "reject", { name: "[102] agent key ", agent_id: "not-a-uuid" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[102] agent key ", agent: null, kind: null }), `a malformed agent id is no agent, and a classified key's name alone lends no kind (${await whoText(p4)})`);
+  await review(p4, "reject", { name: "[102] agent key" });
+  assert((await whoText(p4)) === JSON.stringify({ by: "[102] agent key", agent: null, kind: null }), `…nor that name exactly, with no agent id (${await whoText(p4)})`);
 
   // Never the statement's values: a write naming the columns is stamped from the envelope present (none here).
   await db.query(`UPDATE supersession_proposals SET reviewed_by = 'forged', reviewed_by_kind = 'operator' WHERE id = $1::uuid`, [p1]);
@@ -16045,7 +16045,7 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   assert(/supersession_proposals_reviewer_decided/.test(onStale) && /supersession_proposals_reviewed_by_kind/.test(badKind) && /supersession_proposals_reviewed_by_kind/.test(kindNoAgent),
     `the CHECKs hold a write made with the trigger dropped: no reviewer on an unreviewed row, a kind the registry's and only beside an agent (${onStale.slice(0, 80)}; ${badKind.slice(0, 80)}; ${kindNoAgent.slice(0, 80)})`);
 
-  // The backfill: rows decided before 113 (reviewer emptied with the trigger off), re-applied. An accept that wrote its
+  // The backfill: rows decided before 114 (reviewer emptied with the trigger off), re-applied. An accept that wrote its
   // pointer and a reject that cleared one have an audit row naming the actor; a reject that cleared nothing has none.
   await review(p3, "accept", AG);
   // p5: an accept, a clearing reject, then a reject by another key clearing nothing — the clear's audit row is an
@@ -16072,8 +16072,8 @@ console.log("\n[101] Migration 113: who decided a proposal — reviewed_by, revi
   await reapply(file.slice(0, 3));
   assert((await whoText(p3)) === BY_OP, `a re-apply leaves a row already holding a reviewer as it was, whatever its audit names (${await whoText(p3)})`);
 
-  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[101]%'`);
-  await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[101]%'`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[102]%'`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[102]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
