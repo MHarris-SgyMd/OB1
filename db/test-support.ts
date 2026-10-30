@@ -70,6 +70,10 @@ const TABLES = [
   // 069's durable async job registry (SMD-2318): no foreign key either way — a
   // job's record outlives the agent or thoughts it names — so its place is free.
   "jobs",
+  // 115's work claims (SMD-3597): no foreign key either way — a claim names a
+  // ticket by its key, not a thought — so its place is free. Its CASCADE takes
+  // the helpers whose arguments are its row type.
+  "work_claims",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -369,6 +373,22 @@ const FUNCTIONS = [
   "ob1_js_space()",
   // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
   "ob1_stamp_proposal_reviewer()",
+  // 115 (SMD-3597): work claims — the four calls and their ten helpers (the
+  // two taking work_claims' row type go with its CASCADE, and are named anyway).
+  "claim_work(text, text, text, integer, text, jsonb)",
+  "renew_work_claim(uuid, text, integer, jsonb)",
+  "release_work_claim(uuid, text, text, boolean, jsonb)",
+  "list_work_claims(text[], text, boolean, integer)",
+  "ob1_work_claim_text(text, integer, text)",
+  "ob1_work_claim_issue(text)",
+  "ob1_work_claim_lease(integer)",
+  "ob1_work_claim_token_hash(text)",
+  "ob1_work_claim_json(work_claims, timestamp with time zone)",
+  "ob1_work_claim_actor(jsonb, text)",
+  "ob1_work_claim_isolation(text)",
+  "ob1_work_claim_lock(text)",
+  "ob1_work_claim_is_holder(work_claims, text, uuid, bytea)",
+  "ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone)",
 ];
 
 /**

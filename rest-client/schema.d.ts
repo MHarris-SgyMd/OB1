@@ -233,6 +233,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Task Status
+         * @description Say each of the brain's background tasks in one word, from their heartbeat rows: the coordinator and the passes it runs (the sleep scheduler, the extraction and consolidation followers, board-sync), then any other long-running worker (a re-embed follower run by hand). Each task's `state` is one of running (a pass under way), idle (alive between passes), starting (started, not yet stamped), restarting (ended on its own, run again on the coordinator's clock), refused (held by a start refusal: deploy/.env's to mend), failed (ended on a failure), stale (no stamp in three of its intervals), stopped, or missing (the coordinator started it and it has written no heartbeat). `words` says the same in a reader's words, `coordinated` whether the coordinator runs it, and `at`/`ageS` its row's last stamp by the database's clock. brain_info and preflight read the same states. Read-only. Returns { tasks, ignored }: `ignored` counts heartbeat rows not of the shape; empty when no task has run on this brain.
+         */
+        get: operations["task_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/brain": {
         parameters: {
             query?: never;
@@ -1973,6 +1993,109 @@ export interface operations {
         };
     };
     worker_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The operation's value. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    task_status: {
         parameters: {
             query?: never;
             header?: never;
