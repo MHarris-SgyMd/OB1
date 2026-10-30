@@ -114,6 +114,11 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     retry_failed: { work_type: "extract:x@p1" },
     release_stale_leases: { work_type: "extract:x@p1", include_live: false },
     run_worker: { work_type: "extract:x@p1", dry_run: true, limit: 3 },
+    // Work claims (SMD-3598): the token rides the JSON body of each POST, never the URL.
+    list_claims: { ticket: "SMD-3379", holder: "a key", include_ended: true, limit: 7 },
+    claim_work: { ticket: "smd-3379", piece: "PR 1b-2", label: "a session & a branch", lease_seconds: 600, token: "wc_" + "0".repeat(64) },
+    renew_claim: { id: ID, token: "wc_" + "1".repeat(64), lease_seconds: 3600 },
+    release_claim: { id: ID, token: "wc_" + "2".repeat(64), reason: "merged", force: false },
   } satisfies { [K in ToolName]: InputOf<K> };
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   for (const name of TOOL_NAMES) {

@@ -42,6 +42,10 @@ export const CALLS = {
   retry_failed: (c, p, i) => c.retryFailed(p, i),
   release_stale_leases: (c, p, i) => c.releaseStaleLeases(p, i),
   run_worker: (c, p, i) => c.runWorker(p, i),
+  claim_work: (c, p, i) => c.claimWork(p, i),
+  renew_claim: (c, p, i) => c.renewClaim(p, i),
+  release_claim: (c, p, i) => c.releaseClaim(p, i),
+  list_claims: (c, p, i) => c.listClaims(p, i),
 } satisfies { [K in ToolName]: Call<K> };
 
 /** The `{field}` names a route's path fills, in order: a core route's (rest/routes.ts) or a plugin operation's. */

@@ -86,7 +86,7 @@ async function liveSubset(store: ThoughtStore, ids: string[]): Promise<string[] 
  * who carried it when it was forwarded (SMD-2284, `act`). One place, so a
  * field added to the actor reaches every write.
  */
-const actorOf = (ctx: Ctx, principal: Principal) => ({ name: principal.name, agentId: principal.agentId, via: ctx.door, ...(principal.act ? { act: principal.act } : {}) });
+export const actorOf = (ctx: Ctx, principal: Principal) => ({ name: principal.name, agentId: principal.agentId, via: ctx.door, ...(principal.act ? { act: principal.act } : {}) });
 
 /** A whole-content embedding that fell back to the head window (embed.ts): what an edit or a capture reply says about it. */
 export type HeadWindow = { fellBack: boolean; refused: boolean; error?: string };

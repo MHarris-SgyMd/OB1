@@ -44,7 +44,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -64,7 +64,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -74,7 +74,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -94,7 +94,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -195,7 +195,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -215,7 +215,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -225,7 +225,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -245,7 +245,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -381,7 +381,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -401,7 +401,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -411,7 +411,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -431,7 +431,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -539,7 +539,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -559,7 +559,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -569,7 +569,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -589,7 +589,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -772,7 +772,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -792,7 +792,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -802,7 +802,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -822,7 +822,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -999,7 +999,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1019,7 +1019,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1029,7 +1029,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1049,7 +1049,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1255,7 +1255,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1275,7 +1275,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1285,7 +1285,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1305,7 +1305,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1457,7 +1457,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1477,7 +1477,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1487,7 +1487,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1507,7 +1507,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1621,7 +1621,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1641,7 +1641,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1651,7 +1651,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1671,7 +1671,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1785,7 +1785,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1805,7 +1805,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1815,7 +1815,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1835,7 +1835,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1984,7 +1984,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2004,7 +2004,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2014,7 +2014,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2034,7 +2034,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2125,7 +2125,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2145,7 +2145,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2155,7 +2155,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2175,7 +2175,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2325,7 +2325,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2345,7 +2345,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2355,7 +2355,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2375,7 +2375,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2466,7 +2466,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2486,7 +2486,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2496,7 +2496,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2516,7 +2516,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2607,7 +2607,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2627,7 +2627,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2637,7 +2637,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2657,7 +2657,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2758,7 +2758,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2778,7 +2778,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2788,7 +2788,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2808,7 +2808,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2918,7 +2918,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2938,7 +2938,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2948,7 +2948,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2968,7 +2968,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3081,7 +3081,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3101,7 +3101,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3111,7 +3111,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3131,7 +3131,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3242,7 +3242,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3262,7 +3262,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3272,7 +3272,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3292,7 +3292,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3408,7 +3408,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3428,7 +3428,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3438,7 +3438,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3458,7 +3458,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3579,7 +3579,7 @@
             }
           },
           "400": {
-            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3599,7 +3599,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3609,7 +3609,7 @@
             }
           },
           "404": {
-            "description": "Nothing there: NOT_FOUND.",
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3629,7 +3629,7 @@
             }
           },
           "409": {
-            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP.",
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3660,6 +3660,732 @@
           },
           "501": {
             "description": "A mode not built: RUN_WORKER_DRAIN_NOT_AVAILABLE.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: \"forwarder\"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: \"token\"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "brainKey": []
+          },
+          {
+            "accessKey": []
+          },
+          {
+            "bearer": []
+          },
+          {
+            "brainKey": [],
+            "forwarder": []
+          },
+          {
+            "accessKey": [],
+            "forwarder": []
+          },
+          {
+            "bearer": [],
+            "forwarder": []
+          }
+        ]
+      }
+    },
+    "/v1/claims": {
+      "get": {
+        "operationId": "list_claims",
+        "summary": "List Work Claims",
+        "description": "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. Never shows a claim's token.",
+        "x-ob1-scope": "read",
+        "parameters": [
+          {
+            "name": "ticket",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Only this ticket's claims, its whole and its pieces (e.g. SMD-3379; case and surrounding white space don't matter)",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "holder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Only the claims of the key with this name",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "include_ended",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Also list lapsed and released claims (each with its `state`). Default false: live claims only",
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "At most this many, by ticket, piece and claim time. Default 100",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation's value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A fault (FAILED, with its message; no retryable until SMD-2461).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: \"forwarder\"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: \"token\"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "brainKey": []
+          },
+          {
+            "accessKey": []
+          },
+          {
+            "bearer": []
+          },
+          {
+            "brainKey": [],
+            "forwarder": []
+          },
+          {
+            "accessKey": [],
+            "forwarder": []
+          },
+          {
+            "bearer": [],
+            "forwarder": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "claim_work",
+        "summary": "Claim Work",
+        "description": "Claim a ticket — or one piece of it, such as `PR 1b-2` — so no other agent builds the same change. Call it when you create the branch for the work, before writing code. On success the reply carries a `token` (`wc_` and 64 hex digits), shown this once: keep it where only you read it (a git-ignored file in your worktree), and pass it to renew_claim while you work and to release_claim when the work merges or is abandoned. Never write the token into a thought, a commit, a PR, a ticket or a log: anyone holding it under your key acts as the holder. Refused (WORK_CLAIMED) while a live claim covers the work — another key's, your key's without your token, or your own on overlapping work; the reply names the holder and when its lease ends. A whole ticket and any of its pieces are the same work; two different pieces are not. The lease defaults to four hours (60 seconds to a week); a claim past it lapses and the next claim on exactly that work takes it over, yours included, so a lost token is recovered by claiming again once it lapses. Claiming again with your token renews the claim. An ingested (importer's) key cannot claim.",
+        "x-ob1-scope": "write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ticket": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The ticket key, e.g. SMD-3379 (a team key of letters and digits, a hyphen, a number; case and surrounding white space don't matter)"
+                  },
+                  "piece": {
+                    "description": "The piece of the ticket, e.g. `PR 1b-2`; omit to claim the whole ticket. Compared case-folded, its white space collapsed; at most 100 characters once cleaned",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "label": {
+                    "description": "Free text for people: your tool, machine, session and branch (at most 500 characters once cleaned). Shown to others as data",
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "lease_seconds": {
+                    "description": "How long the claim holds without a renewal, in seconds: 60 to 604800 (a week). Default 14400 (four hours)",
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 604800
+                  },
+                  "token": {
+                    "description": "Your token for this exact work, to renew your claim rather than make a new one; omit for a new claim",
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "ticket"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation's value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A fault (FAILED, with its message; no retryable until SMD-2461).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: \"forwarder\"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: \"token\"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "brainKey": []
+          },
+          {
+            "accessKey": []
+          },
+          {
+            "bearer": []
+          },
+          {
+            "brainKey": [],
+            "forwarder": []
+          },
+          {
+            "accessKey": [],
+            "forwarder": []
+          },
+          {
+            "bearer": [],
+            "forwarder": []
+          }
+        ]
+      }
+    },
+    "/v1/claims/{id}/renew": {
+      "post": {
+        "operationId": "renew_claim",
+        "summary": "Renew Work Claim",
+        "description": "Extend your claim's lease from now: the claim id and the token claim_work returned. Call it while you work, before the lease runs out. Refused when the claim is not yours (another key, or another token), when it ended (released, or taken over after it lapsed: claim the work again), or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed.",
+        "x-ob1-scope": "write",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The token claim_work returned for this claim"
+                  },
+                  "lease_seconds": {
+                    "description": "The new lease, in seconds from now: 60 to 604800. Default 14400 (four hours)",
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 604800
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation's value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A fault (FAILED, with its message; no retryable until SMD-2461).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: \"forwarder\"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: \"token\"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, SUPERSEDES_UNJUDGED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "brainKey": []
+          },
+          {
+            "accessKey": []
+          },
+          {
+            "bearer": []
+          },
+          {
+            "brainKey": [],
+            "forwarder": []
+          },
+          {
+            "accessKey": [],
+            "forwarder": []
+          },
+          {
+            "bearer": [],
+            "forwarder": []
+          }
+        ]
+      }
+    },
+    "/v1/claims/{id}/release": {
+      "post": {
+        "operationId": "release_claim",
+        "summary": "Release Work Claim",
+        "description": "End your claim when the work merges or is abandoned: the claim id and the token claim_work returned; a reason is optional. The claim's row stays as history, with who ended it and why. An operator key (classified operator by its agent id) may release another holder's stuck claim with `force: true` and a `reason`. Refused when the claim is not yours and no force applies. Releasing a claim that already ended answers already_released.",
+        "x-ob1-scope": "write",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "description": "The token claim_work returned for this claim; not needed for an operator's forced release",
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "reason": {
+                    "description": "Why the claim ends (required with force; at most 500 characters once cleaned)",
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "force": {
+                    "description": "Operator only: release another holder's claim. Needs a reason",
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The operation's value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_NOTHING_TO_UPDATE, REFUSED_CLAIM_INPUT, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing there: NOT_FOUND, CLAIM_NOT_FOUND.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, REFUSED_NOT_CAPTURE_STAMP, WORK_CLAIMED, CLAIM_RELEASED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refusal"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A fault (FAILED, with its message; no retryable until SMD-2461).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3998,7 +4724,7 @@
             }
           },
           "403": {
-            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR.",
+            "description": "The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY.",
             "content": {
               "application/json": {
                 "schema": {

@@ -5,7 +5,7 @@
 // as JSON. A refusal is what the principal may be told: a field the existence-
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
-import type { Citation } from "../store.ts";
+import type { Citation, ClaimProblem } from "../store.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
 /**
@@ -49,10 +49,21 @@ export type Refusal =
   // reset_capture_stamp (086, SMD-2744).
   | { code: "REFUSED_NOT_OPERATOR"; retryable: false; key: string; kind: string | null } // the key is not one the registry classifies operator (kind: what it is), or is capture-only
   | { code: "REFUSED_NOT_CAPTURE_STAMP"; retryable: false; id: string } // the thought's label is no capture-only key's a re-capture moves
+  // Work claims (115, SMD-3598): claim_work, renew_claim, release_claim. Never a token: 115 returns one only to the
+  // caller who claimed, in the value, and no refusal carries one.
+  | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
+  | { code: "CLAIM_NOT_FOUND"; retryable: false; id: string }         // no claim with that id
+  | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean } // not this key with this token; forced: a force refused (the key is no operator named by its agent id)
+  | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null } // a renewal of a claim that ended: released, or taken over after it lapsed
+  | { code: "REFUSED_CLAIM_INPUT"; retryable: false; problem: ClaimProblem; message: string } // an argument 115 refused by its rule (SQLSTATE 22023); message: the database's words, which never carry a token
+  | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
   // The worker actions (SMD-2132, SMD-2272).
   | { code: "REFUSED_EMPTY_WORK_TYPE"; retryable: false }            // a work_type required, or given but blank
   | { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER"; retryable: false }    // release_stale_leases' include_live without a worker_id
   | { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE"; retryable: false };    // run_worker without dry_run: true — the executing drain is deferred (SMD-2304)
+
+/** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder and times — never its label, another key's free text, nor anything that proves ownership. */
+export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string };
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
@@ -114,6 +125,14 @@ const FACTS: Facts = {
   // env's, not a token, and the kind is the registry's word about the key.
   REFUSED_NOT_OPERATOR: none,
   REFUSED_NOT_CAPTURE_STAMP: none,
+  // The claims in the way, as values a client acts on: ids, holders (a key's name, the env's), kinds and times — the
+  // piece rides the text, being another key's words (SMD-3598).
+  WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) }),
+  CLAIM_NOT_FOUND: none,
+  CLAIM_NOT_YOURS: (r) => ({ forced: r.forced }),
+  CLAIM_RELEASED: (r) => (r.releasedAt ? { releasedAt: r.releasedAt } : {}),
+  REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
+  REFUSED_CLAIM_KEY: none,
   REFUSED_EMPTY_WORK_TYPE: none,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: none,
   RUN_WORKER_DRAIN_NOT_AVAILABLE: none,

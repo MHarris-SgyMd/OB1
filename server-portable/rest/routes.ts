@@ -43,6 +43,12 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED: 422,
   REFUSED_NOT_OPERATOR: 403,
   REFUSED_NOT_CAPTURE_STAMP: 409,
+  WORK_CLAIMED: 409,
+  CLAIM_NOT_FOUND: 404,
+  CLAIM_NOT_YOURS: 403,
+  CLAIM_RELEASED: 409,
+  REFUSED_CLAIM_INPUT: 400,
+  REFUSED_CLAIM_KEY: 403,
   REFUSED_EMPTY_WORK_TYPE: 400,
   REFUSED_LIVE_LEASE_NEEDS_WORKER: 400,
   RUN_WORKER_DRAIN_NOT_AVAILABLE: 501,
@@ -89,6 +95,11 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: CALLS.retry_failed },
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: CALLS.release_stale_leases },
   run_worker: { method: "POST", path: "/v1/workers/run", ok: 200, call: CALLS.run_worker },
+  // Work claims (SMD-3598, migration 115): the token rides a JSON body, never a URL a log or a proxy may keep.
+  list_claims: { method: "GET", path: "/v1/claims", ok: 200, call: CALLS.list_claims },
+  claim_work: { method: "POST", path: "/v1/claims", ok: 200, call: CALLS.claim_work },
+  renew_claim: { method: "POST", path: "/v1/claims/{id}/renew", ok: 200, call: CALLS.renew_claim },
+  release_claim: { method: "POST", path: "/v1/claims/{id}/release", ok: 200, call: CALLS.release_claim },
 };
 
 /** The `{field}` names a route's path fills, in order — core/calls.ts's, which a plugin's manifest is checked by too. */

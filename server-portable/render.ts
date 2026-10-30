@@ -20,14 +20,15 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, WorkClaim, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import type { ClaimWorkCode, ClaimWorkResult, ListClaimsResult, ReleaseClaimCode, ReleaseClaimResult, RenewClaimCode, RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, StampReset, StampResetCode, Updated } from "./core/writes.ts";
@@ -1677,3 +1678,44 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
   REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.",
   RUN_WORKER_DRAIN_NOT_AVAILABLE: "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.",
 });
+
+// ── Work claims (SMD-3598, migration 115) ────────────────────────────────────
+// Each reply's value is its JSON (AS_JSON): claim_work's carries the token, which the guard would null as a
+// non-token string, and the caller who claimed must get it. The token is in claim_work's `claimed` text alone; no
+// refusal carries one. Another key's piece and holder are its own words: bounded to one line here, never a sentence
+// of ours.
+
+const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
+const heldLine = (c: HeldClaim) => `${workText(c.issue, c.piece)} by ${oneLine(snipText(c.holder, 80))} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. Leave it to its holder, or claim other work; a claim of your own on overlapping work is in the way too.`;
+const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message, 300))}`;
+const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
+  r.forced
+    ? `Refused: only an operator key, classified operator by its agent id, may release another holder's claim; claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}.`
+    : `Refused: claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}, not by this key with this token.`;
+
+export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
+  v.outcome === "claimed"
+    ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
+
+export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+  (r) => r.code === "CLAIM_NOT_FOUND" ? `Refused: no claim ${oneLine(snipText(r.id, 80))}.`
+    : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "CLAIM_RELEASED" ? `Refused: claim ${r.id} ended${r.releasedAt ? ` at ${r.releasedAt}` : ""} (released, or taken over after it lapsed); claim the work again.`
+    : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
+    : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
+
+export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
+  (v) => v.outcome === "released"
+    ? `Released claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)}${v.claim.releaseReason ? ` (${oneLine(snipText(v.claim.releaseReason, 200))})` : ""}.`
+    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}.`,
+  (r) => r.code === "CLAIM_NOT_FOUND" ? `Refused: no claim ${oneLine(snipText(r.id, 80))}.`
+    : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
+
+export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
