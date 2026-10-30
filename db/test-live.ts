@@ -55,7 +55,7 @@ import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from ".
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { drainer, sweepOrphans } from "./rebuild.ts";
-import type { PassStop } from "./lease.ts";
+import type { InHandAbort, PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
@@ -4683,6 +4683,25 @@ if (want("9f")) {
     const pollExit = await polled.stop();
     assert(drained && pollWaiting && unpooledC && pooledC && pollExit === "exit 0",
       `…closed before a poll, it waits before the pool — a new thought not pooled while it waits — and pools and re-embeds it once the gate opens (drained ${drained}, waiting ${pollWaiting}, unpooled ${unpooledC}, re-embedded ${pooledC}; ${pollExit})`);
+    // abortInHand (SMD-3379 PR 1b-2): a follower's embedding call in hand
+    // aborted, the thought set back, and the follower goes on to re-embed it.
+    let abortEmbed: InHandAbort | undefined;
+    const embedFrom = probeCalls;
+    // Under OB1_LLM_TIMEOUT (2 s here), so a call not aborted answers rather than times out.
+    slowMs = 1500;
+    const aborting = liveFollower({ onPass: (_st, a) => { abortEmbed = a; } });
+    await aborting.idle();
+    const slowThought = await newThought("a thought whose embedding call is aborted in hand");
+    const embedInHand = await pollUntil(async () => (await claimOf(slowThought))?.status === "claimed", 15_000);
+    await Bun.sleep(200);
+    const embedTooYoung = abortEmbed?.(60_000) ?? -1;
+    const embedAborted = abortEmbed?.() ?? -1;
+    slowMs = 0;
+    const embedded = await pollUntil(() => atModel(slowThought), 15_000);
+    const abortingExit = await aborting.stop();
+    const setBackLine = aborting.lines.find((l) => /set back in the queue/.test(l)) ?? "";
+    assert(embedInHand && embedTooYoung === 0 && embedAborted === 1 && embedded && abortingExit === "exit 0" && /1 set back in the queue, the embedding call in hand aborted by the pass's caller/.test(setBackLine),
+      `abortInHand aborts a re-embed follower's call in hand: the thought set back and re-embedded, the follower going on (${embedTooYoung} then ${embedAborted} aborted, re-embedded ${embedded}; ${abortingExit}; ${setBackLine.trim().slice(0, 160)}; ${probeCalls - embedFrom} probe(s))`);
   } finally {
     restoreOutage();
     providerDown503 = false;
@@ -6303,6 +6322,58 @@ if (want("10")) {
   assert(movedWaiting && movedInHand && movedCode === 130 && movedRow?.stops === 1 && movedRow.stalled === 0,
          `…a hard stop while the window after a 1,500 ms wait is in hand counts the thought's time from the wait's end, so a 1,000 ms floor stalls nothing (exit ${movedCode}; ${JSON.stringify(movedRow)})`);
   await sql`SELECT delete_thought(${movedNote}::uuid, NULL::jsonb)`;
+  // abortInHand (SMD-3379 PR 1b-2): the pass's caller aborts the call in hand.
+  // A long note claimed first, a short one behind it; the gate holds the long
+  // one before its second window, then lets that window's slow call go and
+  // closes again from the next ask. A call younger than the bound given is
+  // left; with none, it is aborted — the first window kept, the stop counted,
+  // the long note set behind the short one — and the worker goes on to its
+  // next claim, where the closed gate holds it for the reading.
+  const firstNote = await seed(ledgerOf("aborted", "aborted"));
+  const behindNote = await seed("Kenji's note behind the aborted ledger.");
+  const atAbort = heldGate(3);
+  let abortInHand: InHandAbort | undefined;
+  const abortLines: string[] = [];
+  const abortRun = runExtract({ url: URL_!, env, workers: 1, admit: atAbort.admit, onPass: (_st, a) => { abortInHand = a; }, writer: { out: (l) => abortLines.push(l), err: (l) => abortLines.push(l) } });
+  const abortAtWindow = await pollUntil(async () => atAbort.waiting === 1, 10_000);
+  slowMs = 3000;
+  const abortFrom = calls;
+  atAbort.open();
+  atAbort.close();
+  let abortInFlight = false;
+  for (let i = 0; i < 250 && !abortInFlight; i++) { abortInFlight = calls > abortFrom; if (!abortInFlight) await Bun.sleep(20); }
+  const tooYoung = abortInHand?.(60_000) ?? -1;
+  const aborted = abortInHand?.() ?? -1;
+  slowMs = 0;
+  const abortHeld = await pollUntil(async () => atAbort.waiting === 1, 10_000);
+  const [abortRow] = (await sql`SELECT c.status, p.stops, p.parts, c.enqueued_at > (SELECT enqueued_at FROM thought_work_claims WHERE thought_id = ${behindNote}::uuid AND work_type = ${KEY}) AS behind
+                                  FROM thought_work_claims c LEFT JOIN extraction_progress p USING (thought_id, work_type)
+                                 WHERE c.thought_id = ${firstNote}::uuid AND c.work_type = ${KEY}`) as { status: string; stops: number | null; parts: Record<string, unknown> | null; behind: boolean }[];
+  atAbort.open();
+  const abortCode = await abortRun;
+  const abortSummary = abortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(abortAtWindow && abortInFlight && tooYoung === 0 && aborted === 1 && abortHeld && abortRow?.status === "pending" && abortRow.stops === 1 && Object.keys(abortRow.parts ?? {}).length === 1 && abortRow.behind === true,
+         `abortInHand leaves a call younger than its bound, aborts the one in hand without one, and the thought goes behind the next, its first window kept and its stop counted (${tooYoung} then ${aborted} aborted; ${JSON.stringify({ status: abortRow?.status, stops: abortRow?.stops, kept: Object.keys(abortRow?.parts ?? {}).length, behind: abortRow?.behind })})`);
+  assert(abortCode <= 1 && (await statusOf(firstNote)) === "succeeded" && (await statusOf(behindNote)) === "succeeded" && /, 1 set back in the queue, the call in hand aborted by the pass's caller/.test(abortSummary),
+         `…and the worker goes on in the same run: both notes extracted, the summary counting the one set back (exit ${abortCode}: ${abortSummary.trim().slice(0, 200)})`);
+  for (const id of [firstNote, behindNote]) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
+  // …and one deleted while its call is in hand, then aborted: not the
+  // worker's to set back, so counted deleted, not set back (review pass 1).
+  const vanishing = await seed(ledgerOf("vanishing", "vanished"));
+  let abortGone: InHandAbort | undefined;
+  const goneAbortLines: string[] = [];
+  slowMs = 3000;
+  const goneAbortFrom = calls;
+  const goneAbortRun = runExtract({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortGone = a; }, writer: { out: (l) => goneAbortLines.push(l), err: (l) => goneAbortLines.push(l) } });
+  let goneInFlight = false;
+  for (let i = 0; i < 500 && !goneInFlight; i++) { goneInFlight = calls > goneAbortFrom; if (!goneInFlight) await Bun.sleep(20); }
+  await sql`SELECT delete_thought(${vanishing}::uuid, NULL::jsonb)`;
+  const goneAborted = abortGone?.() ?? -1;
+  slowMs = 0;
+  const goneAbortCode = await goneAbortRun;
+  const goneAbortSummary = goneAbortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
+  assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary) && goneAbortLines.some((l) => l.includes(`${vanishing}: deleted while it was leased`)),
+         `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -11033,6 +11104,26 @@ if (want("16")) {
   const oldersAfter = await claimStatus(latest);
   assert(oldersWaiting && olders.length === 4 && calls - oldersFrom === 1 && oldersAfter === "succeeded" && oldersCode <= 1,
          `…its older sides deleted while it waits before its second pair, none of their texts is judged once the gate opens, and the thought is finished (${olders.length} older side(s), ${calls - oldersFrom} call(s), ${oldersAfter}, exit ${oldersCode})`);
+  // abortInHand (SMD-3379 PR 1b-2): the judge call in hand aborted, the
+  // thought set back, and the worker goes on — the thought claimed again and
+  // judged in the same run (its older seed, pooled beside it, has no older
+  // side of its own to judge).
+  const abortNewer = await seed("[16g] The watchtower opens at three now.", 31, 0, ["watchtower"]);
+  await seed("[16g] The watchtower opened at nine once.", 31, 2, ["watchtower"]);
+  let abortJudge: InHandAbort | undefined;
+  const abortJudgeLines: string[] = [];
+  slowMs = 3000;
+  const abortJudgeFrom = calls;
+  const abortJudgeRun = runConsolidate({ url: URL_!, env, workers: 1, onPass: (_st, a) => { abortJudge = a; }, writer: { out: (l) => abortJudgeLines.push(l), err: (l) => abortJudgeLines.push(l) } });
+  let judgeInFlight = false;
+  for (let i = 0; i < 500 && !judgeInFlight; i++) { judgeInFlight = calls > abortJudgeFrom; if (!judgeInFlight) await Bun.sleep(20); }
+  const judgeTooYoung = abortJudge?.(60_000) ?? -1;
+  const judgeAborted = abortJudge?.() ?? -1;
+  slowMs = 0;
+  const abortJudgeCode = await abortJudgeRun;
+  const abortJudgeSummary = abortJudgeLines.find((l) => /thought\(s\) judged/.test(l)) ?? "";
+  assert(judgeInFlight && judgeTooYoung === 0 && judgeAborted === 1 && abortJudgeCode <= 1 && (await claimStatus(abortNewer)) === "succeeded" && /, 1 set back in the queue, the judge call in hand aborted by the pass's caller/.test(abortJudgeSummary),
+         `abortInHand aborts consolidation's judge call in hand: the thought set back, and the worker goes on to judge it again in the same run (${judgeTooYoung} then ${judgeAborted} aborted; exit ${abortJudgeCode}: ${abortJudgeSummary.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE content LIKE '[16g]%'`;
 
   judge.stop(true);

@@ -197,7 +197,7 @@ import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
 import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, claimAfterWait, ClaimGoneAtGate, type Admit, type PassStop } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, ClaimGoneAtGate, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
@@ -281,7 +281,7 @@ export interface ExtractOptions {
   decide?: boolean;
   writer?: Writer;
   signal?: AbortSignal;
-  onPass?: (stop: PassStop) => void;
+  onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
    * A follower's heartbeat in place of its own `heartbeat:extract:<job>` row
    * (db/pass-stamp.ts): sleep.ts's, so a wake does not end a row (SMD-1794).
@@ -1075,6 +1075,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let lastPassIdle = false;
   let vanished = 0;
   let superseded = 0;
+  /** Thoughts whose call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
+  let abortedInHand = 0;
   let lost = 0;
   let beats = 0;
   let malformed = 0;
@@ -1137,7 +1139,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     /** In hand at the hard stop: nothing written, and no longer this worker's to release. */
     | { outcome: "abandoned" }
     /** Reaped while its worker waited at the admit gate (a requeue is superseded): nothing more sent, and not this worker's to release (review passes 4 and 5). */
-    | { outcome: "lost" };
+    | { outcome: "lost" }
+    /** Its call in hand aborted by the pass's caller (abortInHand): set back in the queue, its stop counted (SMD-3379 PR 1b-2); `gone`, found deleted or another's instead, and said so (reportLost). */
+    | { outcome: "setBack"; gone?: "deleted" | "lost" };
 
   /**
    * A long thought's answered windows, kept across a claim that does not
@@ -1173,6 +1177,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * hard stop during it counts up to the wait (SMD-3379 PR 1b-1).
    */
   const inHand = new Map<string, { id: string; fingerprint: string; since: number; pausedAt?: number }>();
+  /** Each worker's model call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
   const STALL_FLOOR = opts.stallFloorMs ?? STALL_FLOOR_MS;
   /**
    * The hard stop's count for each worker, which the worker's own release
@@ -1226,8 +1232,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
 
   /** The hard stop's count on the thought a worker has in hand (093's note_extraction_stop), before its lease goes back: the function counts only for the holder. */
-  async function noteStop(workerId: string): Promise<void> {
-    const t = inHand.get(workerId);
+  async function noteStop(workerId: string, t = inHand.get(workerId)): Promise<void> {
     if (!t || !keeping) return;
     // Long: held at least the floor. Not the thought's slowest window, which
     // took a kept 280 s window's document out of the stall for good (review
@@ -1304,13 +1309,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // the model's time nor the thought's held, and a stop while it waits ends
     // the thought there as a first stop does, its windows kept.
     let paused = 0;
+    const call = inCall.get(workerId);
     const admitWindow = ADMIT ? async (): Promise<void> => {
       const at = Date.now();
       const held = inHand.get(workerId);
+      // An abort that came between calls — in a window's save — sets the
+      // thought back here, before the wait, not after it; it wins over a first
+      // stop that follows it (review passes 3 and 4).
+      if (call?.aborted) throw new AbortedInHand();
       if (held) held.pausedAt = at;
       let through: false | "open" | "waited" = false;
       try {
-        through = await admitted(ADMIT, gate);
+        through = await idleWhile(call, admitted(ADMIT, gate));
       } catch (e) {
         throw new AdmitThrow(e);
       } finally {
@@ -1337,7 +1347,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
       // call — per window of a long thought (SMD-1879).
-      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, onHardStop.signal, progress, admitWindow);
+      extraction = await extractEntities(row.content, cfg, TIMEOUT_S * 1000, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }, undefined, call ? AbortSignal.any([onHardStop.signal, call.abort.signal]) : onHardStop.signal, progress, admitWindow);
+    } catch (e) {
+      // The pass's caller aborted the call in hand: marked so, the calls it
+      // made carried on the mark, where a gate's own error or a stop between
+      // windows is left as it is (SMD-3379 PR 1b-2, review pass 1).
+      if (call?.aborted && !hardStopped && !(e instanceof StoppedBetweenWindows || e instanceof ClaimGoneAtGate || e instanceof AdmitThrow)) {
+        throw Object.assign(new AbortedInHand(), { callsMade: callsMadeBy(e) });
+      }
+      throw e;
     } finally {
       llmMs += Date.now() - t0 - paused;
     }
@@ -1384,7 +1402,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // answer for replay; a decider outage falls back to the 7B's entities inside
     // decideEntities. The row's metadata is the egress subject, as extraction's.
     if (jevCfg && extraction.entities.length) {
-      const decided = await decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined });
+      // The decider's call takes no signal: no call abortInHand can abort.
+      const decided = await idleWhile(call, decideEntities(row.content, extraction.entities, jevCfg, { kind: "extraction", actor: actorName, metadata: row.metadata ?? undefined }));
       extraction = { ...extraction, entities: decided.entities };
     }
     if (hardStopped) return { outcome: "abandoned" };
@@ -1444,10 +1463,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * --limit counts the thoughts this run has TAKEN — claimed and not handed
    * back unfinished — and the claims in flight, so two workers cannot each
    * take one on a limit of one. A row a worker hands back unfinished as it
-   * ends (an outage, a stop) leaves `taken`, and counts again only if it is
-   * claimed again; a claim that never answered took nothing; a dead worker's
-   * leases are not this run's until a claim returns them (review pass 3: a
-   * reserved count patched at three sites, each with its own edge).
+   * ends (an outage, a stop), or sets back when its call is aborted
+   * (abortInHand, SMD-3379 PR 1b-2), leaves `taken`, and counts again only if
+   * it is claimed again; a claim that never answered took nothing; a dead
+   * worker's leases are not this run's until a claim returns them (review
+   * pass 3: a reserved count patched at three sites, each with its own edge).
    */
   const taken = new Set<string>();
   let claiming = 0;
@@ -1533,6 +1553,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           } else {
             let stopAfter = false;
             if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
+            inCall.begin(workerId);
             for (let attempt = 0; outcome === null; attempt++) {
               try {
                 outcome = await processRow(row, workerId);
@@ -1544,6 +1565,35 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                 if (e instanceof AdmitThrow) throw e.error;
                 // The hard stop aborted the call: the thought is abandoned, not failed.
                 if (hardStopped) return;
+                // The pass's caller aborted the call in hand (abortInHand): its stop
+                // counted on it, as a wake's (093), its windows answered kept, and
+                // the thought to the back of the queue; the worker goes on with its
+                // next claim. A set-back the database refuses leaves the claim for
+                // the finally's release (SMD-3379 PR 1b-2).
+                if (e instanceof AbortedInHand) {
+                  // Counted once: out of inHand first, so a hard stop racing the
+                  // count finds none to count again (review pass 1).
+                  const held = inHand.get(workerId);
+                  inHand.delete(workerId);
+                  // The hard stop's release waits for this count, which it chains on (review passes 2 and 3).
+                  const counting = noteStop(workerId, held);
+                  stopNotes.set(workerId, counting);
+                  await counting;
+                  if (hardStopped) return;
+                  hb.held.delete(b.thought_id);
+                  let back: boolean;
+                  try {
+                    back = await setBack(sql, JOB, workerId, b.thought_id);
+                  } catch (re) {
+                    hb.held.add(b.thought_id);
+                    err(`  ${workerId}: could not set ${b.thought_id} back in the queue after its call was aborted (${(re as Error).message}) — this worker stops, returning it with its leases`);
+                    return;
+                  }
+                  // Not ours to set back: deleted, or edited or reaped meanwhile, and said so.
+                  if (back && LIMIT > 0) taken.delete(b.thought_id);
+                  outcome = back ? { outcome: "setBack" } : { outcome: "setBack", gone: await reportLost(sql, JOB, workerId, b.thought_id, err) };
+                  continue;
+                }
                 // A first stop ended it between windows, those answered kept: it
                 // goes back to the pool with the leases the finally returns, its
                 // attempt refunded, no stop counted (review pass 5).
@@ -1628,7 +1678,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
                   // the same way: main slept the pause out, called again, and
                   // recorded the thought failed "after 3 retries" after one (SMD-2401).
                   // So does another worker's outage (SMD-2599).
-                  await sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal);
+                  // No call in hand while it pauses, and the next call's time starts after it (SMD-3379 PR 1b-2, review pass 1).
+                  await idleWhile(inCall.get(workerId), sleepUnless(TRANSIENT_PAUSES_MS[attempt], halt.signal));
                   // The pause was the provider's: the thought's clock starts again (review pass 3).
                   const paused = inHand.get(workerId);
                   if (paused) paused.since = Date.now();
@@ -1646,6 +1697,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             }
             // Its extraction is over: a stop from here on took no window from it.
             inHand.delete(workerId);
+            inCall.end(workerId);
             if (hardStopped) return;
             if (stopAfter && outcome.outcome === "failed") {
               hb.held.delete(b.thought_id);
@@ -1695,7 +1747,13 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           }
           if (outcome.outcome === "lost") {
             lost++;
-            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped; nothing more of it was sent`);
+            err(`  ${b.thought_id}: no longer this worker's after it waited at the admit gate — its lease reaped or returned; nothing more of it was sent`);
+            continue;
+          }
+          if (outcome.outcome === "setBack") {
+            if (outcome.gone === "deleted") vanished++;
+            else if (outcome.gone === "lost") lost++;
+            else abortedInHand++;
             continue;
           }
           if (outcome.outcome === "superseded") {
@@ -1780,14 +1838,17 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       }
     } finally {
       inHand.delete(workerId);
+      inCall.end(workerId);
       hb.stop();
       beats += hb.beats;
       // Rows still held are handed back unfinished: out of --limit's count
       // before the release goes out, so another worker's claim of one counts it.
       for (const id of hb.held) taken.delete(id);
       let freed = 0;
-      // The hard stop's count first, while the claim is still this worker's.
+      // The hard stop's count first, while the claim is still this worker's;
+      // then the entry goes, so a follower's aborts keep none (review pass 3).
       await stopNotes.get(workerId);
+      stopNotes.delete(workerId);
       try {
         [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       } catch (e) {
@@ -1826,7 +1887,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       const release = Promise.all([...activeWorkers].map((w) => {
         // Bounded: a count waiting on a lock held the release past the CLI's
         // exit, and the lease for its whole TTL (review pass 2).
-        const noted = Promise.race([note(w), unrefSleep(STOP_NOTE_WAIT_MS)]);
+        // After an abort's count already in flight, whose thought left inHand
+        // before it: the release waits for both (SMD-3379 PR 1b-2, review pass 3).
+        const prior = stopNotes.get(w);
+        const noted = Promise.race([Promise.all([prior, note(w)]).then(() => undefined), unrefSleep(STOP_NOTE_WAIT_MS)]);
         stopNotes.set(w, noted);
         return noted.then(() => sql`SELECT release_claims_for_worker(${JOB}, ${w})`).catch(() => null);
       }));
@@ -1853,7 +1917,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
   // Through the start: the provider answered its probe, at once or after the wait (SMD-2752).
   opts.onStart?.({ ok: true, provider: "up" });
-  opts.onPass?.(stop);
+  opts.onPass?.(stop, inCall.abortInHand);
 
   /**
    * The alarm's lines for the answers since the last judgement, when there are
@@ -2066,7 +2130,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     `\n  ${done} extracted${partial || leftOut ? ` (${[
       partial ? `${partial} over a prefix only — past the per-thought bound, OB1_EXTRACT_MAX_WINDOWS (${cfg.extractMaxWindows}); each row's caveat says how much` : "",
       leftOut ? `${leftOut} with ${leftOutWindows} window(s) left out, the model's answers for them ${MALFORMED_WINDOWS_MARK}; each row's caveat names them` : "",
-    ].filter(Boolean).join("; ")})` : ""}, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
+    ].filter(Boolean).join("; ")})` : ""}, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the call in hand aborted by the pass's caller` : ""}, in ${elapsed}s ` +
       `(${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s) across ${WORKERS} worker(s), ${windowed} thought(s) in windows, ${runawayNote} (${aborted} aborted on the stream before the budget), ${beats} heartbeat(s))`
   );
   out(
