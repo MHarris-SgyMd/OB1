@@ -2182,15 +2182,18 @@ and 64 hex digits) and keeps only its SHA-256: a claim is the caller's own only
 when the key **and** the token match (a claim made by key name alone, by that
 name), so two agents under one key refuse each other, and nothing a refusal or a
 list shows proves ownership. To its own key the token is a bearer secret: send it
-as a bind parameter, never in a statement's text, and keep it out of logs. The
+as a bind parameter, never in a statement's text. That keeps it out of
+`pg_stat_activity` and error lines, but statement logging (`log_statement`,
+`log_min_duration_statement`, auto_explain) prints bind values whole unless
+`log_parameter_max_length = 0`, which only a superuser can set. The
 `label` is free text for people, returned as data. `claim_work` answers `claimed`
 (with the token), `renewed` (given the token of the caller's own claim on exactly
 that work) or `refused` with the code `WORK_CLAIMED`, a message naming the work
 asked for, the first holder's key and the times (never text another key wrote),
 and every claim in the way: a refusal is an answer, never an exception. A
 whole-ticket claim and a claim on one of its pieces are the same work, either way
-round; two pieces are not; a piece blank once cleaned is refused, never read as
-the whole ticket. No two live claims cover one work, whoever holds them: the
+round; two pieces are not; a piece blank once cleaned raises (22023), never read
+as the whole ticket. No two live claims cover one work, whoever holds them: the
 holder's own claim on overlapping work is in the way too, and a lapsed own claim
 another live claim now covers is refused and stays lapsed. A lapsed claim on
 exactly the work is taken over by any claim without its token, its own key's
@@ -2203,14 +2206,23 @@ to a week, four hours by default; a claim past it has lapsed, counts as free, an
 is closed as taken over by the next claim on exactly its ticket and piece, so
 nothing reaps. `list_work_claims` reads the live claims of the tickets named, or
 every claim with its state (live, lapsed, released), never a token or its hash.
-Each writing call refuses a transaction above READ COMMITTED before it reads,
-takes an advisory lock on its ticket (068's rule), and should claim one ticket
-per transaction: two callers taking two tickets' locks in opposite orders
-deadlock. The partial unique index `work_claims_one_unreleased` holds the
+Each writing call raises (0A000) in a transaction above READ COMMITTED before it
+reads, and takes an advisory lock on its ticket until its transaction ends (068's
+rule). Make one writer call (claim, renew or release) per transaction, or take
+tickets in key order: two transactions writing two tickets in opposite orders
+deadlock (40P01), and nothing enforces it. What raises, by SQLSTATE: 22023 a
+malformed argument; 42501 a call with no holder (the caller passed no key) or from
+an ingested key, and a role missing the grant (naming `work_claims`); 0A000 the
+isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for the
+rest of the transaction (029's shape). `list_work_claims` matches nothing for a
+malformed key rather than raising, and a refused forced release shares the code
+`CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
+row is 015's worker claims, not these. The partial unique index `work_claims_one_unreleased` holds the
 exact-work rule for a write made without the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The
 **claims** grant group (SELECT, INSERT, UPDATE on `work_claims`; no DELETE) is
-soft: a role without it is refused the calls and nothing else; the rules hold for
+soft: a role without it gets a permission error (42501) naming `work_claims` on
+the calls, and nothing else; the rules hold for
 callers of the functions, while a role with the group can write the table
 directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
 The REST and MCP operations are SMD-3598, the `claimed` label on results
@@ -2336,7 +2348,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (113, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it is refused the calls, naming the table, and nothing else | `work_claims` (113; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (113, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (113; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2410,9 +2422,8 @@ needs the privileges a real run does and shows what that run would refuse. A rol
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
-for a role that writes pages (064), **claims** for a role whose clients claim
-work (113), and **sleep**, named in `--groups`, for
-the role the sleep scheduler connects as when a search should wake it. The
+for a role that writes pages (064), and **claims** for a role whose clients
+claim work (113). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply

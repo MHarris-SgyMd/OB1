@@ -45,10 +45,14 @@
 --        proves ownership (review pass 1: a session string the refusal printed
 --        let any agent copy it and act as the holder). A token is useless to
 --        another key (a claim made by name alone: to a key not carrying the
---        name it had when it claimed), but to its own key it is a bearer secret: send it as a
---        bind parameter, never in a statement's text (which pg_stat_activity,
---        error lines and statement logs show), and keep it out of logs and
---        captured text. Its shape, wc_[0-9a-f]{64}, is for secret scanners.
+--        name it had when it claimed), but to its own key it is a bearer
+--        secret. Send it as a bind parameter, never in a statement's text: a
+--        bind parameter stays out of pg_stat_activity and error lines, though
+--        not out of statement logs (log_statement, log_min_duration_statement,
+--        auto_explain), which print bind values whole unless
+--        log_parameter_max_length = 0, a setting only a superuser can make
+--        (review pass 4). Keep it out of captured text too. Its shape,
+--        wc_[0-9a-f]{64}, is for secret scanners.
 --      * THE LABEL: free text for people (tool, machine, session, branch),
 --        at most 500. Shown as data, trusted for nothing.
 --      * FREE TEXT (a piece, a label, a reason): control characters made
@@ -94,6 +98,15 @@
 --        READ COMMITTED) raise. A release with no token is not malformed: an
 --        operator's forced release needs none, and anyone else's answers
 --        CLAIM_NOT_YOURS.
+--      * What raises, by SQLSTATE: 22023 a malformed argument; 42501 a call
+--        with no holder (the caller passed no key: the server's bug, not the
+--        client's) and an ingested key; 0A000 a transaction above READ
+--        COMMITTED; 25006 a read-only one; 40P01 two transactions taking two
+--        tickets' locks in opposite orders. A role without the claims group
+--        gets 42501 too, naming work_claims: a deployment's error. A refused
+--        forced release shares CLAIM_NOT_YOURS with any other, told apart by
+--        its message; list_work_claims matches nothing for a malformed key
+--        rather than raising.
 --      * p_actor sets ob1.actor for the rest of the calling transaction (029's
 --        shape): a later call in it that passes no p_actor is stamped with the
 --        same key.
@@ -128,8 +141,8 @@
 --      start: a claim lapsing while one statement runs can read live in its
 --      list and lapsed to its claim.
 --
---   4. CONCURRENCY. Each writing call refuses a transaction above READ
---      COMMITTED first, then takes a transaction advisory lock on its ticket
+--   4. CONCURRENCY. Each writing call raises (0A000) in a transaction above
+--      READ COMMITTED first, then takes a transaction advisory lock on its ticket
 --      (hashtextextended('ob1:work-claim:' || issue, 0)), so a claim on the
 --      whole ticket and a claim on one of its pieces wait for each other, and
 --      reads under a snapshot taken after the lock. That needs READ
@@ -138,9 +151,10 @@
 --      partial unique index work_claims_one_unreleased (one unreleased row per
 --      ticket and piece) holds the exact-work half of the rule for a write
 --      made without the lock; the whole-against-piece half is the lock's
---      alone. A caller claiming two tickets in one transaction holds two
---      locks: two such callers taking them in opposite orders deadlock, so
---      claim one ticket per transaction, or in key order.
+--      alone. Every writer — claim, renew, release — takes its ticket's lock
+--      until its transaction ends: two transactions writing two tickets in
+--      opposite orders deadlock (40P01). Make one writer call per
+--      transaction, or take tickets in key order; nothing enforces it.
 --
 --   5. NOT THE EVENT LOG. Claims are not thoughts: thought_audit is the
 --      thoughts' log (thought_id on every row; since 060 the row is its
@@ -157,8 +171,9 @@
 --   on work_claims. No DELETE: an ended claim stays as history. The holder's
 --   kind is read from ob1_agents — the capture group's SELECT (046), which
 --   every server role holds; a role without it fails naming ob1_agents. Soft:
---   a role without the group is refused the claim calls with a permission
---   error naming work_claims, and nothing else.
+--   a role without the group gets a permission error (42501) naming
+--   work_claims on the claim calls, and nothing else. Preflight's existing
+--   `work claims` row is 015's worker claims, not these.
 --   The rules hold for callers of the functions; a role holding the group can
 --   still write the table directly, as with every core table its group
 --   writes (the pages group's convention). The server first calls them in
