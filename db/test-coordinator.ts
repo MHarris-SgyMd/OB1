@@ -143,8 +143,11 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   const usage = cli("--passes", "sleep");
   const unknown = cli("run", "reembed");
   const help = cli("run", "sleep", "--help");
+  const oneTrigger = cli("run", "board-sync", "--trigger");
   ok(usage.exitCode === 2 && /takes no arguments — OB1_PASSES names the passes it runs/.test(usage.stderr.toString()) && unknown.exitCode === 2,
     `an argument other than run, or run of no pass, is usage (2) (${usage.exitCode}, ${unknown.exitCode})`);
+  ok(oneTrigger.exitCode === 2 && /run board-sync takes no --trigger: that is the coordinator's own mode/.test(oneTrigger.stderr.toString()),
+    `run board-sync --trigger is refused: the trigger's clock is the coordinator's alone (${oneTrigger.exitCode})`);
   ok(help.exitCode === 0 && /^usage: bun db\/sleep\.ts/m.test(help.stdout.toString() + help.stderr.toString()),
     `run sleep --help runs the scheduler's own script with those args, and exits with its code (${help.exitCode})`);
 }

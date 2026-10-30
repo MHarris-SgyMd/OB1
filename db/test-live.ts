@@ -15814,8 +15814,14 @@ if (want("37")) {
       stopped.stop();
       const stopEnds = await Promise.race([mid.then(() => "ended"), Bun.sleep(200).then(() => "hung")]);
       const afterStop = await Promise.race([stopped.next().then(() => "at once"), Bun.sleep(50).then(() => "hung")]);
-      assert(early === "waiting" && afterTrigger === "passed" && stopEnds === "ended" && afterStop === "at once",
-        `a trigger before the wait is let go, one during it starts the next pass, and a stop ends the wait and the next at once (${early}, ${afterTrigger}, ${stopEnds}, ${afterStop})`);
+      // One wait at a time: a second next() while one is pending is that wait (the early race's), never an orphaned second.
+      const twice = triggerGate();
+      const first = twice.next();
+      const same = twice.next() === first;
+      twice.trigger();
+      const firstEnds = await Promise.race([first.then(() => "ended"), Bun.sleep(200).then(() => "hung")]);
+      assert(early === "waiting" && afterTrigger === "passed" && stopEnds === "ended" && afterStop === "at once" && same && firstEnds === "ended",
+        `a trigger before the wait is let go, one during it starts the next pass, a stop ends the wait and the next at once, and a second wait is the first (${early}, ${afterTrigger}, ${stopEnds}, ${afterStop}, ${same}, ${firstEnds})`);
     }
     // A dry run or an audit passes no stamper: the passes write no row.
     await hsql`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
@@ -15844,10 +15850,10 @@ if (want("37")) {
       const c = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "sync-linear.ts"), ...argv], { cwd: HERE, env: { ...boardEnv, ...extra } });
       return { code: c.exitCode, err: c.stderr.toString() };
     };
-    const noKey = boardRun({}, "--trigger");
+    const noKey = boardRun({}, "--trigger", "--interval", "600");
     const noKeyRow = await row("heartbeat:board-sync");
-    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.age < 10,
-      `board-sync --trigger with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
+    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.every_s === 600 && noKeyRow.age < 10,
+      `board-sync --trigger with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key, its period the --interval handed in (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
     const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--trigger");
     const intervalRow = await row("heartbeat:board-sync");
     assert(badInterval.code === 2 && /must be a decimal integer >= 10 and <= 2147483 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",

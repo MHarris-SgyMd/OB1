@@ -58,12 +58,6 @@ import type { BudgetStop, SleepAside, SleepBudget, SleepHeld } from "../server-p
  * start — does nothing, where SIGUSR2's default would end the process.
  */
 export const TRIGGER_SIGNAL = "SIGWINCH" as const;
-/**
- * board-sync's interval, in whole seconds, as the tool and the coordinator's
- * clock both read it: at least 10, and at most 2147483 (24.8 days) — a clock
- * past setInterval's 2^31 ms would fire every millisecond.
- */
-export const BOARD_INTERVAL_RULE = { min: 10, max: 2_147_483 } as const;
 
 /** The workers that stamp, as the key and preflight's row name them. */
 export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed"] as const;
@@ -73,6 +67,17 @@ export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 export const MIN_STAMP_EVERY_S = 60;
 /** The longest a row records: what a timer holds in seconds, and what the reader takes (brain-info.ts). */
 export const MAX_STAMP_EVERY_S = Math.floor(MAX_TIMER_MS / 1000);
+
+/** board-sync's interval when OB1_BOARD_SYNC_INTERVAL is unset: the tool's and the coordinator's clock's (SMD-3476). */
+export const DEFAULT_BOARD_INTERVAL_S = 300;
+/**
+ * board-sync's interval under --trigger, in whole seconds, as the tool and the
+ * coordinator's clock both read it: at least 10, and at most what a timer
+ * holds (MAX_STAMP_EVERY_S, 24.8 days) — a clock past setInterval's 2^31 ms
+ * would fire every millisecond. The interval is the period between passes'
+ * starts: one tick a pass, at most.
+ */
+export const BOARD_INTERVAL_RULE = { min: 10, max: MAX_STAMP_EVERY_S } as const;
 
 /**
  * How a pass ended. `ok`: it ran — whatever its rows came to, a document the

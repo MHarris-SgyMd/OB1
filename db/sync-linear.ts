@@ -130,7 +130,7 @@ import type { Derived } from "./ingest-contract.ts";
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
 import { databaseUrl, databaseUrlIfAny, openSql } from "./connect.ts";
-import { endOnRefusal, passStamper, stampKey, type PassStamper, TRIGGER_SIGNAL, BOARD_INTERVAL_RULE } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper, TRIGGER_SIGNAL, BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
 import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
@@ -140,7 +140,7 @@ import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, t
 export { IDENTIFIER_PATTERN, issueFacets, LABELS_BOUND, labelNames, RELATIONS_BOUND, renderIssue, stripAutolinks, type LinearIssue };
 
 export const DEFAULT_INITIATIVE = "Open Brain";
-export const DEFAULT_INTERVAL_S = 300;
+export const DEFAULT_INTERVAL_S = DEFAULT_BOARD_INTERVAL_S;
 export const ACTOR_NAME = "board-sync";
 const SELF = "db/sync-linear.ts";
 
@@ -1724,7 +1724,9 @@ async function main(): Promise<void> {
     if (trigger && at !== null) {
       const own = openSql(at);
       try {
-        await endOnRefusal({ sql: own, worker: "board-sync", intervalS: DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+        // The period the coordinator handed in, where it reads as one: the row's every_s is the clock's.
+        const handed = readNumber("--interval", (cli.value("interval") ?? "").trim(), BOARD_INTERVAL_RULE);
+        await endOnRefusal({ sql: own, worker: "board-sync", intervalS: typeof handed === "number" ? handed : DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
       } finally {
         await own.close().catch(() => {});
       }
@@ -1737,8 +1739,9 @@ async function main(): Promise<void> {
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
-  // The coordinator's clock reads it by the same rule (BOARD_INTERVAL_RULE), so neither runs a period the other refuses.
-  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, BOARD_INTERVAL_RULE) : DEFAULT_INTERVAL_S;
+  // Under --trigger the coordinator's clock reads it by the same rule (BOARD_INTERVAL_RULE), so neither runs a period
+  // the other refuses; a run of its own waits on no interval, so takes any from 10 up, as it did.
+  const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, trigger ? BOARD_INTERVAL_RULE : { min: 10 }) : DEFAULT_INTERVAL_S;
   if (typeof intervalRead !== "number") return await refuse("usage", `${intervalRead.error} (whole seconds).`);
   const interval = intervalRead;
   const dryRun = cli.has("dry-run");
@@ -1921,7 +1924,7 @@ async function main(): Promise<void> {
   let code = 0;
   try {
     if (!trigger) { code = await once(); return; }
-    console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL} the coordinator sends (every ${interval} s; nothing else sends one) against ${initiative}; SIGTERM/SIGINT ends it after the issue in hand`);
+    console.log(`  ${SELF}: a pass now and at each ${TRIGGER_SIGNAL}, which the coordinator sends every ${interval} s (run by hand nothing does, but a terminal's resize: one pass is a run without --trigger) against ${initiative}; SIGTERM/SIGINT ends it after the issue in hand`);
     code = await triggerPasses({ once, next: gate.next, stopped: () => stopping, stamper });
   } finally {
     await store.close();
@@ -1939,14 +1942,16 @@ async function main(): Promise<void> {
  */
 export function triggerGate(): { trigger: () => void; stop: () => void; next: () => Promise<void> } {
   let wake: (() => void) | null = null;
+  let waiting: Promise<void> | null = null;
   let stopped = false;
   return {
     trigger: () => wake?.(),
     stop: () => { stopped = true; wake?.(); },
-    next: () => stopped ? Promise.resolve() : new Promise<void>((resolve) => {
+    // One wait at a time: a second call while one is pending is that wait, never a second timer.
+    next: () => stopped ? Promise.resolve() : (waiting ??= new Promise<void>((resolve) => {
       const hold = setInterval(() => {}, 1 << 30);
-      wake = () => { wake = null; clearInterval(hold); resolve(); };
-    }),
+      wake = () => { wake = null; waiting = null; clearInterval(hold); resolve(); };
+    })),
   };
 }
 

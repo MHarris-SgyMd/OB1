@@ -69,7 +69,7 @@ import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, typ
 import { dirname, join, resolve } from "node:path";
 import { supervise, type Supervisor } from "./supervise.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
-import { BOARD_INTERVAL_RULE } from "./pass-stamp.ts";
+import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 
 const HERE = import.meta.dir;
@@ -104,8 +104,8 @@ const WORKER_OWN = ["OB1_WORKER_KEY", "MCP_ACCESS_KEYS"] as const;
 /** A setting, or the pass's default when it is unset or empty. */
 const or = (env: Record<string, string | undefined>, name: string, fallback: string): string => env[name] || fallback;
 
-/** board-sync's trigger period, as OB1_BOARD_SYNC_INTERVAL gives it, trimmed: 300 seconds unset or blank. */
-const boardInterval = (env: Record<string, string | undefined>): string => env.OB1_BOARD_SYNC_INTERVAL?.trim() || "300";
+/** board-sync's trigger period, as OB1_BOARD_SYNC_INTERVAL gives it, trimmed: the tool's default unset or blank. */
+const boardInterval = (env: Record<string, string | undefined>): string => env.OB1_BOARD_SYNC_INTERVAL?.trim() || String(DEFAULT_BOARD_INTERVAL_S);
 /**
  * The clock's period in ms, by the tool's own rule (BOARD_INTERVAL_RULE); none
  * for a value it refuses, which the tool then refuses itself and is held —
@@ -430,6 +430,11 @@ if (import.meta.main) {
     const child = name !== undefined && Object.hasOwn(CHILDREN, name) ? CHILDREN[name as ChildName] : undefined;
     if (child === undefined) {
       console.error(USAGE);
+      process.exit(2);
+    }
+    // A trigger's mode is the coordinator's own: a one-off of it would wait on a clock nothing runs, beside the coordinator's.
+    if (child.every && rest.includes("--trigger")) {
+      console.error(`coordinator.ts run ${child.name} takes no --trigger: that is the coordinator's own mode, its clock the coordinator's; a one-off is one pass, without it`);
       process.exit(2);
     }
     process.exit(await runOnce(child, rest, { onSignal: (s) => { stop = s; for (const signal of heard) s(signal); } }));

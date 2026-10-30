@@ -249,8 +249,18 @@ export function supervise(opts: SuperviseOptions): Supervisor {
           : Promise.resolve();
         // The trigger's clock, from the follower's start: its first pass is its own, at start.
         const running = child;
+        // A signal that cannot be sent (the child gone between the check and the kill, a user it may not signal) is
+        // said once and the clock goes on: a throw on the timer would end this process, every pass with it.
+        let unsent = false;
         const tick = opts.every === undefined ? undefined : setInterval(() => {
-          if (running.exitCode === null && running.signalCode === null) running.kill(TRIGGER_SIGNAL);
+          if (running.exitCode !== null || running.signalCode !== null) return;
+          try {
+            running.kill(TRIGGER_SIGNAL);
+            unsent = false;
+          } catch (e) {
+            if (!unsent) err(`supervise: ${opts.worker}'s trigger could not be sent (${(e as Error).message}); the clock goes on`);
+            unsent = true;
+          }
         }, opts.every);
         try {
           code = await child.exited;
