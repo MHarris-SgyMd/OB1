@@ -257,13 +257,13 @@ const entries = sources.filter((f) => {
   ok(subjectsWord.code === 2 && /^extract-entities\.ts: --subjects takes "rules" or no value/m.test(subjectsWord.err) && !subjectsWord.err.includes("s3cret"),
     `extract-entities.ts refuses a --subjects value but "rules", without repeating it (exit ${subjectsWord.code})`);
   const subjectsPass = run("extract-entities.ts", "--url", DEAD, "--subjects", "--workers", "2", "--follow");
-  ok(subjectsPass.code === 2 && /goes with --url, --limit, --timeout and --dry-run alone, not --workers, --follow\.$/m.test(subjectsPass.err),
+  ok(subjectsPass.code === 2 && /goes with --url, --limit, --timeout, --retry-failed, --switch-key and --dry-run alone, not --workers, --follow\.$/m.test(subjectsPass.err),
     `extract-entities.ts refuses a pass's flags beside --subjects, naming them (exit ${subjectsPass.code}: ${subjectsPass.err.split("\n")[0].slice(0, 120)})`);
   // The sweep's own flags pass --subjects' check and reach the sweep, which says what it will do before it dials
   // (review pass 1: without a URL the case stopped at databaseUrl, before the check it named).
-  const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9");
+  const subjectsReached = run("extract-entities.ts", "--url", DEAD, "--subjects", "rules", "--dry-run", "--limit", "5", "--timeout", "9", "--retry-failed", "--switch-key");
   ok(subjectsReached.code !== 2 && subjectsReached.out.includes("  subjects: the rules (subject:metadata@r1, subject:first_line@r2), no model (--subjects rules)") && !/--subjects takes/.test(subjectsReached.err),
-    `--subjects rules with --dry-run, --limit and --timeout passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
+    `--subjects rules with --dry-run, --limit, --timeout, --retry-failed and --switch-key passes --subjects' check to the sweep (exit ${subjectsReached.code}: ${subjectsReached.out.split("\n")[0].slice(0, 100)})`);
   // The model sweep's limit a call (SMD-3306 PR 4, review pass 2): --timeout reaches it, and without the flag the CLI
   // leaves it the sweep's own default, which follows the question's reasoning; the sweep says both before it dials.
   const sweepEnv = { OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "", OB1_JUDGE_MODEL: "j", OB1_SUBJECT_REASONING: "" };

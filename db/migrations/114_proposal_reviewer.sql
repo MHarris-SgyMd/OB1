@@ -127,7 +127,7 @@
 --   through the same functions and gets the reviewer stamped. MINOR under
 --   FORK.md's version rules: columns and a trigger added, nothing a caller
 --   passes or reads changed.
---   test-schema [101], test-upgrade [20bf], test-live [16] (--accept,
+--   test-schema [102], test-upgrade [20bf], test-live [16] (--accept,
 --   --reject and --list with a key and without, a key classified before and
 --   after it decided, and a brain short of 114).
 --

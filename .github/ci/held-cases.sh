@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # The hold steps' cases, side by side (SMD-3365). Sourced from deploy/ by the
-# workers and sleep profile steps, which SMD-3214 made hold a refusal rather
-# than exit: each case starts the service's own command, detached, with one
-# setting wrong; its refusal must be logged, the container still running after
-# it — it does not exit, so `unless-stopped` has nothing to restart in a loop —
-# and a stop must end it with 0 within 15 s.
+# coordinator's workers and sleep steps, which SMD-3214 made hold a refusal
+# rather than exit: each case starts the coordinator's own command (SMD-3476),
+# detached, with OB1_PASSES naming its passes and one setting wrong; its
+# refusal must be logged, the container still running after it — it does not
+# exit, so `unless-stopped` has nothing to restart in a loop — and a stop must
+# end it with 0 within 15 s.
 #
 # Run one case after another, each polling its log every 2 s and then sleeping
 # a fixed 2 s, the two steps took ~83 s of "Full stack, no Supabase", the
@@ -14,9 +15,10 @@
 # its line, as before. A step whose cases read shared state (heartbeat:sleep)
 # runs them as batches of their own.
 #
-#   held_case <id> <profile> <service> <line> [compose run args…]   start one, detached
-#   held_wait                                                       wait for the batch, check it, stop it
-#   held_also <id> <line>                                           after held_wait: another line that case logged
+#   held_case <id> <passes> <line> [compose run args…]   start one, detached
+#   held_wait                                            wait for the batch, check it, stop it
+#   held_also <id> <line>                                after held_wait: another line that case logged
+#   held_never <id> <line>                               after held_wait: a line that case must not have logged
 #
 # Every failing case is reported with its log, not only the first; then the
 # step fails. A case's log stays in "$HELD_DIR/<id>.out" for held_also; its
@@ -30,8 +32,8 @@ HELD_DIR=$(mktemp -d)
 HELD_IDS=()
 
 held_case() {
-  local id=$1 profile=$2 svc=$3 want=$4
-  shift 4
+  local id=$1 passes=$2 want=$3
+  shift 3
   local ct="ci-held-$id-$RANDOM"
   # A name used again in a later batch reads nothing of its last run.
   rm -f "$HELD_DIR/$id".*
@@ -40,7 +42,7 @@ held_case() {
   HELD_IDS+=("$id")
   # Started in the background, each its own container; a start that fails is
   # recorded and reported by held_wait, where the batch is waited on.
-  ( docker compose -f compose.yaml --profile "$profile" run -d --no-deps --name "$ct" "$@" "$svc" > /dev/null 2> "$HELD_DIR/$id.start" || touch "$HELD_DIR/$id.unstarted" ) &
+  ( docker compose -f compose.yaml run -d --no-deps --name "$ct" -e "OB1_PASSES=$passes" "$@" coordinator > /dev/null 2> "$HELD_DIR/$id.start" || touch "$HELD_DIR/$id.unstarted" ) &
 }
 
 held_wait() {
@@ -95,6 +97,14 @@ held_wait() {
 held_also() {
   if ! grep -F -- "$2" "$HELD_DIR/$1.out" > /dev/null; then
     echo "--- $1: expected \"$2\" too: ---" >&2
+    cat "$HELD_DIR/$1.out" >&2
+    exit 1
+  fi
+}
+
+held_never() {
+  if grep -F -- "$2" "$HELD_DIR/$1.out" > /dev/null; then
+    echo "--- $1: expected no \"$2\": ---" >&2
     cat "$HELD_DIR/$1.out" >&2
     exit 1
   fi

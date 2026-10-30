@@ -32,6 +32,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, quoteIdent, reembedKey } from "./config.mjs";
+import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -552,7 +553,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // (the listing selects one pass's proposals, SMD-3248), 110 (the
   // listing pages, SMD-3249), 111 (a thought's own subject
   // recorded, SMD-3306), 112 (a thought's client_key, one thought
-  // per key, SMD-3314) and 114 (who decided a proposal, SMD-2608)
+  // per key, SMD-3314), 113 (the subject pool, SMD-3306) and
+  // 114 (who decided a proposal, SMD-2608)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -699,7 +701,9 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // kind, and redefines 102's validator and 084's lineage writer on their
   // own bodies, refusing by name without 016, 042, 061, 084 or 102
   // ([20bc]); 112 adds a unique partial index on thoughts' client_key,
-  // refusing by name rows that share one ([20bd]); 114 adds the reviewer
+  // refusing by name rows that share one ([20bd]); 113 adds the subject
+  // pool's trigger on thoughts and a close of the subject read, refusing by
+  // name without 015, 016 or 111 ([20be]); 114 adds the reviewer
   // columns, their trigger and two CHECKs, refusing by name without 008,
   // 029, 046 or 050 ([20bf]) — all
   // recorded by the
@@ -707,7 +711,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 84, `030 is among the last eighty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 85, `030 is among the last eighty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5003,6 +5007,129 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
   assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
   await sql.close();
+}
+
+console.log("\n[20be] Migration 113: refused by name without 015, 016 or 111; onto a populated brain at the file before it — thoughts, a subject and the extraction pool standing as they were, and no subject claim until a pool is named; after it a new or edited thought joins the named pool, a metadata edit does not unless it changes metadata.ticket or metadata.issue, and close_thought_subject closes the subject read; a re-apply is a no-op (SMD-3306)");
+{
+  const the113 = MIGRATIONS.find((f) => f.endsWith("_subject_pool.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["015", "migration 113 needs 015 (claim_thoughts); this schema lacks it"],
+    ["016", "migration 113 needs 016 (requeue_thought_work); this schema lacks it"],
+    ["111", "migration 113 needs 111 (record_thought_subject); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `113 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+  // A database not UTF8 is refused by name, before anything else: the file holds no escape a SQL_ASCII server cannot
+  // read (review pass 6, run-it: it failed on them, "conversion between UTF8 and SQL_ASCII is not supported").
+  {
+    const admin = new SQL({ url: URL_, max: 1 });
+    const ascii = new URL(URL_);
+    ascii.pathname = "/ob1_up113_ascii";
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii");
+      await admin.unsafe("CREATE DATABASE ob1_up113_ascii ENCODING 'SQL_ASCII' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'");
+      const refusedAscii = await applyMigrations(ascii.toString(), { ...OPTS, only: (f) => f === the113 }).then(() => "applied", (e: Error) => e.message);
+      assert(refusedAscii === "migration 113 needs a UTF8 database; this one's encoding is SQL_ASCII",
+        `113 on a SQL_ASCII database is refused by name (${refusedAscii.slice(0, 120)})`);
+    } finally {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_ascii").catch(() => {});
+      await admin.close();
+    }
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the113 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const POOL = "subjects:r1.2:p2r";
+  // A brain before 113: the extraction pool named, so its trigger enqueues; a subject the sweep wrote.
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:x@p2')`;
+  const t: string[] = [];
+  for (let i = 0; i < 2; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 113: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const subject = (await sql`SELECT record_thought_subject(${t[0]}::uuid, 'phrase:upgrade', 'model', 'subject:x@p2', NULL::uuid, ${await fpOf(t[0])}::text, NULL::jsonb) AS r`)[0].r as { id: string };
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const claims = async () => JSON.stringify(await sql`SELECT thought_id, work_type, status FROM thought_work_claims ORDER BY thought_id, work_type`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), facetsBefore = await facets(), claimsBefore = await claims(), auditBefore = await audits();
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+
+  assert((await rows()) === before && (await facets()) === facetsBefore && (await claims()) === claimsBefore && (await audits()) === auditBefore,
+    "the file moves nothing it finds: every thought, facet, claim and audit row stands as it was");
+  const inPool = async (id: string) => String((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`)[0]?.status ?? "none");
+  const third = ((await sql`SELECT upsert_thought('upgrade 113: thought 2, before a pool is named'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(2)}::vector) AS r`)[0].r as { id: string }).id;
+  assert((await inPool(third)) === "none", "no pool named: a new thought joins none");
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${POOL})`;
+  const fourth = ((await sql`SELECT upsert_thought('upgrade 113: thought 3, after'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(3)}::vector) AS r`)[0].r as { id: string }).id;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE thought_id = ${fourth}::uuid AND work_type = ${POOL}`;
+  await sql`SELECT update_thought(${t[1]}::uuid, 'upgrade 113: thought 1, edited')`;
+  await sql`UPDATE thoughts SET metadata = metadata || '{"note": "a metadata edit"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(t[1])) === "pending" && (await inPool(third)) === "none" && (await inPool(fourth)) === "succeeded",
+    "after it, with a pool named, an edited thought joins it; a metadata edit does not");
+  await sql`UPDATE thoughts SET metadata = metadata || '{"issue": "SMD-113"}'::jsonb WHERE id = ${third}::uuid`;
+  assert((await inPool(third)) === "pending", "…but filing it under a ticket does: the metadata rule reads it");
+  await sql`SELECT update_thought(${fourth}::uuid, 'upgrade 113: thought 3, edited after it was asked')`;
+  assert((await inPool(fourth)) === "pending", "…and a thought finished in the pool is put back in it once its text changes");
+  const closed = (await sql`SELECT close_thought_subject(${t[0]}::uuid, ${subject.id}::uuid, ${await fpOf(t[0])}::text) AS c`)[0].c as { action: string; id: string };
+  assert(closed.action === "closed" && closed.id === subject.id, `close_thought_subject closes the subject read (${JSON.stringify(closed)})`);
+  // The door 113 redefines, on the upgraded brain: a model's subject on a thought filed under a ticket is refused as
+  // stale, the ticket's rule subject written (review pass 5).
+  const door = async (id: string, key: string, by: string) =>
+    (await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${`subject:${by}@r1`}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string; stale?: boolean };
+  const [modelUp, ruleUp] = [await door(third, "phrase:an upgraded note", "model"), await door(third, "ticket:SMD-113", "metadata")];
+  assert(modelUp.action === "none" && modelUp.stale === true && ruleUp.action === "added",
+    `the door 113 redefines: a model's subject on a thought filed under a ticket refused as stale, the rule's at its ticket added (${modelUp.action}, ${ruleUp.action})`);
+  const after = await rows(), facetsAfter = await facets(), claimsAfter = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the113 });
+  assert((await rows()) === after && (await facets()) === facetsAfter && (await claims()) === claimsAfter, "a re-apply is a no-op: every thought, facet and claim as it was");
+  await sql.close();
+  // A naming waits for the writers of this database's thoughts alone: a template copy of the brain, its thoughts the
+  // same relation by oid, a capture open in it, holds up no naming here (review pass 7, run-it: without the lock read's
+  // database filter it listed that writer, and the wait, which has no end of its own, would wait on it). Bounded by a
+  // stop, should it wait.
+  {
+    // A brain of its own, at 113, whose copy is made with no session on it: the suite's database has the earlier
+    // sections' sessions on it.
+    const pg = new URL(URL_), brain = new URL(URL_), copy = new URL(URL_);
+    pg.pathname = "/postgres";
+    brain.pathname = "/ob1_up113_brain";
+    copy.pathname = "/ob1_up113_copy";
+    const admin = new SQL({ url: pg.toString(), max: 1 });
+    const copyClient = new SQL({ url: copy.toString(), max: 1 });
+    try {
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy");
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain");
+      await admin.unsafe("CREATE DATABASE ob1_up113_brain");
+      await applyMigrations(brain.toString(), OPTS);
+      await admin.unsafe("CREATE DATABASE ob1_up113_copy TEMPLATE ob1_up113_brain");
+      const w = await copyClient.reserve();
+      await w`BEGIN`;
+      await w`SELECT upsert_thought('upgrade 113: a capture open in a copy of the brain'::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(5)}::vector)`;
+      const bound = new AbortController();
+      const timer = setTimeout(() => bound.abort(), 10_000);
+      const lines: string[] = [];
+      const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_LLM_BASE_URL: "http://127.0.0.1:9/v1", OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta", OB1_JUDGE_MODEL: "stub-judge" };
+      const code = await sweepSubjects({ url: brain.toString(), env, model: false, switchKey: true, signal: bound.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
+        .finally(() => clearTimeout(timer));
+      await w`ROLLBACK`;
+      w.release();
+      assert(code === 0 && !lines.some((l) => /waiting for/.test(l)),
+        `a capture open in a template copy of the brain holds up no naming here (exit ${code}: ${lines.find((l) => /waiting|stopped/.test(l))?.trim().slice(0, 100) ?? "no wait"})`);
+    } finally {
+      await copyClient.close({ timeout: 5 });
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_copy").catch(() => {});
+      await admin.unsafe("DROP DATABASE IF EXISTS ob1_up113_brain").catch(() => {});
+      await admin.close();
+    }
+  }
 }
 
 console.log("\n[20bf] Migration 114: refused by name without 008, 029, 046 or 050; onto a populated brain at the file before it — proposals decided before it, the reviewer backfilled from the audit for an accept that wrote its pointer and a reject that cleared one, none guessed for a reject that cleared nothing; no thought, audit row or decision moved; a decision after it stamped with its key; a re-apply a no-op (SMD-2608)");

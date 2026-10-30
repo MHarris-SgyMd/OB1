@@ -541,8 +541,13 @@ console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the 
       (${ids[7]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now()), (${ids[8]}::uuid, ${ACTIVE}, 'succeeded', 'w1', now())`;
     await raw`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
       (${ids[9]}::uuid, ${ACTIVE}, 'failed', 'w1', now(), 'boom')`;
-    // A superseded pool and a consolidate pool, one pending row each.
-    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ORPHAN}, 'pending'), (${ids[0]}::uuid, ${CONSOL}, 'pending')`;
+    // A superseded pool and a consolidate pool, one pending row each; the subject pool
+    // ob1_config names (113, SMD-3306) and one it named before, one each too, the key
+    // written after the claims so the capture trigger pools nothing of its own.
+    const SUBJECTS = "subjects:r1.2:p2r", SUBJECTS_OLD = "subjects:r1.2:p2";
+    await raw`INSERT INTO thought_work_claims (thought_id, work_type, status) VALUES (${ids[0]}::uuid, ${ORPHAN}, 'pending'), (${ids[0]}::uuid, ${CONSOL}, 'pending'),
+      (${ids[0]}::uuid, ${SUBJECTS}, 'pending'), (${ids[0]}::uuid, ${SUBJECTS_OLD}, 'pending')`;
+    await raw`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', ${SUBJECTS}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
 
     const st = await store.workerStatus();
     const active = st.find((r) => r.workType === ACTIVE);
@@ -554,9 +559,11 @@ console.log("\n[5e] workerStatus — per-work_type counts, stale leases and the 
     assert(!!orphan && orphan.pending === 1 && orphan.stale === 0 && orphan.active === false, "a superseded extract pool reads active: false");
     const consol = st.find((r) => r.workType === CONSOL);
     assert(!!consol && consol.active === null, "a consolidate pool (no recorded active key) reads active: null");
+    const subjects = st.find((r) => r.workType === SUBJECTS), subjectsOld = st.find((r) => r.workType === SUBJECTS_OLD);
+    assert(subjects?.active === true && subjectsOld?.active === false, `the subject pool ob1_config names reads active: true, one it named before false (${subjects?.active}, ${subjectsOld?.active})`);
     // Cleanup so later sections and their capture trigger are not polluted.
     await raw`DELETE FROM thought_work_claims`;
-    await raw`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await raw`DELETE FROM ob1_config WHERE key IN ('entity_extraction_key', 'subject_pool_key')`;
   } finally {
     await raw.close();
   }
