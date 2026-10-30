@@ -623,10 +623,11 @@ server/test-capture-atomicity.mjs# fix 5   (new file); deleted by SMD-1800 (test
 db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields); SMD-1933 adds `connectors`
 .github/workflows/fork-checks.yml# fix 7   (new file)
+.github/workflows/ci-shift.yml   # SMD-3467 (new file — warns of a job or step on main that got slower)
 .github/dependabot.yml           # SMD-2093 (new file — moves the workflows' SHA-pinned actions)
 scripts/check-fork-consistency.ts # fix 7 (new file)
 scripts/mechanism-yield.ts       # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
-scripts/ci-step-times.ts         # SMD-3305 (new file — a CI job's and its steps' times over a window of runs, with medians; not a gate)
+scripts/ci-step-times.ts         # SMD-3305 (new file — a CI job's and its steps' times over a window of runs, with medians; not a gate); SMD-3467 adds --shift
 scripts/suite-sections.ts        # SMD-3305 (new file — a suite's bracketed sections by wall time; not a gate)
 scripts/connector-registry.ts    # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
 scripts/contributions.ts         # SMD-1933 (new file — the one walk of the contribution directories)
