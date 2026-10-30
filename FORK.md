@@ -217,23 +217,24 @@ The brain deploys one way: the compose stack, `deploy/compose.yaml` — the prox
 the REST core, the MCP server at `/mcp`, Postgres and the profiles beside them
 (SMD-2282's decision 6, SMD-2288). [`SETUP.md`](SETUP.md) brings it up, and
 `docs/01-getting-started.md` is the same stack at a beginner's pace. Clients
-reach `/mcp` through a TLS proxy or tunnel in front of the stack's proxy
-(`docs/01-getting-started.md`, Steps 6 and 7). There is no single-process,
-lone-container, Workers or Kubernetes deployment, and no Supabase Edge Function
-build: `server/` left with SMD-1800, the Workers target with SMD-3152.
+reach `/mcp` through a TLS proxy or tunnel in front of the stack's proxy, or at
+`http://127.0.0.1:8000/mcp` on its own machine (`docs/01-getting-started.md`,
+Steps 6 and 7). There is no single-process, lone-container, Workers or
+Kubernetes deployment, and no Supabase Edge Function build: `server/` left
+with SMD-1800, the Workers target with SMD-3152.
 
 The stack's `migrate` service applies every migration under `db/migrations/`
 before `api` starts, and the servers assume the whole set. Nothing degrades
 around a missing one: `capture_thought` is one call to `upsert_thought`, with
-no two-step fallback (`server-portable/store-sql.ts`), and preflight's ledger
-row warns of a brain behind the tree.
+no two-step fallback (`server-portable/store-sql.ts`), and preflight's
+"migration ledger" row warns of a brain behind the tree.
 
 A vendored extension, recipe or integration server under the category
 directories is not the brain. It is one HTTP process beside the stack,
 `bun <file>`, behind the same TLS proxy, never stdio
-(`primitives/deploy-remote-mcp/`).
-A contribution that adds operations to the brain is a plugin
-(`plugins/<name>/`, SMD-2310), which the brain's own servers serve.
+(`primitives/deploy-remote-mcp/`). A contribution that adds operations to the
+brain is a plugin (`plugins/<name>/`, SMD-2310), which the brain's own servers
+serve.
 
 ---
 

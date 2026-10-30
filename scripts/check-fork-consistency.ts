@@ -246,9 +246,8 @@
  *      server-portable/wrangler.toml or store-postgrest.ts, no wrangler or
  *      supabase-js in server-portable/package.json, and no file outside the
  *      history (changes/, CHANGELOG.md, FORK.md's change list on) that names
- *      `wrangler`, or
- *      — outside code, where the refusal is spelled — sets OB1_STORE to
- *      postgrest; probes for both patterns
+ *      `wrangler`, or — outside code, where the refusal is spelled — sets
+ *      OB1_STORE to postgrest; probes for both patterns
  * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
  *      the history starts one of its servers by path, quoted, relative or
  *      absolute (`bun server-portable/index.ts`, `cd mcp-server && bun
@@ -261,9 +260,9 @@
  *      stack deploy`, `docker service create`, `podman kube play`, `oc
  *      apply|new-app`); a package manager's `dev` or `start` there (`cd`,
  *      `--cwd`, `--prefix`, `-C`); nor offers the brain a deployment it
- *      lacks in prose (the server or brain "as a Bun process", "on"/"or"/"to"
- *      Cloudflare Workers or Deno Deploy); FORK.md read above its change
- *      list (SMD-3327); probes
+ *      lacks in prose, across wrapped lines (the server or brain "runs as a
+ *      Bun process", Cloudflare Workers or Deno Deploy after "on"/"or"/"to");
+ *      FORK.md read above its change list (SMD-3327); probes
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -5547,9 +5546,9 @@ checkSupabaseJsImports();
 // supabase-js, and no live file names `wrangler` or sets OB1_STORE to
 // postgrest. A code file is exempt from the second pattern alone: the refusal
 // and its tests spell the selection they refuse. The history (changes/,
-// CHANGELOG.md, FORK.md's change list) records what was. dashboards/ was exempt from both
-// while the Next dashboard deployed to Cloudflare with wrangler of its own;
-// it retired with SMD-3309, and the exemption with it.
+// CHANGELOG.md, FORK.md's change list) records what was. dashboards/ was
+// exempt from both while the Next dashboard deployed to Cloudflare with
+// wrangler of its own; it retired with SMD-3309, and the exemption with it.
 /** `wrangler` as a word, any case. */
 const WRANGLER_WORD = /\bwrangler\b/i;
 /**
@@ -5588,13 +5587,21 @@ const FORK_CHANGE_LIST = "## What we changed";
  * deploying) are read like any doc (SMD-3327); any other file, never. FORK.md
  * without the heading is read whole, and fails here.
  */
+let forkHeadingMissed = false;
 function historyFrom(rel: string, text: string): number {
-  if (rel.startsWith("changes/") || rel === "CHANGELOG.md") return 1;
+  if (isWholeHistory(rel)) return 1;
   if (rel !== "FORK.md") return Infinity;
   const at = text.split("\n").indexOf(FORK_CHANGE_LIST);
-  if (at < 0) fail(SELF, `FORK.md has no "${FORK_CHANGE_LIST}" heading, which checks 22b and 22c read its history from — FORK.md is read whole`);
+  if (at < 0 && !forkHeadingMissed) {
+    forkHeadingMissed = true;
+    fail(SELF, `FORK.md has no "${FORK_CHANGE_LIST}" heading, which checks 22b and 22c read its history from — FORK.md is read whole`);
+  }
   return at < 0 ? Infinity : at + 1;
 }
+/** A file that is history from its first line: read by neither check. */
+const isWholeHistory = (rel: string) => rel.startsWith("changes/") || rel === "CHANGELOG.md";
+/** A file's lines above its history, joined again: the whole file for most, nothing for changes/ and CHANGELOG.md. */
+const liveText = (rel: string, text: string) => text.split("\n").slice(0, historyFrom(rel, text) - 1).join("\n");
 function checkRetiredTarget() {
   for (const [probe, wrangler, selected] of RETIRED_TARGET_PROBES) {
     if (WRANGLER_WORD.test(probe) !== wrangler) fail(SELF, `check 22b's wrangler pattern ${wrangler ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
@@ -5605,16 +5612,14 @@ function checkRetiredTarget() {
   for (const dep of ["wrangler", "@supabase/supabase-js"]) {
     if (pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]) fail("server-portable/package.json", `names ${dep}, which only the retired Workers target and PostgREST store needed (SMD-3152)`);
   }
-  const files = citationFiles();
+  const files = citationFiles().filter((rel) => !isWholeHistory(rel));
   for (const want of ["SETUP.md", "FORK.md"]) {
     if (!files.includes(want)) fail(SELF, `check 22b's listing does not reach ${want} — the listing is broken, not the tree clean`);
   }
   for (const rel of files) {
-    const text = readFileSync(join(ROOT, rel), "utf8");
-    const from = historyFrom(rel, text);
+    const text = liveText(rel, readFileSync(join(ROOT, rel), "utf8"));
     const code = CODE_FILE.test(rel);
     text.split("\n").forEach((line, i) => {
-      if (i + 1 >= from) return;
       if (WRANGLER_WORD.test(line)) fail(`${rel}:${i + 1}`, "names wrangler — the Cloudflare Workers target was retired (SMD-3152); the brain deploys as the compose stack");
       if (!code && POSTGREST_SELECTED.test(line)) fail(`${rel}:${i + 1}`, "sets OB1_STORE to postgrest — the PostgREST store was retired (SMD-3152) and the server refuses the selection; leave OB1_STORE unset");
     });
@@ -5716,18 +5721,25 @@ function joinedLines(text: string): [number, string][] {
 }
 const outsideCompose = (line: string) => OUTSIDE_COMPOSE.some((re) => re.test(line));
 /**
- * Prose offering the brain a deployment it lacks: its server or the brain "as
- * a Bun process" (Node, Deno, a word between), or Cloudflare Workers or Deno
- * Deploy after "on", "or" or "to". A retired target named as retired ("the
- * Cloudflare Workers target … was retired") or as another recipe's ("replaces
- * Cloudflare Workers with Vercel") passes; a past "ran on Cloudflare Workers"
- * fails, and is the history's to say.
+ * Prose offering the brain a deployment it lacks: its server or the brain, up
+ * to two words, then "as a Bun process" (Node, Deno, up to two words before
+ * the runtime), or Cloudflare Workers or Deno Deploy after "on", "or" or "to".
+ * Read over a doc's text, not its lines, so `\s` crosses the line breaks prose
+ * wraps at; a hit is reported at the line it starts on. A retired target named
+ * as retired ("the Cloudflare Workers target … was retired") or as another
+ * recipe's ("replaces Cloudflare Workers with Vercel") passes; a past "ran on
+ * Cloudflare Workers" fails, and is the history's to say. A vendored server
+ * "runs as a Bun process" fails too: its docs say `bun <file>`, one HTTP
+ * process beside the stack (primitives/deploy-remote-mcp/).
  */
 const OFFERED_ELSEWHERE = [
-  /\b(?:server|brain)s?\s+as\s+an?\s+(?:[\w-]+\s+)?(?:Bun|Node(?:\.js)?|Deno)\s+process\b/i,
-  /\b(?:on|or|to)\s+(?:Cloudflare\s+Workers|Deno\s+Deploy)\b/i,
+  /\b(?:server|brain)s?\s+(?:\w+\s+){0,2}?as\s+an?\s+(?:[\w-]+\s+){0,2}?(?:Bun|Node(?:\.js)?|Deno)\s+process\b/gi,
+  /\b(?:on|or|to)\s+(?:Cloudflare\s+Workers|Deno\s+Deploy)\b/gi,
 ];
-const offeredElsewhere = (line: string) => OFFERED_ELSEWHERE.some((re) => re.test(line));
+/** The 1-based lines OFFERED_ELSEWHERE's hits in `text` start on, in order. */
+const offeredAt = (text: string): number[] =>
+  OFFERED_ELSEWHERE.flatMap((re) => [...text.matchAll(re)].map((m) => text.slice(0, m.index).split("\n").length)).sort((a, b) => a - b);
+const offeredElsewhere = (text: string) => offeredAt(text).length > 0;
 /** [text, caught?] — what OFFERED_ELSEWHERE must catch (FORK.md's two lines first), and the neighbours it must not reach. */
 const OFFERED_ELSEWHERE_PROBES: [string, boolean][] = [
   ["server as a Bun process or the container `server-portable/Dockerfile` builds", true],
@@ -5736,6 +5748,10 @@ const OFFERED_ELSEWHERE_PROBES: [string, boolean][] = [
   ["the servers as a Deno process each", true],
   ["deploy the server to Cloudflare Workers", true],
   ["it also runs on Deno Deploy", true],
+  ["the server runs as a Bun process", true],
+  ["the brain can run as a single bare Node.js process", true],
+  ["the path runs the server as a Bun\n  process or the container", true],
+  ["the working reference), or\nCloudflare Workers;", true],
   ["The Cloudflare Workers target and the PostgREST store it needed were retired in", false],
   ["- **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers", false],
   ["An alternative Open Brain architecture that replaces Cloudflare Workers with **Vercel serverless functions**", false],
@@ -5744,6 +5760,7 @@ const OFFERED_ELSEWHERE_PROBES: [string, boolean][] = [
   ["lone-container, Workers or Kubernetes deployment, and no Supabase Edge Function", false],
   ["It is one HTTP process beside the stack,", false],
   ["was written for Cloudflare Workers, whose bindings arrive on the request", false],
+  ["the server.\n\nRun it as a Bun process", false],
 ];
 /** [text, caught?] — what 22c must catch (the ticket's Verify plant first), and the neighbours it must not reach. */
 const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
@@ -5843,18 +5860,16 @@ function checkComposeOnly() {
   for (const [probe, caught] of OFFERED_ELSEWHERE_PROBES) {
     if (offeredElsewhere(probe) !== caught) fail(SELF, `check 22c's prose rule ${caught ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
   }
-  const files = citationFiles().filter((rel) => DOC_FILE.test(rel));
+  const files = citationFiles().filter((rel) => DOC_FILE.test(rel) && !isWholeHistory(rel));
   for (const want of ["SETUP.md", "docs/01-getting-started.md", "primitives/deploy-remote-mcp/README.md", "FORK.md"]) {
     if (!files.includes(want)) fail(SELF, `check 22c's listing does not reach ${want} — the listing is broken, not the tree clean`);
   }
   for (const rel of files) {
-    const text = readFileSync(join(ROOT, rel), "utf8");
-    const from = historyFrom(rel, text);
+    const text = liveText(rel, readFileSync(join(ROOT, rel), "utf8"));
     for (const [n, line] of joinedLines(text)) {
-      if (n >= from) break;
       if (outsideCompose(line)) fail(`${rel}:${n}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
-      if (offeredElsewhere(line)) fail(`${rel}:${n}`, "offers the brain a deployment it lacks (a lone process, Cloudflare Workers or Deno Deploy) — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288); say a retired target is retired");
     }
+    for (const n of offeredAt(text)) fail(`${rel}:${n}`, "offers the brain a deployment it lacks (a lone process, Cloudflare Workers or Deno Deploy) — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288); say a retired target is retired");
   }
 }
 checkComposeOnly();
