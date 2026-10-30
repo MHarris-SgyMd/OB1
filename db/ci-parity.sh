@@ -99,12 +99,14 @@ nodb() { suite nodb "$@"; }
 # check` — svelte-kit sync, then svelte-check — since its tsconfig extends the
 # one sync generates (SMD-2280 PR 2b; check 35 reads CI's step as its typecheck).
 typecheck() {
-  local dir="$1" out how="tsc --noEmit" t0=$SECONDS
+  local dir="$1" out how="tsc --noEmit" t0=$SECONDS rc took
   [ -f "$ROOT/$dir/svelte.config.js" ] && how="bun run check"
-  if out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); then
-    row ok "$dir" "$how · $((SECONDS - t0)) s"
+  out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); rc=$?
+  took="$((SECONDS - t0)) s"
+  if [ "$rc" -eq 0 ]; then
+    row ok "$dir" "$how · $took"
   else
-    row bad "$dir" "$how · $((SECONDS - t0)) s"
+    row bad "$dir" "$how · $took"
     # The first type errors — tsc's `error TS` lines, svelte-check's `ERROR`
     # ones; or, when neither ran (a bunx resolution failure has no such line),
     # the tail of what did print.
@@ -283,7 +285,8 @@ main() {
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
   OB1_LIVE_SHARD=extract run db test-live.ts
-  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane (pair_rows).
+  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane
+  # (pair_rows).
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
@@ -309,10 +312,11 @@ main() {
   run extensions         test-writes.ts
   run extensions         test-tools.ts
 
+  # Each pid cleared once waited, so a trap after cannot signal a reused one.
   wait_lane "$PAIR_PID" "$PAIR_OUT" "test-upgrade and test-preflight, on a Postgres of their own"
-  PAIR_PID=
+  PAIR_PID=''
   wait_lane "$FREE_PID" "$FREE_OUT" "The database-free lane"
-  FREE_PID=
+  FREE_PID=''
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s)"
   return "$FAILED"
