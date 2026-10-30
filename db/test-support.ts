@@ -746,10 +746,11 @@ export function createAssert(): {
     },
     report(): never {
       console.log(`\n${"─".repeat(52)}`);
-      // Fork Checks' schema step, its data-layer pair and Portable server's
-      // background pair grep this line from each log for their closing
-      // summaries (`^[0-9]+ assertions: `, SMD-2092, SMD-2219, SMD-3470), as
-      // db/ci-parity.sh does for its rows: reword it there too.
+      // Fork Checks' schema step, its data-layer legs (behind a +<s>s stamp,
+      // SMD-3468) and Portable server's background pair grep this line from
+      // each log for their closing summaries (`^[0-9]+ assertions: `,
+      // SMD-2092, SMD-2219, SMD-3470), as db/ci-parity.sh does for its rows:
+      // reword it there too.
       console.log(
         `${passed + failed} assertions: ${passed} passed, ${failed} failed` +
           (skipped ? `, ${skipped} skipped` : "") +
