@@ -54,6 +54,14 @@
  * STAMP_TIMEOUT_MS, the row is left as it is and the log says so; the next
  * follower writes its own.
  *
+ * A migration. A follower that ends with MIGRATION_EXIT (75) — the sleep
+ * scheduler, which saw migrate.ts take its lock or the ledger move (SMD-3379
+ * PR 1c-1) — runs again at once, its try not counted, the row's restart
+ * saying in_s 0 and code 75, so the next process loads the code the migration
+ * came with: `git pull && up -d` runs the migrator, and recreates the
+ * coordinator only when its image changed. More than MIGRATION_RESTARTS such
+ * ends in a row, each within a minute of its start, fall back to the clock.
+ *
  * A stop. Each stop() goes on to the follower, whose own rules apply (the
  * first SIGTERM stops it after the work in hand, the second hard); once it
  * has ended, `done` settles with 0. Waiting or held, it settles at once.
@@ -66,13 +74,22 @@ import type { SQL } from "bun";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { embeddingContract, reembedKey } from "./config.mjs";
+import { embeddingContract, MIGRATION_EXIT, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
+/**
+ * A follower that ends with MIGRATION_EXIT — the sleep scheduler, a migration
+ * seen (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
+ * process loads the migration's code. Past this many such ends in a row, each
+ * within MIGRATION_QUICK_MS of its start, it is run again on the clock as any
+ * end is: a follower that saw a migration at every start would otherwise spin.
+ */
+export const MIGRATION_RESTARTS = 3;
+export const MIGRATION_QUICK_MS = 60_000;
 /** The longest a heartbeat write may take before it is left: the database may be what is down. */
 export const STAMP_TIMEOUT_MS = 10_000;
 /** The longest a follower's last output is waited for once it has exited. */
@@ -220,6 +237,8 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       return 0;
     }
     let tries = 0;
+    /** MIGRATION_EXIT ends in a row, each within MIGRATION_QUICK_MS of its start. */
+    let migrationsInRow = 0;
     while (!stopped.signal.aborted) {
       const began = new Date();
       const piped = opts.label !== undefined;
@@ -247,6 +266,14 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();
+      // A migration seen: run again at once on its code, the try not counted,
+      // unless it keeps ending so at once (SMD-3379 PR 1c-1).
+      migrationsInRow = code === MIGRATION_EXIT ? (ranMs < MIGRATION_QUICK_MS ? migrationsInRow + 1 : 1) : 0;
+      if (code === MIGRATION_EXIT && migrationsInRow <= MIGRATION_RESTARTS) {
+        err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)} — a migration seen; restarting after a migration, at once, on the code it brought${key && opts.sql ? `, ${key} says so` : ""}`);
+        await stamp(began, { in_s: 0, code, tries });
+        continue;
+      }
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);

@@ -16080,6 +16080,26 @@ if (want("37b")) {
     const ends = said.filter((l) => /^supervise: board-sync exited 3 after \d+ s; it runs again at \d{4}-\d\d-\d\dT[\d:.]+Z \(in 0 s, end \d in a row\), heartbeat:board-sync says so\./.test(l));
     assert(loopCode === 0 && Date.now() - stopAt < 1000 && mid?.ended === true && mid.outcome === "failed" && mid.restart.code === 3 && mid.restart.tries >= 3 && ends.length >= 3 && !said.some((l) => /a refusal/.test(l)),
       `a follower ending on its own runs again on the clock, each end on the log and the row, and a stop in the wait ends it at once with 0 (code ${loopCode}, ${ends.length} ends said, row ${JSON.stringify(mid?.restart)})`);
+    // A migration seen (SMD-3379 PR 1c-1): a follower that exits 75 runs again
+    // at once — no wait, no try counted — and past three such ends in a row,
+    // each quick, on the clock again, its first counted end then the clock's.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const migrationRuns = join(tmpdir(), `ob1-supervise-75-${process.pid}`);
+    rmSync(migrationRuns, { force: true });
+    const migrating = supervise({ worker: "sleep", cmd: ["sh", "-c", `echo run >> ${migrationRuns}; exit 75`], sql: ssql as never, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer });
+    const runsOf = () => (existsSync(migrationRuns) ? readFileSync(migrationRuns, "utf8").split("\n").filter(Boolean).length : 0);
+    const fourRuns = await pollUntil(async () => runsOf() >= 4 && ((await row("heartbeat:sleep"))?.restart?.in_s ?? 0) === 60, 10_000);
+    await Bun.sleep(300);
+    const runsSeen = runsOf();
+    const migrationRow = await row("heartbeat:sleep");
+    migrating.stop("SIGTERM");
+    const migratingCode = await within(migrating.done, 2000);
+    rmSync(migrationRuns, { force: true });
+    const atOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once, on the code it brought, heartbeat:sleep says so$/.test(l)).length;
+    const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
+    assert(fourRuns && runsSeen === 4 && atOnce === 3 && onTheClock === 1 && migrationRow?.restart?.code === 75 && migrationRow.restart.tries === 1 && migratingCode === 0,
+      `a follower exiting 75 runs again at once, no try counted, three times, then on the clock, its first counted end (${runsSeen} run(s), ${atOnce} at once, ${onTheClock} on the clock, row ${JSON.stringify(migrationRow?.restart)}, exit ${migratingCode})`);
     // The count starts again after a run of `reset` or longer: here every run counts as long.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const resetting = supervise({ worker: "board-sync", cmd: ["sh", "-c", "sleep 0.15; exit 2"], sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
@@ -17802,6 +17822,44 @@ if (want("38")) {
       sw.missing = false;
       sw.slowExtract = 0;
       await setKey(EX);
+    }
+    // A migration (SMD-3379 PR 1c-1). The lock migrate.ts takes, held at the
+    // start: the scheduler waits before its passes' starts. Let go, it starts;
+    // then the ledger moving ends it with 75, the row ended stopped. And the
+    // lock taken while it runs ends a second run the same way.
+    {
+      const holder = await sql.reserve();
+      try {
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const migFrom = lines.length;
+        const migStop = new AbortController();
+        const migRun = sleepRun({ follow: true, signal: migStop.signal, pollMs: 200 });
+        const migWaited = await pollUntil(async () => lines.slice(migFrom).some((l) => /^  migration: backend \d+ holds ob1:migrate, applying migrations — the scheduler waits for it to finish before it starts$/.test(l)), 10_000);
+        await Bun.sleep(600);
+        const migStartedEarly = lines.slice(migFrom).some((l) => /^  \[(extract|consolidate)\]/.test(l));
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        const migRunning = await pollUntil(async () => (await beat())?.running === true, 15_000);
+        await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('999_smd3379_ledger_moved', 'test')`;
+        const migCode = await bounded(migRun, migStop);
+        const migBeat = await beat();
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, \d{3}_\S+ to 999_smd3379_ledger_moved — the passes stop now, their leases returned, and the scheduler exits 75/.test(l));
+        assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false,
+          `a lock held at the start is waited out before the passes' starts, and the ledger moving then ends the run with 75, its row ended (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running })})`);
+        await sql`DELETE FROM schema_migrations WHERE name = '999_smd3379_ledger_moved'`;
+        const lockFrom = lines.length;
+        const lockStop = new AbortController();
+        const lockRun = sleepRun({ follow: true, signal: lockStop.signal, pollMs: 200 });
+        const lockRunning = await pollUntil(async () => lines.slice(lockFrom).some((l) => /^  quiet:/.test(l)) && (await beat())?.running === true, 15_000);
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const lockCode = await bounded(lockRun, lockStop);
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        const lockSaid = lines.slice(lockFrom).some((l) => /backend \d+ holds ob1:migrate, applying migrations — the passes stop now/.test(l));
+        assert(lockRunning && lockCode === 75 && lockSaid, `…and the lock taken while it runs ends it with 75 too (exit ${lockCode}, said ${lockSaid})`);
+      } finally {
+        await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        holder.release();
+        await sql`DELETE FROM schema_migrations WHERE name = '999_smd3379_ledger_moved'`;
+      }
     }
   } finally {
     restoreOutage();

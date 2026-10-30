@@ -2735,6 +2735,14 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
    WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
      AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
+/**
+ * The exit status the sleep scheduler ends with when it sees a migration —
+ * MIGRATE_LOCK taken, or the ledger's newest name moved since its start —
+ * and db/supervise.ts runs it again on at once, no wait and no try counted,
+ * so the next process loads the code the migration came with (SMD-3379 PR
+ * 1c-1). EX_TEMPFAIL, sysexits.h's "try again".
+ */
+export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "community", "extensions", "recipes"]);
 /**
