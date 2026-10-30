@@ -16042,8 +16042,10 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   assert(wholeFirst.outcome === "claimed" && pieceAfter.outcome === "refused" && pieceAfter.held_by[0]?.id === wholeFirst.claim!.id, `…and a piece of a ticket held whole is refused (${pieceAfter.outcome})`);
   // Free text cleaned: a piece's end white space of any kind trimmed, a label's control characters made spaces.
   const tidy = await claim("SMD-9015", AGENT, "\tStep 1" + String.fromCharCode(0x2003) + "\n", "line one\nline two" + String.fromCharCode(7));
-  assert(tidy.outcome === "claimed" && tidy.claim!.piece === "Step 1" && tidy.claim!.label === "line one line two",
-    `a piece's leading tab, trailing em space and newline are trimmed, never refused by the table's CHECK; a label's newline and bell are made spaces (${JSON.stringify([tidy.outcome, tidy.claim?.piece, tidy.claim?.label])})`);
+  const blankPiece = await raised(`SELECT claim_work('SMD-9025', $1, NULL, 14400, NULL, $2::jsonb)`, [String.fromCharCode(0x200b) + " ", JSON.stringify(AGENT)]);
+  assert(tidy.outcome === "claimed" && tidy.claim!.piece === "Step 1" && tidy.claim!.label === "line one line two"
+    && blankPiece.code === "22023" && /a piece was given but is blank once cleaned/.test(blankPiece.message) && (await rowsOf("SMD-9025")) === 0,
+    `a piece's leading tab, trailing em space and newline are trimmed, never refused by the table's CHECK; a label's newline and bell are made spaces; a piece blank once cleaned is refused, never read as the whole ticket (${blankPiece.code}; ${JSON.stringify([tidy.outcome, tidy.claim?.piece, tidy.claim?.label])})`);
   const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
   const zw1 = await claim("SMD-9022", OTHER, "PR1", family);
   const zw2 = await claim("SMD-9022", AGENT, "PR" + String.fromCharCode(0x200b) + "1");
@@ -16101,10 +16103,20 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   await age(pieceIdle.claim!.id);
   const wholeOver = await claim("SMD-9016", OTHER);
   const pieceRenew = await renew(pieceIdle.claim!.id, pieceIdle.token, AGENT);
+  const coveredClaim = await claim("SMD-9007", AGENT, null, null, covered.token);
+  const stillLapsed = (await db.query<{ state: string }>(`SELECT state FROM list_work_claims(ARRAY['SMD-9007'], NULL, true) WHERE id = $1::uuid`, [covered.claim!.id])).rows[0]?.state;
+  await release(coverer.claim!.id, coverer.token, OTHER);
+  const afterCover = await claim("SMD-9007", AGENT, null, null, covered.token);
+  const self = await claim("SMD-9026", AGENT);
+  await age(self.claim!.id);
+  const selfTake = await claim("SMD-9026", AGENT);
+  const selfOld = (await db.query<{ released_by: string; release_reason: string }>(`SELECT released_by, release_reason FROM list_work_claims(ARRAY['SMD-9026'], NULL, true) WHERE id = $1::uuid`, [self.claim!.id])).rows[0];
   assert(revived.outcome === "renewed" && revived.claim!.state === "live" && reclaimed.outcome === "renewed" && reclaimed.claim!.id === idle2.claim!.id
     && coverer.outcome === "claimed" && coveredRenew.code === "WORK_CLAIMED" && coveredRenew.held_by[0]?.id === coverer.claim!.id
-    && wholeOver.outcome === "claimed" && pieceRenew.code === "WORK_CLAIMED" && pieceRenew.held_by[0]?.id === wholeOver.claim!.id,
-    `a lapsed claim nothing covers is renewed live, by renew and by claim_work with its token; a lapsed whole another holder's piece now covers, and a lapsed piece another holder's whole now covers, are refused naming it (${[revived.outcome, reclaimed.outcome, coveredRenew.code, pieceRenew.code].join(", ")})`);
+    && wholeOver.outcome === "claimed" && pieceRenew.code === "WORK_CLAIMED" && pieceRenew.held_by[0]?.id === wholeOver.claim!.id
+    && coveredClaim.code === "WORK_CLAIMED" && stillLapsed === "lapsed" && afterCover.outcome === "renewed" && afterCover.claim!.id === covered.claim!.id
+    && selfTake.outcome === "claimed" && selfTake.claim!.id !== self.claim!.id && selfOld?.released_by === "claims-agent" && selfOld?.release_reason === "lapsed; taken over",
+    `a lapsed claim nothing covers is renewed live, by renew and by claim_work with its token; a lapsed whole another holder's piece now covers, and a lapsed piece another holder's whole now covers, are refused naming it; claim_work with the token on a lapsed own claim another covers is refused, leaves it lapsed, and renews it once the other is released; a key's own lapsed claim, claimed again without its token, is taken over by the key itself (the lost token's recovery) (${[revived.outcome, reclaimed.outcome, coveredRenew.code, pieceRenew.code].join(", ")})`);
 
   // Renew and release are the holder's own: the key and the token. A token is useless to another key.
   const mine = await claim("SMD-9008", AGENT);
@@ -16134,12 +16146,13 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
     `another key with the right token renewing, the same key with another token releasing, an unknown id, no id, no token, an unforced release, an agent's force, an operator named by its name alone forcing, p_force NULL, an operator by id forcing with no reason, an agent key by its id forcing, an unknown agent id under the operator's name forcing, an upper-case token, release of an unknown id and with a malformed token: each refused or raised by name, and no refusal advertises p_force (${[otherKey.code, otherToken.code, nf.code, nullId.code, noToken.code, notForced.code, agentForce.code, nameForce.code, nullForce.code, noReason.code, agentIdForce.code, fakeIdForce.code, upperToken.code, relNf.code, relBadToken.code].join(" ")})`);
   const forced = await release(mine.claim!.id, null, OP_BY_ID, "the session died with its PR merged", true);
   const twice = await release(mine.claim!.id, null, OP_BY_ID, "again", true);
+  const twiceOther = await release(mine.claim!.id, null, OTHER);
   const own = await claim("SMD-9009", AGENT);
   const ownRel = await release(own.claim!.id, own.token, AGENT);
   const afterOwn = await claim("SMD-9009", AGENT, null, null, own.token);
   const reclaim = await claim("SMD-9008", OTHER);
   assert(forced.outcome === "released" && forced.claim!.released_by === "claims-op" && forced.claim!.released_by_kind === "operator" && forced.claim!.release_reason === "the session died with its PR merged"
-    && twice.outcome === "already_released" && twice.claim!.release_reason === "the session died with its PR merged"
+    && twice.outcome === "already_released" && twice.claim!.release_reason === "the session died with its PR merged" && twiceOther.outcome === "already_released"
     && ownRel.outcome === "released" && ownRel.claim!.release_reason === "released"
     && afterOwn.outcome === "claimed" && afterOwn.claim!.id !== own.claim!.id && afterOwn.token !== own.token && (await rowsOf("SMD-9009")) === 2 && reclaim.outcome === "claimed",
     `an operator's forced release by agent id records who and why; again is already_released and moves nothing; the holder's own release needs no reason, and claiming again with the old token is a new claim with a new token, never a renewal of the released row; the work is then free (${[forced.outcome, twice.outcome, ownRel.outcome, afterOwn.outcome, reclaim.outcome].join(", ")})`);
@@ -16151,7 +16164,10 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   const nameRenew = await renew(byId.claim!.id, byId.token, AGENT);
   const nameRel = await release(byId.claim!.id, byId.token, AGENT);
   const idRenew = await renew(byId.claim!.id, byId.token, AGENT_ID);
-  assert(idRel.outcome === "released" && nameRenew.code === "CLAIM_NOT_YOURS" && nameRel.code === "CLAIM_NOT_YOURS" && idRenew.outcome === "renewed",
+  const byName2 = await claim("SMD-9027", AGENT);
+  const idClaimOwn = await claim("SMD-9027", AGENT_ID, null, null, byName2.token);
+  assert(idRel.outcome === "released" && nameRenew.code === "CLAIM_NOT_YOURS" && nameRel.code === "CLAIM_NOT_YOURS" && idRenew.outcome === "renewed"
+    && idClaimOwn.outcome === "renewed" && idClaimOwn.claim!.id === byName2.claim!.id,
     `a claim made by name alone is its holder's under that name whatever agent id the call now carries, with the token (a key whose id resolved later is not locked out); a claim made with an agent id is not a name-only call's, even with the token; the same agent id renews (${[idRel.outcome, nameRenew.code, nameRel.code, idRenew.outcome].join(", ")})`);
 
   // READ COMMITTED alone, checked before any read; the index holds the exact-work rule for a write made without the lock.
@@ -16174,7 +16190,7 @@ console.log("\n[101] Migration 113: work claims — a ticket or one piece of it 
   const cleaned = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM list_work_claims(ARRAY[$1, $2])`, ["SMD-9001\n", "smd-9003" + String.fromCharCode(160)])).rows[0].n;
   assert(JSON.stringify(listed.map((r) => `${r.issue}/${r.piece}/${r.holder}/${r.state}`)) === JSON.stringify(["SMD-9001/null/claims-agent/live", "SMD-9002/PR 1/claims-other/live", "SMD-9002/PR 2/claims-agent/live"])
     && listed.every((r) => !("token_hash" in r) && !("token" in r))
-    && JSON.stringify(byHolder) === JSON.stringify(["SMD-9002", "SMD-9005", "SMD-9007", "SMD-9008", "SMD-9016", "SMD-9022", "SMD-9023"]) && capped === 2 && cleaned === 2,
+    && JSON.stringify(byHolder) === JSON.stringify(["SMD-9002", "SMD-9005", "SMD-9008", "SMD-9016", "SMD-9022", "SMD-9023"]) && capped === 2 && cleaned === 2,
     `the list reads the tickets named, upper-cased and trimmed, live only, by ticket and piece, with no token or hash; by a holder's key name; to its limit; and keys cleaned as claim_work cleans them, a trailing newline and a no-break space (${cleaned}, ${JSON.stringify(listed.map((r) => r.issue))}, ${byHolder})`);
 
   // The claims grant group: with it a role claims, lists and releases; without it, refused naming the table.

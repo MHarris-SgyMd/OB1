@@ -2189,8 +2189,13 @@ that work) or `refused` with the code `WORK_CLAIMED`, a message naming the work
 asked for, the first holder's key and the times (never text another key wrote),
 and every claim in the way: a refusal is an answer, never an exception. A
 whole-ticket claim and a claim on one of its pieces are the same work, either way
-round; two pieces are not. No two live claims cover one work, whoever holds them:
-the holder's own claim on overlapping work is in the way too. `renew_work_claim` and `release_work_claim` act on the
+round; two pieces are not; a piece blank once cleaned is refused, never read as
+the whole ticket. No two live claims cover one work, whoever holds them: the
+holder's own claim on overlapping work is in the way too, and a lapsed own claim
+another live claim now covers is refused and stays lapsed. A lapsed claim on
+exactly the work is taken over by any claim without its token, its own key's
+included, which is how a lost token is recovered. `release_work_claim` answers
+`already_released` to any caller, as the list shows an ended claim to anyone. `renew_work_claim` and `release_work_claim` act on the
 holder's own claim, given its token (`CLAIM_NOT_YOURS` otherwise); `p_force`
 releases another holder's, for an operator key named by its agent id (a name
 alone lends no kind, SMD-2608's rule) and with a reason. The lease is 60 seconds

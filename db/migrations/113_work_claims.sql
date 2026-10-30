@@ -44,7 +44,8 @@
 --        refusal, a list or a claim names the holder's key, never anything that
 --        proves ownership (review pass 1: a session string the refusal printed
 --        let any agent copy it and act as the holder). A token is useless to
---        another key, but to its own key it is a bearer secret: send it as a
+--        another key (a claim made by name alone: to a key not carrying the
+--        name it had when it claimed), but to its own key it is a bearer secret: send it as a
 --        bind parameter, never in a statement's text (which pg_stat_activity,
 --        error lines and statement logs show), and keep it out of logs and
 --        captured text. Its shape, wc_[0-9a-f]{64}, is for secret scanners.
@@ -73,7 +74,12 @@
 --        pieces are the same work, either way round; two different pieces of
 --        one ticket are not.
 --      * The holder's own claim on exactly this work (key and token) is
---        renewed, not refused: claiming twice with the token is safe. Every
+--        renewed, not refused: claiming twice with the token is safe — unless
+--        it has lapsed and another live claim now covers it, when the call is
+--        refused and the claim stays lapsed, renewable once that claim ends.
+--        A lapsed claim on exactly this work is taken over by any claim
+--        without its token, its own key's included: a lost token's recovery,
+--        the old row closed as 'lapsed; taken over' by the key itself. Every
 --        other claim is in the way — the same key's without its token, and the
 --        holder's own on overlapping work (a whole ticket it holds, when it
 --        claims a piece): no two live claims cover one work, whoever holds
@@ -81,8 +87,9 @@
 --      * A refusal is an ANSWER, not an error: outcome 'refused', a stable
 --        code, a message naming the first holder's key, and every claim in
 --        the way. Callers branch on it; an exception would abort their
---        transaction. A malformed argument (not a ticket key, a malformed
---        token, a lease out of range, a renew with no token) and a call that
+--        transaction. A malformed argument (not a ticket key, a piece blank
+--        once cleaned, a malformed token, a lease out of range, a renew with no
+--        token, an operator's force with no reason) and a call that
 --        cannot claim at all (no holder, an ingested key, a transaction above
 --        READ COMMITTED) raise. A release with no token is not malformed: an
 --        operator's forced release needs none, and anyone else's answers
@@ -101,12 +108,15 @@
 --      * renew_work_claim(p_claim, p_token, p_lease_seconds, p_actor):
 --        'renewed', or 'refused' — CLAIM_NOT_FOUND, CLAIM_NOT_YOURS,
 --        CLAIM_RELEASED (released, or taken over after it lapsed), or
---        WORK_CLAIMED (it lapsed and another holder's claim now covers it).
+--        WORK_CLAIMED (it lapsed and another claim, the holder's own on
+--        overlapping work included, now covers it).
 --      * release_work_claim(p_claim, p_token, p_reason, p_force, p_actor):
---        'released', 'already_released', or 'refused' — CLAIM_NOT_FOUND,
+--        'released', 'already_released' (to any caller: an ended claim's
+--        row is anyone's to read in the list), or 'refused' — CLAIM_NOT_FOUND,
 --        CLAIM_NOT_YOURS. p_force releases another holder's claim, for an
 --        operator key named by its agent id (a name alone lends no kind,
---        SMD-2608's rule) and with a reason.
+--        SMD-2608's rule) and with a reason; an operator forcing with no
+--        reason raises.
 --      * list_work_claims(p_issues, p_holder, p_include_ended, p_limit): the
 --        live claims, or every claim with p_include_ended, each with its
 --        `state` — live, lapsed or released. STABLE, one query for a page of
@@ -472,6 +482,11 @@ DECLARE
   v_held    jsonb;
   v_token   text;
 BEGIN
+  -- A piece given but blank once cleaned would claim the whole ticket, the
+  -- broadest claim: refused instead (review pass 3).
+  IF p_piece IS NOT NULL AND v_piece IS NULL THEN
+    RAISE EXCEPTION USING MESSAGE = 'a piece was given but is blank once cleaned; pass NULL to claim the whole ticket', ERRCODE = 'invalid_parameter_value';
+  END IF;
   PERFORM ob1_work_claim_isolation('claim_work');
   SELECT * INTO v_who FROM ob1_work_claim_actor(p_actor, 'claim_work');
   IF v_who.kind = 'ingested' THEN
@@ -528,7 +543,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION claim_work(text, text, text, int, text, jsonb) IS
-  'Claims a ticket (p_issue), or one piece of it (p_piece), for the key p_actor names, for p_lease_seconds (60 to 604800, default 14400). Returns jsonb {outcome, code, message, claim, held_by, token}: claimed, with the token that proves the claim (shown this once); renewed, when p_token is the caller''s own unreleased claim on exactly this work; or refused (WORK_CLAIMED), with every live claim not the caller''s own that covers it — the same piece, the whole ticket, or any piece of it for a whole-ticket claim. A lapsed claim on exactly this ticket and piece is closed as taken over. Raises for no holder, an ingested key, a malformed argument, or a transaction above READ COMMITTED. Migration 113 / SMD-3597.';
+  'Claims a ticket (p_issue), or one piece of it (p_piece), for the key p_actor names, for p_lease_seconds (60 to 604800, default 14400). Returns jsonb {outcome, code, message, claim, held_by, token}: claimed, with the token that proves the claim (shown this once); renewed, when p_token is the caller''s own unreleased claim on exactly this work and nothing else covers it; or refused (WORK_CLAIMED), with every live claim covering it but that one — the same piece, the whole ticket, or any piece of it for a whole-ticket claim, the caller''s own on overlapping work included. A lapsed own claim another live claim now covers is refused and stays lapsed. A lapsed claim on exactly this ticket and piece is closed as taken over, the caller''s own included (the recovery for a lost token). Raises for no holder, an ingested key, a malformed argument (a piece blank once cleaned among them), or a transaction above READ COMMITTED. Migration 113 / SMD-3597.';
 
 -- ---------------------------------------------------------------------------
 -- renew_work_claim
