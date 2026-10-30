@@ -38,6 +38,7 @@ export const TOOLS = [
   { name: "list_thought_ids", scope: "read" },
   { name: "list_logged_searches", scope: "read" },
   { name: "worker_status", scope: "read" },
+  { name: "task_status", scope: "read" },
   { name: "job_status", scope: "read" },
   { name: "scan_thoughts", scope: "read" },
   { name: "list_supersession_proposals", scope: "read" },

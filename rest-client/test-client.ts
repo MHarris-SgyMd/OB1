@@ -104,6 +104,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     thought_stats: {},
     thought_changes: { actions: ["capture", "delete"], others_only: true, limit: 4 },
     worker_status: {},
+    task_status: {},
     brain_info: {},
     job_status: { job_id: "job/with?odd chars" },
     scan_thoughts: { limit: 10 },

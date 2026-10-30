@@ -38,6 +38,19 @@
  * directly in /var/lib/ob1 — the `sleep-dumps` volume — is handed to sleep's
  * user, the dumps a root-run scheduler left there included (handDumpDir).
  *
+ * Its row (SMD-3476 PR 3). `heartbeat:coordinator` in ob1_config
+ * (brain-info.ts's CoordinatorValue): the passes asked for, and each child's
+ * heartbeat key and state — starting, running, waiting to run again (the
+ * next try's seconds), held by a guard (its kind), stopped — stamped on each
+ * change, every MIN_STAMP_EVERY_S, and ended at the stop. The status surface
+ * reads it beside the passes' own rows, so a pass asked for that wrote no row
+ * shows as missing, and a coordinator that stopped as stale. With no
+ * database it is left unwritten, the passes running on. The row is one
+ * coordinator's at a time, by an id of its process: a second started beside a
+ * live one writes nothing over it, says so, and takes it over once it is
+ * ended or stale; one of the same host (a container restarted after a hard
+ * stop) at once.
+ *
  * Output. Each child's lines go to this process's, after `[<name>] `.
  *
  * Signals. Its handlers are installed before anything else. Each SIGTERM or
@@ -66,19 +79,21 @@
 
 import type { SQL } from "bun";
 import { chmodSync, lchownSync, lstatSync, mkdtempSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { supervise, type Supervisor } from "./supervise.ts";
+import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
-import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S } from "./pass-stamp.ts";
+import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
+import { COORDINATOR_KEY, COORDINATOR_PASSES, STALE_AFTER_INTERVALS, type Coordinated, type CoordinatorValue } from "../server-portable/brain-info.ts";
 
 const HERE = import.meta.dir;
 
-/** The names OB1_PASSES takes. */
-export const PASSES = ["sleep", "workers", "board-sync"] as const;
+/** The names OB1_PASSES takes: the ones the coordinator's row names (brain-info.ts), so the reader and this agree. */
+export const PASSES = COORDINATOR_PASSES;
 export type Pass = (typeof PASSES)[number];
 
-export type ChildName = "board-sync" | "extract" | "consolidate" | "sleep";
+export type ChildName = Coordinated;
 
 /** What the coordinator knows of a child: who it runs as, what it owns, its guards and its command line. */
 export type Child = {
@@ -333,6 +348,112 @@ function launch(child: Child, env: Record<string, string | undefined>, args: rea
   };
 }
 
+/** The passes OB1_PASSES asks for, those it takes alone, each once, in its order: what the coordinator's row names. Pure. */
+export function askedPasses(raw: string | undefined): Pass[] {
+  return [...new Set((raw ?? "").split(/[\s,]+/))].filter((n): n is Pass => (PASSES as readonly string[]).includes(n));
+}
+
+/**
+ * The coordinator's row (brain-info.ts's CoordinatorValue): the passes asked
+ * for, and each child it runs — its heartbeat's key, its state, and the
+ * seconds since it began it and, waiting, to its next try, both counted back
+ * from `now`, the stamp's own time. A child not yet started is `starting`. Pure.
+ */
+export function coordinatorValue(o: {
+  id: string;
+  host: string;
+  passes: readonly Pass[];
+  children: readonly Child[];
+  keys: ReadonlyMap<ChildName, string | null>;
+  states: ReadonlyMap<ChildName, FollowerState>;
+  now: number;
+  everyS: number;
+  ended?: boolean;
+}): CoordinatorValue {
+  const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
+  const children: CoordinatorValue["children"] = {};
+  for (const c of o.children) {
+    const s = o.states.get(c.name);
+    const key = o.keys.get(c.name);
+    const base = { ...(key ? { key } : {}), for_s: s === undefined ? 0 : secs(o.now - s.since) };
+    children[c.name] = s === undefined ? { ...base, state: "starting" }
+      : s.state === "waiting" ? { ...base, state: "waiting", in_s: Math.min(86_400, secs(s.next - o.now)), code: Math.max(0, Math.min(255, s.code)), tries: s.tries }
+      : s.state === "held" ? { ...base, state: "held", refused: s.refused }
+      : { ...base, state: s.state };
+  }
+  return { v: 1, id: o.id, host: o.host, every_s: o.everyS, passes: [...o.passes], children, ...(o.ended ? { ended: true as const } : {}) };
+}
+
+/**
+ * The row's writer: on each change, every `everyS`, and once more ended. One
+ * write at a time, in order, each bounded by `timeoutMs` — the database may be
+ * what is down — and its value taken as it runs, so its times are the stamp's.
+ * A failure is said once until a write lands; the passes never wait on it.
+ *
+ * The row is one coordinator's at a time (review pass 3): a write replaces a
+ * row of its own `id` or its own `host`, or one ended, stale or not JSON —
+ * never another live coordinator's. So a second started beside the stack's (a
+ * one-off `compose run coordinator`, CI's held cases, each a container of its
+ * own) neither rewrites its children nor, at its stop, ends its row; it says
+ * so once, and takes the row over when the other's is ended or goes stale.
+ * The host (review pass 4): a container restarted after a hard stop keeps
+ * its hostname, so its next process takes over the row the last left live at
+ * once, rather than three intervals later. Two runs from checkouts on one
+ * machine share a host, and so the row.
+ */
+function coordinatorRow(o: { sql: SQL | null; id: string; host: string; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
+  const sql = o.sql;
+  if (sql === null) return { changed() {}, async end() {} };
+  let chain: Promise<void> = Promise.resolve();
+  let unwritten = false;
+  let notOurs = false;
+  let ended = false;
+  const staleS = STALE_AFTER_INTERVALS * o.everyS;
+  const write = (end: boolean): Promise<void> => {
+    chain = chain.then(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // An object, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
+        // The CASE keeps a value that is not JSON from reaching the cast.
+        const wrote = (await Promise.race([
+          sql`INSERT INTO ob1_config (key, value) VALUES (${COORDINATOR_KEY}, (${o.value(end)}::jsonb)::text)
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                WHERE CASE WHEN ob1_config.value IS JSON OBJECT
+                           THEN ob1_config.value::jsonb->>'id' IS NOT DISTINCT FROM ${o.id}
+                                OR ob1_config.value::jsonb->>'host' IS NOT DISTINCT FROM ${o.host}
+                                OR ob1_config.value::jsonb->'ended' = 'true'::jsonb
+                                OR ob1_config.updated_at < now() - make_interval(secs => ${staleS})
+                           ELSE true END
+              RETURNING 1 AS wrote`,
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${o.timeoutMs / 1000} s`)), o.timeoutMs); }),
+        ])) as unknown[];
+        unwritten = false;
+        if (wrote.length === 0 && !notOurs) {
+          o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, from another host, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`);
+        }
+        notOurs = wrote.length === 0;
+      } catch (e) {
+        if (!unwritten) o.err(`coordinator: could not stamp ${COORDINATOR_KEY} (${(e as Error).message}) — the passes run on, and it is tried again at the next change and every ${o.everyS} s`);
+        unwritten = true;
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+    return chain;
+  };
+  const tick = setInterval(() => void write(false), o.everyS * 1000);
+  return {
+    changed() {
+      if (!ended) void write(false);
+    },
+    async end() {
+      ended = true;
+      clearInterval(tick);
+      await write(true);
+    },
+  };
+}
+
 export type CoordinatorOptions = {
   env?: Record<string, string | undefined>;
   sql: SQL | null;
@@ -341,9 +462,14 @@ export type CoordinatorOptions = {
   /** The children to run in place of OB1_PASSES's: db/test-coordinator.ts's planted pair. */
   children?: readonly Child[];
   writer?: Writer;
+  /** The row's period and each write's bound: MIN_STAMP_EVERY_S and STAMP_TIMEOUT_MS unless a test drives them faster. */
+  rowEveryS?: number;
+  stampTimeoutMs?: number;
+  /** The host its row names: this machine's (os.hostname), unless a test plants another. */
+  host?: string;
 };
 
-/** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all. */
+/** Start the children OB1_PASSES names; `done` settles with 0 once a stop has ended them all and the row says so. */
 export function coordinate(opts: CoordinatorOptions): Supervisor {
   const env = opts.env ?? process.env;
   const writer = opts.writer ?? consoleWriter;
@@ -354,10 +480,27 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
     const who = plan.children.map((c) => (asRoot ? `${c.name} (uid ${c.uid})` : c.name));
     writer.err(`coordinator: runs ${andList(who)}${asRoot ? "" : " — not root, so each as this process's user, not its own"}`);
   }
+  // Its own row (SMD-3476 PR 3): what it runs and each child's state, which the status surface reads beside the passes' own.
+  const passes = askedPasses(env.OB1_PASSES);
+  const states = new Map<ChildName, FollowerState>();
+  const keys = new Map<ChildName, string | null>();
+  const everyS = opts.rowEveryS ?? MIN_STAMP_EVERY_S;
+  const id = crypto.randomUUID();
+  const host = opts.host ?? hostname();
+  const row = coordinatorRow({
+    sql: opts.sql,
+    id,
+    host,
+    everyS,
+    timeoutMs: opts.stampTimeoutMs ?? STAMP_TIMEOUT_MS,
+    err: writer.err,
+    value: (ended) => coordinatorValue({ id, host, passes, children: plan.children, keys, states, now: Date.now(), everyS, ended }),
+  });
   const children = plan.children.map((child) => {
     if (asRoot) removeOldHomes(child, writer.err);
     const l = launch(child, env, null, asRoot, writer.err);
     const every = child.every?.(l.env);
+    keys.set(child.name, followerKey(child.name, l.env));
     return supervise({
       worker: child.name,
       cmd: l.cmd,
@@ -369,12 +512,18 @@ export function coordinate(opts: CoordinatorOptions): Supervisor {
       env: l.env,
       sql: opts.sql,
       writer,
+      onState: (state) => {
+        states.set(child.name, state);
+        row.changed();
+      },
     });
   });
+  row.changed();
   const stopped = new AbortController();
-  const done = children.length
-    ? Promise.all(children.map((c) => c.done)).then(() => 0)
-    : new Promise<number>((settle) => stopped.signal.addEventListener("abort", () => settle(0), { once: true }));
+  const ended = children.length
+    ? Promise.all(children.map((c) => c.done))
+    : new Promise<void>((settle) => stopped.signal.addEventListener("abort", () => settle(), { once: true }));
+  const done = ended.then(() => row.end()).then(() => 0);
   return {
     done,
     stop(signal) {
