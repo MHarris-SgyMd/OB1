@@ -36,6 +36,11 @@ echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
 FORWARD_KEY=$(openssl rand -hex 32)
 FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
+# Each masked in the job's log from here on, in every job that runs this: a
+# throwaway minted for the job, but a credential to its stack while it runs.
+# The edge step's mask, the brains job's one, went with it to the auth job
+# (SMD-3471).
+for k in "$KEY" "$READ_KEY" "$CAPTURE_KEY" "$FORWARD_KEY"; do echo "::add-mask::$k"; done
 # No OPENROUTER_API_KEY: the provider is a local endpoint, which
 # needs no credential (preflight decides). Preflight dials it
 # (GET /models, SMD-1875), and the steps that seed or search thoughts
