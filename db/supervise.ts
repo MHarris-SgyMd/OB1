@@ -174,9 +174,10 @@ function jobOf(worker: StampingWorker, key: string): string | undefined {
 
 /**
  * End the follower's row with `restart`: its own last word kept when it wrote
- * one since `since`, else a row of its own here. The waits go — an ended row
- * waits on nothing — and a follower that did not exit 0 failed. One
- * statement, the row read and written under its own lock.
+ * one since `since`, else a row of its own here. The waits and the pause go
+ * — an ended row waits on nothing, and is paused by nothing (SMD-3379 PR 1c)
+ * — its held passes stay as its last word, and a follower that did not exit
+ * 0 failed. One statement, the row read and written under its own lock.
  */
 export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: string; since: Date; restart: RestartMark; refused?: string }): Promise<void> {
   // Objects, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
@@ -187,7 +188,7 @@ export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: stri
   await sql`
     INSERT INTO ob1_config (key, value)
     SELECT ${opts.key}, ((CASE WHEN c.updated_at >= ${opts.since} AND c.value IS JSON OBJECT THEN c.value::jsonb ELSE ${fresh}::jsonb END
-                         - 'waiting' - 'waitingMidPass' - 'resting') || ${set}::jsonb)::text
+                         - 'waiting' - 'waitingMidPass' - 'resting' - 'paused') || ${set}::jsonb)::text
       FROM (SELECT 1) one LEFT JOIN ob1_config c ON c.key = ${opts.key}
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
 }
