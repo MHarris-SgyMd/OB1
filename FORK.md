@@ -812,11 +812,12 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 ./db/ci-parity.sh
 ```
 
-runs them all in CI's order against one shared database. Use it before pushing.
-It also runs the suites and self-checks of CI's jobs that have no database
-(with `DATABASE_URL` unset, as theirs is) and every typecheck. Check 35 holds
-it to the workflow, both ways: a script a step runs, from the same directory,
-with the same flags and environment, or an excuse with its reason (SMD-2903).
+runs them in CI's order on one shared database, test-upgrade and test-preflight
+on a second as CI's are. Use it before pushing. Beside them it runs the suites
+and self-checks of CI's jobs with no database (`DATABASE_URL` unset, as in CI)
+and every typecheck (SMD-3638). Check 35 holds it to the workflow, both ways:
+a script a step runs, from the same directory, with the same flags and
+environment, or an excuse with its reason (SMD-2903).
 
 **Two linters run on every PR (SMD-1808).** `commit-lint` holds each commit to the
 house grammar (`[fork] … (SMD-NNNN)`, and `(caught: …)` on a review pass's finding

@@ -44,7 +44,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
-import { parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
+import { MIGRATION_EXIT, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -288,6 +288,12 @@ const fixOf = (...parts: string[]) => parts.map((p) => p.trim()).filter((p) => p
 function heldFix(h: WorkerHeartbeat, name: string): string | null {
   const r = h.restart;
   if (!r) return null;
+  // A migration seen: run again at once, the new process waiting at its start, unstamped, as
+  // long as the migration runs (SMD-3379 PR 1c-1); long past the overdue mark, a supervisor gone.
+  if (r.code === MIGRATION_EXIT && r.inS === 0) {
+    const recreateIt = restartCommand(h.worker, h.job);
+    return `${name} is restarting after a migration: its supervisor ran it again at once, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, the database does not answer, or its passes' start checks run${h.ageS >= RESTART_OVERDUE_S ? `. This long, a migrate.ts may hang holding the lock — a second run names its holder — or the coordinator may be gone — ${recreateIt}` : ""}.`;
+  }
   const remedy = h.refused ? startRefusalRemedy(h.refused, h.worker) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
   const recreate = restartCommand(h.worker, h.job);
   if (r.inS === null) return `${name} is held by its supervisor, never started: ${remedy}. That is deploy/.env's to mend, so recreate it then — ${recreate}.`;

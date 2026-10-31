@@ -2725,9 +2725,9 @@ export const GRANT_LOCK = "ob1:grants";
  * file, role, schema, ledger or hand-back, 096's re-run, or `--reapply` — and
  * holds until it returns; never for `--dry-run`, `--grant` or a run with nothing
  * to write. A second run meanwhile is refused by name, where before it raced the
- * first on the ledger's rows and the catalog's; the sleep scheduler is to read
- * it to stop its passes (SMD-3379 PR 1c). A signal, not a barrier: migrate waits for nothing
- * else to stop.
+ * first on the ledger's rows and the catalog's; the sleep scheduler reads it
+ * to stop its passes (SMD-3379 PR 1c-1). A signal, not a barrier: migrate
+ * waits for nothing else to stop.
  */
 export const MIGRATE_LOCK = "ob1:migrate";
 /**
@@ -2744,6 +2744,15 @@ export const MIGRATE_LOCK_HOLDER_SQL = `
    WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
      AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid`;
+/**
+ * The exit status the sleep scheduler ends with when it sees a migration —
+ * MIGRATE_LOCK held at two polls, or the ledger moved since its start —
+ * and db/supervise.ts runs it again at once, no wait and no try counted:
+ * the next process waits the migration out and takes its start's reads again
+ * on the schema it left (SMD-3379 PR 1c-1). EX_TEMPFAIL, sysexits.h's "try
+ * again".
+ */
+export const MIGRATION_EXIT = 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "structure", "querylog", "jobs", "pages", "claims", "community", "extensions", "recipes"]);
 /**
