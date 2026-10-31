@@ -102,12 +102,12 @@ if (!URL_) {
  * (SMD-3392), and [9f], re-embed's follower outage cases, out of [9]
  * (SMD-2679 PR 4a-2b). The four are split so that each cell's job takes
  * about a quarter of the four's ~885 s, ~221 s, by the section times of
- * main's runs to 4490b54b (SMD-3469): sleep has [38] and [10g], 199 s of
- * sections, and [39]; long [38b], [9] and [9f], 194 s, and [17]; extract [10]
- * and [38r], 182 s, and five short sections; the rest its own 163 s, [10h]
- * and [10e]. A cell's job runs ~18 s past its sections (~27 s for the rest's,
- * with test-search-path.ts), so a section added to a cell adds to the run's
- * length once that cell is the longest.
+ * main's runs to 4490b54b as their logs stamp them (SMD-3469): sleep has
+ * [38] and [10g], 200 s of sections, and [39]; long [38b], [9] and [9f],
+ * 194 s, and [17]; extract [10] and [38r], 182 s, and five short sections;
+ * the rest its own 163 s, [10h] and [10e]. A cell's job runs ~18 s past its
+ * sections (~25 s for the rest's, with test-search-path.ts), so a section
+ * added to a cell adds to the run's length once that cell is the longest.
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
@@ -4204,6 +4204,10 @@ if (want("9f")) {
   delete env.OB1_LLM_API_KEY;
   const OWN_KEY = `reembed:stub-embed@${DIM}`;
   const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+  // The model the brain recorded before this section, put back at its end as [9] puts back its own: a later
+  // section's replay finds its vector in the snapshot under that model, and with stub-embed left recorded [28]'s
+  // two replays rebuilt their rows without one in a full run (SMD-3469 review pass 1).
+  const [recordedBefore] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
   await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
   await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
   const row = async () => {
@@ -4734,6 +4738,8 @@ if (want("9f")) {
     await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
     await sql`DELETE FROM thoughts`;
+    if (recordedBefore) await sql`UPDATE ob1_config SET value = ${recordedBefore.value} WHERE key = 'embedding_model'`;
+    else await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
   }
 }
 
@@ -18446,9 +18452,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded, in a full run and the long
-  // cell alike, is another model's, which every pass's start would refuse:
-  // set aside, and put back at the end.
+  // The extraction key [38r] leaves recorded in a full run is another
+  // model's, which every pass's start would refuse: set aside, and put back
+  // at the end. In its cell, [38r] elsewhere, there is none to set aside.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
