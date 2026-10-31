@@ -104,14 +104,15 @@ if (!URL_) {
  * [9] into extract, so long keeps its time (SMD-2679 PR 4a-2b). [38r], the
  * scheduler's re-embed cases, came out of [38] into long, and [10g] went to
  * sleep, so that neither cell sets the run's length (SMD-3392). Long's three,
- * ~216 s of sections, are the floor no split goes under; the short sections
- * even the others out to it, by the section times main's CI logs stamp in
- * its runs from 7301d0f5 to e7220bd5 (SMD-3469): sleep has [17] beside [38]
- * and [10g], and the rest takes [10e], [37] and [43] from extract. The rest's
- * sections wait on the CPU, not on timers, so its time moves most with the
- * runner's speed. A cell's job runs ~18 s past its sections (~25 s for the
- * rest's, with test-search-path.ts), so a section added to a cell adds to
- * the run's length once that cell's job is the run's longest.
+ * ~216 s of sections, are the floor no split keeping them together goes
+ * under; the short sections even the others out to it, by the section times
+ * main's CI logs stamp in its runs from 7301d0f5 to e7220bd5 (SMD-3469):
+ * sleep has [17] beside [38] and [10g], and the rest takes [10e], [37] and
+ * [43] from extract. The rest's sections wait on the CPU, not on timers, so
+ * its time moves most with the runner's speed. A cell's job runs ~18 s past
+ * its sections (~25 s for the rest's, with test-search-path.ts), so a
+ * section added to a cell adds to the run's length once that cell's job is
+ * the run's longest.
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
