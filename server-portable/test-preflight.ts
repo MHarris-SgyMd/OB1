@@ -6198,4 +6198,4 @@ else {
 }
 
 localStub.stop(true);
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);

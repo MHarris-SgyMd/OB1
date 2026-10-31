@@ -192,7 +192,8 @@
  *      applies — and it requires one check, "Fork Checks passed": the job
  *      fork-checks-passed in .github/workflows/fork-checks.yml, which needs
  *      every other job, runs if: always(), lets only the jobs with an if: of
- *      their own skip (AGGREGATE_MAY_SKIP, commit-lint), on which no job it
+ *      their own skip (AGGREGATE_MAY_SKIP: commit-lint and
+ *      publish-test-counts), on which no job it
  *      needs sets continue-on-error or calls a reusable workflow, which runs
  *      on ubuntu-24.04 with no key beyond the few allowed on it or its step,
  *      and whose one step is held verbatim and run on its own cases
@@ -4858,13 +4859,16 @@ const AGGREGATE_RUNNER = "ubuntu-24.04";
  * between names, as the step's jq splits them (review pass 2). Held here so
  * that a job made skippable is a reviewed change to this check, not an `if:`
  * and a MAY_SKIP entry added together: commit-lint, because a plain push has
- * no range of its own to lint. A job here must be one no other job needs (a
+ * no range of its own to lint; publish-test-counts, because only a push to
+ * main publishes the suites' counts to the wiki (SMD-3614) — it runs no suite
+ * of its own, and on main a job it needs that failed fails the aggregate
+ * through that job. A job here must be one no other job needs (a
  * skipped need skips its dependents, review pass 5). The comments above
  * commit-lint and the aggregate in the workflow, and FORK.md's ruleset text,
  * name this list in prose; change them with it. The probes keep their own list
  * (PROBE_MAY_SKIP), so a change here moves only the real rules.
  */
-const AGGREGATE_MAY_SKIP = ["commit-lint"];
+const AGGREGATE_MAY_SKIP = ["commit-lint", "publish-test-counts"];
 const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
 /** A name as a message shows it: quoted, with anything outside printable ASCII escaped, so a look-alike does not read as the name it imitates (review pass 3). */
 const shownName = (s: string): string => JSON.stringify(s).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
@@ -9870,6 +9874,7 @@ const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, st
     "deploy-stack-brains": "a second brain, the tier refresh and a canary beside that stack, on Docker",
     "deploy-stack-auth": "the import runner and the authorization server on that stack, on Docker",
     "auth-poc": "the authorization POC's own stacks in Docker (eval-auth.ts --up)",
+    "publish-test-counts": "commits the run's counts to the wiki on a push to main (SMD-3614); its page's rules are the self-check the repo-consistency job runs",
   },
   scripts: {
     "scripts/check-landing.ts": "reads a pull request's or merge group's commit range from the event",
@@ -9902,8 +9907,14 @@ function parityLinesIn(text: string): { runs: ParityRun[]; typechecks: { dir: st
   });
   return { runs, typechecks, unread };
 }
-/** The environment the comparison holds: the database URLs are the harness's, so not compared; the verb says whether DATABASE_URL is set. */
-const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL"));
+/**
+ * The environment the comparison holds: the database URLs are the harness's,
+ * so not compared; the verb says whether DATABASE_URL is set. OB1_TEST_COUNTS
+ * is where a run's totals are written for the wiki (SMD-3614), not what it
+ * tests, so it is not compared either.
+ */
+const UNHELD_ENV = ["OB1_TEST_COUNTS"];
+const heldEntries = (env: Record<string, string>): [string, string][] => Object.entries(env).filter(([k]) => !k.endsWith("DATABASE_URL") && !UNHELD_ENV.includes(k));
 const heldEnv = (env: Record<string, string>): string => JSON.stringify(heldEntries(env).sort(([a], [b]) => a.localeCompare(b)));
 const parityLine = (verb: string, dir: string, script: string, args: string, env: Record<string, string>): string =>
   [...heldEntries(env).map(([k, v]) => `${k}=${v}`), verb, dir, script, args].filter(Boolean).join(" ");

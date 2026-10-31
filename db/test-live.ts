@@ -21385,4 +21385,4 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   }
 }
 
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);
