@@ -1592,6 +1592,9 @@ jobs:
       # that could not connect at all would fail here rather than pass. Each
       # dial gives up after 4 s. The probe is the server's image, which has
       # Bun, read from compose as the later steps read it; nothing is pulled.
+      # The four probes run side by side, each into files of its own, and are
+      # read in the order they once ran in: in series, until SMD-3472, the
+      # two on egress waited out about 4.5 s each.
       - name: Postgres answers on the data network alone
         working-directory: deploy
         run: |
@@ -1600,10 +1603,20 @@ jobs:
           [ -n "$ip" ] || { echo "Postgres has no address on open-brain_data" >&2; exit 1; }
           # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
           dial='const [host, port] = process.argv.slice(-2); const s = (await import("node:net")).connect({ host, port: Number(port) }); setTimeout(() => { console.log(`${host}: no answer in 4 s`); process.exit(1); }, 4000); s.on("connect", () => { console.log(`${host}: connected`); process.exit(0); }); s.on("error", (e) => { console.log(`${host}: ${e.code}`); process.exit(1); });'
+          dir="$RUNNER_TEMP/postgres-probes"; mkdir -p "$dir"
+          # probe NETWORK TARGET: the dial's output in NETWORK.TARGET.out, its exit code in NETWORK.TARGET.rc.
+          probe() {
+            local rc=0
+            docker run --rm --network "open-brain_$1" --entrypoint bun "$IMAGE" -e "$dial" "$2" 5432 > "$dir/$1.$2.out" || rc=$?
+            echo "$rc" > "$dir/$1.$2.rc"
+          }
+          for target in postgres "$ip"; do probe data "$target" & probe egress "$target" & done
+          wait
           for target in postgres "$ip"; do
-            docker run --rm --network open-brain_data --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432 \
+            cat "$dir/data.$target.out"
+            [ "$(cat "$dir/data.$target.rc")" = 0 ] \
               || { echo "a container on open-brain_data could not reach Postgres as $target, so the refusal below proves nothing" >&2; exit 1; }
-            rc=0; out=$(docker run --rm --network open-brain_egress --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432) || rc=$?
+            rc=$(cat "$dir/egress.$target.rc"); out=$(cat "$dir/egress.$target.out")
             [ "$rc" != 0 ] || { echo "a container on open-brain_egress alone opened a connection to Postgres as $target" >&2; exit 1; }
             # docker's own failure (125: no such network) is not a refusal.
             if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then
@@ -1629,8 +1642,14 @@ jobs:
       # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
       # alone, so it asks no resolver outside the stack: a public name does
       # not resolve there, where the same image on the forwarder's outward
-      # network resolves it (so a missing tool cannot pass). The forwarder's
-      # self-check runs from the copy compose.yaml mounts. The proxy logs a
+      # network resolves it (so a missing tool cannot pass). The proxy's
+      # lookup is given 2 s, where one an outside resolver answers takes a
+      # fraction of that: unbounded, 12 s passed before the self-check printed,
+      # most of it, inferred, the lookup waiting out its resolver (SMD-3472).
+      # Its exit code is getent's "not found" (2) or the timeout's
+      # (143) and nothing else, since a missing `timeout` (127) is no refusal.
+      # The forwarder's self-check runs from the copy compose.yaml mounts. The
+      # control, the lookup and the self-check run side by side. The proxy logs a
       # client by the PROXY line, as neither the forwarder nor itself. And with
       # the proxy stopped, a decoy answering to the proxy's name on `edge` is
       # what the forwarder resolves, and gets nothing: the forwarder dials only
@@ -1638,11 +1657,18 @@ jobs:
       - name: The proxy asks nothing outside the stack, and the forwarder dials it alone
         working-directory: deploy
         run: |
-          PROXY_IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)"
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
-          docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
-          if docker compose -f compose.yaml exec -T proxy getent hosts example.com; then echo "the proxy resolved an outside name" >&2; exit 1; fi
-          docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check
+          cfg="$(docker compose -f compose.yaml config --format json)"
+          PROXY_IMAGE="$(jq -r .services.proxy.image <<<"$cfg")"
+          IMAGE="$(jq -r .services.api.image <<<"$cfg")"
+          docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null & control=$!
+          docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check > "$RUNNER_TEMP/forwarder-self-check" 2>&1 & selfcheck=$!
+          rc=0; docker compose -f compose.yaml exec -T proxy timeout 2 getent hosts example.com || rc=$?
+          wait "$control" || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
+          [ "$rc" != 0 ] || { echo "the proxy resolved an outside name" >&2; exit 1; }
+          [ "$rc" = 2 ] || [ "$rc" = 143 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor the 2 s timeout (143), so it refused nothing" >&2; exit 1; }
+          rc=0; wait "$selfcheck" || rc=$?
+          cat "$RUNNER_TEMP/forwarder-self-check"
+          [ "$rc" = 0 ] || { echo "the forwarder's self-check, in its container, exited $rc" >&2; exit 1; }
           fwd=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_front").IPAddress}}' "$(docker compose -f compose.yaml ps -q forwarder)")
           [ -n "$fwd" ] || { echo "the forwarder has no address on open-brain_front" >&2; exit 1; }
           for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] && break; sleep 2; done
@@ -1654,7 +1680,7 @@ jobs:
           if [ -z "$client" ] || [ "$client" = null ] || [[ "$own" == *" $client "* ]]; then echo "the proxy logged /health from '$client', one of the forwarder's or the proxy's own addresses ($own): no PROXY line naming the client" >&2; exit 1; fi
           stopped=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose -f compose.yaml stop proxy
-          trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy' EXIT
+          trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy' EXIT
           # A raw TCP listener, so it counts a connection whatever its first bytes:
           # the forwarder opens with the PROXY line, which an HTTP server refuses
           # unlogged (a forwarder that dialled it went uncounted, measured).
@@ -1734,10 +1760,9 @@ jobs:
             esac
           }
           # proxy_loads WANT ARGS...: WANT is [{source, target, label, file}].
-          # Each file named with -f is kept in `rendered`, held to the
-          # directory's compose files at the end.
-          rendered=()
-          trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
+          # Each runs in the background by loads(), below.
+          dir="$RUNNER_TEMP/proxy-loads"; mkdir -p "$dir"
+          trap 'kill $(jobs -p) 2>/dev/null || true; rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
           # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
@@ -1763,19 +1788,15 @@ jobs:
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
           proxy_loads() {
-            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=()
+            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=() alone
             shift
+            alone="$(mktemp "$dir/alone.XXXXXX")"
             paths=""
             for a in "$@"; do
               if [ "$prev" = -f ]; then
-                rendered+=("$a")
                 paths+="$(declared "$a")"$'\n'
                 if [ -z "$first" ]; then first="$a"; fi
-                # Bun.YAML's reading of the file, which check 28 holds; the release's overlay is read by none.
-                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else
-                  bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
-                  twins+=(".bun-view.$a.json")
-                fi
+                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else twins+=(".bun-view.$a.json"); fi
               else twins+=("$a"); fi
               if [ "$prev" = -p ]; then project=(-p "$a"); fi
               case "$a" in --profile=*) only+=("$a") ;; esac
@@ -1792,15 +1813,15 @@ jobs:
             # argument (MAX_ARG_STRLEN) since the dashboard's inline (SMD-1849 PR 3c
             # review pass 1: compose.yaml's every-profile render 148 KB, measured),
             # and macOS has no such limit.
-            docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json > .bun-view.alone.json
-            jq -e --argjson want "$want" --argjson base "$base" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $labelled" <<<"$render" >/dev/null \
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json > "$alone"
+            jq -e --argjson want "$want" --argjson base "$base" --slurpfile alones "$alone" --argjson declared "$paths" "\$alones[0] as \$alone | $labelled" <<<"$render" >/dev/null \
               || { echo "$*: the render is not compose.yaml's alone but for what its overlays declare, or its proxy and tables are not the held ones" >&2; return 1; }
             # The same, with no variable substituted: a value that matched under
             # CI's settings and moved under an operator's (pass 6) differs here.
             raw="$(docker compose "$@" config --no-interpolate --format json)"
             [ "$(docker compose "${twins[@]}" config --no-interpolate --format json)" = "$raw" ] || { echo "compose reads $* otherwise than Bun.YAML does, with no variable substituted" >&2; return 1; }
-            docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json > .bun-view.alone.json
-            jq -e --argjson want "$want" --argjson base "$base_raw" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $held" <<<"$raw" >/dev/null \
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json > "$alone"
+            jq -e --argjson want "$want" --argjson base "$base_raw" --slurpfile alones "$alone" --argjson declared "$paths" "\$alones[0] as \$alone | $held" <<<"$raw" >/dev/null \
               || { echo "$*: the same, with no variable substituted" >&2; return 1; }
             while read -r row; do
               for r in "$render" "$raw"; do
@@ -1809,37 +1830,74 @@ jobs:
               done
             done < <(jq -c '.[]' <<<"$want")
           }
+          # loads WANT ARGS...: proxy_loads in the background, its output in a
+          # file of its own, so the renders run side by side (in series, until
+          # SMD-3472, about 30 s). Each file named with -f is kept in
+          # `rendered`, held to the directory's compose files at the end, and
+          # read by Bun.YAML here, once for every render naming it (check 28
+          # holds that reading; the release's overlay is read by none).
+          rendered=() pids=() calls=()
+          loads() {
+            local a prev=""
+            for a in "${@:2}"; do
+              if [ "$prev" = -f ]; then
+                rendered+=("$a")
+                if [ "$a" != compose.release.yaml ] && [ ! -e ".bun-view.$a.json" ]; then
+                  bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
+                fi
+              fi
+              prev="$a"
+            done
+            proxy_loads "$@" > "$dir/${#pids[@]}.log" 2>&1 &
+            pids+=("$!"); calls+=("${*:2}")
+          }
+          # settle FROM TO: wait for calls FROM to TO-1, printing each one's
+          # output in the order it was made, and fail if any failed.
+          settle() {
+            local i rc failed=0
+            for ((i = $1; i < $2; i++)); do
+              rc=0; wait "${pids[$i]}" || rc=$?
+              cat "$dir/$i.log"
+              if [ "$rc" != 0 ]; then failed=1; echo "proxy_loads ${calls[$i]}: exit $rc" >&2; fi
+            done
+            return "$failed"
+          }
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
-          proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml "${profiles[@]}"
+          loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
+          unreleased=${#pids[@]}
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
-          # cut). release.yml holds the overlay a release actually ships.
+          # cut). release.yml holds the overlay a release actually ships. Each
+          # mode's renders end before the next mode rewrites the file; the
+          # renders above read no release overlay, and run on beside both.
           for mode in rehearsal tag; do
+            from=${#pids[@]}
             if [ "$mode" = rehearsal ]; then
               bun ../scripts/release-artifacts.ts compose --rehearsal --owner "$GITHUB_REPOSITORY_OWNER" --ollama-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 > compose.release.yaml
             else
               bun -e 'import { renderComposeOverlay } from "../scripts/release-artifacts.ts"; const z = "sha256:" + "0".repeat(64); process.stdout.write(renderComposeOverlay({ version: "9.9.9", tag: "v9.9.9", rendered: "ci", images: { server: { ref: "ghcr.io/example/ob1-server:v9.9.9", digest: z }, migrate: { ref: "ghcr.io/example/ob1-migrate:v9.9.9", digest: z } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: z }))' > compose.release.yaml
             fi
-            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
+            loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
+            loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+            loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+            loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            settle "$from" "${#pids[@]}"
             # Every service compose.yaml runs on a local build's image (the
             # server's, the migrator's, by the project's name) runs the
             # release's instead, so a service added there is pinned here too
@@ -1847,6 +1905,7 @@ jobs:
             left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
             [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
+          settle 0 "$unreleased"
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
@@ -2078,7 +2137,8 @@ jobs:
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
           carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
+          # --no-deps: the overlay changes the proxy alone (check 28's OVERLAYS), and without it each up ran migrate again (SMD-3472).
+          docker compose -f compose.yaml -f compose.api-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
           # From outside, the proxy deletes the forwarder slot: no act, however sound the forwarder key.
@@ -2089,7 +2149,7 @@ jobs:
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
           if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
           [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
-          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
           sleep 1
