@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -307,6 +307,25 @@ const providerWaitWords = (passes: readonly string[], midPass = false) => `${pas
 /** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
 const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
   [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
+/** A sleeping scheduler's passes, running or paused by a live call (SMD-3379 PR 1c), as the rows of the passes it runs say them. */
+const asleepWords = (h: Pick<WorkerHeartbeat, "paused">) => (h.paused ? "paused by a live call, its passes going on once the brain is quiet" : "asleep, its passes running");
+/**
+ * What the scheduler is doing with one pass, as that pass's row says it:
+ * held out (SMD-3379 PR 1c), paused, awake, or asleep — its passes waiting
+ * for the provider at their start running nothing, as the sleep row says
+ * (SMD-2752 PR 3), nor those waiting mid-pass for one that stopped
+ * answering (SMD-2905) — or running.
+ */
+const passWords = (sleeping: WorkerHeartbeat, pass: SleepHold["pass"], awake: string, leaveHold = false) => {
+  // `leaveHold`: the row says the hold in words of its own (re-embed's set-down or set-aside, review pass 2).
+  const hold = leaveHold ? undefined : sleeping.holds?.find((x) => x.pass === pass);
+  if (hold) return `held out: ${holdWords(hold, sleeping)}`;
+  const waits = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null) : null;
+  // Paused, a provider wait goes on beside it (draft 5's §3, review pass 2).
+  if (sleeping.paused) return `${asleepWords(sleeping)}${waits ? `, ${waits}` : ""}`;
+  if (!sleeping.running) return awake;
+  return waits ? `asleep, ${waits}` : asleepWords(sleeping);
+};
 /** The rows to check for passes waiting on their provider: re-embed's is the embedding endpoint, the others' chat (SMD-2679 PR 4b). */
 const providerRows = (passes: readonly string[]) =>
   [passes.some((p) => p !== "reembed") ? "the model provider rows here (--deep probes chat)" : null, passes.includes("reembed") ? "the embedding provider row here (--deep calls it)" : null].filter((r) => r !== null).join(" and ");
@@ -345,6 +364,8 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
 
 /** The coordinator started again, as restartCommand words a pass's restart (db/config.mjs's coordinatorUp): recreated, with no deps. */
 const COORDINATOR_UP = "podman compose -f deploy/compose.yaml up -d --no-deps --force-recreate coordinator, with the -f files and -p the stack was started with (docker compose alike)";
+/** The import runner started again: its profile's services, as deploy/README.md starts them (SMD-3476 PR 3b). */
+const RUNNER_UP = "podman compose -f deploy/compose.yaml --profile orchestration up -d orchestration-runner, with the -f files and -p the stack was started with (docker compose alike)";
 
 /** How long a pending proposal may wait before the proposals row warns, in days (SMD-2680). */
 const PROPOSALS_WARN_DAYS = 7;
@@ -4337,10 +4358,9 @@ if (configFailed) {
               // re-embed (review pass 6).
               if (runner.by === "scheduler") {
                 const sleeping = runner.beat;
-                const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
                 // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
                 const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "awake, its passes waiting for the brain to go quiet";
-                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : awake})`;
+                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake, runner.down !== null || runner.clears !== null)})`;
                 // Its failed rows: retried once their cause is fixed, or one the
                 // provider refuses permanently accepted — a retry of that fails
                 // again, every sleep (review pass 1: main's way out was lost).
@@ -4557,10 +4577,7 @@ if (configFailed) {
                 const beside = followersBeside(facts.workers?.heartbeats ?? [], sleeping);
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${besideWords(beside)}` : "";
                 const diedFix = l.expired ? fixOf(besideFix(beside), reclaim(key)) : "";
-                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2),
-                // nor do those waiting mid-pass for one that stopped answering (SMD-2905).
-                const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "awake, its passes waiting for the brain to go quiet")})`;
                 if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
@@ -4949,10 +4966,11 @@ if (configFailed) {
           } else if (h === undefined) {
             add("sleep", "skip", "the sleep scheduler has not run on this brain — the coordinator runs it when deploy/.env's OB1_PASSES names sleep, as an alternative to workers (deploy/README.md, SMD-2678, SMD-3476).");
           } else {
-            const wakes = "a live write wakes it; a search does not";
+            // Paused, a live write paused it rather than woke it (SMD-3379 PR 1c, review pass 1).
+            const wakes = `a live write ${h.paused && !(h.stale || h.ended) ? "pauses" : "wakes"} it; a search does not`;
             const s = h.slept;
             const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
-            const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
+            const since = (t: string) => ago(Math.max(0, secondsSince(h, t)));
             // Its passes waiting at their start for a provider that does not
             // answer, by its own word (SMD-2752), or mid-pass for one that
             // stopped answering (SMD-2905): asleep, but nothing runs.
@@ -4977,6 +4995,12 @@ if (configFailed) {
               : "";
             const sleepWords = h.stale || h.ended
               ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
+              // Paused: heartbeatState says by what and for how long (SMD-3379 PR 1c).
+              // Between sleeps, its work waits for the next (review pass 2: an ended sleep read as current).
+              : h.paused
+                ? s && !s.to
+                  ? `its passes waiting between thoughts, going on once the brain is quiet${waitingFor || waitingMid ? `, ${waitWords}` : ""} — the sleep began ${since(s.from)} ago`
+                  : `its work waiting, the next sleep beginning once the brain is quiet — ${s?.to ? `the last sleep ended ${since(s.to)} ago` : "no sleep yet"}`
               : h.running
                 ? waitingFor || waitingMid
                   ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
@@ -5045,7 +5069,8 @@ if (configFailed) {
             // the embedding config row, which skips this one (review pass 1).
             const unfitName = (h.reembedJob === undefined || down) && embUnfit === "model";
             const unfitDetail = unfitName ? `; ${h.reembedJob !== undefined ? "started again, " : ""}re-embed does not run in sleep — this stack's OB1_EMBEDDING_MODEL is no model name its row can carry (ASCII letters, digits and . _ : @ / + -, the name and its width at most 120 characters as <name>@<width>); any backlog is re-embedded by hand, as the vector models and re-embed pass rows say` : "";
-            const detail = `${heartbeatState(h)}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}${setDetail}${unfitDetail}`;
+            // Re-embed's hold is said with its remedy below, where it is set aside or down (review pass 1).
+            const detail = `${heartbeatState(h, set ? { leave: ["reembed"] } : {})}${refusedBy ? `, refused at a pass's start (${refusedBy})` : ""}; ${sleepWords}; ${down ? `when it runs, ${wakes}` : wakes}${budgetDetail}${heldDetail}${setDetail}${unfitDetail}`;
             const fixes: string[] = [];
             // An ended row's set-down is mended first: the restart below starts it (review pass 2: the order read restart, then mend).
             // Not under a model name that keeps re-embed out once started again: nothing would set it down (review pass 3).
@@ -5136,15 +5161,21 @@ if (configFailed) {
               add("tasks", "skip", `no task has stamped a heartbeat on this brain${tail}.`);
             } else {
               const detail = tasks.map((t) => `${t.job ?? t.task} ${t.state}`).join(", ") + tail;
-              const wrong = tasks.filter((t) => !(TASK_OK as readonly string[]).includes(t.state));
+              // The import runner stopped is its profile's stop, an operator's (compose stop, or an up without
+              // --profile orchestration): said, not warned on. One that died, or lost the database, goes stale (review pass 1).
+              const wrong = tasks.filter((t) => !(TASK_OK as readonly string[]).includes(t.state) && !(t.task === "orchestration-runner" && t.state === "stopped"));
               const fixes = wrong.map((t) => {
                 const name = t.job ?? t.task;
+                // As the workers row's: a coordinator or runner taken away on purpose leaves a row only its retirement clears (review pass 1).
+                const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
                 if (t.task === "coordinator") {
-                  // As the workers row's: a coordinator taken away on purpose leaves a row only its retirement clears (review pass 1).
-                  const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
                   return t.state === "stale"
                     ? `The coordinator has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database — start it again: ${COORDINATOR_UP}. ${retire}`
                     : `The coordinator stopped: start it again — ${COORDINATOR_UP}. ${retire}`;
+                }
+                // The import runner is the orchestration profile's own service, which no coordinator runs (SMD-3476 PR 3b).
+                if (t.task === "orchestration-runner") {
+                  return `The import runner has not stamped for ${ago(t.ageS ?? 0)}: it stopped without ending its row, or cannot reach the database — start it again: ${RUNNER_UP}. ${retire}`;
                 }
                 if (t.state === "missing") return `${name}: ${t.words} — the coordinator's log says why (compose logs coordinator).`;
                 return `${name}: ${t.words} — the ${t.task === "sleep" ? "sleep" : "workers"} row says what to do.`;
