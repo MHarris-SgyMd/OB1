@@ -499,14 +499,16 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   const aRow = await row(a.pid);
   assert(acc.status === 200 && acc.body.status === "accepted" && acc.body.supersedingId === a.n && acc.body.supersededId === a.o && acc.body.written === true
       && (await pointer(a.n)) === a.o && audit?.actor_name === "writer" && audit?.origin === "open-brain-api"
-      && aRow.status === "accepted" && aRow.reviewed_by === "writer" && aRow.agent !== null && aRow.note === "the newer value stands" && (acc.body.reviewer as { name?: string } | null)?.name === "writer",
+      && aRow.status === "accepted" && aRow.reviewed_by === "writer" && aRow.agent !== null && aRow.note === "the newer value stands" && (acc.body.reviewer as { name?: string } | null)?.name === "writer"
+      && (acc.body.reviewer as { agentId?: unknown } | null)?.agentId === aRow.agent,
     `an accept through REST sets the newer's supersedes, audited under the caller's key, the row recording it as the reviewer with the note (${acc.status} ${JSON.stringify(acc.body).slice(0, 120)} | ${JSON.stringify(audit)} | ${JSON.stringify(aRow)})`);
   // The same decision through MCP renders from the REST answer, ids swapped.
   const b = await pair("b");
   const bm = await mcp("review_supersession_proposal", { id: b.pid, decision: "accept", note: "the newer value stands" });
   const swapped = Object.fromEntries(Object.entries(acc.body).map(([k, x]) => [k, k === "id" ? b.pid : k === "supersedingId" ? b.n : k === "supersededId" ? b.o : x]));
   const br = rendered((v) => say.renderReviewProposal(ok(v)), swapped);
-  assert(!bm.isError && (await pointer(b.n)) === b.o && br.content[0].text === bm.text && same(br.structuredContent, bm.sc) && /^Decided by: writer \(your key\), /m.test(bm.text),
+  assert(!bm.isError && (await pointer(b.n)) === b.o && br.content[0].text === bm.text && same(br.structuredContent, bm.sc) && /^Decided by: writer \(your key\), a key the registry has not classified\.$/m.test(bm.text)
+      && typeof (bm.sc.reviewer as { agentId?: unknown } | null)?.agentId === "string",
     `…and through MCP the same reply, the caller named as the reviewer (first difference: ${firstDiff(br.structuredContent, bm.sc)} | ${bm.text.split("\n").pop()})`);
   // A core of this suite's own says the same, the REST answer its value's whole shape.
   const c0 = await pair("c0");
@@ -543,6 +545,9 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   // a reject with no actor (a raw call) lists as none recorded, null as a pending row's (review pass 1 of PR 2).
   const raw = await pair("raw");
   await sql`SELECT review_supersession_proposal(${raw.pid}::uuid, 'reject', NULL, NULL, NULL, false)`;
+  // …and one decided by a run with no key (consolidate.ts's envelope, a name and no agent): agentRecorded false.
+  const kl = await pair("kl");
+  await sql`SELECT review_supersession_proposal(${kl.pid}::uuid, 'reject', NULL, NULL, ${{ name: "consolidate", via: "consolidate" }}::jsonb, false)`;
   const listedRest = await rest("GET", "/v1/proposals?status=all&limit=200");
   const byId = new Map(((listedRest.body.proposals ?? []) as { id: string; status: string; reviewer: { name?: string; agentRecorded?: boolean; agentId?: unknown } | null }[]).map((p) => [p.id, p]));
   const listedMcp = await mcp("list_supersession_proposals", { status: "rejected", limit: 200 });
@@ -553,6 +558,8 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
       && [...byId.values()].every((p) => p.reviewer === null || !("agentId" in p.reviewer))
       && byId.get(b.pid)?.reviewer?.name === "writer" && [...byId.values()].filter((p) => p.status === "pending").every((p) => p.reviewer === null)
       && byId.get(raw.pid)?.status === "rejected" && byId.get(raw.pid)?.reviewer === null
+      && byId.get(kl.pid)?.reviewer?.name === "consolidate" && byId.get(kl.pid)?.reviewer?.agentRecorded === false
+      && (listedMcp.text.split("\n\n").find((blk) => blk.includes(`proposal ${kl.pid}`)) ?? "").endsWith("\n   decided by: consolidate, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)")
       && /\n {3}decided by: writer, a key the registry has not classified/.test(cBlock) && scRow?.reviewer?.agentRecorded === true && !("agentId" in (scRow?.reviewer ?? {})) && listedMcp.sc.reviewersRead === true,
     `the listing names who decided each decided row, through REST and MCP, and none on a pending one (${cBlock.split("\n").pop()})`);
   const again = await review(b.pid, { decision: "accept" });
