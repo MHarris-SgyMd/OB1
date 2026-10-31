@@ -744,9 +744,10 @@ discovers through `tools/list` (a capture-only key sees none of them):
   (`heartbeat:coordinator`: the passes `OB1_PASSES` asks for and each child's state),
   then the passes it runs, then any other long-running worker (a re-embed follower
   run by hand), then the import runner (`heartbeat:orchestration-runner`, the
-  `orchestration` profile's service, SMD-3476 PR 3b: running the pipelines it names
-  or idle, with how its last run ended). Each task's `state` is `running`, `idle`, `starting`, `restarting`,
-  `refused`, `failed`, `stale`, `stopped` or `missing` — the coordinator started it
+  `orchestration` profile's service, SMD-3476 PR 3b: running the pipelines it
+  names or idle, with how its last run ended). Each task's `state` is `running`,
+  `idle`, `starting`, `restarting`, `refused`, `failed`, `stale`, `stopped` or
+  `missing` — the coordinator started it
   and it has written no heartbeat — with `words` saying the same as preflight and
   `brain_info` do, `coordinated`, and its row's `at`/`ageS`. A live coordinator speaks
   for its children (a guard's hold, a wait for the next try, a stop); a child it runs

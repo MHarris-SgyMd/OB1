@@ -70,7 +70,7 @@ import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
 import { RESERVED_SYSTEMS, scopeProblem } from "../../db/ingest-items.ts";
 import { MIN_STAMP_EVERY_S, rowWriter } from "../../db/pass-stamp.ts";
-import { RUNNER_COUNTS, RUNNER_KEY, RUNNER_STAGES, type RunnerValue } from "../../server-portable/brain-info.ts";
+import { PIPELINE_NAME, RUNNER_COUNTS, RUNNER_KEY, RUNNER_STAGES, type RunnerValue } from "../../server-portable/brain-info.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
@@ -141,7 +141,8 @@ export type Pipeline = {
 /** A host a live-API emitter names: reached through the runner's proxy by CONNECT, on this port only. */
 export type Host = { host: string; port: number };
 
-const NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
+/** A pipeline's name: the rule its row's names are read by too (brain-info.ts), one rule. */
+const NAME_RE = PIPELINE_NAME;
 /** What the image has to run an emitter with. */
 const INTERPRETERS = ["python3", "bun"];
 
@@ -1287,8 +1288,8 @@ async function selfCheck(): Promise<number> {
     const runningNow = new Set<string>();
     const rows: RunnerValue[] = [];
     const row = rowWriter<RunnerValue>({
-      value: (ended) => runnerValue({ pipelines: pipelines.length, running: runningNow, last: lastRun, now: Date.now(), everyS: 60, ended }),
-      everyS: 60,
+      value: (ended) => runnerValue({ pipelines: pipelines.length, running: runningNow, last: lastRun, now: Date.now(), everyS: RUNNER_STAMP_EVERY_S, ended }),
+      everyS: RUNNER_STAMP_EVERY_S,
       timeoutMs: 1000,
       write: async (v) => { rows.push(v); return true; },
       failed: () => {},

@@ -574,8 +574,8 @@ export function parseCoordinator(r: { value: unknown; at: unknown; age_s: unknow
  * run's age in seconds from the stamp as the coordinator's times are.
  */
 export const RUNNER_KEY = "heartbeat:orchestration-runner";
-/** A pipeline's name, as the runner's allowlist holds it (runner.ts's NAME_RE). */
-const PIPELINE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** A pipeline's name: the rule the runner's allowlist holds its names to (runner.ts) and its row's are read by. */
+export const PIPELINE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 /** Where a run stopped short (runner.ts's Stage). */
 export const RUNNER_STAGES = ["emitter", "one-source", "ingest", "reembed"] as const;
 /** The ingester's counts a run's report carries (runner.ts's TALLY_KEYS). */
