@@ -44,32 +44,41 @@ row() {
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, over twice the slowest honest row here under both lanes' load;
 # OB1_PARITY_ROW_LIMIT sets another. limit SECS CMD... runs CMD as timeout(1)
-# would. CMD runs in a process group of its own (set -m), its stdin /dev/null
-# as in CI, so the group holds all it starts, even what outlives its parent.
-# Past SECS a watchdog sends the group TERM, and KILL if any of it is left
-# 10 s on (CI's --kill-after); limit then returns 124, whatever CMD's exit.
-# Outside the terminal's group CMD gets no Ctrl-C or hangup, so limit's trap
-# sends the group TERM. Called only inside a command substitution, whose
-# subshell set -m dies with.
+# would. CMD runs in a process group of its own (set -m), so ending the group
+# ends what CMD started too, even what outlived its parent (not what left the
+# group, as a setsid does); its stdin is /dev/null, as in CI. Past SECS a
+# watchdog ends the group and limit returns 124, whatever CMD's exit. When CMD
+# exits first, what it left in the group is ended, so nothing of it holds the
+# substitution's output open. Outside the terminal's group CMD gets no Ctrl-C
+# or hangup, so limit's trap ends the group. Called only inside a command
+# substitution, with 2>&1: with stderr a terminal, bash 3.2's set -m would take
+# the terminal from the shell that ran this script.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in '' | *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;; esac
+# end_group PGID: TERM to a row's process group, and KILL to what is left of
+# it 10 s on (CI's --kill-after); nothing to wait for when it is already gone.
+end_group() {
+  local n=0
+  [ -n "$1" ] && kill -s TERM -- -"$1" 2>/dev/null || return 0
+  while [ "$n" -lt 10 ] && kill -0 -- -"$1" 2>/dev/null; do sleep 1; n=$((n + 1)); done
+  kill -s KILL -- -"$1" 2>/dev/null
+  return 0
+}
 limit() {
-  local secs="$1" tmp="${TMPDIR:-/tmp}" armed pid dog rc; shift
+  local secs="$1" tmp="${TMPDIR:-/tmp}" armed='' pid='' dog='' rc; shift
+  # Set before CMD starts, so no signal falls between.
+  trap '[ -z "$dog" ] || kill -s TERM -- -"$dog" 2>/dev/null; end_group "$pid"; rm -f "$armed"; exit 130' HUP INT TERM
   # There while the watchdog has not fired.
   armed=$(mktemp "${tmp%/}/ci-parity-limit.XXXXXX") || return 1
   set -m
   "$@" < /dev/null &
   pid=$!
-  (
-    sleep "$secs"; rm -f "$armed"; kill -s TERM -- -"$pid"
-    n=0; while [ "$n" -lt 10 ] && kill -0 -- -"$pid"; do sleep 1; n=$((n + 1)); done
-    kill -s KILL -- -"$pid"
-  ) > /dev/null 2>&1 &
+  ( sleep "$secs"; rm -f "$armed"; end_group "$pid" ) > /dev/null 2>&1 &
   dog=$!
-  trap 'kill -s TERM -- -"$pid" -"$dog" 2>/dev/null; rm -f "$armed"; exit 130' HUP INT TERM
   wait "$pid"; rc=$?
   if [ -e "$armed" ]; then
     kill -s TERM -- -"$dog" 2>/dev/null; rm -f "$armed"
+    end_group "$pid"
   else
     rc=124
   fi
@@ -80,7 +89,8 @@ limit() {
 }
 
 # at_row NAME: the row a lane has in hand and since when, with the one before,
-# in the file wait_lane reads (none in the database lane), whole or not at all.
+# in the file wait_lane reads (none in the database lane), whole or not at all;
+# an empty NAME once the lane's rows are done.
 at_row() {
   [ -n "${NOW_FILE:-}" ] && printf '%s\n%s\n%s\n' "$(date +%s)" "$1" "${LAST_ROW:-}" > "$NOW_FILE.new" && mv "$NOW_FILE.new" "$NOW_FILE"
   return 0
@@ -180,7 +190,7 @@ typecheck() {
 # FAILED is its own, so it returns its verdict and main() reads it from wait.
 # free_rows NOWFILE: at_row's file.
 free_rows() {
-  FAILED=0 NOW_FILE="$1"
+  FAILED=0 NOW_FILE="$1" LAST_ROW=''
   # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
   OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text nodb db test-schema.ts
@@ -254,6 +264,7 @@ free_rows() {
   typecheck deploy/auth
   typecheck compat/supabase-sql
   typecheck dashboard
+  at_row ''
   return "$FAILED"
 }
 
@@ -274,24 +285,26 @@ pair_rows() {
   run db                 test-upgrade.ts
   OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
   OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
+  at_row ''
   return "$FAILED"
 }
 
 # The lanes beside the database lane: each writes to a file, printed when the
 # database lane is done, one block each, so no lane's rows interleave with
-# another's. A Ctrl-C or a closed terminal stops them whole, though a
+# another's. A Ctrl-C stops them whole through stop_lanes, since a
 # non-interactive shell's background job ignores SIGINT and their suites would
 # otherwise run on after the script has gone (the pair lane's with-postgres.sh
 # removes its container as it exits). A TERM to this script alone does too,
 # once the database lane's row in hand ends: bash runs a trap only between
-# commands. Their files are in one directory, named as they start so `tail -f`
-# can follow a lane: NAME.out its rows so far, NAME.now the row in hand
-# (SMD-3647).
+# commands. A closed terminal's hangup reaches them itself (main()). Their
+# files are in one directory, printed as the lanes start so `tail -f` can
+# follow a lane: NAME.out its rows so far, NAME.now the row in hand, since
+# when, and the row before (SMD-3647).
 start_lanes() {
   local tmp="${TMPDIR:-/tmp}"
   LANES=$(mktemp -d "${tmp%/}/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
-  echo "  … the database-free lane writes its rows to $LANES/free.out, test-upgrade and test-preflight to $LANES/pair.out"
+  echo "  … the other two lanes write to $LANES: free.out the database-free lane's rows, pair.out test-upgrade's and test-preflight's"
   free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
   FREE_PID=$!
   "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
@@ -317,7 +330,9 @@ wait_lane() {
     printf '  … %s, beside the database lane since %s s in, is still going:\n' "$3" "$LANES_AT"
     [ -f "$LANES/$2.now" ] && { read -r at; read -r row; read -r last; } < "$LANES/$2.now"
     if [ -n "$row" ]; then
-      printf '      %s, %s s in of its %s s limit%s\n' "$row" "$(($(date +%s) - at))" "$ROW_LIMIT" "${last:+, after $last}"
+      printf '      %s, %s s into its %s s limit%s\n' "$row" "$(($(date +%s) - at))" "$ROW_LIMIT" "${last:+, after $last}"
+    elif [ -n "$last" ]; then
+      echo "      every row done, the last $last"
     else
       echo "      no row begun yet"
     fi
@@ -332,9 +347,12 @@ main() {
   FAILED=0
   FREE_PID='' PAIR_PID='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
-  # A closed terminal's hangup reaches the lanes and their with-postgres.sh
-  # itself, all but the rows, which limit passes it on to; stopping the pair
-  # lane here too could cut its with-postgres.sh's container removal short.
+  # A closed terminal's hangup reaches every process of this script's group,
+  # the lanes and the pair lane's with-postgres.sh among them, and limit's trap
+  # passes it on to each row's own group; so main() only exits, since stopping
+  # the pair lane too could cut its with-postgres.sh's container removal short.
+  # A HUP sent to this script alone leaves the lanes to finish, each row within
+  # its limit.
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT TERM
   trap drop_lanes EXIT
