@@ -3423,10 +3423,12 @@ start and end, every minute, and once more at its stop: the pipelines it
 holds, those running, and how its last run ended. The brain's status surface
 reads it — `task_status` (`GET /v1/status`), preflight's `tasks` row and
 `brain_info` — so the runner shows there as running, idle, stale or stopped
-beside the coordinator's passes, its last run in words. A stale or stopped
-runner's fix is `compose --profile orchestration up -d orchestration-runner`;
-a profile taken down on purpose leaves the row, which `DELETE FROM ob1_config
-WHERE key = 'heartbeat:orchestration-runner'` retires. Its role's worker
+beside the coordinator's passes, its last run in words. A runner stopped with
+its profile (`compose stop`, an `up` without `--profile orchestration`) ends its
+row and is said, not warned on; one that went stale — it died, or lost the
+database — is, its fix `compose --profile orchestration up -d
+orchestration-runner`, or for a profile retired for good `DELETE FROM ob1_config
+WHERE key = 'heartbeat:orchestration-runner'`. Its role's worker
 group writes the row, so the grants below are unchanged.
 
 **The runner's database role** (SMD-2289). The runner reaches Postgres as

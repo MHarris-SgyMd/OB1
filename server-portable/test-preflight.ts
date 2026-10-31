@@ -3525,9 +3525,14 @@ else {
       await claims`UPDATE ob1_config SET updated_at = now() - interval '10 minutes' WHERE key = 'heartbeat:orchestration-runner'`;
       const runnerQuiet = await run(SQL_ENV);
       assert(/orchestration-runner stale$/m.test(row(runnerQuiet.out, "tasks"))
-          && /The import runner has not stamped for 10 min: it stopped, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml --profile orchestration up -d orchestration-runner/.test(fix(runnerQuiet.out, "tasks"))
+          && /The import runner has not stamped for 10 min: it stopped without ending its row, or cannot reach the database — start it again: podman compose -f deploy\/compose\.yaml --profile orchestration up -d orchestration-runner/.test(fix(runnerQuiet.out, "tasks"))
           && /Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:orchestration-runner'\./.test(fix(runnerQuiet.out, "tasks")),
         `a runner past three intervals is stale, its profile's restart and its retirement named (${fix(runnerQuiet.out, "tasks")})`);
+      // A runner that ended its row stopped with its profile, an operator's act: said, not warned on (review pass 1).
+      await put("heartbeat:orchestration-runner", { v: 1, every_s: 60, pipelines: 2, running: [], ended: true }, 5);
+      const runnerStopped = await run(SQL_ENV);
+      assert(/orchestration-runner stopped$/m.test(row(runnerStopped.out, "tasks")) && !/import runner/.test(fix(runnerStopped.out, "tasks")),
+        `a runner stopped with its profile is said in the row, and no fix is named for it (${row(runnerStopped.out, "tasks")} | ${fix(runnerStopped.out, "tasks")})`);
     } finally {
       await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     }

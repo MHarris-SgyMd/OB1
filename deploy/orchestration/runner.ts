@@ -70,7 +70,7 @@ import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
 import { RESERVED_SYSTEMS, scopeProblem } from "../../db/ingest-items.ts";
 import { MIN_STAMP_EVERY_S, rowWriter } from "../../db/pass-stamp.ts";
-import { RUNNER_COUNTS, RUNNER_KEY, type RunnerValue } from "../../server-portable/brain-info.ts";
+import { RUNNER_COUNTS, RUNNER_KEY, RUNNER_STAGES, type RunnerValue } from "../../server-portable/brain-info.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
@@ -288,7 +288,8 @@ function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
   return out;
 }
 
-const TALLY_KEYS = ["inserted", "updated", "patched", "unchanged", "skipped", "held", "stale"] as const;
+/** The ingester's count names: the ones the runner's row carries (brain-info.ts), so the row drops none (review pass 1). */
+const TALLY_KEYS = RUNNER_COUNTS;
 export type Tally = Record<(typeof TALLY_KEYS)[number], number>;
 /** The ingester's count line (`tier=stable  inserted 5  updated 0 …`), or null when it printed none. */
 function parseTally(stdout: string): Tally | null {
@@ -655,7 +656,8 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
   });
 }
 
-export type Stage = "emitter" | "one-source" | "ingest" | "reembed";
+/** Where a run stops short: the stages the runner's row names (brain-info.ts), one list (review pass 1). */
+export type Stage = (typeof RUNNER_STAGES)[number];
 export type Report = {
   pipeline: string;
   ok: boolean;

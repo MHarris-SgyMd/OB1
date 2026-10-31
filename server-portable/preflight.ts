@@ -5132,7 +5132,9 @@ if (configFailed) {
               add("tasks", "skip", `no task has stamped a heartbeat on this brain${tail}.`);
             } else {
               const detail = tasks.map((t) => `${t.job ?? t.task} ${t.state}`).join(", ") + tail;
-              const wrong = tasks.filter((t) => !(TASK_OK as readonly string[]).includes(t.state));
+              // The import runner stopped is its profile's stop, an operator's (compose stop, or an up without
+              // --profile orchestration): said, not warned on. One that died, or lost the database, goes stale (review pass 1).
+              const wrong = tasks.filter((t) => !(TASK_OK as readonly string[]).includes(t.state) && !(t.task === "orchestration-runner" && t.state === "stopped"));
               const fixes = wrong.map((t) => {
                 const name = t.job ?? t.task;
                 if (t.task === "coordinator") {
@@ -5145,7 +5147,7 @@ if (configFailed) {
                 // The import runner is the orchestration profile's own service, which no coordinator runs (SMD-3476 PR 3b).
                 if (t.task === "orchestration-runner") {
                   const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
-                  return `${t.state === "stale" ? `The import runner has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database` : "The import runner stopped"} — start it again: ${RUNNER_UP}. ${retire}`;
+                  return `The import runner has not stamped for ${ago(t.ageS ?? 0)}: it stopped without ending its row, or cannot reach the database — start it again: ${RUNNER_UP}. ${retire}`;
                 }
                 if (t.state === "missing") return `${name}: ${t.words} — the coordinator's log says why (compose logs coordinator).`;
                 return `${name}: ${t.words} — the ${t.task === "sleep" ? "sleep" : "workers"} row says what to do.`;

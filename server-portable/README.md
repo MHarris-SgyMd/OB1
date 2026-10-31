@@ -1154,9 +1154,9 @@ bun run test:sql          # 297 — store conformance, real Postgres in a contai
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
 ../db/with-postgres.sh bun test-rest-sql.ts  # 269 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 116 — a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
-../db/with-postgres.sh bun test-preflight.ts  # 999 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
+../db/with-postgres.sh bun test-preflight.ts  # 1000 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
 OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # 441 — one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
-OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 558 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
+OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 559 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`
