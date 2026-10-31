@@ -230,6 +230,61 @@ export async function endOnRefusal(opts: { sql: SQL; worker: StampingWorker; job
 }
 
 /**
+ * A row stamped whole — the coordinator's and the import runner's (SMD-3476
+ * PR 3) — on each change(), every `everyS`, and once more at end(), its value
+ * taken as each write runs, so its times are the stamp's. One write at a time,
+ * in order, each bounded by `timeoutMs`: the database may be what is down. A
+ * failure is told once (`failed`) until a write lands, and nothing but end()
+ * waits on a write. `write` runs the statement and answers whether it landed,
+ * since an owned upsert may decline; `declined` is told on the first of a run
+ * of declines.
+ */
+export function rowWriter<V>(o: {
+  write: (value: V) => Promise<boolean>;
+  value: (ended: boolean) => V;
+  everyS: number;
+  timeoutMs: number;
+  failed: (e: Error) => void;
+  declined?: () => void;
+}): { changed(): void; end(): Promise<void> } {
+  let chain: Promise<void> = Promise.resolve();
+  let failing = false;
+  let declining = false;
+  let ended = false;
+  const write = (end: boolean): Promise<void> => {
+    chain = chain.then(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const landed = await Promise.race([
+          o.write(o.value(end)),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${o.timeoutMs / 1000} s`)), o.timeoutMs); }),
+        ]);
+        failing = false;
+        if (!landed && !declining) o.declined?.();
+        declining = !landed;
+      } catch (e) {
+        if (!failing) o.failed(e as Error);
+        failing = true;
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+    return chain;
+  };
+  const tick = setInterval(() => void write(false), o.everyS * 1000);
+  return {
+    changed() {
+      if (!ended) void write(false);
+    },
+    async end() {
+      ended = true;
+      clearInterval(tick);
+      await write(true);
+    },
+  };
+}
+
+/**
  * The key for a worker and its job. A job already named for its worker
  * (extract:…, consolidate:…) is not prefixed twice; one that is not (a custom
  * --job) is, so every key names its worker first. The job itself goes in the
