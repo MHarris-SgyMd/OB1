@@ -100,20 +100,26 @@ if (!URL_) {
  * A shard without [1] migrates in the preamble without asserting.
  * [33] and [35] check the projection after the sections that write tickets
  * and sources, which are the rest's, so they stay there; [end] checks it again
- * at every run's end. Extract takes short sections of the rest's too ([37],
- * [37b], [39], [41], [43]), each on its own client, to keep the rest under
- * the full-stack jobs. [9f],
- * re-embed's follower outage cases, came out of [9] into extract, so long
- * keeps its time (SMD-2679 PR 4a-2b). [38r], the scheduler's re-embed cases,
- * came out of [38] into long, and [10g] went to sleep, so that neither cell
- * sets the run's length (SMD-3392).
+ * at every run's end. [9f], re-embed's follower outage cases, came out of
+ * [9] into extract, so long keeps its time (SMD-2679 PR 4a-2b). [38r], the
+ * scheduler's re-embed cases, came out of [38] into long, and [10g] went to
+ * sleep, so that neither cell sets the run's length (SMD-3392). Long's three,
+ * ~216 s of sections, are the floor no split keeping them together goes
+ * under; the short sections even the others out to it, by the section times
+ * main's CI logs stamp in its runs from 7301d0f5 to e7220bd5 (SMD-3469):
+ * sleep has [17] beside [38] and [10g], and the rest takes [10e], [37] and
+ * [43] from extract. The rest's sections wait on the CPU, not on timers, so
+ * its time moves most with the runner's speed. A cell's job runs ~18 s past
+ * its sections (~25 s for the rest's, with test-search-path.ts), so a
+ * section added to a cell adds to the run's length once that cell's job is
+ * the run's longest.
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["10g", "38"],
+  sleep: ["10g", "17", "38"],
   long: ["9", "38r", "38b"],
-  extract: ["9f", "10", "10e", "10f", "10h", "17", "37", "37b", "39", "41", "43"],
+  extract: ["9f", "10", "10f", "10h", "37b", "39", "41"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -4203,6 +4209,10 @@ if (want("9f")) {
   delete env.OB1_LLM_API_KEY;
   const OWN_KEY = `reembed:stub-embed@${DIM}`;
   const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+  // The model the brain recorded before this section, put back at its end as [9] puts back its own: a later
+  // section's replay finds its vector in the snapshot under that model, and with stub-embed left recorded [28]'s
+  // two replays rebuilt their rows without one in a full run (SMD-3469 review pass 1).
+  const [recordedBefore] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
   await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
   await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
   const row = async () => {
@@ -4733,6 +4743,8 @@ if (want("9f")) {
     await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
     await sql`DELETE FROM thoughts`;
+    if (recordedBefore) await sql`UPDATE ob1_config SET value = ${recordedBefore.value} WHERE key = 'embedding_model'`;
+    else await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
   }
 }
 
