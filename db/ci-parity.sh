@@ -4,7 +4,8 @@
 # test-upgrade and test-preflight, which run beside them on a second as CI's do;
 # and beside both, in a lane of their own, the suites and self-checks that need
 # none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
-# Each row says how long it took.
+# Each row says how long it took, and is stopped as a failure at a time limit,
+# 600 s unless OB1_PARITY_ROW_LIMIT says otherwise (SMD-3647).
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
@@ -34,17 +35,66 @@ cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
+# The lane keeps the last one, for wait_lane's "still going" line.
 row() {
   local ok="$1" name="$2" verdict="$3"
-  if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-48s %s\n" "$name" "$verdict"; else printf "  \033[31m✗\033[0m %-48s %s\n" "$name" "$verdict"; fi
+  if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✓"; else printf "  \033[31m✗\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✗"; fi
 }
+
+# Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
+# pair legs, over twice the slowest honest row here under both lanes' load;
+# OB1_PARITY_ROW_LIMIT sets another. limit SECS CMD... runs CMD as timeout(1)
+# would. CMD runs in a process group of its own (set -m), its stdin /dev/null
+# as in CI, so the group holds all it starts, even what outlives its parent.
+# Past SECS a watchdog sends the group TERM, and KILL if any of it is left
+# 10 s on (CI's --kill-after); limit then returns 124, whatever CMD's exit.
+# Outside the terminal's group CMD gets no Ctrl-C or hangup, so limit's trap
+# sends the group TERM. Called only inside a command substitution, whose
+# subshell set -m dies with.
+ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
+case "$ROW_LIMIT" in '' | *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;; esac
+limit() {
+  local secs="$1" tmp="${TMPDIR:-/tmp}" armed pid dog rc; shift
+  # There while the watchdog has not fired.
+  armed=$(mktemp "${tmp%/}/ci-parity-limit.XXXXXX") || return 1
+  set -m
+  "$@" < /dev/null &
+  pid=$!
+  (
+    sleep "$secs"; rm -f "$armed"; kill -s TERM -- -"$pid"
+    n=0; while [ "$n" -lt 10 ] && kill -0 -- -"$pid"; do sleep 1; n=$((n + 1)); done
+    kill -s KILL -- -"$pid"
+  ) > /dev/null 2>&1 &
+  dog=$!
+  trap 'kill -s TERM -- -"$pid" -"$dog" 2>/dev/null; rm -f "$armed"; exit 130' HUP INT TERM
+  wait "$pid"; rc=$?
+  if [ -e "$armed" ]; then
+    kill -s TERM -- -"$dog" 2>/dev/null; rm -f "$armed"
+  else
+    rc=124
+  fi
+  # A watchdog that fired ends once the group is gone, KILLed or not.
+  wait "$dog" 2>/dev/null
+  trap - HUP INT TERM
+  return "$rc"
+}
+
+# at_row NAME: the row a lane has in hand and since when, with the one before,
+# in the file wait_lane reads (none in the database lane), whole or not at all.
+at_row() {
+  [ -n "${NOW_FILE:-}" ] && printf '%s\n%s\n%s\n' "$(date +%s)" "$1" "${LAST_ROW:-}" > "$NOW_FILE.new" && mv "$NOW_FILE.new" "$NOW_FILE"
+  return 0
+}
+# cut_off RC: what a failing row's verdict adds when limit stopped it.
+cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
 
 # Each directory CI installs, once, from its lockfile. A lockfile out of step
 # with package.json is reported here, apart from anything that then fails.
 install() {
-  local dir="$1" out
-  if ! out=$(cd "$ROOT/$dir" && bun install --frozen-lockfile 2>&1); then
-    row bad "$dir" "bun install --frozen-lockfile"
+  local dir="$1" out rc
+  out=$(cd "$ROOT/$dir" && limit "$ROW_LIMIT" bun install --frozen-lockfile 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    row bad "$dir" "bun install --frozen-lockfile$(cut_off "$rc")"
     printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     FAILED=1
   fi
@@ -65,16 +115,17 @@ suite() {
   # apart.
   given=$(LC_ALL=C comm -13 <(printf '%s\n' "$BASE_ENV") <(env | LC_ALL=C sort) | tr '\n' ' ')
   name="${given}$([ "$dir" = . ] || printf '%s/' "$dir")$script${1:+ $*}"
+  at_row "$name"
   local t0=$SECONDS
   if [ "$mode" = nodb ]; then
-    out=$(cd "$ROOT/$dir" && env -u DATABASE_URL bun "$script" "$@" 2>&1); rc=$?
+    out=$(cd "$ROOT/$dir" && limit "$ROW_LIMIT" env -u DATABASE_URL bun "$script" "$@" 2>&1); rc=$?
   else
-    out=$(cd "$ROOT/$dir" && bun "$script" "$@" 2>&1); rc=$?
+    out=$(cd "$ROOT/$dir" && limit "$ROW_LIMIT" bun "$script" "$@" 2>&1); rc=$?
   fi
   local took="$((SECONDS - t0)) s"
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
-    row bad "$name" "${res:+$res, }exit $rc · $took"
+    row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
     if printf '%s\n' "$out" | grep -qE '✗|error:'; then
       printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
     else
@@ -101,12 +152,13 @@ nodb() { suite nodb "$@"; }
 typecheck() {
   local dir="$1" out how="tsc --noEmit" t0=$SECONDS rc took
   [ -f "$ROOT/$dir/svelte.config.js" ] && how="bun run check"
-  out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); rc=$?
+  at_row "$dir"
+  out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then limit "$ROW_LIMIT" bun run check; else limit "$ROW_LIMIT" bunx tsc --noEmit; fi 2>&1); rc=$?
   took="$((SECONDS - t0)) s"
   if [ "$rc" -eq 0 ]; then
     row ok "$dir" "$how · $took"
   else
-    row bad "$dir" "$how · $took"
+    row bad "$dir" "$how$(cut_off "$rc") · $took"
     # The first type errors — tsc's `error TS` lines, svelte-check's `ERROR`
     # ones; or, when neither ran (a bunx resolution failure has no such line),
     # the tail of what did print.
@@ -126,8 +178,9 @@ typecheck() {
 # share is the CPU, and with it the timing rows of both lanes (test-server's
 # probe windows, test-live's polls) run under more load than in series. Its
 # FAILED is its own, so it returns its verdict and main() reads it from wait.
+# free_rows NOWFILE: at_row's file.
 free_rows() {
-  FAILED=0
+  FAILED=0 NOW_FILE="$1"
   # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
   OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text nodb db test-schema.ts
@@ -214,8 +267,9 @@ free_rows() {
 # with-postgres.sh with --pair, and that run does only this — so a run needs
 # podman or docker even when DATABASE_URL is given, and without one this lane
 # fails with with-postgres.sh's "No working container runtime found".
+# pair_rows NOWFILE: at_row's file.
 pair_rows() {
-  FAILED=0
+  FAILED=0 NOW_FILE="$1"
   BASE_ENV=$(env | LC_ALL=C sort)
   run db                 test-upgrade.ts
   OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
@@ -225,18 +279,22 @@ pair_rows() {
 
 # The lanes beside the database lane: each writes to a file, printed when the
 # database lane is done, one block each, so no lane's rows interleave with
-# another's. A Ctrl-C stops them whole, though a non-interactive shell's
-# background job ignores SIGINT and their suites would otherwise run on after
-# the script has gone (the pair lane's with-postgres.sh removes its container
-# as it exits). A TERM to this script alone does too, once the database lane's
-# row in hand ends: bash runs a trap only between commands.
+# another's. A Ctrl-C or a closed terminal stops them whole, though a
+# non-interactive shell's background job ignores SIGINT and their suites would
+# otherwise run on after the script has gone (the pair lane's with-postgres.sh
+# removes its container as it exits). A TERM to this script alone does too,
+# once the database lane's row in hand ends: bash runs a trap only between
+# commands. Their files are in one directory, named as they start so `tail -f`
+# can follow a lane: NAME.out its rows so far, NAME.now the row in hand
+# (SMD-3647).
 start_lanes() {
-  FREE_OUT=$(mktemp "${TMPDIR:-/tmp}/ci-parity-free.XXXXXX")
-  PAIR_OUT=$(mktemp "${TMPDIR:-/tmp}/ci-parity-pair.XXXXXX")
+  local tmp="${TMPDIR:-/tmp}"
+  LANES=$(mktemp -d "${tmp%/}/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
-  free_rows > "$FREE_OUT" 2>&1 &
+  echo "  … the database-free lane writes its rows to $LANES/free.out, test-upgrade and test-preflight to $LANES/pair.out"
+  free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
   FREE_PID=$!
-  "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair < /dev/null > "$PAIR_OUT" 2>&1 &
+  "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
   PAIR_PID=$!
 }
 stop_tree() {
@@ -247,25 +305,39 @@ stop_tree() {
 stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID; do stop_tree "$pid"; done
-  rm -f "$FREE_OUT" "$PAIR_OUT"
+  drop_lanes
 }
-# wait_lane PID FILE TITLE: wait for a lane, read its verdict, print its rows.
+drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
+# wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
+# A lane still going says which row it has in hand, for how long, and the row
+# before it.
 wait_lane() {
+  local at='' row='' last=''
   if kill -0 "$1" 2>/dev/null; then
-    printf '  … %s, beside the database lane since %s s in, is still going\n' "$3" "$LANES_AT"
+    printf '  … %s, beside the database lane since %s s in, is still going:\n' "$3" "$LANES_AT"
+    [ -f "$LANES/$2.now" ] && { read -r at; read -r row; read -r last; } < "$LANES/$2.now"
+    if [ -n "$row" ]; then
+      printf '      %s, %s s in of its %s s limit%s\n' "$row" "$(($(date +%s) - at))" "$ROW_LIMIT" "${last:+, after $last}"
+    else
+      echo "      no row begun yet"
+    fi
   fi
   wait "$1" || FAILED=1
   echo
   echo "  $3, beside the database lane from $LANES_AT s in:"
-  cat "$2"
+  cat "$LANES/$2.out"
 }
 
 main() {
   FAILED=0
-  FREE_PID='' PAIR_PID='' FREE_OUT='' PAIR_OUT=''
+  FREE_PID='' PAIR_PID='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
+  # A closed terminal's hangup reaches the lanes and their with-postgres.sh
+  # itself, all but the rows, which limit passes it on to; stopping the pair
+  # lane here too could cut its with-postgres.sh's container removal short.
+  trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT TERM
-  trap 'rm -f "$FREE_OUT" "$PAIR_OUT"' EXIT
+  trap drop_lanes EXIT
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
   # Against the shared Postgres, in CI's order.
@@ -313,9 +385,9 @@ main() {
   run extensions         test-tools.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
-  wait_lane "$PAIR_PID" "$PAIR_OUT" "test-upgrade and test-preflight, on a Postgres of their own"
+  wait_lane "$PAIR_PID" pair "test-upgrade and test-preflight, on a Postgres of their own"
   PAIR_PID=''
-  wait_lane "$FREE_PID" "$FREE_OUT" "The database-free lane"
+  wait_lane "$FREE_PID" free "The database-free lane"
   FREE_PID=''
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s)"
@@ -324,5 +396,5 @@ main() {
 
 if [ "${1:-}" = --pair ]; then
   [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --pair runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
-  pair_rows
+  pair_rows "${2:-}"
 elif [ -n "${DATABASE_URL:-}" ]; then main; else exec "$ROOT/db/with-postgres.sh" "$0"; fi
