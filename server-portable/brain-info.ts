@@ -260,11 +260,13 @@ export interface WorkerHeartbeat {
    */
   paused?: { since: string };
   /**
-   * The sleep scheduler's passes held — left out of its work until each
-   * re-arms by its own rule (SMD-3379 PR 1c): the pass, why (SleepHoldWhy),
-   * and when it re-arms, null for an event rather than a time (a statement
-   * past its timeout, a model switch, the next period). Kept on an ended
-   * row, as its last word. Absent while none is, and for the other workers.
+   * The sleep scheduler's passes held out of its work until each re-arms by
+   * its own rule (SMD-3379 PR 1c): the pass, why (SleepHoldWhy), and when it
+   * re-arms on the database's clock, null for an event rather than a time (a
+   * statement past its timeout, a model switch, the next period). Kept on an
+   * ended row, said there as its last word while it reads stopped or stale;
+   * a restarted process's first stamp writes its own. Absent while none is,
+   * and for the other workers.
    */
   holds?: SleepHold[];
   /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width or model name forms no key a row carries (SMD-2679 PR 4b-2, SMD-3486). */
@@ -511,12 +513,13 @@ function parseHolds(h: unknown): SleepHold[] | undefined {
 /**
  * A held pass in words: "extract (provider, re-arms in 4 min)", the re-arm by
  * the row's own clock; "(model-switch)" for an event's, and for a row no
- * longer live (`live` false), whose process re-arms nothing.
+ * longer live (`live` false), whose process re-arms nothing. A re-arm past
+ * its time while paused waits for the gate (review pass 1).
  */
-export function holdWords(hold: SleepHold, h: Pick<WorkerHeartbeat, "at" | "ageS">, live = true): string {
+export function holdWords(hold: SleepHold, h: Pick<WorkerHeartbeat, "at" | "ageS" | "paused">, live = true): string {
   if (hold.until === null || !live) return `${hold.pass} (${hold.why})`;
   const left = (Date.parse(hold.until) - Date.parse(h.at)) / 1000 - h.ageS;
-  return `${hold.pass} (${hold.why}, ${left > 0 ? `re-arms in ${ago(left)}` : "re-arming now"})`;
+  return `${hold.pass} (${hold.why}, ${left > 0 ? `re-arms in ${ago(left)}` : h.paused ? "re-arms once the brain is quiet" : "re-arming now"})`;
 }
 
 /** A heartbeat older than this many of its own intervals is stale. */
@@ -1752,7 +1755,8 @@ export function beatState(h: WorkerHeartbeat): TaskState {
   }
   if (h.ended) return h.outcome === "failed" ? (h.refused ? "refused" : "failed") : "stopped";
   if (h.stale) return "stale";
-  return h.running ? "running" : "idle";
+  // Paused by a live call: work in hand, waiting for the brain to go quiet (SMD-3379 PR 1c).
+  return h.running || h.paused ? "running" : "idle";
 }
 
 /** The claim job a heartbeat key names: none for board-sync's and the scheduler's. */
@@ -1868,8 +1872,12 @@ export function restartWords(h: WorkerHeartbeat): string | null {
     : `held: ${why}, ${r.tries} end(s) in a row — its supervisor ran it again ${ago(-left)} ago, and it has not stamped since`;
 }
 
-/** One heartbeat's state in a few words: what a reader acts on first. */
-export function heartbeatState(h: WorkerHeartbeat): string {
+/**
+ * One heartbeat's state in a few words: what a reader acts on first. `leave`:
+ * held passes another part of the reader says in words of its own (preflight's
+ * re-embed set-aside, with its remedy).
+ */
+export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly SleepHold["pass"][] } = {}): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
   // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped.
@@ -1880,8 +1888,10 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
   // row says its own in preflight's words, "at a pass's start".
   // The sleep scheduler's held passes, beside the state, never instead of it;
-  // an ended or stale row's are its last word, re-armed by nothing (SMD-3379 PR 1c).
-  const holds = (live: boolean) => h.holds?.length ? `; ${live ? "" : "at its last word, "}held: ${h.holds.map((x) => holdWords(x, h, live)).join(", ")}` : "";
+  // an ended or stale row's are its last word, re-armed by nothing (SMD-3379
+  // PR 1c). "Held out", apart from the restart's "held" and the thoughts held back (review pass 1).
+  const shown = h.holds?.filter((x) => !opts.leave?.includes(x.pass)) ?? [];
+  const holds = (live: boolean) => shown.length ? `; ${live ? "" : "at its last word, "}held out: ${shown.map((x) => holdWords(x, h, live)).join(", ")}` : "";
   if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"}${holds(false)} (${when})`;
   if (h.stale) return `stale${holds(false)} (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
@@ -1890,10 +1900,12 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3); nor
   // does one waiting mid-pass for a provider that stopped answering (SMD-2905).
   const at = h.waiting?.length ? (h.waitingMidPass?.length ? ", at a pass's start and mid-pass" : " at a pass's start") : h.waitingMidPass?.length ? " mid-pass" : null;
-  const state = h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
-  // Paused by a live call, its passes waiting between thoughts: for how long, by the row's own clock (SMD-3379 PR 1c).
-  const paused = h.paused ? `, paused by a live call for ${ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(h.paused.since)) / 1000))}` : "";
-  return `${state}${paused}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
+  // Paused by a live call is the state, before running or waiting — its
+  // passes run nothing meanwhile — for how long by the row's own clock
+  // (SMD-3379 PR 1c; draft 5's §4, review pass 1).
+  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(h.paused.since)) / 1000))}`
+    : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
+  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */

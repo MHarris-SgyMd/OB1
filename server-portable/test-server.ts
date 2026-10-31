@@ -1492,11 +1492,22 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const holdsSay = sleepWords({ holds: okHolds });
   const pastSays = sleepWords({ holds: [{ pass: "extract", why: "provider", until: "2026-10-05T12:00:10.000Z" }] });
   const endedSays = sleepWords({ holds: okHolds, running: false, outcome: "stopped", ended: true });
-  assert(pausedSays === "running a pass, paused by a live call for 60 s (last stamped 30 s ago, every 60 s)"
-      && holdsSay === "running a pass; held: extract (provider, re-arms in 60 s), reembed (model-switch) (last stamped 30 s ago, every 60 s)"
-      && pastSays === "running a pass; held: extract (provider, re-arming now) (last stamped 30 s ago, every 60 s)"
-      && endedSays === "stopped; at its last word, held: extract (provider), reembed (model-switch) (last stamped 30 s ago, every 60 s)",
-    `a pause reads its length, and the held passes their reasons and re-arms beside the state, an ended row's as its last word (${pausedSays} | ${holdsSay} | ${pastSays} | ${endedSays})`);
+  const staleSays = heartbeatState(parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true, holds: okHolds }), at, age_s: 3_600 }]).heartbeats[0]!);
+  const pausedPastSays = sleepWords({ paused: { since: pausedAt }, holds: [{ pass: "extract", why: "provider", until: "2026-10-05T12:00:10.000Z" }] });
+  const leftSays = heartbeatState(parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true, holds: okHolds }), at, age_s: 30 }]).heartbeats[0]!, { leave: ["reembed"] });
+  assert(pausedSays === "paused by a live call for 60 s (last stamped 30 s ago, every 60 s)"
+      && holdsSay === "running a pass; held out: extract (provider, re-arms in 60 s), reembed (model-switch) (last stamped 30 s ago, every 60 s)"
+      && pastSays === "running a pass; held out: extract (provider, re-arming now) (last stamped 30 s ago, every 60 s)"
+      && endedSays === "stopped; at its last word, held out: extract (provider), reembed (model-switch) (last stamped 30 s ago, every 60 s)"
+      && staleSays === "stale; at its last word, held out: extract (provider), reembed (model-switch) (last stamped 60 min ago, every 60 s)"
+      && pausedPastSays === "paused by a live call for 60 s; held out: extract (provider, re-arms once the brain is quiet) (last stamped 30 s ago, every 60 s)"
+      && leftSays === "running a pass; held out: extract (provider, re-arms in 60 s) (last stamped 30 s ago, every 60 s)",
+    `a pause is the state, for how long, and the held passes their reasons and re-arms beside it — an ended or stale row's as its last word, a re-arm past its time while paused waiting for the quiet, a pass the reader says itself left out (${pausedSays} | ${holdsSay} | ${pastSays} | ${endedSays} | ${staleSays} | ${pausedPastSays} | ${leftSays})`);
+  // The status route reads a paused row as running, its work in hand, whether or not a pass runs (review pass 1).
+  const { beatState } = await import("./brain-info.ts");
+  const pausedIdle = parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: false, paused: { since: pausedAt } }), at, age_s: 30 }]).heartbeats[0]!;
+  assert(beatState(pausedIdle) === "running" && heartbeatState(pausedIdle).startsWith("paused by a live call for 60 s"),
+    `a paused row reads running in task_status and paused in its words, even with no pass running (${beatState(pausedIdle)}, ${heartbeatState(pausedIdle)})`);
   // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
   const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
   assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"

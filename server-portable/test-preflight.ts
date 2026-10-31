@@ -1576,6 +1576,15 @@ else {
   assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
       && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
          `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
+  // Re-embed held out, or the scheduler paused by a live call (SMD-3379 PR 1c-2): the row says which, not "its passes running".
+  await hb("heartbeat:sleep", { running: true, holds: [{ pass: "reembed", why: "outage", until: null }] });
+  const schedHeld = row((await run(SQL_ENV)).out, "re-embed pass");
+  await hb("heartbeat:sleep", { running: true, paused: { since: new Date(Date.now() - 40_000).toISOString() } });
+  const schedPaused = row((await run(SQL_ENV)).out, "re-embed pass");
+  await hb("heartbeat:sleep", { running: true });
+  assert(/the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; held out: reembed \(outage\)\)/.test(schedHeld)
+         && /the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(schedPaused),
+         `the re-embed pass row says re-embed held out, or the scheduler paused (${schedHeld} | ${schedPaused})`);
   // A dead worker's expired lease on the scheduler's key is its work, which it reclaims when it next works the key: named,
   // with the reclaim, no "finish it" beside it (SMD-3485). A record unlike this configuration keeps the record's words.
   await claims`SELECT claim_thoughts(${KEY}, 'preflight-dead-beside-sleep', 1)`;
@@ -2090,6 +2099,16 @@ else {
   assert(/the sleep scheduler runs this key \(stamped 20 s ago; asleep, consolidate waiting for the provider mid-pass\), and its last pass failed/.test(row(consSleptMid.out, "consolidate pass"))
          && /The provider stopped answering mid-pass — check it/.test(fix(consSleptMid.out, "consolidate pass")) && !/log says why/.test(fix(consSleptMid.out, "consolidate pass")),
          `the scheduler's pass waiting mid-pass is said on the consolidate pass row, the fix naming the provider (${row(consSleptMid.out, "consolidate pass")} | ${fix(consSleptMid.out, "consolidate pass")})`);
+  // Its pass held out, or the scheduler paused by a live call (SMD-3379 PR 1c-2):
+  // the row says its own pass's hold, not another's listed first, or the
+  // pause, with or without a pass running — not "its passes running" or "awake".
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", holds: [{ pass: "extract", why: "lookup", until: null }, { pass: "consolidate", why: "provider", until: new Date(Date.now() + 240_000).toISOString() }] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consHeld = row((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "ok", paused: { since: new Date(Date.now() - 40_000).toISOString() } })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consPaused = row((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
+  assert(/the sleep scheduler runs this key \(stamped 20 s ago; held out: consolidate \(provider, re-arms in 4 min\)\)/.test(consHeld) && !/extract/.test(consHeld)
+         && /the sleep scheduler runs this key \(stamped 20 s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(consPaused),
+         `the consolidate pass row says its own pass held out, not another's, or the scheduler paused (${consHeld} | ${consPaused})`);
   // Asleep, the scheduler's own claim holds a live lease beside the workers
   // profile's old ended row: not "start it again", a second worker (review
   // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
@@ -4248,8 +4267,8 @@ else {
       // scheduler writes them: the row says both, and warns of neither.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null }, paused: { since: await at(40) }, holds: [{ pass: "consolidate", why: "provider", until: null }] }), 10);
       const pausedRow = row((await run(LOG_ON)).out, "sleep");
-      assert(/✓\s+sleep\s+running a pass, paused by a live call for 40 s; held: consolidate \(provider\) \(last stamped 10 s ago, every 60 s\); asleep, its passes paused by a live call, going on once the brain is quiet — for 2 min; a live write wakes it; a search does not$/.test(pausedRow),
-        `paused: the row says for how long and that the passes go on once the brain is quiet, its held pass beside, no warning (${pausedRow})`);
+      assert(/✓\s+sleep\s+paused by a live call for 40 s; held out: consolidate \(provider\) \(last stamped 10 s ago, every 60 s\); its passes waiting between thoughts, going on once the brain is quiet — the sleep began 2 min ago; a live write pauses it; a search does not$/.test(pausedRow),
+        `paused: the row says for how long, that the passes go on once the brain is quiet and that a live write pauses it, its held pass beside, no warning (${pausedRow})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);

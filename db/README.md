@@ -4457,13 +4457,18 @@ of its work, one to three, each `{ pass, why, until }`:
 - `pass` is `reembed`, `extract` or `consolidate`;
 - `why` is one of re-embed's set-down kinds (above), `lookup` or
   `model-switch`;
-- `until` is the time it re-arms, or null for an event rather than a time.
+- `until` is the time it re-arms on the database's clock, or null for an
+  event rather than a time.
 
-`brain_info` and preflight's `sleep` row say them beside the state — "running
-a pass, paused by a live call for 40 s; held: consolidate (provider)" and
-"asleep, its passes paused by a live call, going on once the brain is quiet"
-— and warn of neither. An ended row keeps its holds as its last word,
-without their times.
+Paused is the state, before running: `brain_info` reads "paused by a live
+call for 40 s; held out: consolidate (provider)", `task_status` reads it
+running, and preflight's `sleep` row adds "its passes waiting between
+thoughts, going on once the brain is quiet … a live write pauses it". The
+re-embed and consolidate pass rows each name their own pass's hold, or the
+pause. A re-arm past its time while paused waits for the quiet. None of
+these warn. A row the scheduler ended or let go stale keeps its holds as its
+last word, without their times; one supervise restarts loses them at the
+new process's first stamp.
 
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there
