@@ -16166,6 +16166,11 @@ if (want("37b")) {
     assert(own?.job === EXTRACT_KEY.slice("heartbeat:".length) && own.ended === true && own.outcome === "failed" && !("malformed" in own) && own.restart?.code === 1
         && facts !== null && (await readDatabaseFacts(ssql as never, { stats: false })).workers?.heartbeats.some((h) => h.key === EXTRACT_KEY && h.restart?.inS === 60),
       `a row older than the follower's start is replaced by the supervisor's own, its job the configuration's, read as held (${JSON.stringify(own)})`);
+    // The scheduler restarted on a migration keeps its "stopped": no failure (SMD-3379 PR 1c-1, review pass 4).
+    await ssql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true })}, updated_at = now() WHERE key = 'heartbeat:sleep'`;
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 0, code: 75, tries: 0 } });
+    const migrated = await row("heartbeat:sleep");
+    assert(migrated?.outcome === "stopped" && migrated.restart?.code === 75, `a migration's at-once restart keeps the scheduler's "stopped" (${JSON.stringify(migrated)})`);
     // A follower that exited 0 on its own keeps its outcome; a value not JSON is replaced, never a reason to fail.
     await ssql`UPDATE ob1_config SET value = 'not json', updated_at = now() WHERE key = 'heartbeat:sleep'`;
     await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 0, tries: 1 } });
@@ -16186,6 +16191,53 @@ if (want("37b")) {
     const ends = said.filter((l) => /^supervise: board-sync exited 3 after \d+ s; it runs again at \d{4}-\d\d-\d\dT[\d:.]+Z \(in 0 s, end \d in a row\), heartbeat:board-sync says so\./.test(l));
     assert(loopCode === 0 && Date.now() - stopAt < 1000 && mid?.ended === true && mid.outcome === "failed" && mid.restart.code === 3 && mid.restart.tries >= 3 && ends.length >= 3 && !said.some((l) => /a refusal/.test(l)),
       `a follower ending on its own runs again on the clock, each end on the log and the row, and a stop in the wait ends it at once with 0 (code ${loopCode}, ${ends.length} ends said, row ${JSON.stringify(mid?.restart)})`);
+    // A migration seen (SMD-3379 PR 1c-1): a follower that exits 75 runs again
+    // at once — no wait, no try counted — and past three such ends in a row,
+    // each quick, on the clock again, its first counted end then the clock's.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const migrationRuns = join(tmpdir(), `ob1-supervise-75-${process.pid}`);
+    rmSync(migrationRuns, { force: true });
+    const migrating = supervise({ worker: "sleep", cmd: ["sh", "-c", `echo run >> ${migrationRuns}; exit 75`], sql: ssql as never, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer });
+    const runsOf = () => (existsSync(migrationRuns) ? readFileSync(migrationRuns, "utf8").split("\n").filter(Boolean).length : 0);
+    const fourRuns = await pollUntil(async () => runsOf() >= 4 && ((await row("heartbeat:sleep"))?.restart?.in_s ?? 0) === 60, 10_000);
+    await Bun.sleep(300);
+    const runsSeen = runsOf();
+    const migrationRow = await row("heartbeat:sleep");
+    migrating.stop("SIGTERM");
+    const migratingCode = await within(migrating.done, 2000);
+    rmSync(migrationRuns, { force: true });
+    const atOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once, to wait it out and read its start again, heartbeat:sleep says so$/.test(l)).length;
+    const onTheClock = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen at each of its last 4 starts; it runs again at .* \(in 60 s, end 1 in a row\)/.test(l)).length;
+    assert(fourRuns && runsSeen === 4 && atOnce === 3 && onTheClock === 1 && migrationRow?.restart?.code === 75 && migrationRow.restart.tries === 1 && migratingCode === 0,
+      `a follower exiting 75 runs again at once, no try counted, three times, then on the clock, its first counted end (${runsSeen} run(s), ${atOnce} at once, ${onTheClock} on the clock, row ${JSON.stringify(migrationRow?.restart)}, exit ${migratingCode})`);
+    // The row the at-once restart writes, as preflight and brain_info read
+    // it; a slow 75 after three quick ones runs again at once, its count
+    // started again, and its long run forgets the end before it (review
+    // pass 2). Runs: exit 3, three quick 75s, a slow 75, then one that stays.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    writeFileSync(migrationRuns, "");
+    const staged = `n=$(grep -c . ${migrationRuns}); echo run >> ${migrationRuns}; case $n in 0) exit 3;; 1|2|3) exit 75;; 4) sleep 0.4; exit 75;; *) exec sleep 30;; esac`;
+    const slow = supervise({ worker: "sleep", cmd: ["sh", "-c", staged], sql: ssql as never, waits: { first: 50, max: 50, reset: 300 }, migrationQuickMs: 200, writer });
+    const sixRuns = await pollUntil(async () => runsOf() >= 6, 10_000);
+    await Bun.sleep(300);
+    const slowRow = await row("heartbeat:sleep");
+    const slowRuns = runsOf();
+    slow.stop("SIGTERM");
+    const slowCode = await within(slow.done, 2000);
+    rmSync(migrationRuns, { force: true });
+    const slowAtOnce = said.filter((l) => /^supervise: sleep exited 75 after \d+ s — a migration seen; restarting after a migration, at once/.test(l)).length;
+    assert(sixRuns && slowRuns === 6 && slowAtOnce === 4 && slowRow?.restart?.in_s === 0 && slowRow.restart.code === 75 && slowRow.restart.tries === 0 && slowCode === 0,
+      `a slow 75 after three quick ones runs again at once, and the row says in_s 0, code 75, the end before the long run forgotten (${slowRuns} run(s), ${slowAtOnce} at once, row ${JSON.stringify(slowRow?.restart)}, exit ${slowCode})`);
+    // Another follower's 75 is any end, on the clock (review pass 2).
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const other = supervise({ worker: "board-sync", cmd: ["sh", "-c", "exit 75"], sql: ssql as never, waits: { first: 60_000, max: 60_000, reset: 60_000 }, writer });
+    const otherHeld = await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 5000);
+    other.stop("SIGTERM");
+    assert(otherHeld && (await within(other.done, 2000)) === 0 && !said.some((l) => /a migration seen/.test(l)),
+      `another follower exiting 75 runs again on the clock, not at once (held ${otherHeld})`);
     // The count starts again after a run of `reset` or longer: here every run counts as long.
     await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     const resetting = supervise({ worker: "board-sync", cmd: ["sh", "-c", "sleep 0.15; exit 2"], sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
@@ -17979,6 +18031,87 @@ if (want("38")) {
       sw.missing = false;
       sw.slowExtract = 0;
       await setKey(EX);
+    }
+    // A migration (SMD-3379 PR 1c-1). The lock migrate.ts takes, held at the
+    // start: the scheduler waits before its passes' starts. Let go, it starts;
+    // then the ledger moving ends it with 75, the row ended stopped. And the
+    // lock taken while it runs ends a second run the same way.
+    {
+      const holder = await sql.reserve();
+      try {
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const migFrom = lines.length;
+        const migStop = new AbortController();
+        const migRun = sleepRun({ follow: true, signal: migStop.signal, pollMs: 200 });
+        const migWaited = await pollUntil(async () => lines.slice(migFrom).some((l) => /^  migration: backend \d+ holds ob1:migrate, applying migrations — the scheduler waits for it to finish before it starts$/.test(l)), 10_000);
+        await Bun.sleep(600);
+        // Nothing of the start but the wait: its reads come after (`quiet:` the first said), then its passes.
+        const migStartedEarly = lines.slice(migFrom).some((l) => /^  (\[(extract|consolidate)\]|quiet:)/.test(l));
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        const migRunning = await pollUntil(async () => (await beat())?.running === true, 15_000);
+        // Named before every file, so only the ledger's count moves (review pass 2).
+        await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('000_smd3379_ledger_moved', 'test')`;
+        const migCode = await bounded(migRun, migStop);
+        const migBeat = await beat();
+        const movedSaid = lines.slice(migFrom).some((l) => /the migration ledger moved, (\d{3}_\S+) \((\d+) applied\) to \1 \((\d+) applied\) — the passes stop now, their leases returned and a statement of the scheduler's waiting on a lock cancelled, and the scheduler exits 75: under the coordinator its supervisor starts it again at once/.test(l));
+        assert(migWaited && !migStartedEarly && migRunning && migCode === 75 && movedSaid && migBeat?.ended === true && migBeat.running === false && migBeat.outcome === "stopped",
+          `a lock held at the start is waited out before the start's reads, and a row added to the ledger then ends the run with 75, its row ended stopped (waited ${migWaited}, started early ${migStartedEarly}, exit ${migCode}, said ${movedSaid}, ${JSON.stringify({ ended: migBeat?.ended, running: migBeat?.running, outcome: migBeat?.outcome })})`);
+        await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
+        const lockFrom = lines.length;
+        const lockStop = new AbortController();
+        const lockRun = sleepRun({ follow: true, signal: lockStop.signal, pollMs: 200 });
+        const lockRunning = await pollUntil(async () => lines.slice(lockFrom).some((l) => /^  quiet:/.test(l)) && (await beat())?.running === true, 15_000);
+        await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+        const lockCode = await bounded(lockRun, lockStop);
+        const lockBeat = await beat();
+        await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+        const lockSaid = lines.slice(lockFrom).some((l) => /backend \d+ holds ob1:migrate, applying migrations — the passes stop now/.test(l));
+        assert(lockRunning && lockCode === 75 && lockSaid && lockBeat?.ended === true && lockBeat.outcome === "stopped",
+          `…and the lock taken while it runs ends it with 75 too, its row ended stopped (exit ${lockCode}, said ${lockSaid}, ${JSON.stringify({ ended: lockBeat?.ended, outcome: lockBeat?.outcome })})`);
+        /**
+         * A run under way (`ready`), `table` locked as a migration would, a
+         * statement of the scheduler's waiting on it, then ob1:migrate taken:
+         * the run's code — -1 when not within 10 s, the lock still held — and
+         * how long after the take.
+         */
+        const whileLocked = async (table: string, ready: () => Promise<boolean>) => {
+          const stop = new AbortController();
+          const run = sleepRun({ follow: true, signal: stop.signal, pollMs: 200 });
+          const running = await pollUntil(ready, 20_000);
+          await holder`BEGIN`;
+          await holder.unsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
+          const waited = await pollUntil(async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE application_name LIKE 'ob1-sleep %' AND wait_event_type = 'Lock'`)[0].c) > 0, 10_000);
+          const at = Date.now();
+          await holder`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+          const code = await Promise.race([run, Bun.sleep(10_000).then(() => -1)]);
+          const ms = Date.now() - at;
+          await holder`ROLLBACK`;
+          await holder`SELECT pg_advisory_unlock(hashtext(${MIGRATE_LOCK}))`;
+          if (code === -1) { stop.abort(); await run; }
+          return { running, waited, code, ms };
+        };
+        // A pass's statement waiting on a lock the migration holds: cancelled,
+        // so the run ends while the migration still runs, where it waited for
+        // it and could deadlock it; no thought failed (review pass 4, run).
+        const failedBefore = (await claims(EX)).failed ?? 0;
+        for (let i = 0; i < 6; i++) await capture(`Ada Lovelace wrote the first program, note ${i} of the blocked run`, null);
+        sw.slowExtract = 400;
+        const pass = await whileLocked("thought_entities", async () => (await beat())?.running === true && modelCalls.some((c) => c.kind === "extract" && Date.now() - c.at < 2000));
+        sw.slowExtract = 0;
+        const blockFailed = ((await claims(EX)).failed ?? 0) - failedBefore;
+        assert(pass.running && pass.waited && pass.code === 75 && blockFailed === 0,
+          `…and a pass's statement waiting on the migration's lock is cancelled, the run ending 75 while the migration holds it, no thought failed (running ${pass.running}, a pass waited ${pass.waited}, exit ${pass.code} after ${pass.ms} ms, ${blockFailed} failed)`);
+        // The scheduler's own read waiting on it — the live-write read on
+        // thought_audit, each poll — is cancelled too (review pass 5, run).
+        const read = await whileLocked("thought_audit", async () => (await beat())?.running === true);
+        assert(read.running && read.waited && read.code === 75,
+          `…and the scheduler's own read waiting on it is cancelled too, the run ending 75 while the migration holds it (running ${read.running}, a read waited ${read.waited}, exit ${read.code} after ${read.ms} ms)`);
+      } finally {
+        await holder`ROLLBACK`.catch(() => {});
+        await holder`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        holder.release();
+        await sql`DELETE FROM schema_migrations WHERE name = '000_smd3379_ledger_moved'`;
+      }
     }
   } finally {
     restoreOutage();

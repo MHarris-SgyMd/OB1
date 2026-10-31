@@ -1452,6 +1452,15 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^held: exited 1, 1 end\(s\) in a row — its supervisor ran it again 60 s ago, and it has not stamped since/.test(due)
       && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
     `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
+  // A migration seen (SMD-3379 PR 1c-1): restarting, at any age — the new process waits the migration out unstamped.
+  // brain-info.ts takes no imports: its copy of the exit status pinned to config.mjs' (review pass 2).
+  const { MIGRATION_EXIT: infoExit } = await import("./brain-info.ts");
+  const { MIGRATION_EXIT: configExit } = await import("../db/config.mjs");
+  assert(infoExit === configExit, `brain-info.ts' MIGRATION_EXIT is config.mjs' (${infoExit}, ${configExit})`);
+  const migrating = [20, 2_000].map((age) => heldState(heldRow(age, { in_s: 0, code: 75, tries: 0 })));
+  assert(migrating.every((m, i) => m.startsWith(`restarting after a migration — its supervisor ran it again ${["20 s", "33 min"][i]} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, the database does not answer, or its passes' start checks run`))
+      && /^held: exited 75, 1 end\(s\) in a row — its supervisor runs it again in 60 s/.test(heldState(heldRow(0, { in_s: 60, code: 75, tries: 1 }))),
+    `a 75 run again at once reads restarting after a migration at any age, one on the clock reads held (${migrating.join(" | ")})`);
   // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
   const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
   assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"
