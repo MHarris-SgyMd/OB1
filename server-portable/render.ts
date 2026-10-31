@@ -1641,12 +1641,14 @@ export const REVIEWERS_UNREAD = "Who decided each row is not shown: this brain i
  * through the replies' cleaner, on one line; yours said so.
  */
 export function reviewerText(r: Reviewer | null, caller?: string): string {
-  // The listing reaches rows the CLI and the workers decided, and rows from before 114 (review pass 1 of PR 2): each
-  // word true of every one, as --list's are.
-  if (!r || (!r.name && !r.agentId)) return "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
+  // Two readers (PR 2 review pass 2): the decision's reply, which passes its caller — a decision through this server,
+  // always under a key's name — and the listing, which reaches rows the CLI and the workers decided and rows from
+  // before 114, and passes none. Each says what can be true of its own rows.
+  const decision = caller !== undefined;
+  if (!r || (!r.name && !r.agentId)) return decision ? "not recorded — no actor named the decision" : "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
   const kind = r.kind ?? (r.kindNow ? `${r.kindNow} — classified after it decided` : "a key the registry has not classified");
   const name = r.name ? `${snipText(r.name, 80)}${caller !== undefined && r.name.trim() === caller.trim() ? " (your key)" : ""}` : null;
-  return name && r.agentId ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)` : `agent ${r.agentId}, ${kind}, no name`;
+  return name && r.agentId ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (${decision ? "the key did not resolve in the registry" : "run with no key — the CLI's or a worker's — or a key that did not resolve"})` : `agent ${r.agentId}, ${kind}, no name`;
 }
 
 /**

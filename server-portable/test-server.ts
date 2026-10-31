@@ -6381,8 +6381,9 @@ console.log("\n[32] review_supersession_proposal's reply, branch by branch: what
   assert(by({ name: "op", agentId: AG, kind: "agent", kindNow: "operator" }) === "Decided by: op, agent."
       && by({ name: "op", agentId: AG, kind: null, kindNow: "operator" }) === "Decided by: op, operator — classified after it decided."
       && by({ name: "op", agentId: AG, kind: null, kindNow: null }) === "Decided by: op, a key the registry has not classified."
-      && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)."
-      && by(null) === "Decided by: not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer."
+      && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (the key did not resolve in the registry)."
+      && by(null) === "Decided by: not recorded — no actor named the decision."
+      && by({ name: null, agentId: AG, kind: "agent", kindNow: "agent" }) === `Decided by: agent ${AG}, agent, no name.`
       && by({ name: "op", agentId: AG, kind: "operator", kindNow: "operator" }, "op") === "Decided by: op (your key), operator.",
     `the reviewer: its kind then, else now said so, neither, no agent, none, yours (${by({ name: "op", agentId: AG, kind: null, kindNow: "operator" })})`);
   // Refusals, each condition's two sides.
@@ -6429,6 +6430,12 @@ console.log("\n[33] list_supersession_proposals names who decided each decided r
   const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentId: string; kind: string | null; kindNow: string | null } | null }[] };
   assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentId === R.agentId && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
     "…its value carries the reviewer's agent and kinds, not its name");
+  // The listing's words for rows the server never decided: a keyless run's, and one with an agent and no name (pass 2).
+  const keyless = page(true, [row("00000000-0000-4000-8000-0000000033c5", "rejected", { name: "consolidate", agentId: null, kind: null, kindNow: null })]).content[0].text;
+  const nameless = page(true, [row("00000000-0000-4000-8000-0000000033c6", "accepted", { name: null, agentId: R.agentId, kind: "operator", kindNow: "operator" })]).content[0].text;
+  assert(keyless.includes("\n   decided by: consolidate, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)")
+      && nameless.includes(`\n   decided by: agent ${R.agentId}, operator, no name`),
+    "the listing: a keyless run's decision and an agent with no name, each in the listing's words");
   // A stale row (reopened, 067) names none though the page read them; a page from a REST core before PR 2 (no
   // reviewersRead) says neither a line nor the short-of-114 note (review pass 1 of PR 2).
   const stale = page(true, [row("00000000-0000-4000-8000-0000000033c4", "stale", null)]).content[0].text;
