@@ -2944,7 +2944,7 @@ if (configFailed) {
           const tc = Array.isArray(tcRows) ? tcRows[0] : null;
           // The log settings, read apart: a role that may not read one says nothing here rather than failing the row.
           const LOG_SETTINGS = ["log_statement", "log_min_duration_statement", "log_min_duration_sample", "log_statement_sample_rate", "log_transaction_sample_rate",
-            "log_parameter_max_length", "log_parameter_max_length_on_error", "log_min_error_statement", "debug_print_plan",
+            "log_parameter_max_length", "log_parameter_max_length_on_error", "log_min_messages", "debug_print_plan",
             "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "auto_explain.log_verbose", "pgaudit.log_parameter", "pgaudit.log", "pgaudit.role"];
           const logs = await sql.unsafe(`SELECT ${LOG_SETTINGS.map((s, i) => `current_setting('${s}', true) AS s${i}`).join(", ")}`)
             .then((r) => Object.fromEntries(LOG_SETTINGS.map((s, i) => [s, ((r as Record<string, string | null>[])[0] ?? {})[`s${i}`] ?? null])), () => null);
@@ -2962,14 +2962,15 @@ if (configFailed) {
           const logging = !logs ? [] : [
             ...(statementLogs.length && printing(logs.log_parameter_max_length)
               ? [`statement logging is on (${statementLogs.join(", ")}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
-            // A failed statement is logged with its parameters only where log_min_error_statement logs it at all.
-            ...(printing(logs.log_parameter_max_length_on_error) && logs.log_min_error_statement !== "panic"
+            // The parameters ride the ERROR report itself (its CONTEXT), logged by log_min_messages — not the STATEMENT
+            // line log_min_error_statement governs — so only a log that keeps no ERROR is spared.
+            ...(printing(logs.log_parameter_max_length_on_error) && logs.log_min_messages !== "fatal" && logs.log_min_messages !== "panic"
               ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
             // A verbose plan prints a custom plan's constants — the bound token among them — whatever the parameter cap.
             ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && (printing(logs["auto_explain.log_parameter_max_length"]) || logs["auto_explain.log_verbose"] === "on")
               ? [`auto_explain logs plans with parameters (auto_explain.log_parameter_max_length is ${logs["auto_explain.log_parameter_max_length"]}, auto_explain.log_verbose is ${logs["auto_explain.log_verbose"]})`] : []),
             ...(logs.debug_print_plan === "on" ? ["debug_print_plan is on, so each plan's constants are logged"] : []),
-            ...(logs["pgaudit.log_parameter"] === "on" && ((logs["pgaudit.log"] ?? "none") !== "none" || (logs["pgaudit.role"] ?? "") !== "") ? ["pgaudit.log_parameter is on"] : []),
+            ...(logs["pgaudit.log_parameter"] === "on" && ((logs["pgaudit.log"] ?? "none").trim().toLowerCase() !== "none" || (logs["pgaudit.role"] ?? "") !== "") ? ["pgaudit.log_parameter is on"] : []),
           ];
           if (!tc) {
             add("ticket claims", "warn", `could not verify: ${(tcRows as Error).message}`, "The check reads work_claims and 115's functions in public; the message says why it failed.");

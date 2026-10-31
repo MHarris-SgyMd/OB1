@@ -798,12 +798,16 @@ else {
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_statement = 'mod'`);
       const mod = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_statement`);
-      // …a failed statement logged nowhere (log_min_error_statement=panic): its parameters' cap is moot, so ok.
+      // …the parameters ride the ERROR report's CONTEXT, logged by log_min_messages: log_min_error_statement=panic,
+      // which drops only the STATEMENT line, still warns; log_min_messages=panic, which keeps no ERROR, is ok.
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_parameter_max_length_on_error = 100`);
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_error_statement = panic`);
+      const statementPanic = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_error_statement`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_messages = panic`);
       const panicOnly = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_parameter_max_length_on_error`);
-      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_error_statement`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_messages`);
       // Sampled statements, named as the setting that samples them.
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_sample = 0`);
       const sampled = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -820,8 +824,8 @@ else {
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET debug_print_plan = on`);
       const debugPlan = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET debug_print_plan`);
-      assert(/✓  ticket claims/.test(panicOnly.out) && /!  ticket claims\s+statement logging is on \(log_min_duration_sample=0 at log_statement_sample_rate=1\) and log_parameter_max_length is -1/.test(sampled.out),
-             `a failed statement's cap with no failed statement logged: ok; sampled statements: a warning naming the sampling (${line(panicOnly.out).trim().slice(0, 40)} | ${line(sampled.out).trim().slice(0, 140)})`);
+      assert(/✓  ticket claims/.test(panicOnly.out) && /!  ticket claims\s+log_parameter_max_length_on_error is 100B?/.test(statementPanic.out) && /!  ticket claims\s+statement logging is on \(log_min_duration_sample=0 at log_statement_sample_rate=1\) and log_parameter_max_length is -1/.test(sampled.out),
+             `a failed statement's cap: still a warning under log_min_error_statement=panic, ok with no ERROR logged (log_min_messages=panic); sampled statements: a warning naming the sampling (${line(panicOnly.out).trim().slice(0, 40)} | ${line(sampled.out).trim().slice(0, 140)})`);
       assert(/!  ticket claims\s+auto_explain logs plans with parameters \(auto_explain\.log_parameter_max_length is 0, auto_explain\.log_verbose is on\)/.test(verbose.out) && /auto_explain\.log_verbose = off/.test(verbose.out)
              && /✓  ticket claims/.test(terse.out) && /!  ticket claims\s+debug_print_plan is on, so each plan's constants are logged/.test(debugPlan.out),
              `a verbose auto_explain warns though its parameter cap is 0, a terse one is ok; debug_print_plan warns (${line(verbose.out).trim().slice(0, 140)} | ${line(terse.out).trim().slice(0, 40)} | ${line(debugPlan.out).trim().slice(0, 80)})`);
