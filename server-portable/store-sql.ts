@@ -20,10 +20,11 @@
 
 import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
-import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
+import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
+import { reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ClaimRefused, claimProblemOf, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
@@ -47,6 +48,7 @@ import type {
   ThoughtKeywordMatch,
   LoggedSearchPage,
   WorkerStatusRow,
+  HeartbeatRead,
   RetryFailedResult,
   ReleaseLeasesOpts,
   ReleaseLeasesResult,
@@ -540,6 +542,10 @@ export class SqlStore implements ThoughtStore {
     return { searches, truncated };
   }
 
+  async heartbeats(): Promise<HeartbeatRead> {
+    return readHeartbeats(this.sql as never);
+  }
+
   async workerStatus(): Promise<WorkerStatusRow[]> {
     // Per work_type: the four status counts as the workers count them — a stale
     // lease stays 'claimed' until the next claim_thoughts() reaps it, so it is in
@@ -950,6 +956,12 @@ export class SqlStore implements ThoughtStore {
         FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
                               ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int)` as Record<string, unknown>[];
     return rows.map((r) => normaliseWorkClaim(r, "list_work_claims"));
+  }
+
+  async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {
+    // SMD-3338: one transaction, under 029's lock — the CLI's own decision
+    // (proposal-review.ts). The audit rows name the actor as its envelope does.
+    return reviewProposal(this.sql, { id: opts.id, decision: opts.decision, note: opts.note ?? null, direction: opts.direction ?? null, force: opts.force === true, actor: actorPayload(opts.actor), actorName: opts.actor?.name ?? "" });
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {

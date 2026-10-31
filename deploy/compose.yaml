@@ -1401,7 +1401,8 @@ services:
   # reach the CLI as a flag); each is held until the coordinator is
   # recreated, its heartbeat ended with the refusal. A child that ends on its
   # own is run again after 1, 2, 4, 8, then every 15 minutes, its heartbeat
-  # ended with when, so preflight says it is held, not stopped.
+  # ended with when, so preflight says it is held, not stopped; sleep ended
+  # on a migration (exit 75) at once (SMD-3379 PR 1c-1).
   #
   # Code. The server image, which since SMD-3476 carries db/coordinator.ts
   # and the passes' import graph (.dockerignore's allow-list, held by

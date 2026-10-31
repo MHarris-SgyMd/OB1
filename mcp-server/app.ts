@@ -319,6 +319,7 @@ const WORDS: Record<ToolName, Words> = {
   list_thought_ids: { render: (o) => say.renderThoughtIds(o), fault: readFault() },
   list_logged_searches: { render: (o) => say.renderLoggedSearches(o), fault: readFault(() => say.loggedSearchesHint) },
   worker_status: { render: (o) => say.renderWorkerStatus(o), fault: readFault() },
+  task_status: { render: (o) => say.renderTaskStatus(o), fault: readFault() },
   // brain_info's record is never a refusal: the reply renders the value itself.
   brain_info: { render: (o) => say.renderBrainInfoReply((o as { value: never }).value), fault: readFault() },
   // capture's fault is STORE_UNAVAILABLE, the transient the session hook keeps and retries (SMD-1978).
@@ -326,6 +327,7 @@ const WORDS: Record<ToolName, Words> = {
   update_thought: { render: (o) => say.renderUpdate(o), fault: writeFault("update_thought failed: ") },
   delete_thought: { render: (o) => say.renderDelete(o), fault: writeFault("delete_thought failed: ") },
   reset_capture_stamp: { render: (o) => say.renderResetCaptureStamp(o), fault: writeFault("reset_capture_stamp failed: ", say.resetHint) },
+  review_supersession_proposal: { render: (o) => say.renderReviewProposal(o), fault: writeFault("review_supersession_proposal failed: ", say.reviewHint) },
   retry_failed: { render: (o) => say.renderRetryFailed(o), fault: writeFault("retry_failed failed: ") },
   release_stale_leases: { render: (o) => say.renderReleaseStaleLeases(o), fault: writeFault("release_stale_leases failed: ") },
   run_worker: { render: (o) => say.renderRunWorker(o), fault: writeFault("run_worker failed: ") },

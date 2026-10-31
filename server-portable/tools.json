@@ -34,6 +34,10 @@
       "scope": "read"
     },
     {
+      "name": "task_status",
+      "scope": "read"
+    },
+    {
       "name": "job_status",
       "scope": "read"
     },
@@ -75,6 +79,10 @@
     },
     {
       "name": "reset_capture_stamp",
+      "scope": "write"
+    },
+    {
+      "name": "review_supersession_proposal",
       "scope": "write"
     },
     {

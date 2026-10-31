@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
-# the database-backed suites in CI's order against ONE shared Postgres, then the
-# suites and self-checks that need none, then every directory's typecheck
-# (SMD-1932, SMD-1870, SMD-2903).
+# the database-backed suites in CI's order against ONE shared Postgres, but for
+# test-upgrade and test-preflight, which run beside them on a second as CI's do;
+# and beside both, in a lane of their own, the suites and self-checks that need
+# none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
+# Each row says how long it took.
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
@@ -31,7 +33,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
 
-# One row per suite or typecheck: ✓ or ✗, the name, the verdict.
+# One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
 row() {
   local ok="$1" name="$2" verdict="$3"
   if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-48s %s\n" "$name" "$verdict"; else printf "  \033[31m✗\033[0m %-48s %s\n" "$name" "$verdict"; fi
@@ -63,14 +65,16 @@ suite() {
   # apart.
   given=$(LC_ALL=C comm -13 <(printf '%s\n' "$BASE_ENV") <(env | LC_ALL=C sort) | tr '\n' ' ')
   name="${given}$([ "$dir" = . ] || printf '%s/' "$dir")$script${1:+ $*}"
+  local t0=$SECONDS
   if [ "$mode" = nodb ]; then
     out=$(cd "$ROOT/$dir" && env -u DATABASE_URL bun "$script" "$@" 2>&1); rc=$?
   else
     out=$(cd "$ROOT/$dir" && bun "$script" "$@" 2>&1); rc=$?
   fi
+  local took="$((SECONDS - t0)) s"
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
-    row bad "$name" "${res:+$res, }exit $rc"
+    row bad "$name" "${res:+$res, }exit $rc · $took"
     if printf '%s\n' "$out" | grep -qE '✗|error:'; then
       printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
     else
@@ -78,7 +82,7 @@ suite() {
     fi
     FAILED=1
   else
-    row ok "$name" "${res:-exit 0}"
+    row ok "$name" "${res:-exit 0} · $took"
   fi
 }
 # A step that sets DATABASE_URL: the shared Postgres this script started.
@@ -95,12 +99,14 @@ nodb() { suite nodb "$@"; }
 # check` — svelte-kit sync, then svelte-check — since its tsconfig extends the
 # one sync generates (SMD-2280 PR 2b; check 35 reads CI's step as its typecheck).
 typecheck() {
-  local dir="$1" out how="tsc --noEmit"
+  local dir="$1" out how="tsc --noEmit" t0=$SECONDS rc took
   [ -f "$ROOT/$dir/svelte.config.js" ] && how="bun run check"
-  if out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); then
-    row ok "$dir" "$how"
+  out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); rc=$?
+  took="$((SECONDS - t0)) s"
+  if [ "$rc" -eq 0 ]; then
+    row ok "$dir" "$how · $took"
   else
-    row bad "$dir" "$how"
+    row bad "$dir" "$how · $took"
     # The first type errors — tsc's `error TS` lines, svelte-check's `ERROR`
     # ones; or, when neither ran (a bunx resolution failure has no such line),
     # the tail of what did print.
@@ -113,61 +119,18 @@ typecheck() {
   fi
 }
 
-main() {
+# The database-free lane (SMD-3638): every row with no DATABASE_URL and every
+# typecheck, one after another in a background subshell beside the database
+# suites, its rows printed when the database lane is done. None of these reads
+# the shared Postgres, so the database suites see no other client; what they
+# share is the CPU, and with it the timing rows of both lanes (test-server's
+# probe windows, test-live's polls) run under more load than in series. Its
+# FAILED is its own, so it returns its verdict and main() reads it from wait.
+free_rows() {
   FAILED=0
-  BASE_ENV=$(env | LC_ALL=C sort)
-  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
-
   # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
   OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text nodb db test-schema.ts
-
-  # Against the shared Postgres, in CI's order.
-  # CI runs test-live.ts's four shards side by side, one matrix cell each,
-  # each on a fresh database (SMD-3048, SMD-3169). Here they run in series on
-  # the shared one, each dropping its schema first, which takes the rows and
-  # config keys the one before left; cluster roles and any table dropSchema
-  # does not list stay. A section broken by another's rows shows only in a
-  # full run.
-  OB1_LIVE_SHARD=rest run db test-live.ts
-  OB1_LIVE_SHARD=sleep run db test-live.ts
-  OB1_LIVE_SHARD=long run db test-live.ts
-  OB1_LIVE_SHARD=extract run db test-live.ts
-  # CI runs this one and test-preflight.ts's two shards in the background from
-  # the data-layer job's start, on Postgreses of their own, beside that job's
-  # suites below (SMD-2219, SMD-3195, SMD-3468); here, in their places and in
-  # series, on the shared one, test-preflight.ts where CI ran it before
-  # SMD-3195.
-  run db                 test-upgrade.ts
-  run db                 test-search-path.ts
-  run server-portable    test-store-sql.ts
-  run server-portable    test-e2e-sql.ts
-  run server-portable    test-rest-sql.ts
-  run server-portable    test-plugins-sql.ts
-  run server-portable    test-local-provider.ts
-  run evals              eval-write-path.ts --gate
-  # The check drops the schema and refuses a database holding thoughts unless
-  # told; this one is the throwaway with-postgres.sh started, as CI's is.
-  OB1_FIXTURE_RESET=1 run evals eval-projection-replay.ts --fixture-check
-  run server-portable    test-egress.ts
-  run server-portable    test-audit.ts
-  run server-portable    test-update-delete.ts
-  run server-portable    test-agents.ts
-  run server-portable    test-chunking.ts
-  run server-portable    test-chunk-context.ts
-  run server-portable    test-embedding-dimensions.ts
-  # CI runs its two shards side by side, the first beside test-upgrade.ts on
-  # pair-postgres, the rest on preflight-postgres (SMD-3468); here in series,
-  # each dropping the schema before its first database section.
-  OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
-  OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
-  run compat/supabase-sql test-compat.ts
-  # The vendored writers of a thought's content or vector (change 69), then
-  # every extension tool on the SQL shim, as CI's data-layer job runs them —
-  # last, since each applies vendored schemas to the shared database and drops
-  # them after.
-  run extensions         test-writes.ts
-  run extensions         test-tools.ts
 
   # Suites and self-checks that need no database, by CI job. They are here
   # because CI runs them and this script exists to be CI's local equivalent —
@@ -238,9 +201,128 @@ main() {
   typecheck deploy/auth
   typecheck compat/supabase-sql
   typecheck dashboard
-  echo
-  [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"
 }
 
-if [ -n "${DATABASE_URL:-}" ]; then main; else exec "$ROOT/db/with-postgres.sh" "$0"; fi
+# The pair lane (SMD-3638): test-upgrade.ts, then test-preflight.ts's two
+# shards, on a Postgres of their own, as CI's data-layer job runs them in the
+# background from its start (SMD-2219, SMD-3195, SMD-3468) — CI side by side,
+# test-upgrade.ts and the first shard on pair-postgres, the rest on
+# preflight-postgres; here one after the other on one, each shard dropping the
+# schema before its first database section, which their lane's length, inside
+# the database lane's, makes free. The script runs itself again under a second
+# with-postgres.sh with --pair, and that run does only this — so a run needs
+# podman or docker even when DATABASE_URL is given, and without one this lane
+# fails with with-postgres.sh's "No working container runtime found".
+pair_rows() {
+  FAILED=0
+  BASE_ENV=$(env | LC_ALL=C sort)
+  run db                 test-upgrade.ts
+  OB1_PREFLIGHT_SHARD=first run server-portable test-preflight.ts
+  OB1_PREFLIGHT_SHARD=rest run server-portable test-preflight.ts
+  return "$FAILED"
+}
+
+# The lanes beside the database lane: each writes to a file, printed when the
+# database lane is done, one block each, so no lane's rows interleave with
+# another's. A Ctrl-C stops them whole, though a non-interactive shell's
+# background job ignores SIGINT and their suites would otherwise run on after
+# the script has gone (the pair lane's with-postgres.sh removes its container
+# as it exits). A TERM to this script alone does too, once the database lane's
+# row in hand ends: bash runs a trap only between commands.
+start_lanes() {
+  FREE_OUT=$(mktemp "${TMPDIR:-/tmp}/ci-parity-free.XXXXXX")
+  PAIR_OUT=$(mktemp "${TMPDIR:-/tmp}/ci-parity-pair.XXXXXX")
+  LANES_AT=$SECONDS
+  free_rows > "$FREE_OUT" 2>&1 &
+  FREE_PID=$!
+  "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair < /dev/null > "$PAIR_OUT" 2>&1 &
+  PAIR_PID=$!
+}
+stop_tree() {
+  local child
+  for child in $(pgrep -P "$1"); do stop_tree "$child"; done
+  kill "$1" 2>/dev/null
+}
+stop_lanes() {
+  local pid
+  for pid in $FREE_PID $PAIR_PID; do stop_tree "$pid"; done
+  rm -f "$FREE_OUT" "$PAIR_OUT"
+}
+# wait_lane PID FILE TITLE: wait for a lane, read its verdict, print its rows.
+wait_lane() {
+  if kill -0 "$1" 2>/dev/null; then
+    printf '  … %s, beside the database lane since %s s in, is still going\n' "$3" "$LANES_AT"
+  fi
+  wait "$1" || FAILED=1
+  echo
+  echo "  $3, beside the database lane from $LANES_AT s in:"
+  cat "$2"
+}
+
+main() {
+  FAILED=0
+  FREE_PID='' PAIR_PID='' FREE_OUT='' PAIR_OUT=''
+  BASE_ENV=$(env | LC_ALL=C sort)
+  trap 'stop_lanes; exit 130' INT TERM
+  trap 'rm -f "$FREE_OUT" "$PAIR_OUT"' EXIT
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
+
+  # Against the shared Postgres, in CI's order.
+  # CI runs test-live.ts's four shards side by side, one matrix cell each,
+  # each on a fresh database (SMD-3048, SMD-3169). Here they run in series on
+  # the shared one, each dropping its schema first, which takes the rows and
+  # config keys the one before left; cluster roles and any table dropSchema
+  # does not list stay. A section broken by another's rows shows only in a
+  # full run.
+  OB1_LIVE_SHARD=rest run db test-live.ts
+  # The other two lanes start here, beside the rest of this one, and not
+  # before: the rest shard's [2] appends a line to the tracked
+  # db/migrations/002 for a moment, and the database-free lane's checker (17c
+  # hashes the frozen migrations), test-engines and test-schema read the file,
+  # as do test-upgrade and test-preflight (SMD-3639).
+  start_lanes
+  OB1_LIVE_SHARD=sleep run db test-live.ts
+  OB1_LIVE_SHARD=long run db test-live.ts
+  OB1_LIVE_SHARD=extract run db test-live.ts
+  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane
+  # (pair_rows).
+  run db                 test-search-path.ts
+  run server-portable    test-store-sql.ts
+  run server-portable    test-e2e-sql.ts
+  run server-portable    test-rest-sql.ts
+  run server-portable    test-plugins-sql.ts
+  run server-portable    test-local-provider.ts
+  run evals              eval-write-path.ts --gate
+  # The check drops the schema and refuses a database holding thoughts unless
+  # told; this one is the throwaway with-postgres.sh started, as CI's is.
+  OB1_FIXTURE_RESET=1 run evals eval-projection-replay.ts --fixture-check
+  run server-portable    test-egress.ts
+  run server-portable    test-audit.ts
+  run server-portable    test-update-delete.ts
+  run server-portable    test-agents.ts
+  run server-portable    test-chunking.ts
+  run server-portable    test-chunk-context.ts
+  run server-portable    test-embedding-dimensions.ts
+  run compat/supabase-sql test-compat.ts
+  # The vendored writers of a thought's content or vector (change 69), then
+  # every extension tool on the SQL shim, as CI's data-layer job runs them —
+  # last, since each applies vendored schemas to the shared database and drops
+  # them after.
+  run extensions         test-writes.ts
+  run extensions         test-tools.ts
+
+  # Each pid cleared once waited, so a trap after cannot signal a reused one.
+  wait_lane "$PAIR_PID" "$PAIR_OUT" "test-upgrade and test-preflight, on a Postgres of their own"
+  PAIR_PID=''
+  wait_lane "$FREE_PID" "$FREE_OUT" "The database-free lane"
+  FREE_PID=''
+  echo
+  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s)"
+  return "$FAILED"
+}
+
+if [ "${1:-}" = --pair ]; then
+  [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --pair runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
+  pair_rows
+elif [ -n "${DATABASE_URL:-}" ]; then main; else exec "$ROOT/db/with-postgres.sh" "$0"; fi

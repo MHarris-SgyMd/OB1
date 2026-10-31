@@ -291,7 +291,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
   The survey behind decision 13 (eight candidates at the versions checked on 2026-09-28) is on SMD-2285.
 - **The importance scale, the restricted-content lock and kanban's status column.** Each is non-core schema today (`schemas/enhanced-thoughts`, `schemas/workflow-status`); adopting one is a migration decision of its own.
 - **Operations that exist only on the command line or not at all**, needed by the GUI's later views, filed when the GUI reaches them:
-  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063) and a `lineage` selector (070);
+  - supersession accept/reject (`db/consolidate.ts --accept/--reject`), where the list tool now also has a `stale` status (migration 063) and a `lineage` selector (070) — on the core since SMD-3338 as `review_supersession_proposal`, the GUI's verb SMD-3322's;
   - `rebuild_derived`, its orphan sweep and its census (migration 063, `db/rebuild.ts`);
   - lineage and provenance reads;
   - an entity-graph read.

@@ -125,9 +125,10 @@ export interface DatabaseFacts {
    * `heartbeat:` row of ob1_config, judged against the database's clock.
    * `ignored` counts rows whose key or value is not a heartbeat's shape — named,
    * not printed. Null when ob1_config was not read (`unread` names it) or is
-   * absent. A worker that never ran on this brain has no row.
+   * absent. A worker that never ran on this brain has no row. `coordinator` is
+   * the coordinator's own row (SMD-3476 PR 3), absent while it has none.
    */
-  workers: { heartbeats: WorkerHeartbeat[]; ignored: number } | null;
+  workers: { heartbeats: WorkerHeartbeat[]; ignored: number; coordinator?: CoordinatorBeat; runner?: RunnerBeat } | null;
   /**
    * The supersession-proposal queue (029, SMD-2680): what consolidation found
    * that waits on a reviewer. `pending` and `stale` by status; the oldest
@@ -251,6 +252,23 @@ export interface WorkerHeartbeat {
    * re-embed runs, and for the other workers.
    */
   aside?: SleepAside;
+  /**
+   * The sleep scheduler paused by a live call (SMD-3379 PR 1c): its gate
+   * closed since `since`, on the database's clock, its passes waiting
+   * between thoughts. Only on a live row — db/supervise.ts strips it from an
+   * ended one. Absent otherwise, and for the other workers.
+   */
+  paused?: { since: string };
+  /**
+   * The sleep scheduler's passes held out of its work until each re-arms by
+   * its own rule (SMD-3379 PR 1c): the pass, why (SleepHoldWhy), and when it
+   * re-arms on the database's clock, null for an event rather than a time (a
+   * statement past its timeout, a model switch, the next period). Kept on an
+   * ended row, said there as its last word while it reads stopped or stale;
+   * a restarted process's first stamp writes its own. Absent while none is,
+   * and for the other workers.
+   */
+  holds?: SleepHold[];
   /** The sleep scheduler's own re-embed key (`reembed:<model>@<dim>`), on its row only; absent on a row from a scheduler that runs no re-embed — v1.9.0's — or whose width or model name forms no key a row carries (SMD-2679 PR 4b-2, SMD-3486). */
   reembedJob?: string;
 }
@@ -468,9 +486,220 @@ function parseHeld(h: unknown): SleepHeld | undefined {
  */
 export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board", "model-switch"] as const;
 export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
+/**
+ * Why the sleep scheduler holds a pass (WorkerHeartbeat.holds, SMD-3379 PR
+ * 1c): re-embed's set-downs — `model` and `provider` among them, the start
+ * refusals it retries with `lookup` — and re-embed's model switch.
+ */
+export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch"] as const;
+export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
+/** The passes the sleep scheduler runs, as its `holds` names them. */
+export const SLEEP_PASSES = ["reembed", "extract", "consolidate"] as const;
+/** A pass the sleep scheduler holds (WorkerHeartbeat.holds). */
+export type SleepHold = { pass: (typeof SLEEP_PASSES)[number]; why: SleepHoldWhy; until: string | null };
+
+/** A `holds` value as db/sleep.ts writes it, or undefined: one to three passes, each once, each of the shape. */
+function parseHolds(h: unknown): SleepHold[] | undefined {
+  if (!Array.isArray(h) || h.length < 1 || h.length > 3) return undefined;
+  const out: SleepHold[] = [];
+  for (const x of h as Record<string, unknown>[]) {
+    if (x === null || typeof x !== "object") return undefined;
+    if (!(SLEEP_PASSES as readonly unknown[]).includes(x.pass) || out.some((o) => o.pass === x.pass)) return undefined;
+    if (!(SLEEP_HOLD_WHY as readonly unknown[]).includes(x.why)) return undefined;
+    if (!(x.until === null || (typeof x.until === "string" && UTC_INSTANT.test(x.until)))) return undefined;
+    out.push({ pass: x.pass as SleepHold["pass"], why: x.why as SleepHoldWhy, until: x.until as string | null });
+  }
+  return out;
+}
+
+/**
+ * A held pass in words: "extract (provider, re-arms in 4 min)", the re-arm by
+ * the row's own clock; "(model-switch)" for an event's, and for a row no
+ * longer live (`live` false), whose process re-arms nothing. A re-arm past
+ * its time while paused waits for the gate (review pass 1).
+ */
+export function holdWords(hold: SleepHold, h: Pick<WorkerHeartbeat, "at" | "ageS" | "paused">, live = true): string {
+  if (hold.until === null || !live) return `${hold.pass} (${hold.why})`;
+  const left = -secondsSince(h, hold.until);
+  return `${hold.pass} (${hold.why}, ${left > 0 ? `re-arms in ${ago(left)}` : h.paused ? "re-arms once the brain is quiet" : "re-arming now"})`;
+}
 
 /** A heartbeat older than this many of its own intervals is stale. */
 export const STALE_AFTER_INTERVALS = 3;
+
+/**
+ * The coordinator's own row (db/coordinator.ts, SMD-3476 PR 3): what it runs
+ * and each child's state, stamped on each change and every `every_s`. Its
+ * times are seconds from its own stamp — `for_s` in the state, `in_s` to a
+ * waiting child's next try — so only the database's clock is read, as a pass
+ * stamp's is.
+ */
+export const COORDINATOR_KEY = "heartbeat:coordinator";
+/** The children a coordinator runs, by the name its row and their heartbeats share. */
+export const COORDINATED = ["board-sync", "extract", "consolidate", "sleep"] as const;
+export type Coordinated = (typeof COORDINATED)[number];
+/** The passes OB1_PASSES takes, as the row names those asked for. */
+export const COORDINATOR_PASSES = ["sleep", "workers", "board-sync"] as const;
+/** A child as the coordinator's row says it: its heartbeat's key (none when its configuration names none), its state, and how long it has been in it. */
+export type ChildMark = { key?: string; for_s: number } & (
+  | { state: "starting" | "running" | "stopped" }
+  | { state: "waiting"; in_s: number; code: number; tries: number }
+  | { state: "held"; refused: "identity" | "usage" }
+);
+/** The value db/coordinator.ts writes under COORDINATOR_KEY. */
+export type CoordinatorValue = {
+  v: 1;
+  /**
+   * The process that stamps the row: one coordinator's alone while it is
+   * live. Another — a second started beside it, a one-off `compose run` —
+   * writes nothing until the row is ended or stale (db/coordinator.ts).
+   * Not read: the record carries no id.
+   */
+  id: string;
+  /**
+   * The host it runs on: a container restarted after a hard stop (a reboot)
+   * keeps its hostname, so its next process takes over its own row at once.
+   * Not read either.
+   */
+  host: string;
+  every_s: number;
+  /** The passes OB1_PASSES asks for, those of COORDINATOR_PASSES alone, in its order. */
+  passes: (typeof COORDINATOR_PASSES)[number][];
+  children: Partial<Record<Coordinated, ChildMark>>;
+  /** The coordinator has stopped. */
+  ended?: true;
+};
+/** The coordinator's row as the record carries it: its value, read in full, and its stamp judged against the database's clock. */
+export type CoordinatorBeat = Omit<CoordinatorValue, "v" | "id" | "host" | "every_s" | "ended"> & { at: string; ageS: number; everyS: number; stale: boolean; ended: boolean };
+
+const MARK_STATES = ["starting", "running", "stopped", "waiting", "held"] as const;
+/** A state's age past which it is not one a stamp writes: ten years. */
+const MAX_FOR_S = 315_360_000;
+
+/** One child's mark, or null when not of the shape: a key it names must be a heartbeat key of its own worker. */
+function parseMark(name: Coordinated, m: unknown): ChildMark | null {
+  if (m === null || typeof m !== "object") return null;
+  const r = m as Record<string, unknown>;
+  if (!(MARK_STATES as readonly unknown[]).includes(r.state) || !count(r.for_s, MAX_FOR_S)) return null;
+  if (r.key !== undefined && !(typeof r.key === "string" && HEARTBEAT_KEY.exec(r.key)?.[1] === name)) return null;
+  const base = { ...(r.key === undefined ? {} : { key: r.key as string }), for_s: r.for_s as number };
+  if (r.state === "waiting") {
+    return count(r.in_s, 86_400) && count(r.code, 255) && count(r.tries) ? { ...base, state: "waiting", in_s: r.in_s as number, code: r.code as number, tries: r.tries as number } : null;
+  }
+  if (r.state === "held") return r.refused === "identity" || r.refused === "usage" ? { ...base, state: "held", refused: r.refused } : null;
+  return { ...base, state: r.state as "starting" | "running" | "stopped" };
+}
+
+/** The coordinator's row, or null when it is not of the shape — read in full, as a pass stamp is, since any role of the worker group can write it. */
+export function parseCoordinator(r: { value: unknown; at: unknown; age_s: unknown }): CoordinatorBeat | null {
+  let v: Record<string, unknown> | null = null;
+  try { v = typeof r.value === "string" ? JSON.parse(r.value) : null; } catch { v = null; }
+  const ageS = typeof r.age_s === "number" ? r.age_s : Number(r.age_s);
+  if (v === null || typeof v !== "object" || v.v !== 1 || !count(v.every_s, 2_147_483) || (v.every_s as number) < 1) return null;
+  if (!(v.ended === undefined || v.ended === true) || typeof r.at !== "string" || !UTC_INSTANT.test(r.at) || !Number.isFinite(ageS) || ageS <= -FUTURE_SLACK_S) return null;
+  const p = v.passes;
+  if (!Array.isArray(p) || new Set(p).size !== p.length || !p.every((x) => (COORDINATOR_PASSES as readonly unknown[]).includes(x))) return null;
+  const c = v.children;
+  if (c === null || typeof c !== "object" || Array.isArray(c)) return null;
+  const children: Partial<Record<Coordinated, ChildMark>> = {};
+  for (const [name, m] of Object.entries(c)) {
+    if (!(COORDINATED as readonly string[]).includes(name)) return null;
+    const mark = parseMark(name as Coordinated, m);
+    if (mark === null) return null;
+    children[name as Coordinated] = mark;
+  }
+  const everyS = v.every_s as number;
+  return {
+    passes: p as CoordinatorValue["passes"],
+    children,
+    at: r.at,
+    ageS: Math.max(0, Math.round(ageS)),
+    everyS,
+    stale: ageS > STALE_AFTER_INTERVALS * everyS,
+    ended: v.ended === true,
+  };
+}
+
+/**
+ * The import runner's row (deploy/orchestration/runner.ts, SMD-3476 PR 3b):
+ * the `orchestration` profile's service, which runs a pipeline when n8n asks
+ * and so keeps no clock of passes. It says it is up — stamped every
+ * `every_s` — what it holds, what runs now, and how its last run ended, that
+ * run's age in seconds from the stamp as the coordinator's times are.
+ */
+export const RUNNER_KEY = "heartbeat:orchestration-runner";
+/** A pipeline's name: the rule the runner's allowlist holds its names to (runner.ts) and its row's are read by. */
+export const PIPELINE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** Where a run stopped short (runner.ts's Stage). */
+export const RUNNER_STAGES = ["emitter", "one-source", "ingest", "reembed"] as const;
+/** The ingester's counts a run's report carries (runner.ts's TALLY_KEYS). */
+export const RUNNER_COUNTS = ["inserted", "updated", "patched", "unchanged", "skipped", "held", "stale"] as const;
+/** The last run that ended: its pipeline, whether it succeeded or where it stopped (none: the runner failed on it), what it emitted and counted, and its age from the stamp. */
+export type RunnerLast = {
+  pipeline: string;
+  ok: boolean;
+  stage?: (typeof RUNNER_STAGES)[number];
+  emitted: number;
+  counts?: Partial<Record<(typeof RUNNER_COUNTS)[number], number>>;
+  for_s: number;
+};
+/** The value runner.ts writes under RUNNER_KEY. */
+export type RunnerValue = {
+  v: 1;
+  every_s: number;
+  /** The pipelines its allowlist holds. */
+  pipelines: number;
+  /** The pipelines running now, each once. */
+  running: string[];
+  last?: RunnerLast;
+  /** The runner has stopped. */
+  ended?: true;
+};
+/** The runner's row as the record carries it: its value read in full, the last run's age as of the read, and its stamp judged against the database's clock. */
+export type RunnerBeat = Omit<RunnerValue, "v" | "every_s" | "ended" | "last"> & {
+  last?: Omit<RunnerLast, "for_s"> & { endedS: number };
+  /** The row named a last run not of the shape, left off: a run happened that cannot be said (review pass 2). */
+  lastUnread?: true;
+  at: string;
+  ageS: number;
+  everyS: number;
+  stale: boolean;
+  ended: boolean;
+};
+
+/** The runner's row, or null when it is not of the shape; a `last` not of the shape is left off, the row still saying whether the runner is up. */
+export function parseRunner(r: { value: unknown; at: unknown; age_s: unknown }): RunnerBeat | null {
+  let v: Record<string, unknown> | null = null;
+  try { v = typeof r.value === "string" ? JSON.parse(r.value) : null; } catch { v = null; }
+  const ageS = typeof r.age_s === "number" ? r.age_s : Number(r.age_s);
+  if (v === null || typeof v !== "object" || v.v !== 1 || !count(v.every_s, 2_147_483) || (v.every_s as number) < 1 || !count(v.pipelines, 1000)) return null;
+  if (!(v.ended === undefined || v.ended === true) || typeof r.at !== "string" || !UTC_INSTANT.test(r.at) || !Number.isFinite(ageS) || ageS <= -FUTURE_SLACK_S) return null;
+  const running = v.running;
+  if (!Array.isArray(running) || running.length > 1000 || new Set(running).size !== running.length || !running.every((n) => typeof n === "string" && PIPELINE_NAME.test(n))) return null;
+  const l = v.last as Record<string, unknown> | undefined;
+  const c = l !== null && typeof l === "object" ? (l.counts as Record<string, unknown> | undefined) : undefined;
+  const countsOk = c === undefined || (c !== null && typeof c === "object" && !Array.isArray(c) && Object.entries(c).every(([k, n]) => (RUNNER_COUNTS as readonly string[]).includes(k) && count(n)));
+  const last = l !== null && typeof l === "object" && typeof l.pipeline === "string" && PIPELINE_NAME.test(l.pipeline) && typeof l.ok === "boolean"
+      && (l.stage === undefined || (RUNNER_STAGES as readonly unknown[]).includes(l.stage)) && count(l.emitted) && count(l.for_s, MAX_FOR_S) && countsOk
+    ? {
+      pipeline: l.pipeline, ok: l.ok, emitted: l.emitted as number, endedS: (l.for_s as number) + Math.max(0, Math.round(ageS)),
+      ...(l.stage === undefined ? {} : { stage: l.stage as RunnerLast["stage"] }),
+      ...(c === undefined ? {} : { counts: c as RunnerLast["counts"] }),
+    }
+    : undefined;
+  const everyS = v.every_s as number;
+  return {
+    pipelines: v.pipelines as number,
+    running: running as string[],
+    ...(last ? { last } : {}),
+    ...(v.last !== undefined && !last ? { lastUnread: true as const } : {}),
+    at: r.at,
+    ageS: Math.max(0, Math.round(ageS)),
+    everyS,
+    stale: ageS > STALE_AFTER_INTERVALS * everyS,
+    ended: v.ended === true,
+  };
+}
 
 /** Whether a heartbeat row under this key is one the readers take: a follower writing another is seen by no one (SMD-3486 review pass 2). */
 export const heartbeatKeyCarried = (key: string): boolean => HEARTBEAT_KEY.test(key);
@@ -494,11 +723,27 @@ const count = (n: unknown, max = Number.MAX_SAFE_INTEGER): n is number => Number
  * as brain_info is, as list_thought_ids is). Anything else is counted in
  * `ignored`, and its text goes nowhere.
  */
-export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown; total?: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number } {
+export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknown; age_s: unknown; total?: unknown }[]): { heartbeats: WorkerHeartbeat[]; ignored: number; coordinator?: CoordinatorBeat; runner?: RunnerBeat } {
   const heartbeats: WorkerHeartbeat[] = [];
   // Rows past the read's bound are counted, not carried (review pass 1).
   let ignored = Math.max(0, Number(rows[0]?.total ?? rows.length) - rows.length) || 0;
+  let coordinator: CoordinatorBeat | undefined;
+  let runner: RunnerBeat | undefined;
   for (const r of rows) {
+    // The coordinator's own row, of its own shape (SMD-3476 PR 3).
+    if (r.key === COORDINATOR_KEY) {
+      const c = parseCoordinator(r);
+      if (c === null) ignored++;
+      else coordinator = c;
+      continue;
+    }
+    // The import runner's, of its own shape (SMD-3476 PR 3b).
+    if (r.key === RUNNER_KEY) {
+      const b = parseRunner(r);
+      if (b === null) ignored++;
+      else runner = b;
+      continue;
+    }
     const k = typeof r.key === "string" ? HEARTBEAT_KEY.exec(r.key) : null;
     const worker = k?.[1] as WorkerHeartbeat["worker"] | undefined;
     const suffix = k?.[2];
@@ -567,6 +812,12 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const budget = worker === "sleep" ? parseBudget(v!.budget) : undefined;
     // Its passes set aside (SMD-2679 PR 4b), left off when not of the shape.
     const aside = worker === "sleep" ? parseAside(v!.aside) : undefined;
+    // A row still live: its passes may be paused or resting, which an ended or stale one speaks for no longer (review pass 2 of SMD-2679).
+    const live = v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS);
+    // Paused by a live call, on a live row alone, and its held passes, kept on an ended one (SMD-3379 PR 1c); each left off when not of the shape.
+    const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
+    const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
+    const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
     // Its own re-embed key (SMD-2679 PR 4b-2), a model's own key or left off.
     const reembedJob = worker === "sleep" && typeof v!.reembedJob === "string" && REEMBED_OWN_KEY.test(v!.reembedJob) ? v!.reembedJob : undefined;
     heartbeats.push({
@@ -590,11 +841,18 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(budget ? { budget } : {}),
       ...(aside ? { aside } : {}),
       ...(reembedJob ? { reembedJob } : {}),
+      ...(paused ? { paused } : {}),
+      ...(holds ? { holds } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
-      ...(worker === "sleep" && v!.resting === true && v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS) ? { resting: true as const } : {}),
+      ...(worker === "sleep" && v!.resting === true && live ? { resting: true as const } : {}),
     });
   }
-  return { heartbeats, ignored };
+  return { heartbeats, ignored, ...(coordinator ? { coordinator } : {}), ...(runner ? { runner } : {}) };
+}
+
+/** The heartbeat rows as parseHeartbeats reads them: brain_info's read alone, which the status surface takes (task_status, SMD-3476 PR 3). */
+export async function readHeartbeats(sql: SqlTag): Promise<ReturnType<typeof parseHeartbeats>> {
+  return parseHeartbeats(await HEARTBEAT_SQL(sql));
 }
 
 /** The heartbeat rows, at most fifty — one per worker and job, so a brain holds a handful. */
@@ -1436,7 +1694,11 @@ export interface ServerFacts {
  * there and readable, not every name it records — preflight's remedies need
  * the names, the record's readers need the highest (review pass 1).
  */
-export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & { ledger: { present: boolean; readable: boolean } };
+export type DatabaseSummary = Omit<DatabaseFacts, "ledger"> & {
+  ledger: { present: boolean; readable: boolean };
+  /** Each task's state from the heartbeat rows, by taskStates — what task_status answers (SMD-3476 PR 3); absent when the rows were not read. */
+  tasks?: TaskStatus[];
+};
 
 export type LedgerStatus = "current" | "behind" | "ahead" | null;
 
@@ -1505,8 +1767,165 @@ export async function brainInfo(
     : null;
   if (!facts) return { ...server, unreleased, database: { error: failure }, ledgerStatus: null };
   const { ledger, ...rest } = facts;
-  const database: DatabaseSummary = { ...rest, ledger: { present: ledger.present, readable: ledger.present && ledger.names !== null } };
+  const database: DatabaseSummary = {
+    ...rest,
+    ledger: { present: ledger.present, readable: ledger.present && ledger.names !== null },
+    ...(rest.workers === null ? {} : { tasks: taskStates(rest.workers).tasks }),
+  };
   return { ...server, unreleased, database, ledgerStatus: ledgerStatus(facts.highestMigration, server.latestMigration) };
+}
+
+/*
+ * The status surface — each of the brain's tasks in one word, from the
+ * heartbeat rows (SMD-3476 PR 3, docs/brain-coordinator.md row 13): what the
+ * task_status operation answers with, and what brain_info's record and
+ * preflight's tasks row read too, so the three never disagree on a task's state.
+ *
+ * The input is parseHeartbeats' read of the `heartbeat:` rows: each pass's
+ * own row and the coordinator's (db/coordinator.ts). A coordinator that is
+ * live — stamped within three of its intervals, not ended — speaks for the
+ * children it runs: a child its guard holds is refused, one waiting for its
+ * next try restarting, one stopped with it stopped. A child it says runs is
+ * read from the child's own row, when that row was stamped since the child's
+ * start; one older is the run before's, so the child is starting within
+ * START_GRACE_S of its start and missing after. Every other row — one no live
+ * coordinator runs, a follower run by hand — is read alone, by the words
+ * heartbeatState gives it.
+ */
+
+/** A task's state: the one word a reader acts on. */
+export const TASK_STATES = ["running", "idle", "starting", "restarting", "refused", "failed", "stale", "stopped", "missing"] as const;
+export type TaskState = (typeof TASK_STATES)[number];
+/** The states that need nothing done: preflight's tasks row passes on these alone. */
+export const TASK_OK = ["running", "idle", "starting"] as const satisfies readonly TaskState[];
+
+/** How long a child the coordinator started may go without a stamp of its own before it is missing: each pass stamps as it starts, so two of the shortest intervals. */
+export const START_GRACE_S = 120;
+/**
+ * The slack in "stamped since its start": the run's seconds add two rounded
+ * figures (the mark's `for_s`, the coordinator row's age) and the child's
+ * row's age is rounded on its own, so a first stamp within a second of the
+ * start can read a second older than the run. A row of the run before is
+ * older by a restart's wait, a minute at least (db/supervise.ts's RESTART_MS).
+ */
+const SINCE_START_SLACK_S = 5;
+
+/** One task as the status surface says it. */
+export type TaskStatus = {
+  /** The coordinator, or the worker a heartbeat row names. */
+  task: "coordinator" | "orchestration-runner" | WorkerHeartbeat["worker"];
+  /** The claim job a claim worker works; null for the coordinator, board-sync and the scheduler. */
+  job: string | null;
+  /** Its heartbeat row's key; null for a child the coordinator runs whose configuration names none. */
+  key: string | null;
+  state: TaskState;
+  /** The coordinator runs it. */
+  coordinated: boolean;
+  /** The state in a reader's words: heartbeatState's for a row read alone. */
+  words: string;
+  /** Its row's stamp and age by the database's clock; null for a task with no row. */
+  at: string | null;
+  ageS: number | null;
+};
+
+export type TaskStatusResult = {
+  tasks: TaskStatus[];
+  /** Heartbeat rows not of the shape, counted and not carried (brain-info.ts's parse). */
+  ignored: number;
+};
+
+/** A row read alone: its state by heartbeatState's own order — a supervisor's next try, an end, staleness, a pass under way. */
+export function beatState(h: WorkerHeartbeat): TaskState {
+  if (h.restart) {
+    if (h.restart.inS === null) return "refused";
+    const left = h.restart.inS - h.ageS;
+    if (left > 0) return "restarting";
+    // Past its next try, by the rule preflight's held fix reads the row by (review pass 2): a follower's start
+    // stamps nothing until its first pass, so it is starting until RESTART_OVERDUE_S, then taken for gone.
+    return -left > RESTART_OVERDUE_S ? "stale" : "starting";
+  }
+  if (h.ended) return h.outcome === "failed" ? (h.refused ? "refused" : "failed") : "stopped";
+  if (h.stale) return "stale";
+  // Paused by a live call: work in hand, waiting for the brain to go quiet (SMD-3379 PR 1c).
+  return h.running || h.paused ? "running" : "idle";
+}
+
+/** The claim job a heartbeat key names: none for board-sync's and the scheduler's. */
+function jobOfKey(key: string, worker: Coordinated): string | null {
+  return worker === "board-sync" || worker === "sleep" ? null : key.slice("heartbeat:".length);
+}
+
+/** A coordinated child: its mark read with its own row, as the header says. */
+function childStatus(name: Coordinated, mark: ChildMark, beat: WorkerHeartbeat | undefined, c: CoordinatorBeat): TaskStatus {
+  const key = mark.key ?? null;
+  const base = { task: name, job: beat?.job ?? (key === null ? null : jobOfKey(key, name)), key, coordinated: true, at: beat?.at ?? null, ageS: beat?.ageS ?? null };
+  if (mark.state === "held") {
+    return { ...base, state: "refused", words: `held by its coordinator: refused at its start (${mark.refused}) — deploy/.env's to mend, then up -d coordinator` };
+  }
+  if (mark.state === "waiting") {
+    const left = mark.in_s - c.ageS;
+    return { ...base, state: "restarting", words: `exited ${mark.code}, ${mark.tries} end(s) in a row — its coordinator runs it again ${left > 0 ? `in ${ago(left)}` : "now"}` };
+  }
+  if (mark.state === "stopped") return { ...base, state: "stopped", words: "stopped with its coordinator" };
+  // Starting or running: the seconds since its start, as of the read.
+  const ranS = mark.for_s + c.ageS;
+  if (beat !== undefined && beat.ageS <= ranS + SINCE_START_SLACK_S) return { ...base, state: beatState(beat), words: heartbeatState(beat) };
+  const before = beat === undefined ? "" : `; its row is the run before's, ${heartbeatState(beat)}`;
+  return ranS < START_GRACE_S
+    ? { ...base, state: "starting", words: `started by its coordinator ${ago(ranS)} ago, no stamp of its own yet${before}` }
+    : { ...base, state: "missing", words: `started by its coordinator ${ago(ranS)} ago, and it has written no heartbeat since${key === null ? " — its configuration names no row" : ""}${before}` };
+}
+
+/**
+ * The import runner, read from its own row: stopped, stale, running the
+ * pipelines it names, or idle between runs, with what it holds and how its
+ * last run ended — a run that stopped short is the run's report to n8n, not
+ * the runner's state, so it is said, not a state of its own.
+ */
+function runnerStatus(r: RunnerBeat): TaskStatus {
+  const state: TaskState = r.ended ? "stopped" : r.stale ? "stale" : r.running.length ? "running" : "idle";
+  const now = r.ended ? "stopped" : r.stale ? "stale" : r.running.length ? `running ${r.running.join(", ")}` : "idle";
+  const l = r.last;
+  const counts = l?.counts ? Object.entries(l.counts).filter(([, n]) => (n ?? 0) > 0).map(([k, n]) => `${k} ${n}`).join(", ") : "";
+  const last = l === undefined
+    ? r.lastUnread ? "its last run not of the shape, so not said" : "no run since it started"
+    : `its last run, ${l.pipeline}, ${l.ok ? "succeeded" : l.stage ? `stopped at its ${l.stage}` : "failed in the runner"} ${ago(l.endedS)} ago (emitted ${l.emitted}${counts ? `; ${counts}` : ""})`;
+  return {
+    task: "orchestration-runner", job: null, key: RUNNER_KEY, coordinated: false, at: r.at, ageS: r.ageS, state,
+    words: `${now} — ${r.pipelines} pipeline(s) held; ${last} (last stamped ${ago(r.ageS)} ago, every ${r.everyS} s)`,
+  };
+}
+
+/** Each task's state, from the parsed heartbeat rows: the coordinator first, then the children it runs in its order, then every other row by key. Pure. */
+export function taskStates(workers: { heartbeats: readonly WorkerHeartbeat[]; ignored: number; coordinator?: CoordinatorBeat; runner?: RunnerBeat }): TaskStatusResult {
+  const tasks: TaskStatus[] = [];
+  const c = workers.coordinator;
+  const claimed = new Set<string>();
+  if (c !== undefined) {
+    const live = !c.stale && !c.ended;
+    const runs = Object.keys(c.children);
+    const when = `last stamped ${ago(c.ageS)} ago, every ${c.everyS} s`;
+    const what = runs.length ? `runs ${runs.join(", ")}` : "runs no pass";
+    tasks.push({
+      task: "coordinator", job: null, key: COORDINATOR_KEY, coordinated: false, at: c.at, ageS: c.ageS,
+      state: c.ended ? "stopped" : c.stale ? "stale" : "running",
+      words: `${c.ended ? "stopped" : c.stale ? "stale" : what} (${c.passes.length ? `OB1_PASSES asks for ${c.passes.join(", ")}` : "OB1_PASSES asks for none"}; ${when})`,
+    });
+    for (const [name, mark] of Object.entries(c.children) as [Coordinated, ChildMark][]) {
+      const beat = mark.key === undefined ? undefined : workers.heartbeats.find((h) => h.key === mark.key);
+      if (mark.key !== undefined) claimed.add(mark.key);
+      // A coordinator that stopped or went quiet speaks for nothing: its children's rows are read alone, still its.
+      if (live) tasks.push(childStatus(name, mark, beat, c));
+      else if (beat !== undefined) tasks.push({ task: name, job: beat.job, key: beat.key, coordinated: true, at: beat.at, ageS: beat.ageS, state: beatState(beat), words: heartbeatState(beat) });
+    }
+  }
+  for (const h of [...workers.heartbeats].sort((a, b) => a.key.localeCompare(b.key))) {
+    if (claimed.has(h.key)) continue;
+    tasks.push({ task: h.worker, job: h.job, key: h.key, coordinated: false, at: h.at, ageS: h.ageS, state: beatState(h), words: heartbeatState(h) });
+  }
+  // The import runner last: no coordinator runs it (SMD-3476 PR 3b).
+  if (workers.runner !== undefined) tasks.push(runnerStatus(workers.runner));
+  return { tasks, ignored: workers.ignored };
 }
 
 /** A migration number as the ledger and the files spell it — 052. */
@@ -1537,6 +1956,11 @@ export function ago(s: number): string {
   return s < 90 ? `${Math.round(s)} s` : s < 90 * 60 ? `${Math.round(s / 60)} min` : s < 48 * 3600 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
 }
 
+/** The seconds from `t`, an instant on the database's clock, to now, by a heartbeat's own: its age, and its stamp less `t` — negative for a time still to come. */
+export function secondsSince(h: Pick<WorkerHeartbeat, "at" | "ageS">, t: string): number {
+  return h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000;
+}
+
 /**
  * How long past its supervisor's next try a row may stay unstamped before
  * the supervisor is taken for gone: db/supervise.ts's longest wait, 15 min —
@@ -1544,6 +1968,8 @@ export function ago(s: number): string {
  * the provider first (SMD-3214).
  */
 export const RESTART_OVERDUE_S = 900;
+/** db/config.mjs's MIGRATION_EXIT, the sleep scheduler's exit on a migration seen (SMD-3379 PR 1c-1): this file takes no imports. */
+export const MIGRATION_EXIT = 75;
 
 /**
  * db/supervise.ts's word on an ended row, as a reader acts on it (SMD-3214):
@@ -1553,6 +1979,9 @@ export const RESTART_OVERDUE_S = 900;
 export function restartWords(h: WorkerHeartbeat): string | null {
   const r = h.restart;
   if (!r) return null;
+  // A migration seen: run again at once, and the new process waits at its start, unstamped, while the
+  // migration runs — however long that is (SMD-3379 PR 1c-1).
+  if (r.code === MIGRATION_EXIT && r.inS === 0) return `restarting after a migration — its supervisor ran it again ${ago(h.ageS)} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, the database does not answer, or its passes' start checks run`;
   const why = h.refused ? `refused (${h.refused})` : `exited ${r.code}`;
   if (r.inS === null) return `held: ${why} — its supervisor runs it again only once the service is recreated`;
   const left = r.inS - h.ageS;
@@ -1561,36 +1990,51 @@ export function restartWords(h: WorkerHeartbeat): string | null {
     : `held: ${why}, ${r.tries} end(s) in a row — its supervisor ran it again ${ago(-left)} ago, and it has not stamped since`;
 }
 
-/** One heartbeat's state in a few words: what a reader acts on first. */
-export function heartbeatState(h: WorkerHeartbeat): string {
+/**
+ * One heartbeat's state in a few words: what a reader acts on first. `leave`:
+ * held passes another part of the reader says in words of its own (preflight's
+ * re-embed set-aside, with its remedy).
+ */
+export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly SleepHold["pass"][] } = {}): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
-  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped.
+  // The sleep scheduler's held passes, beside the state, never instead of it;
+  // an ended or stale row's are its last word, re-armed by nothing (SMD-3379
+  // PR 1c). "Held out", apart from the restart's "held" and the thoughts held back (review pass 1).
+  const shown = h.holds?.filter((x) => !opts.leave?.includes(x.pass)) ?? [];
+  const holds = (live: boolean) => shown.length ? `; ${live ? "" : "at its last word, "}held out: ${shown.map((x) => holdWords(x, h, live)).join(", ")}` : "";
+  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped. Its holds said too (review pass 2).
   const held = restartWords(h);
-  if (held !== null) return `${held} (${when})`;
+  if (held !== null) return `${held}${holds(false)} (${when})`;
   // A worker that said it ended is stopped, fresh or not (review pass 1: it
   // read "alive"); one that ended on a failure says so (review pass 2), and a
   // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
   // row says its own in preflight's words, "at a pass's start".
-  if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"} (${when})`;
-  if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
+  if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"}${holds(false)} (${when})`;
+  if (h.stale) return `stale${holds(false)} (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
   // A pass the sleep scheduler started that waits at its start for the
   // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3); nor
   // does one waiting mid-pass for a provider that stopped answering (SMD-2905).
   const at = h.waiting?.length ? (h.waitingMidPass?.length ? ", at a pass's start and mid-pass" : " at a pass's start") : h.waitingMidPass?.length ? " mid-pass" : null;
-  const state = h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
-  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
+  // Paused by a live call is the state, before running or waiting — its
+  // passes run nothing meanwhile — for how long by the row's own clock, a
+  // provider wait going on beside it (SMD-3379 PR 1c; draft 5's §3 and §4,
+  // review passes 1 and 2).
+  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, secondsSince(h, h.paused.since)))}${at === null ? "" : `, waiting for the provider${at}`}`
+    : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
+  return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
 }
 
 /** The Workers row: each heartbeat's state, none, or why it was not read. */
 function workersLine(db: DatabaseSummary): string {
   if (db.workers === null) return "workers" in db.unread ? `? (ob1_config ${unreadWords(db.unread.workers)})` : "no ob1_config";
-  const { heartbeats, ignored } = db.workers;
+  // The status surface's words (taskStates): each row's heartbeatState, and the coordinator's own word on its children.
+  const { tasks, ignored } = taskStates(db.workers);
   const tail = ignored ? ` (${ignored} heartbeat row(s) not of the shape, ignored)` : "";
-  if (heartbeats.length === 0) return `none stamped — no long-running worker has run here${tail}`;
-  return heartbeats.map((h) => `${h.job ?? h.worker} ${heartbeatState(h)}`).join("; ") + tail;
+  if (tasks.length === 0) return `none stamped — no long-running worker has run here${tail}`;
+  return tasks.map((t) => `${t.job ?? t.task} ${t.words}`).join("; ") + tail;
 }
 
 /** "4 pair two tickets the board does not link", `?` when that read did not answer, or nothing. */

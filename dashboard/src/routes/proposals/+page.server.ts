@@ -19,9 +19,10 @@ const VERDICT = {
 // Supersession proposals (SMD-2280 PR 2b): the pairs the consolidation pass
 // judged one to outdate or duplicate the other, most confident first, with its
 // verdict, its reason and both thoughts as they are now. Read only: nothing is
-// written to a thought until a reviewer accepts a proposal, which is the CLI's
-// (db/consolidate.ts --accept/--reject, its writer and lineage guards with it);
-// SMD-3322 brings it here once SMD-3338 gives it a REST-core operation. The
+// written to a thought until a reviewer accepts a proposal, through the CLI
+// (db/consolidate.ts --accept/--reject) or the core's review_supersession_proposal
+// (SMD-3338), one decision with the writer and lineage guards; SMD-3322 brings
+// it here. The
 // page reads the most confident `limit`; the core's cursor (`after`, SMD-3249) is not followed here yet.
 export const load: PageServerLoad = async (event) => {
 	const params = event.url.searchParams;
