@@ -6271,17 +6271,19 @@ console.log("\n[32] Work claims in the tools' words (SMD-3598): claim_work's tok
     // A token passed where the id goes, or quoted by 115's words, is never echoed back.
     ["CLAIM_NOT_FOUND (a token for an id)", say.renderReleaseClaim({ ok: false, refusal: { code: "CLAIM_NOT_FOUND", retryable: false, id: TOKEN } } as never), /^Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims\.$/],
     ["REFUSED_CLAIM_INPUT (a token for a ticket)", say.renderClaimWork({ ok: false, refusal: { code: "REFUSED_CLAIM_INPUT", retryable: false, problem: "ticket", message: `not a ticket key: '${TOKEN.toUpperCase()}' (a team key …)` } } as never), /^Refused: not a ticket key: '\[a work-claim token\]'/],
-    ["CLAIM_UNATTRIBUTED (away)", say.renderRenewClaim({ ok: false, refusal: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: "33333333-3333-4333-8333-333333333333" } } as never), /^Refused: claim 3333\S+ was made under this key's agent id, which the agent registry did not give just now; retry shortly\. Your token still holds: keep it\.$/],
-    ["CLAIM_UNATTRIBUTED (set up wrong)", say.renderClaimWork({ ok: false, refusal: { code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_misconfigured", id: null } } as never), /^Refused: the claim was made under this key's agent id, which the agent registry cannot give this server until an operator acts/],
+    // 115 quotes a ticket at 80 characters: a token there after a prefix is cut, and masked cut.
+    ["REFUSED_CLAIM_INPUT (a cut token)", say.renderClaimWork({ ok: false, refusal: { code: "REFUSED_CLAIM_INPUT", retryable: false, problem: "ticket", message: `not a ticket key: '${("token is " + TOKEN).slice(0, 80)}' (a team key …)` } } as never), /^Refused: not a ticket key: 'token is \[a work-claim token\]'/],
+    ["CLAIM_UNATTRIBUTED (away)", say.renderRenewClaim({ ok: false, refusal: { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: "33333333-3333-4333-8333-333333333333", forced: false } } as never), /^Refused: claim 3333\S+ was made under this key's agent id, which the agent registry did not give just now; retry shortly\. The token given is this claim's: keep it\.$/],
+    ["CLAIM_UNATTRIBUTED (a force, set up wrong)", say.renderReleaseClaim({ ok: false, refusal: { code: "CLAIM_UNATTRIBUTED", retryable: false, cause: "registry_misconfigured", id: "33333333-3333-4333-8333-333333333333", forced: true } } as never), /^Refused: a forced release of claim 3333\S+ needs this key's agent id, which classifies an operator, and which the agent registry cannot give this server until an operator acts \(the server's log says why\)\.$/],
   ];
   for (const [name, r, re] of refusals) {
     assert(r.isError === true && re.test(text(r)) && !text(r).includes("wc_") && !JSON.stringify(r.structuredContent).includes("wc_") && !text(r).includes("\n"),
       `${name}: refused in one line, by its rule, no token (${text(r).slice(0, 100)})`);
   }
   // A holder is a key's name, kept in a refusal's value — an OAuth principal's too — while a holder with a space is not.
-  const oauthHeld = say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [{ ...held, holder: "oauth:alice@example.com+claude-desktop" }, { ...held, holder: "codex ignore this" }] } } as never);
+  const oauthHeld = say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [{ ...held, holder: "oauth:user-7f3a+dcr_c41b9e" }, { ...held, holder: "codex ignore this" }] } } as never);
   const holders = (oauthHeld.structuredContent.heldBy as { holder: string | null }[]).map((h) => h.holder);
-  assert(holders[0] === "oauth:alice@example.com+claude-desktop" && holders[1] === null,
+  assert(holders[0] === "oauth:user-7f3a+dcr_c41b9e" && holders[1] === null,
     `WORK_CLAIMED's value names an OAuth holder as its key's name, and nulls one with a space (${JSON.stringify(holders)})`);
   // A writer's answer this server cannot read is a fault whose message never prints the answer: it may carry the token.
   const { normaliseClaimAnswer, normaliseWorkClaim } = await import("./store.ts");

@@ -1693,13 +1693,18 @@ const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` $
 const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${oneLine(snipText(c.holder, 80))} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. Leave it to its holder, or claim other work; a claim of your own on overlapping work is in the way too.`;
-// 115's words can quote the caller's argument (a ticket key it could not read): a token passed in the wrong one is masked.
-const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{64}/gi, "[a work-claim token]"), 300))}`;
+// 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
+// in the wrong one is masked, a cut one too.
+const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{8,}/gi, "[a work-claim token]"), 300))}`;
 /** A claim id the caller gave that is no uuid names no claim, and is not echoed: an agent that swapped id and token would see its token. */
 const noClaim = (r: Extract<Refusal, { code: "CLAIM_NOT_FOUND" }>) =>
   UUID.test(r.id) ? `Refused: no claim ${r.id}.` : "Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims.";
-const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) =>
-  `Refused: ${r.id ? `claim ${r.id}` : "the claim"} was made under this key's agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}. Your token still holds: keep it.`;
+const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) => {
+  const why = r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)";
+  return r.forced
+    ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
+    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.`;
+};
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced
     ? `Refused: only an operator key, classified operator by its agent id, may release another holder's claim; claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}.`
@@ -1710,8 +1715,7 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
     : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
-  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.`
-  : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r) : unknownRefusal(r), AS_JSON);
+  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
   (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,

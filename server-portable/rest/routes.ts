@@ -18,7 +18,9 @@ export type { CallOptions } from "../core/index.ts";
  * does not compile until it has one. 400 a shape the caller can fix, 403 a
  * rule the caller may not pass, 404 nothing there, 409 the state changed or
  * conflicts, 422 a reference to nothing or a refusal the store named that
- * this server does not know (REFUSED), 501 a mode not built, 503 retry.
+ * this server does not know (REFUSED), 501 a mode not built, 503 retry —
+ * with Retry-After when the refusal is retryable, without it when the server waits
+ * on an operator (CLAIM_UNATTRIBUTED's set-up causes).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,

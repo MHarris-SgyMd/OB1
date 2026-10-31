@@ -910,17 +910,30 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     await sql`UPDATE ob1_agents SET kind = NULL WHERE label = 'rival'`;
   }
   // The registry unable to give the writer's agent id (its function away: set up wrong, not unreachable): the writer's
-  // own claim, made under that id, is refused as unattributed — 503, its token still good — never as another's.
+  // own claim, made under that id, with its own token, is refused as unattributed — 503, no Retry-After, the token
+  // said to be this claim's — never as another's; a wrong token is still CLAIM_NOT_YOURS, an ended claim of its own
+  // still CLAIM_RELEASED, and a force — which the id classifies — is said as that, not as the claim being its own.
+  const rivalLive = await rest("POST", "/v1/claims", { ticket: "SMD-9305" }, KEYS.rival);
+  const ended = await rest("POST", "/v1/claims", { ticket: "SMD-9306" }, KEYS.writer);
+  const endedId = String((ended.body.claim as Claim | undefined)?.id), endedToken = String(ended.body.token ?? "");
+  await rest("POST", `/v1/claims/${endedId}/release`, { token: endedToken }, KEYS.writer);
   await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_smd3598_away`;
   try {
     const renewAway = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token }, KEYS.writer);
     const releaseAway = await rest("POST", `/v1/claims/${mine?.id}/release`, { token }, KEYS.writer);
+    const wrongToken = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token: rivalToken }, KEYS.writer);
+    const endedAway = await rest("POST", `/v1/claims/${endedId}/renew`, { token: endedToken }, KEYS.writer);
     const claimAway = await rest("POST", "/v1/claims", { ticket: "SMD-9301", piece: "PR 1", token }, KEYS.writer);
+    const forceAway = await rest("POST", `/v1/claims/${(rivalLive.body.claim as Claim | undefined)?.id}/release`, { force: true, reason: "stuck" }, KEYS.writer);
     const renewAwayMcp = await mcp("renew_claim", { id: String(mine?.id), token });
-    const unattributed = (a: Answer) => a.status === 503 && a.body.code === "CLAIM_UNATTRIBUTED" && a.body.cause === "registry_misconfigured" && a.body.retryable === false;
-    assert(unattributed(renewAway) && unattributed(releaseAway) && unattributed(claimAway) && claimAway.body.id === mine?.id
-        && renewAwayMcp.isError && /was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*Your token still holds/.test(renewAwayMcp.text),
-      `the registry unable to give the holder's id: its own renew, release and reclaim answer 503 CLAIM_UNATTRIBUTED, never CLAIM_NOT_YOURS (${renewAway.status} ${renewAway.body.code} | ${releaseAway.status} ${releaseAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${renewAwayMcp.text.slice(0, 80)})`);
+    const unattributed = (a: Answer, forced: boolean) => a.status === 503 && a.body.code === "CLAIM_UNATTRIBUTED" && a.body.cause === "registry_misconfigured" && a.body.retryable === false
+      && a.body.forced === forced && a.headers.get("retry-after") === null;
+    assert(unattributed(renewAway, false) && unattributed(releaseAway, false) && renewAway.body.id === mine?.id
+        && renewAwayMcp.isError && /was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it/.test(renewAwayMcp.text),
+      `the registry unable to give the holder's id: its own renew and release with its token answer 503 CLAIM_UNATTRIBUTED, no Retry-After, never CLAIM_NOT_YOURS (${renewAway.status} ${renewAway.body.code} ${renewAway.headers.get("retry-after")} | ${releaseAway.status} ${releaseAway.body.code} | ${renewAwayMcp.text.slice(0, 80)})`);
+    assert(wrongToken.status === 403 && wrongToken.body.code === "CLAIM_NOT_YOURS" && endedAway.status === 409 && endedAway.body.code === "CLAIM_RELEASED"
+        && claimAway.status === 409 && claimAway.body.code === "WORK_CLAIMED" && unattributed(forceAway, true),
+      `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim WORK_CLAIMED, and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
   } finally {
     await sql`ALTER FUNCTION resolve_agent_smd3598_away(text, text, text) RENAME TO resolve_agent`;
   }

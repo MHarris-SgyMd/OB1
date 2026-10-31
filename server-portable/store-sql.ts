@@ -937,6 +937,12 @@ export class SqlStore implements ThoughtStore {
                                 ${actorPayload(opts.actor)}::jsonb) AS r`);
   }
 
+  async claimTokenIs(id: string, token: string): Promise<boolean> {
+    const rows = await this.sql`
+      SELECT EXISTS (SELECT 1 FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)) AS mine` as { mine: boolean }[];
+    return rows[0]?.mine === true;
+  }
+
   async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]> {
     const rows = await this.sql`
       SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,

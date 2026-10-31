@@ -798,7 +798,34 @@ else {
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_statement = 'mod'`);
       const mod = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_statement`);
-      assert(logging.code === 0 && /!  ticket claims\s+statement logging is on \(log_statement=none, log_min_duration_statement=0\) and log_parameter_max_length is -1: a renewal's or a release's token, a bind value, is logged/.test(logging.out)
+      // …a failed statement logged nowhere (log_min_error_statement=panic): its parameters' cap is moot, so ok.
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_parameter_max_length_on_error = 100`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_error_statement = panic`);
+      const panicOnly = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_parameter_max_length_on_error`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_error_statement`);
+      // Sampled statements, named as the setting that samples them.
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_sample = 0`);
+      const sampled = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET log_min_duration_sample`);
+      // A verbose auto_explain plan prints a custom plan's constants, the parameter cap at 0 or not; debug_print_plan too.
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET session_preload_libraries = 'auto_explain'`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET auto_explain.log_min_duration = 0`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET auto_explain.log_parameter_max_length = 0`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET auto_explain.log_verbose = on`);
+      const verbose = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET auto_explain.log_verbose = off`);
+      const terse = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      for (const s of ["session_preload_libraries", "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "auto_explain.log_verbose"]) await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET ${s}`);
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET debug_print_plan = on`);
+      const debugPlan = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe(`ALTER DATABASE ${dbIdent} RESET debug_print_plan`);
+      assert(/✓  ticket claims/.test(panicOnly.out) && /!  ticket claims\s+statement logging is on \(log_min_duration_sample=0 at log_statement_sample_rate=1\) and log_parameter_max_length is -1/.test(sampled.out),
+             `a failed statement's cap with no failed statement logged: ok; sampled statements: a warning naming the sampling (${line(panicOnly.out).trim().slice(0, 40)} | ${line(sampled.out).trim().slice(0, 140)})`);
+      assert(/!  ticket claims\s+auto_explain logs plans with parameters \(auto_explain\.log_parameter_max_length is 0, auto_explain\.log_verbose is on\)/.test(verbose.out) && /auto_explain\.log_verbose = off/.test(verbose.out)
+             && /✓  ticket claims/.test(terse.out) && /!  ticket claims\s+debug_print_plan is on, so each plan's constants are logged/.test(debugPlan.out),
+             `a verbose auto_explain warns though its parameter cap is 0, a terse one is ok; debug_print_plan warns (${line(verbose.out).trim().slice(0, 140)} | ${line(terse.out).trim().slice(0, 40)} | ${line(debugPlan.out).trim().slice(0, 80)})`);
+      assert(logging.code === 0 && /!  ticket claims\s+statement logging is on \(log_min_duration_statement=0\) and log_parameter_max_length is -1: a renewal's or a release's token, a bind value, is logged/.test(logging.out)
              && /ALTER SYSTEM SET log_parameter_max_length = 0/.test(logging.out) && /✓  ticket claims/.test(capped.out),
              `statement logging with bind values whole: a warning naming the setting that stops it; with log_parameter_max_length = 0, ok (${line(logging.out).trim().slice(0, 120)} | ${line(capped.out).trim().slice(0, 40)})`);
       assert(/!  ticket claims\s+log_parameter_max_length_on_error is 100B?, so a failed statement's parameters are logged/.test(onError.out) && /log_parameter_max_length_on_error = 0/.test(onError.out)

@@ -1890,6 +1890,8 @@ export interface ThoughtStore {
   claimWork(opts: { issue: string; piece?: string; label?: string; leaseSeconds?: number; token?: string; actor?: Actor }): Promise<ClaimAnswer>;
   renewClaim(opts: { id: string; token: string; leaseSeconds?: number; actor?: Actor }): Promise<ClaimAnswer>;
   releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer>;
+  /** Whether a token is this claim's, by 115's hash (a token in its shape: the writer that refused it read it so); never the hash itself. */
+  claimTokenIs(id: string, token: string): Promise<boolean>;
   /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
   listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
 
@@ -2148,7 +2150,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, claimWork: true, renewClaim: true, releaseClaim: true, listClaims: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

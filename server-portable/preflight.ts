@@ -2944,21 +2944,32 @@ if (configFailed) {
           const tc = Array.isArray(tcRows) ? tcRows[0] : null;
           // The log settings, read apart: a role that may not read one says nothing here rather than failing the row.
           const LOG_SETTINGS = ["log_statement", "log_min_duration_statement", "log_min_duration_sample", "log_statement_sample_rate", "log_transaction_sample_rate",
-            "log_parameter_max_length", "log_parameter_max_length_on_error", "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "pgaudit.log_parameter"];
+            "log_parameter_max_length", "log_parameter_max_length_on_error", "log_min_error_statement", "debug_print_plan",
+            "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "auto_explain.log_verbose", "pgaudit.log_parameter", "pgaudit.log", "pgaudit.role"];
           const logs = await sql.unsafe(`SELECT ${LOG_SETTINGS.map((s, i) => `current_setting('${s}', true) AS s${i}`).join(", ")}`)
             .then((r) => Object.fromEntries(LOG_SETTINGS.map((s, i) => [s, ((r as Record<string, string | null>[])[0] ?? {})[`s${i}`] ?? null])), () => null);
           // Which settings print a claim call's bind values — its token among them. A claim call is a SELECT, so
           // log_statement=mod logs none; a value 0 cuts a parameter to nothing, -1 prints it whole.
           const printing = (len: string | null) => len !== null && len !== "0";
+          // Which statement logging is on, each setting named as it reads.
+          const statementLogs = !logs ? [] : [
+            ...(logs.log_statement === "all" ? ["log_statement=all"] : []),
+            ...((logs.log_min_duration_statement ?? "-1") !== "-1" ? [`log_min_duration_statement=${logs.log_min_duration_statement}`] : []),
+            ...((logs.log_min_duration_sample ?? "-1") !== "-1" && (logs.log_statement_sample_rate ?? "0") !== "0"
+              ? [`log_min_duration_sample=${logs.log_min_duration_sample} at log_statement_sample_rate=${logs.log_statement_sample_rate}`] : []),
+            ...((logs.log_transaction_sample_rate ?? "0") !== "0" ? [`log_transaction_sample_rate=${logs.log_transaction_sample_rate}`] : []),
+          ];
           const logging = !logs ? [] : [
-            ...((logs.log_statement === "all" || (logs.log_min_duration_statement ?? "-1") !== "-1"
-                 || ((logs.log_min_duration_sample ?? "-1") !== "-1" && (logs.log_statement_sample_rate ?? "0") !== "0")
-                 || (logs.log_transaction_sample_rate ?? "0") !== "0") && printing(logs.log_parameter_max_length)
-              ? [`statement logging is on (log_statement=${logs.log_statement}, log_min_duration_statement=${logs.log_min_duration_statement}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
-            ...(printing(logs.log_parameter_max_length_on_error) ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
-            ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && printing(logs["auto_explain.log_parameter_max_length"])
-              ? [`auto_explain logs plans with parameters (auto_explain.log_parameter_max_length is ${logs["auto_explain.log_parameter_max_length"]})`] : []),
-            ...(logs["pgaudit.log_parameter"] === "on" ? ["pgaudit.log_parameter is on"] : []),
+            ...(statementLogs.length && printing(logs.log_parameter_max_length)
+              ? [`statement logging is on (${statementLogs.join(", ")}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
+            // A failed statement is logged with its parameters only where log_min_error_statement logs it at all.
+            ...(printing(logs.log_parameter_max_length_on_error) && logs.log_min_error_statement !== "panic"
+              ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
+            // A verbose plan prints a custom plan's constants — the bound token among them — whatever the parameter cap.
+            ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && (printing(logs["auto_explain.log_parameter_max_length"]) || logs["auto_explain.log_verbose"] === "on")
+              ? [`auto_explain logs plans with parameters (auto_explain.log_parameter_max_length is ${logs["auto_explain.log_parameter_max_length"]}, auto_explain.log_verbose is ${logs["auto_explain.log_verbose"]})`] : []),
+            ...(logs.debug_print_plan === "on" ? ["debug_print_plan is on, so each plan's constants are logged"] : []),
+            ...(logs["pgaudit.log_parameter"] === "on" && ((logs["pgaudit.log"] ?? "none") !== "none" || (logs["pgaudit.role"] ?? "") !== "") ? ["pgaudit.log_parameter is on"] : []),
           ];
           if (!tc) {
             add("ticket claims", "warn", `could not verify: ${(tcRows as Error).message}`, "The check reads work_claims and 115's functions in public; the message says why it failed.");
@@ -2975,7 +2986,7 @@ if (configFailed) {
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
           } else if (logging.length) {
             add("ticket claims", "warn", `${logging.join("; ")}: a renewal's or a release's token, a bind value, is logged`,
-                "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; ALTER SYSTEM SET log_parameter_max_length_on_error = 0; (and auto_explain.log_parameter_max_length = 0, pgaudit.log_parameter = off where loaded) SELECT pg_reload_conf(); — or turn that logging off (SMD-3598).");
+                "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; ALTER SYSTEM SET log_parameter_max_length_on_error = 0; (and auto_explain.log_parameter_max_length = 0, auto_explain.log_verbose = off, pgaudit.log_parameter = off where loaded; debug_print_plan = off) SELECT pg_reload_conf(); — or turn that logging off (SMD-3598).");
           } else {
             add("ticket claims", "ok", `claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; ${logs ? "the logging settings read print no bind value" : "the logging settings could not be read"}`);
           }

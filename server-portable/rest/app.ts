@@ -592,7 +592,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       if (outcome.ok) return answered(c, name, route.ok, outcome.value, p);
       const r = outcome.refusal as Refusal;
       const status = REFUSAL_STATUS[r.code];
-      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 ? RETRY_AFTER : {});
+      // A 503 the caller may retry says when; one that waits on an operator (CLAIM_UNATTRIBUTED's set-up causes) does not.
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 && r.retryable ? RETRY_AFTER : {});
     });
   }
 
