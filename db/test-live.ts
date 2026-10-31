@@ -100,25 +100,25 @@ if (!URL_) {
  * A shard without [1] migrates in the preamble without asserting.
  * [33] and [35] check the projection after the sections that write tickets
  * and sources, which are the rest's, so they stay there; [end] checks it again
- * at every run's end. [38r], the scheduler's re-embed cases, came out of [38]
- * (SMD-3392), and [9f], re-embed's follower outage cases, out of [9]
- * (SMD-2679 PR 4a-2b). The four are split so that each cell's job takes
- * about a quarter of the four's, ~230 s, by the section times main's CI logs
- * stamp in its runs from 7301d0f5 to b07061d4 (SMD-3469): sleep has [38] and
- * [10g], ~200–205 s of sections, and [39]; long [38b], [9] and [9f], ~193 s,
- * and [17] and [43]; extract [10] and [38r], ~182 s, and five short
- * sections; the rest its own ~165–190 s and [10h]. The rest's sections wait
- * on the CPU, not on timers, so its time moves most with the runner's speed,
- * and it takes the least. A cell's job runs ~18 s past its sections (~25 s
- * for the rest's, with test-search-path.ts), so a section added to a cell
- * adds to the run's length once that cell's job is the run's longest.
+ * at every run's end. [9f], re-embed's follower outage cases, came out of
+ * [9] into extract, so long keeps its time (SMD-2679 PR 4a-2b). [38r], the
+ * scheduler's re-embed cases, came out of [38] into long, and [10g] went to
+ * sleep, so that neither cell sets the run's length (SMD-3392). Long's three,
+ * ~216 s of sections, are the floor no split goes under; the short sections
+ * even the others out to it, by the section times main's CI logs stamp in
+ * its runs from 7301d0f5 to e7220bd5 (SMD-3469): sleep has [17] beside [38]
+ * and [10g], and the rest takes [10e], [37] and [43] from extract. The rest's
+ * sections wait on the CPU, not on timers, so its time moves most with the
+ * runner's speed. A cell's job runs ~18 s past its sections (~25 s for the
+ * rest's, with test-search-path.ts), so a section added to a cell adds to
+ * the run's length once that cell's job is the run's longest.
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["10g", "38", "39"],
-  long: ["9", "9f", "17", "38b", "43"],
-  extract: ["10", "10e", "10f", "37", "37b", "38r", "41"],
+  sleep: ["10g", "17", "38"],
+  long: ["9", "38r", "38b"],
+  extract: ["9f", "10", "10f", "10h", "37b", "39", "41"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -4138,8 +4138,8 @@ if (want("9")) {
 // and mid-pass, whose each error is (worker-bootstrap.ts's followClassify,
 // whose every cell test-worker-bootstrap.ts holds; here one case per path it
 // sends a thought down), and what the follower says, stamps and ends with. Its
-// own section, so a shard can take it apart from [9] (review pass 4): extract
-// did until [38r] went there, and it is long's again (SMD-3469).
+// own section, in the extract shard, so the long shard keeps its time (review
+// pass 4).
 
 if (want("9f")) {
   console.log("\n[9f] db/reembed.ts --follow: the provider and the database going away, at the start and mid-pass");
@@ -19442,9 +19442,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded in a full run is another
-  // model's, which every pass's start would refuse: set aside, and put back
-  // at the end. In its cell, [38r] elsewhere, there is none to set aside.
+  // The extraction key [38r] leaves recorded, in a full run and the long
+  // cell alike, is another model's, which every pass's start would refuse:
+  // set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
