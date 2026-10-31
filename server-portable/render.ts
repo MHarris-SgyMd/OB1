@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -772,6 +772,8 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, judgeKey, proposals: data, cursor, remaining, pastCursor, reviewersRead }) => {
+    // SMD-3338: the rows a decision closed, which alone name who decided.
+    const decided = (p: SupersessionProposal) => p.status === "accepted" || p.status === "rejected";
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
     const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
     // SMD-3249: how many more follow, and the cursor that lists them.
@@ -838,8 +840,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL ${accept}   reject: … --reject ${p.id}` +
           (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
         : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${stoodSide(p) ? ` — the ${stoodSide(p)} side stands` : ""}${note ? `: ${note}` : ""}` +
-          // SMD-3338: who decided it (114), as the decision's reply names it — on a brain short of 114 said once, above.
-          (reviewersRead === true && (p.status === "accepted" || p.status === "rejected") ? `\n   decided by: ${reviewerText(p.reviewer)}` : "");
+          // SMD-3338: who decided it (114), in the listing's words (reviewerText) — on a brain short of 114 said once, above.
+          (reviewersRead === true && decided(p) ? `\n   decided by: ${reviewerText(p.reviewer)}` : "");
       // 070 (SMD-2313): a lineage pair — one side derived from the other
       // — is never proposed since 066; a row standing on one is the
       // reviewer's to reject, said with the command while it is theirs.
@@ -859,7 +861,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     });
     const unread = (data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "") +
       // false, not absent: a REST core from before SMD-3338 PR 2 sends none, and its brain may well be at 114.
-      (reviewersRead === false && data.some((p) => p.status === "accepted" || p.status === "rejected") ? ` ${REVIEWERS_UNREAD}` : "");
+      (reviewersRead === false && data.some(decided) ? ` ${REVIEWERS_UNREAD}` : "");
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
@@ -1640,17 +1642,18 @@ export const REVIEWERS_UNREAD = "Who decided each row is not shown: this brain i
  * a decision with no agent id said so, none recorded said so. The name
  * through the replies' cleaner, on one line; yours said so.
  */
-export function reviewerText(r: (Omit<Reviewer, "agentId"> & { agentId?: string | null; agentRecorded?: boolean }) | null, caller?: string): string {
+export function reviewerText(r: Reviewer | ListedReviewer | null, caller?: string): string {
   // Two readers (PR 2 review pass 2): the decision's reply, which passes its caller — a decision through this server,
   // always under a key's name — and the listing, which reaches rows the CLI and the workers decided and rows from
   // before 114, and passes none. Each says what can be true of its own rows.
   const decision = caller !== undefined;
   // The listing's reviewer says whether an agent was recorded, not which (review pass 3).
-  const agent = r ? r.agentId != null || r.agentRecorded === true : false;
+  const id = r && "agentId" in r ? r.agentId : null;
+  const agent = r ? ("agentRecorded" in r ? r.agentRecorded : id !== null) : false;
   if (!r || (!r.name && !agent)) return decision ? "not recorded — no actor named the decision" : "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
   const kind = r.kind ?? (r.kindNow ? `${r.kindNow} — classified after it decided` : "a key the registry has not classified");
   const name = r.name ? `${snipText(r.name, 80)}${caller !== undefined && r.name.trim() === caller.trim() ? " (your key)" : ""}` : null;
-  return name && agent ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (${decision ? "the key did not resolve in the registry" : "run with no key — the CLI's or a worker's — or a key that did not resolve"})` : r.agentId ? `agent ${r.agentId}, ${kind}, no name` : `an agent with no name, ${kind}`;
+  return name && agent ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (${decision ? "the key did not resolve in the registry" : "run with no key — the CLI's or a worker's — or a key that did not resolve"})` : id ? `agent ${id}, ${kind}, no name` : `an agent with no name, ${kind}`;
 }
 
 /**
