@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The full-stack jobs' stack, brought up on a GitHub Actions runner (SMD-3051):
 # four scoped keys minted, their raw values handed to the job's later steps
-# through $GITHUB_ENV; a provider stub on the runner's port 11434; deploy/.env
-# written; and compose.yaml built and up. SMD-3051 moved the jobs' step body
-# here; it runs from deploy/ whatever the caller's directory is.
+# through $GITHUB_ENV and masked in its log; a provider stub on the runner's
+# port 11434; deploy/.env written; and compose.yaml built and up. SMD-3051
+# moved the jobs' step body here; it runs from deploy/ whatever the caller's
+# directory is.
 #
 #   - name: Bring up the compose stack
 #     run: .github/ci/full-stack-up.sh
@@ -36,6 +37,11 @@ echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
 FORWARD_KEY=$(openssl rand -hex 32)
 FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
+# Each masked in the job's log from here on, in every job that runs this: a
+# throwaway minted for the job, but a credential to its stack while it runs.
+# Masked here since SMD-3471 moved the edge step, which held the brains job's
+# only mask, to the auth job.
+for k in "$KEY" "$READ_KEY" "$CAPTURE_KEY" "$FORWARD_KEY"; do echo "::add-mask::$k"; done
 # No OPENROUTER_API_KEY: the provider is a local endpoint, which
 # needs no credential (preflight decides). Preflight dials it
 # (GET /models, SMD-1875), and the steps that seed or search thoughts
