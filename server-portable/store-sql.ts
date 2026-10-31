@@ -1052,7 +1052,14 @@ export class SqlStore implements ThoughtStore {
     const proposals = withWriters(rows, writers, read).map(normaliseProposal);
     const decided = proposals.filter((p) => p.status === "accepted" || p.status === "rejected").map((p) => p.id);
     const reviewers = await reviewersOf(this.sql, decided);
-    if (reviewers !== "no-114") for (const p of proposals) p.reviewer = reviewers.get(p.id) ?? null;
+    // A decided row that records none (a raw call, or a decision before 114 that wrote no pointer) reads null, as an
+    // undecided one does: `reviewer` null is "none recorded" to a client (review pass 1 of PR 2).
+    if (reviewers !== "no-114") {
+      for (const p of proposals) {
+        const r = reviewers.get(p.id);
+        p.reviewer = r && (r.name !== null || r.agentId !== null) ? r : null;
+      }
+    }
     return { proposals, next, remaining, reviewersRead: reviewers !== "no-114" };
   }
 

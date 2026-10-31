@@ -839,7 +839,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
           (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
         : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${stoodSide(p) ? ` — the ${stoodSide(p)} side stands` : ""}${note ? `: ${note}` : ""}` +
           // SMD-3338: who decided it (114), as the decision's reply names it — on a brain short of 114 said once, above.
-          (reviewersRead && (p.status === "accepted" || p.status === "rejected") ? `\n   decided by: ${reviewerText(p.reviewer)}` : "");
+          (reviewersRead === true && (p.status === "accepted" || p.status === "rejected") ? `\n   decided by: ${reviewerText(p.reviewer)}` : "");
       // 070 (SMD-2313): a lineage pair — one side derived from the other
       // — is never proposed since 066; a row standing on one is the
       // reviewer's to reject, said with the command while it is theirs.
@@ -858,7 +858,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = (data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "") +
-      (!reviewersRead && data.some((p) => p.status === "accepted" || p.status === "rejected") ? ` ${REVIEWERS_UNREAD}` : "");
+      // false, not absent: a REST core from before SMD-3338 PR 2 sends none, and its brain may well be at 114.
+      (reviewersRead === false && data.some((p) => p.status === "accepted" || p.status === "rejected") ? ` ${REVIEWERS_UNREAD}` : "");
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
@@ -1640,10 +1641,12 @@ export const REVIEWERS_UNREAD = "Who decided each row is not shown: this brain i
  * through the replies' cleaner, on one line; yours said so.
  */
 export function reviewerText(r: Reviewer | null, caller?: string): string {
-  if (!r || (!r.name && !r.agentId)) return "not recorded — no actor named the decision";
+  // The listing reaches rows the CLI and the workers decided, and rows from before 114 (review pass 1 of PR 2): each
+  // word true of every one, as --list's are.
+  if (!r || (!r.name && !r.agentId)) return "not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer";
   const kind = r.kind ?? (r.kindNow ? `${r.kindNow} — classified after it decided` : "a key the registry has not classified");
   const name = r.name ? `${snipText(r.name, 80)}${caller !== undefined && r.name.trim() === caller.trim() ? " (your key)" : ""}` : null;
-  return name && r.agentId ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (the key did not resolve in the registry)` : `agent ${r.agentId}, ${kind}, no name`;
+  return name && r.agentId ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)` : `agent ${r.agentId}, ${kind}, no name`;
 }
 
 /**

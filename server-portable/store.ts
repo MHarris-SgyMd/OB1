@@ -348,7 +348,7 @@ export type ProposalPosition = { confidence: string; judgedAt: string; id: strin
  */
 export type ProposalPage = {
   proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number;
-  /** Whether each decided row's reviewer was read (114, SMD-2608): false on a brain short of 114, whose rows record none (SMD-3338). */
+  /** Whether the decided rows' reviewers were read (114, SMD-2608): false when the page lists a decided row on a brain short of 114, whose rows record none; a page with none reads no columns, and says true (SMD-3338). */
   reviewersRead: boolean;
 };
 
@@ -761,9 +761,9 @@ export type SupersessionProposal = {
   /**
    * Who decided an accepted or rejected row (114's columns, SMD-2608), with
    * the registry's kind now beside the kind the key had when it decided
-   * (SMD-3338): null on a pending or stale row, on a row that records none (a
-   * raw call, or a decision before 114 that wrote no pointer), and on a brain
-   * short of 114 (the page's reviewersRead says which).
+   * (SMD-3338): null on a pending or stale row, on a decided row that records
+   * none (a raw call, or a decision before 114 that wrote no pointer), and on a
+   * brain short of 114 (the page's reviewersRead says which).
    */
   reviewer: Reviewer | null;
 };

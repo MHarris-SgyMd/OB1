@@ -492,7 +492,7 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
  */
 export type ProposalsResult = {
   status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; pastCursor: boolean;
-  /** Whether the decided rows' reviewers were read: false on a brain short of 114 (SMD-3338). */
+  /** Whether the decided rows' reviewers were read: false when the page lists a decided row on a brain short of 114 (SMD-3338). */
   reviewersRead: boolean;
 };
 

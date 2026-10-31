@@ -1706,7 +1706,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A page (SMD-3249): `proposals`, most confident first; `cursor` — pass it as the `after` query parameter, with the same status, lineage and judge_key, for the next page; null when no more follow; `remaining`, how many follow this page; and `pastCursor`, whether this page followed a cursor. A cursor that is none of this operation's, an empty one, or one whose time Postgres cannot read is refused REFUSED_CURSOR (400) with `reason: "shape"`; one made under other filters with `reason: "filters"` and `made`, the `status`, `lineage` and `judgeKey` it was made under. */
+            /** @description A page (SMD-3249): `proposals`, most confident first; `cursor` — pass it as the `after` query parameter, with the same status, lineage and judge_key, for the next page; null when no more follow; `remaining`, how many follow this page; `pastCursor`, whether this page followed a cursor; each accepted or rejected proposal's `reviewer` (who decided it: the key's name, its agent, its kind then and the registry's now; null when none is recorded, and on a pending or stale one); and `reviewersRead`, false when a decided row was listed on a brain short of migration 114, which records none (SMD-3338). A cursor that is none of this operation's, an empty one, or one whose time Postgres cannot read is refused REFUSED_CURSOR (400) with `reason: "shape"`; one made under other filters with `reason: "filters"` and `made`, the `status`, `lineage` and `judgeKey` it was made under. */
             200: {
                 headers: {
                     [name: string]: unknown;

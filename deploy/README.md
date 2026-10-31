@@ -2195,9 +2195,10 @@ workers' key's.
 
 The decision then prints `decided by: <your key's name> (<its kind>)`, and
 `--list accepted` or `--list rejected` shows the same line on each row
-(SMD-2608), as do the `list_supersession_proposals` tool and
-`GET /v1/proposals` (SMD-3338); the GUI's `/dashboard/proposals` does not yet
-(SMD-3322). The kind is the one the registry
+(SMD-2608). The `list_supersession_proposals` tool names the decider on a
+`decided by:` line of its own, and `GET /v1/proposals` gives it as each
+proposal's `reviewer` (SMD-3338); the GUI's `/dashboard/proposals` does not
+show it yet (SMD-3322). The kind is the one the registry
 held for the key when it decided: classify your key and the workers' key first
 (`SELECT set_agent_kind('<key name>', 'operator')`, as `SETUP.md` says, and
 `'agent'` for the workers' key), or the line reads "a key the

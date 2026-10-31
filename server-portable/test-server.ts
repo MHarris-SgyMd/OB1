@@ -6381,8 +6381,8 @@ console.log("\n[32] review_supersession_proposal's reply, branch by branch: what
   assert(by({ name: "op", agentId: AG, kind: "agent", kindNow: "operator" }) === "Decided by: op, agent."
       && by({ name: "op", agentId: AG, kind: null, kindNow: "operator" }) === "Decided by: op, operator — classified after it decided."
       && by({ name: "op", agentId: AG, kind: null, kindNow: null }) === "Decided by: op, a key the registry has not classified."
-      && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (the key did not resolve in the registry)."
-      && by(null) === "Decided by: not recorded — no actor named the decision."
+      && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)."
+      && by(null) === "Decided by: not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer."
       && by({ name: "op", agentId: AG, kind: "operator", kindNow: "operator" }, "op") === "Decided by: op (your key), operator.",
     `the reviewer: its kind then, else now said so, neither, no agent, none, yours (${by({ name: "op", agentId: AG, kind: null, kindNow: "operator" })})`);
   // Refusals, each condition's two sides.
@@ -6423,12 +6423,18 @@ console.log("\n[33] list_supersession_proposals names who decided each decided r
   const of = (id: string) => blocks.find((b) => b.includes(`proposal ${id}`)) ?? "";
   assert(of("00000000-0000-4000-8000-0000000033c1").endsWith("\n   decided by: op, operator — classified after it decided")
       && !of("00000000-0000-4000-8000-0000000033c2").includes("decided by:")
-      && of("00000000-0000-4000-8000-0000000033c3").endsWith("\n   decided by: not recorded — no actor named the decision")
+      && of("00000000-0000-4000-8000-0000000033c3").endsWith("\n   decided by: not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer")
       && !t.includes(REVIEWERS_UNREAD),
     `a decided row names who decided (the kind now, said so; none recorded, said so), a pending row none, and no short-of-114 note (${of("00000000-0000-4000-8000-0000000033c1").split("\n").pop()})`);
   const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentId: string; kind: string | null; kindNow: string | null } | null }[] };
   assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentId === R.agentId && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
     "…its value carries the reviewer's agent and kinds, not its name");
+  // A stale row (reopened, 067) names none though the page read them; a page from a REST core before PR 2 (no
+  // reviewersRead) says neither a line nor the short-of-114 note (review pass 1 of PR 2).
+  const stale = page(true, [row("00000000-0000-4000-8000-0000000033c4", "stale", null)]).content[0].text;
+  const older = renderSupersessionProposals({ ok: true, value: { status: "all", proposals: [row("00000000-0000-4000-8000-0000000033c1", "rejected", null)], cursor: null, remaining: 0, pastCursor: false } } as never).content[0].text;
+  assert(!stale.includes("decided by:") && !older.includes("decided by:") && !older.includes(REVIEWERS_UNREAD),
+    "a stale row names no decider; a page with no reviewersRead (an older REST core) says neither the line nor the note");
   const unreadDecided = page(false, [row("00000000-0000-4000-8000-0000000033c1", "rejected", null)]).content[0].text;
   const unreadPending = page(false, [row("00000000-0000-4000-8000-0000000033c2", "pending", null)]).content[0].text;
   assert(unreadDecided.split(REVIEWERS_UNREAD).length === 2 && !unreadDecided.includes("decided by:") && !unreadPending.includes(REVIEWERS_UNREAD),
