@@ -8708,6 +8708,41 @@ if (want("10h")) {
       INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at) SELECT id, ${otherWork}, 'succeeded', now() FROM unnest(${sql.array(ids, "TEXT")}::uuid[]) AS id`;
     const otherStatus = async (ids: string[]) => (((await sql`
       SELECT string_agg(status, ',' ORDER BY thought_id) AS s FROM thought_work_claims WHERE work_type = ${otherWork} AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as { s: string | null }[])[0].s ?? "");
+    /**
+     * A trigger of a case's own, its function named alike, `body` the function's: what the returned call drops, which a
+     * case calls in its finally.
+     */
+    const caseTrigger = async (name: string, timing: string, on: string, when: string, body: string) => {
+      await sql.unsafe(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} END $$`);
+      await sql.unsafe(`CREATE TRIGGER ${name} ${timing} ON ${on} FOR EACH ROW WHEN (${when}) EXECUTE FUNCTION ${name}()`);
+      return async () => {
+        await sql.unsafe(`DROP TRIGGER ${name} ON ${on}`);
+        await sql.unsafe(`DROP FUNCTION ${name}()`);
+      };
+    };
+    /** Another run's trip as the case's own stamp on the window, older than any run, its answers none. */
+    const stampWindow = () => sql`
+      INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    /**
+     * A run that waits on the subject pool's lock, held by the case on a client of its own: once the run says it waits,
+     * having read the window's last trip, `meanwhile` runs, and the lock is let go.
+     */
+    const runPastPoolLock = async (meanwhile: () => Promise<unknown>) => {
+      const holder = new SQL({ url: URL_!, max: 1 });
+      try {
+        await holder`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
+        let sawWait = () => {};
+        const waiting = new Promise<void>((r) => { sawWait = r; });
+        const running = caught((writer) => sweepSubjects({ url: URL_!, env, limit: 12, writer: { out: (l) => { if (l.includes("waiting for another run holding the subject pool's lock")) sawWait(); writer.out(l); }, err: writer.err } }));
+        await Promise.race([waiting, running]);
+        await meanwhile();
+        await holder`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`;
+        return await running;
+      } finally {
+        await holder.close({ timeout: 5 });
+      }
+    };
     // Each run is held to a --limit it never reaches when it stops as it should: one that went on past the alarm would
     // ask again, without end, the claims each trip hands back.
     const alarmRun = (opts: Omit<SubjectSweepOptions, "writer"> = {}, e = env) => sweep({ limit: 12, ...opts }, e);
@@ -8933,8 +8968,7 @@ if (want("10h")) {
       onOwn = async (thought) => {
         if (!thought.includes("Alarm note 154")) return;
         onOwn = null;
-        await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text)
-                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+        await stampWindow();
       };
       asked = ownCalls;
       const timedRun = await alarmRun({ timeout: 1 }).finally(() => { onOwn = null; });
@@ -8949,23 +8983,8 @@ if (want("10h")) {
       await drop(timedIds);
       await alarmAt(5);
       const [waitT] = await seedAll(notes(156, 1, "alarm-good work, claimed after the lock."));
-      // A client of its own, one connection: the lock is its session's.
-      const lockHolder = new SQL({ url: URL_!, max: 1 });
-      let waitedRun = null as SweepRun | null;
-      try {
-        await lockHolder`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
-        let sawWait = () => {};
-        const waiting = new Promise<void>((r) => { sawWait = r; });
-        asked = ownCalls;
-        const running = caught((writer) => sweepSubjects({ url: URL_!, env, limit: 12, writer: { out: (l) => { if (l.includes("waiting for another run holding the subject pool's lock")) sawWait(); writer.out(l); }, err: writer.err } }));
-        await Promise.race([waiting, running]);
-        await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text)
-                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-        await lockHolder`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`;
-        waitedRun = await running;
-      } finally {
-        await lockHolder.close({ timeout: 5 });
-      }
+      asked = ownCalls;
+      const waitedRun = await runPastPoolLock(stampWindow);
       assert(waitedRun?.code === 3 && ownCalls === asked && (await claimOf(waitT))?.status === "pending" && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, after this run began/.test(waitedRun.stderr),
         `a trip landing while the run waits on the pool's lock stops it at its first claim, nothing asked (exit ${waitedRun?.code}, ${ownCalls - asked} asked, its claim ${(await claimOf(waitT))?.status}): ${(waitedRun?.stderr ?? "").trim().slice(0, 300)}`);
 
@@ -8973,21 +8992,7 @@ if (want("10h")) {
       // run-it).
       await drop([waitT]);
       await alarmAt(5);
-      const emptyHolder = new SQL({ url: URL_!, max: 1 });
-      let emptyPoolRun = null as SweepRun | null;
-      try {
-        await emptyHolder`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
-        let sawWait = () => {};
-        const waiting = new Promise<void>((r) => { sawWait = r; });
-        const running = caught((writer) => sweepSubjects({ url: URL_!, env, limit: 12, writer: { out: (l) => { if (l.includes("waiting for another run holding the subject pool's lock")) sawWait(); writer.out(l); }, err: writer.err } }));
-        await Promise.race([waiting, running]);
-        await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text)
-                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-        await emptyHolder`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`;
-        emptyPoolRun = await running;
-      } finally {
-        await emptyHolder.close({ timeout: 5 });
-      }
+      const emptyPoolRun = await runPastPoolLock(stampWindow);
       assert(emptyPoolRun?.code === 3 && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, after this run began/.test(emptyPoolRun.stderr),
         `a run that finds nothing to claim after another run's trip says so, exit 3 (exit ${emptyPoolRun?.code}): ${(emptyPoolRun?.stderr ?? "").trim().slice(0, 300)}`);
 
@@ -8998,15 +9003,13 @@ if (want("10h")) {
       await alarmAt(5);
       const [raceT] = await seedAll(notes(157, 1, "alarm-good work, claimed as the trip lands."));
       await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, ${JSON.stringify({ pool: POOL, answers: [], tripped: null, by: [] })}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-      await sql.unsafe(`CREATE FUNCTION alarm_case_trip_at_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE ob1_config SET value = jsonb_build_object('pool', '${POOL}', 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text WHERE key = '${JUDGE_WINDOW_KEY}'; RETURN NEW; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_trip_at_claim BEFORE UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'pending' AND NEW.status = 'claimed' AND NEW.thought_id = '${raceT}') EXECUTE FUNCTION alarm_case_trip_at_claim()`);
+      const undoTripAtClaim = await caseTrigger("alarm_case_trip_at_claim", "BEFORE UPDATE", "thought_work_claims", `OLD.status = 'pending' AND NEW.status = 'claimed' AND NEW.thought_id = '${raceT}'`, `UPDATE ob1_config SET value = jsonb_build_object('pool', '${POOL}', 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00')::text WHERE key = '${JUDGE_WINDOW_KEY}'; RETURN NEW;`);
       let raceRun = null as SweepRun | null;
       try {
         asked = ownCalls;
         raceRun = await alarmRun();
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_trip_at_claim ON thought_work_claims`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_trip_at_claim()`);
+        await undoTripAtClaim();
       }
       assert(raceRun?.code === 3 && ownCalls === asked && (await claimOf(raceT))?.status === "pending" && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, after this run began/.test(raceRun.stderr),
         `a trip landing with the claim is read once the claim is taken: the thought goes back unasked, exit 3 (exit ${raceRun?.code}, ${ownCalls - asked} asked, its claim ${(await claimOf(raceT))?.status}): ${(raceRun?.stderr ?? "").trim().slice(0, 300)}`);
@@ -9091,16 +9094,14 @@ if (want("10h")) {
       // run-it). The refusal is a trigger of the case's own, raising the door's SQLSTATE for one key.
       await drop(ruledIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_refuse_key() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the alarm case refuses this key' USING ERRCODE = '22023'; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_refuse_key BEFORE INSERT ON thought_facets FOR EACH ROW WHEN (NEW.payload->>'key' = 'phrase:refused topic') EXECUTE FUNCTION alarm_case_refuse_key()`);
+      const undoRefuseKey = await caseTrigger("alarm_case_refuse_key", "BEFORE INSERT", "thought_facets", `NEW.payload->>'key' = 'phrase:refused topic'`, `RAISE EXCEPTION 'the alarm case refuses this key' USING ERRCODE = '22023';`);
       let refusedIds: string[] = [];
       let refusedRun = null as SweepRun | null;
       try {
         refusedIds = await seedAll(notes(81, 6, "alarm-refused, its key refused."));
         refusedRun = await alarmRun();
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_refuse_key ON thought_facets`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_refuse_key()`);
+        await undoRefuseKey();
       }
       assert(refusedRun?.code === 1 && /6 keys refused/.test(tally(refusedRun!)) && !/gave no subject/.test(refusedRun!.stderr),
         `a key the door refuses is an answer that gave a key: six refused, exit 1, no alarm (exit ${refusedRun?.code}: ${refusedRun ? tally(refusedRun) : "no run"})`);
@@ -9151,16 +9152,14 @@ if (want("10h")) {
       // own, raising the shutdown's SQLSTATE at the hand-back alone.
       await drop(stopIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_lose_handback() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the alarm case loses the database here' USING ERRCODE = '57P01'; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_lose_handback BEFORE UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'succeeded' AND NEW.status = 'pending') EXECUTE FUNCTION alarm_case_lose_handback()`);
+      const undoLoseHandback = await caseTrigger("alarm_case_lose_handback", "BEFORE UPDATE", "thought_work_claims", `OLD.status = 'succeeded' AND NEW.status = 'pending'`, `RAISE EXCEPTION 'the alarm case loses the database here' USING ERRCODE = '57P01';`);
       let lostIds: string[] = [];
       let lostRun = null as SweepRun | null;
       try {
         lostIds = await seedAll(notes(121, 3, "named nothing."));
         lostRun = await alarmRun();
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_lose_handback ON thought_work_claims`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_lose_handback()`);
+        await undoLoseHandback();
       }
       const lostClaims = await statusOf(lostIds);
       const lostWindow = await windowOf();
@@ -9176,16 +9175,14 @@ if (want("10h")) {
       // finish, it stood finished outside the window, for good). The loss is a trigger of the case's own on that write.
       await drop(lostIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_lose_window() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the alarm case loses the database at the window' USING ERRCODE = '57P01'; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_lose_window BEFORE UPDATE ON ob1_config FOR EACH ROW WHEN (NEW.key = '${JUDGE_WINDOW_KEY}') EXECUTE FUNCTION alarm_case_lose_window()`);
+      const undoLoseWindow = await caseTrigger("alarm_case_lose_window", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}'`, `RAISE EXCEPTION 'the alarm case loses the database at the window' USING ERRCODE = '57P01';`);
       let windowLostIds: string[] = [];
       let windowLostRun = null as SweepRun | null;
       try {
         windowLostIds = await seedAll(notes(191, 2, "named nothing."));
         windowLostRun = await alarmRun();
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_lose_window ON ob1_config`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_lose_window()`);
+        await undoLoseWindow();
       }
       const windowLostClaims = await statusOf(windowLostIds);
       assert(windowLostRun?.code === 1 && windowLostClaims.join(",") === "pending,pending"
@@ -9196,16 +9193,14 @@ if (want("10h")) {
       // were, the window holding the answer before it. The loss is the case's own trigger on the trip's write alone.
       await drop(windowLostIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_lose_trip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the alarm case loses the database at the trip' USING ERRCODE = '57P01'; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_lose_trip BEFORE UPDATE ON ob1_config FOR EACH ROW WHEN (NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value LIKE '%"tripped":"%') EXECUTE FUNCTION alarm_case_lose_trip()`);
+      const undoLoseTrip = await caseTrigger("alarm_case_lose_trip", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value LIKE '%"tripped":"%'`, `RAISE EXCEPTION 'the alarm case loses the database at the trip' USING ERRCODE = '57P01';`);
       let tripLostIds: string[] = [];
       let tripLostRun = null as SweepRun | null;
       try {
         tripLostIds = await seedAll(notes(193, 2, "garbled at the trip."));
         tripLostRun = await alarmRun();
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_lose_trip ON ob1_config`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_lose_trip()`);
+        await undoLoseTrip();
       }
       const tripLostClaims = await statusOf(tripLostIds);
       const tripLostWindow = await windowOf();
@@ -9218,8 +9213,7 @@ if (want("10h")) {
       // held a second by a trigger of the case's own, and the two signals come within it.
       await drop(tripLostIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_hold_finish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_hold_finish AFTER UPDATE ON thought_work_claims FOR EACH ROW WHEN (OLD.status = 'claimed' AND NEW.status = 'succeeded') EXECUTE FUNCTION alarm_case_hold_finish()`);
+      const undoHoldFinish = await caseTrigger("alarm_case_hold_finish", "AFTER UPDATE", "thought_work_claims", `OLD.status = 'claimed' AND NEW.status = 'succeeded'`, `PERFORM pg_sleep(1); RETURN NEW;`);
       let heldIds: string[] = [];
       let heldRun = null as SweepRun | null;
       try {
@@ -9234,8 +9228,7 @@ if (want("10h")) {
         };
         heldRun = await alarmRun({ onPass: (s) => { passStop = s; } }).finally(() => { onOwn = null; });
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_hold_finish ON thought_work_claims`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_hold_finish()`);
+        await undoHoldFinish();
       }
       const heldClaims = await statusOf(heldIds);
       const heldWindow = await windowOf();
@@ -9280,8 +9273,7 @@ if (want("10h")) {
       // it may go unsaid).
       await drop(queuedIds);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_hold_trip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_hold_trip BEFORE UPDATE ON ob1_config FOR EACH ROW WHEN (NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value LIKE '%"tripped":"%') EXECUTE FUNCTION alarm_case_hold_trip()`);
+      const undoHoldTrip = await caseTrigger("alarm_case_hold_trip", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value LIKE '%"tripped":"%'`, `PERFORM pg_sleep(1); RETURN NEW;`);
       let landedIds: string[] = [];
       let landedRun = null as SweepRun | null;
       try {
@@ -9297,8 +9289,7 @@ if (want("10h")) {
         };
         landedRun = await alarmRun({ onPass: (s) => { passStop = s; } }).finally(() => { onOwn = null; });
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_hold_trip ON ob1_config`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_hold_trip()`);
+        await undoHoldTrip();
       }
       const landedClaims = await statusOf(landedIds);
       const landedWindow = await windowOf();
@@ -9356,8 +9347,7 @@ if (want("10h")) {
       // of the case's own on the window's write, and a naming with a short lock_timeout tried inside it.
       await drop([requeuedT]);
       await alarmAt(5);
-      await sql.unsafe(`CREATE FUNCTION alarm_case_hold_alone() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(1.5); RETURN NEW; END $$`);
-      await sql.unsafe(`CREATE TRIGGER alarm_case_hold_alone BEFORE UPDATE ON ob1_config FOR EACH ROW WHEN (NEW.key = '${JUDGE_WINDOW_KEY}') EXECUTE FUNCTION alarm_case_hold_alone()`);
+      const undoHoldAlone = await caseTrigger("alarm_case_hold_alone", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}'`, `PERFORM pg_sleep(1.5); RETURN NEW;`);
       const aloneNamer = new SQL({ url: URL_!, max: 1 });
       let aloneIds: string[] = [];
       let aloneRun = null as SweepRun | null;
@@ -9380,8 +9370,7 @@ if (want("10h")) {
         aloneRun = await alarmRun().finally(() => { onOwn = null; });
         await aloneDone;
       } finally {
-        await sql.unsafe(`DROP TRIGGER alarm_case_hold_alone ON ob1_config`);
-        await sql.unsafe(`DROP FUNCTION alarm_case_hold_alone()`);
+        await undoHoldAlone();
         await aloneNamer.close({ timeout: 5 });
         await setNamed(POOL);
       }

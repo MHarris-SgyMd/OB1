@@ -64,14 +64,14 @@
  * standing; `--retry-failed` puts them back in the pool. A judge model 10 of whose last 48 answers gave no subject —
  * unread, or naming nothing — stops the run, exit 3, the window the pool's, kept across runs in ob1_config
  * (JUDGE_ALARM, PR 5b): the claims among those answers finished as named nothing, by whichever run, go back to the
- * pool, since nothing else would ask them again, and those it could not read stay failed. Each answer counts when it
- * is asked again as when it was new, and a judge checked and found right runs with --judge-checked, the alarm off. A
- * rate limit, a server error or a lost connection is paused for and retried
- * (TRANSIENT_PAUSES_MS), then ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A
- * dry run writes, pools and asks nothing, counts what a run would take (the pool's, or every thought with no current
- * subject when its pool is not named yet or its pooling broke off), reads on through a signal as the pass's does, and
- * names the refusals a run would meet. Its pages go in thought id order, so with --limit it counts the first by id,
- * which a run, taking the oldest pooled first, need not.
+ * pool, since nothing else would ask them again, and those it could not read stay failed. Each answer counts when it is
+ * asked again as when it was new, and a judge checked and found right runs with --judge-checked, the alarm off. A rate
+ * limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then ends the sweep; any
+ * other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes, pools and asks nothing, counts
+ * what a run would take (the pool's, or every thought with no current subject when its pool is not named yet or its
+ * pooling broke off), reads on through a signal as the pass's does, and names the refusals a run would meet. Its pages
+ * go in thought id order, so with --limit it counts the first by id, which a run, taking the oldest pooled first, need
+ * not.
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
@@ -139,11 +139,11 @@ export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
  * 2: a window of each run's own left every run of fewer than 10 answers unjudged, most runs after a pool's first
  * naming, its claims named nothing finished for good). Every answer counts, on a thought asked again as on a new one,
  * so a judge left broken trips again at each run and what it named nothing for goes back each time; one checked and
- * found right, which thoughts that truly have no subject, asked together, tripped, runs with --judge-checked (review
- * pass 3, run-it: answers on handed-back thoughts taken as given let a judge left broken finish all 30, exit 0; cold
- * read: a pooling again brings up together what the model named nothing for, which that rule did not cover). The
- * pass's fifth of 48 (db/config.mjs's malformedAlarm): the
- * 27B named nothing for 1 of the 63 it was asked in the canary's first naming run. It reads an answer's shape, not its
+ * found right, which thoughts that truly have no subject, asked together, tripped, runs with --judge-checked, which the
+ * trip line offers with --limit, the count it handed back (review pass 3, run-it: answers on handed-back thoughts taken
+ * as given let a judge left broken finish all 30, exit 0; cold read: a pooling again brings up together what the model
+ * named nothing for, which that rule did not cover). The pass's fifth of 48 (db/config.mjs's malformedAlarm): the 27B
+ * named nothing for 1 of the 63 it was asked in the canary's first naming run. It reads an answer's shape, not its
  * truth: qwen2.5:7b, the metadata model's default, which judges when OB1_JUDGE_MODEL is unset, answered 100 canary
  * thoughts in shape, naming nothing for one, and gave the 27B's key for 60 of the other 99 (db/README.md). Read as the
  * run goes, so a test shortens `window`, as NAMING_WAIT is.
@@ -207,7 +207,7 @@ export function readJudgeWindow(value: string | null | undefined, pool: string):
 /** What a watched statement answers when the caller's stop cancelled it. */
 const STOPPED = Symbol("stopped");
 
-/** Thrown in a transaction to end it rolled back: a second signal before the finish of a claim wrote the window. */
+/** Thrown in a transaction to end it rolled back: a second signal before a finish's judgement had the window's lock. */
 const ROLLED_BACK = Symbol("rolled back");
 
 /** The least thought id: a cursor before every page. */
@@ -888,9 +888,9 @@ async function sweep(
   /** The claims this run failed, its leases spent while it ran aside: what --retry-failed would put back of its own. */
   const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey - n.lostFailed;
   /** What to run once the model is right, the claims this run failed named. */
-  const runAgain = (once: string) => {
+  const runAgain = (lead: string) => {
     const failed = failedHere();
-    return failed > 0 ? `${once} run again with --retry-failed, which puts back the pool's failed claims, the ${failed} this run failed among them.` : `${once} run it again.`;
+    return failed > 0 ? `${lead} run again with --retry-failed, which puts back the pool's failed claims, the ${failed} this run failed among them.` : `${lead} run it again.`;
   };
 
   /**
@@ -937,7 +937,8 @@ async function sweep(
    * asked again, said. Those it could not read stay failed, for --retry-failed, as the pass leaves its malformed rows
    * failed. An answer that finds the window tripped by another run since this one began is that window's: its claim,
    * finished as named nothing, goes back too, uncounted, and the run stops (review pass 3, run-it: a run beside the
-   * trip finished the claim in hand and counted it in the window after, which slid it out for good).
+   * trip finished the claim in hand and counted it in the window after, which slid it out for good). `inFinish`: called
+   * from the finish of a claim named nothing, which a second signal before the window's lock is had takes back.
    */
   const judgedIn = async (tx: SQL, entry: WindowAnswer, inFinish: boolean): Promise<{ code: number; line: string } | null> => {
     const window = Math.max(1, JUDGE_ALARM.window);
@@ -1511,7 +1512,7 @@ async function sweep(
     }
   }
   if (spent) err(`\n  ${spent} claim(s) whose lease ran out at its last attempt failed while this run claimed: a worker held each ${MAX_ATTEMPTS} times and did not finish it`);
-  const failedNow = n.unanswered + n.unread + n.egress + n.refusedKey - n.lostFailed + spent;
+  const failedNow = failedHere() + spent;
   if (failedNow > 0) err(`\n  ${failedNow} claim(s) failed: fix the cause and run again with --retry-failed`);
   return failedNow > 0 ? 1 : 0;
 }
