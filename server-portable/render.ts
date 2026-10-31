@@ -28,7 +28,7 @@ import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.t
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
-import type { ClaimWorkCode, ClaimWorkResult, ListClaimsResult, ReleaseClaimCode, ReleaseClaimResult, RenewClaimCode, RenewClaimResult } from "./core/claims.ts";
+import { TAKEN_OVER, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, StampReset, StampResetCode, Updated } from "./core/writes.ts";
@@ -1690,9 +1690,16 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
 // of ours.
 
 const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
-const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${oneLine(snipText(c.holder, 80))} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+const holderText = (holder: string, ownKey: boolean) => ownKey ? `your own key (${oneLine(snipText(holder, 80))})` : oneLine(snipText(holder, 80));
+/** What a session of the caller's own key does about a claim its key holds under a token it does not have. */
+const OWN_KEY = "A claim by your own key is another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.";
+const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
-  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. Leave it to its holder, or claim other work; a claim of your own on overlapping work is in the way too.`;
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? OWN_KEY : "Leave it to its holder, or claim other work."}`;
+/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
+const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
+  ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
+  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, claim it again.`;
 // 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
 // in the wrong one is masked, a cut one too.
 const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{8,}/gi, "[a work-claim token]"), 300))}`;
@@ -1708,7 +1715,9 @@ const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) =
 const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
   r.forced
     ? `Refused: only an operator key, classified operator by its agent id, may release another holder's claim; claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}.`
-    : `Refused: claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}, not by this key with this token.`;
+    : r.ownKey
+      ? `Refused: claim ${r.id} is held by your own key (${oneLine(snipText(r.holder, 80))}) under a token this call did not give — another session of yours, or this one having lost its token. If this session lost it, claim the work again once the claim lapses${r.expiresAt ? ` at ${r.expiresAt}` : ""}, or ask an operator to release it with force and a reason.`
+      : `Refused: claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}, not by this key with this token.`;
 
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"
@@ -1722,14 +1731,14 @@ export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): 
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
-    : r.code === "CLAIM_RELEASED" ? `Refused: claim ${r.id} ended${r.releasedAt ? ` at ${r.releasedAt}` : ""} (released, or taken over after it lapsed); claim the work again.`
+    : r.code === "CLAIM_RELEASED" ? endedText(r)
     : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
   (v) => v.outcome === "released"
     ? `Released claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)}${v.claim.releaseReason ? ` (${oneLine(snipText(v.claim.releaseReason, 200))})` : ""}.`
-    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}.`,
+    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}${v.claim.releaseReason === TAKEN_OVER ? `: it lapsed and was taken over${v.claim.releasedBy ? ` by ${oneLine(snipText(v.claim.releasedBy, 80))}` : ""}` : ""}.`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)

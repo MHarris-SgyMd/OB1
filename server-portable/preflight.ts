@@ -2963,8 +2963,8 @@ if (configFailed) {
             ...(statementLogs.length && printing(logs.log_parameter_max_length)
               ? [`statement logging is on (${statementLogs.join(", ")}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
             // The parameters ride the ERROR report itself (its CONTEXT), logged by log_min_messages — not the STATEMENT
-            // line log_min_error_statement governs — so only a log that keeps no ERROR is spared.
-            ...(printing(logs.log_parameter_max_length_on_error) && logs.log_min_messages !== "fatal" && logs.log_min_messages !== "panic"
+            // line log_min_error_statement governs — so only a log that keeps no ERROR (log, fatal, panic rank above it) is spared.
+            ...(printing(logs.log_parameter_max_length_on_error) && !["log", "fatal", "panic"].includes(logs.log_min_messages ?? "")
               ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
             // A verbose plan prints a custom plan's constants — the bound token among them — whatever the parameter cap.
             ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && (printing(logs["auto_explain.log_parameter_max_length"]) || logs["auto_explain.log_verbose"] === "on")

@@ -53,8 +53,8 @@ export type Refusal =
   // caller who claimed, in the value, and no refusal carries one.
   | { code: "WORK_CLAIMED"; retryable: false; ticket: string; piece: string | null; heldBy: HeldClaim[] } // live claims cover the work: another key's, the same key's without its token, or the caller's own on overlapping work
   | { code: "CLAIM_NOT_FOUND"; retryable: false; id: string }         // no claim with that id
-  | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean } // not this key with this token; forced: a force refused (the key is no operator named by its agent id)
-  | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null } // a renewal of a claim that ended: released, or taken over after it lapsed
+  | { code: "CLAIM_NOT_YOURS"; retryable: false; id: string; holder: string; forced: boolean; ownKey: boolean; expiresAt: string | null } // not this key with this token; forced: a force refused (the key is no operator named by its agent id); ownKey: the caller's own key holds it, under a token this call did not give
+  | { code: "CLAIM_RELEASED"; retryable: false; id: string; releasedAt: string | null; takenOver: boolean; releasedBy: string | null; reason: string | null } // a renewal of a claim that ended: released (by releasedBy, for reason), or taken over after it lapsed (by releasedBy)
   | { code: "REFUSED_CLAIM_INPUT"; retryable: false; problem: ClaimProblem; message: string } // an argument 115 refused by its rule (SQLSTATE 22023); message: the database's words, which never carry a token
   | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
   | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string; forced: boolean } // this key's agent id is not to hand while the registry may answer: its own claim made under it, by its token (forced: false), or a force, which the id classifies
@@ -65,7 +65,7 @@ export type Refusal =
   | { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE"; retryable: false };    // run_worker without dry_run: true — the executing drain is deferred (SMD-2304)
 
 /** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder and times — never its label, another key's free text, nor anything that proves ownership. */
-export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string };
+export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
 export type MetadataProblem = "too_many_keys" | "bad_key" | "reserved_key" | "ticket_key" | "bad_value" | "value_too_long";
@@ -129,10 +129,10 @@ const FACTS: Facts = {
   REFUSED_NOT_CAPTURE_STAMP: none,
   // The claims in the way, as values a client acts on: ids, holders (a key's name, the env's), kinds and times — the
   // piece rides the text, being another key's words (SMD-3598).
-  WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) }),
+  WORK_CLAIMED: (r) => ({ heldBy: r.heldBy.map((c) => ({ id: c.id, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey })) }),
   CLAIM_NOT_FOUND: none,
-  CLAIM_NOT_YOURS: (r) => ({ forced: r.forced }),
-  CLAIM_RELEASED: (r) => (r.releasedAt ? { releasedAt: r.releasedAt } : {}),
+  CLAIM_NOT_YOURS: (r) => ({ forced: r.forced, ownKey: r.ownKey }),
+  CLAIM_RELEASED: (r) => ({ ...(r.releasedAt ? { releasedAt: r.releasedAt } : {}), takenOver: r.takenOver }),
   REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
   REFUSED_CLAIM_KEY: none,
   CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced }),

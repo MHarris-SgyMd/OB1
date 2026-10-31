@@ -879,7 +879,7 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const noClaim = await rest("POST", "/v1/claims/00000000-0000-4000-8000-000000009301/release", { token });
   assert(badTicket.status === 400 && badTicket.body.code === "REFUSED_CLAIM_INPUT" && badTicket.body.problem === "ticket"
       && badToken.status === 400 && badToken.body.code === "REFUSED_CLAIM_INPUT" && badToken.body.problem === "token"
-      && badLease.status === 400 && blankPiece.status === 400 && blankPiece.body.problem === "piece"
+      && badLease.status === 400 && badLease.body.code === "REFUSED_INPUT" && blankPiece.status === 400 && blankPiece.body.problem === "piece"
       && noId.status === 404 && noId.body.code === "CLAIM_NOT_FOUND" && noClaim.status === 404 && noClaim.body.code === "CLAIM_NOT_FOUND",
     `arguments 115 refuses: a ticket key that is none, a malformed token and a blank piece 400 REFUSED_CLAIM_INPUT by rule; a lease of 59 s 400 by the schema; an id that is no uuid, or no claim's, 404 CLAIM_NOT_FOUND (${badTicket.status}/${badTicket.body.problem} ${badToken.status}/${badToken.body.problem} ${badLease.status} ${blankPiece.status}/${blankPiece.body.problem} ${noId.status} ${noClaim.status})`);
 
@@ -922,6 +922,8 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     const renewAway = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token }, KEYS.writer);
     const releaseAway = await rest("POST", `/v1/claims/${mine?.id}/release`, { token }, KEYS.writer);
     const wrongToken = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token: rivalToken }, KEYS.writer);
+    // Another key's claim with that key's real token: never confirmed as "this claim's", whatever the registry.
+    const othersToken = await rest("POST", `/v1/claims/${(rivalLive.body.claim as Claim | undefined)?.id}/renew`, { token: String(rivalLive.body.token ?? "") }, KEYS.writer);
     const endedAway = await rest("POST", `/v1/claims/${endedId}/renew`, { token: endedToken }, KEYS.writer);
     const claimAway = await rest("POST", "/v1/claims", { ticket: "SMD-9301", piece: "PR 1", token }, KEYS.writer);
     const forceAway = await rest("POST", `/v1/claims/${(rivalLive.body.claim as Claim | undefined)?.id}/release`, { force: true, reason: "stuck" }, KEYS.writer);
@@ -931,14 +933,61 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     assert(unattributed(renewAway, false) && unattributed(releaseAway, false) && renewAway.body.id === mine?.id
         && renewAwayMcp.isError && /was made under this key's agent id, which the agent registry cannot give this server until an operator acts.*The token given is this claim's: keep it/.test(renewAwayMcp.text),
       `the registry unable to give the holder's id: its own renew and release with its token answer 503 CLAIM_UNATTRIBUTED, no Retry-After, never CLAIM_NOT_YOURS (${renewAway.status} ${renewAway.body.code} ${renewAway.headers.get("retry-after")} | ${releaseAway.status} ${releaseAway.body.code} | ${renewAwayMcp.text.slice(0, 80)})`);
-    assert(wrongToken.status === 403 && wrongToken.body.code === "CLAIM_NOT_YOURS" && endedAway.status === 409 && endedAway.body.code === "CLAIM_RELEASED"
+    assert(wrongToken.status === 403 && wrongToken.body.code === "CLAIM_NOT_YOURS" && othersToken.status === 403 && othersToken.body.code === "CLAIM_NOT_YOURS" && endedAway.status === 409 && endedAway.body.code === "CLAIM_RELEASED"
         && claimAway.status === 409 && claimAway.body.code === "WORK_CLAIMED" && unattributed(forceAway, true),
       `…while a wrong token is CLAIM_NOT_YOURS, its own ended claim CLAIM_RELEASED, a reclaim WORK_CLAIMED, and a force 503 forced (${wrongToken.status} ${wrongToken.body.code} | ${endedAway.status} ${endedAway.body.code} | ${claimAway.status} ${claimAway.body.code} | ${forceAway.status} ${forceAway.body.code} ${forceAway.body.forced})`);
   } finally {
     await sql`ALTER FUNCTION resolve_agent_smd3598_away(text, text, text) RENAME TO resolve_agent`;
   }
-  const renewBack = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token }, KEYS.writer);
-  assert(renewBack.status === 200, `…and with the registry back, the same token renews (${renewBack.status} ${renewBack.body.code ?? ""})`);
+  // The registry unreachable (a stand-in that fails as a dropped connection would): retryable, with Retry-After.
+  await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_smd3598_real`;
+  await sql.unsafe(`CREATE FUNCTION resolve_agent(p_key_hash text, p_label text, p_scope text DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql AS $f$
+    BEGIN RAISE EXCEPTION 'the registry is away (SMD-3598 test)' USING ERRCODE = '08006'; END $f$`);
+  try {
+    const away = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token }, KEYS.writer);
+    const awayMcp = await mcp("renew_claim", { id: String(mine?.id), token });
+    assert(away.status === 503 && away.body.code === "CLAIM_UNATTRIBUTED" && away.body.cause === "registry_away" && away.body.retryable === true && away.headers.get("retry-after") !== null
+        && awayMcp.isError && /did not give just now; retry shortly\. The token given is this claim's: keep it\.$/.test(awayMcp.text),
+      `the registry unreachable: the holder's own renew answers 503 CLAIM_UNATTRIBUTED registry_away, retryable, with Retry-After, "retry shortly" over MCP (${away.status} ${away.body.cause} ${away.body.retryable} ${away.headers.get("retry-after")} | ${awayMcp.text.slice(0, 80)})`);
+  } finally {
+    await sql`DROP FUNCTION resolve_agent(text, text, text)`;
+    await sql`ALTER FUNCTION resolve_agent_smd3598_real(text, text, text) RENAME TO resolve_agent`;
+  }
+  const renewBack = await rest("POST", `/v1/claims/${mine?.id}/renew`, { token: token.toUpperCase() }, KEYS.writer);
+  assert(renewBack.status === 200, `…and with the registry back, the same token renews, upper-cased by a model as it may be (${renewBack.status} ${renewBack.body.code ?? ""})`);
+
+  // Two sessions of one key: the second, without the first's token, is told the holder is its own key, and how back.
+  const first = await rest("POST", "/v1/claims", { ticket: "SMD-9307", label: "session one" }, KEYS.writer);
+  const firstId = String((first.body.claim as Claim | undefined)?.id);
+  const second = await rest("POST", "/v1/claims", { ticket: "SMD-9307" }, KEYS.writer);
+  const secondMcp = await mcp("claim_work", { ticket: "SMD-9307" });
+  const releaseBare = await rest("POST", `/v1/claims/${firstId}/release`, {}, KEYS.writer);
+  const releaseBareMcp = await mcp("release_claim", { id: firstId });
+  const rivalSees = await rest("POST", "/v1/claims", { ticket: "SMD-9307" }, KEYS.rival);
+  assert(second.status === 409 && (second.body.heldBy as { ownKey?: boolean }[])[0]?.ownKey === true && /by your own key \(writer\) since .*A claim by your own key is another session of yours, or this one without its token/.test(secondMcp.text)
+      && releaseBare.status === 403 && releaseBare.body.ownKey === true && /^Refused: claim \S+ is held by your own key \(writer\) under a token this call did not give .*claim the work again once the claim lapses at /.test(releaseBareMcp.text)
+      && (rivalSees.body.heldBy as { ownKey?: boolean }[])[0]?.ownKey === false,
+    `a second session of one key: its claim and its tokenless release say the holder is its own key and the way back; another key's sees ownKey false (${second.status} | ${secondMcp.text.slice(0, 90)} | ${releaseBare.status} ${releaseBare.body.ownKey})`);
+  // A takeover: the writer's claim lapses, the rival takes the work over; the writer's renew says stop, its release says by whom.
+  const short = await rest("POST", "/v1/claims", { ticket: "SMD-9308", lease_seconds: 60 }, KEYS.writer);
+  const shortId = String((short.body.claim as Claim | undefined)?.id), shortToken = String(short.body.token ?? "");
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '2 minutes', expires_at = now() - interval '1 minute' WHERE id = ${shortId}::uuid`;
+  const taker = await rest("POST", "/v1/claims", { ticket: "SMD-9308" }, KEYS.rival);
+  const overtaken = await rest("POST", `/v1/claims/${shortId}/renew`, { token: shortToken }, KEYS.writer);
+  const overtakenMcp = await mcp("renew_claim", { id: shortId, token: shortToken });
+  const lateRelease = await mcp("release_claim", { id: shortId, token: shortToken, reason: "merged" });
+  assert(taker.status === 200 && overtaken.status === 409 && overtaken.body.code === "CLAIM_RELEASED" && overtaken.body.takenOver === true
+      && /lapsed and was taken over by rival at .*: stop work on it; list_claims shows the claim that holds the work now\.$/.test(overtakenMcp.text)
+      && !lateRelease.isError && /had already ended at .*: it lapsed and was taken over by rival\.$/.test(lateRelease.text),
+    `a lapsed claim taken over: the old holder's renew answers CLAIM_RELEASED takenOver, "stop work on it", and its release says who took it (${overtaken.status} ${overtaken.body.takenOver} | ${overtakenMcp.text.slice(0, 90)} | ${lateRelease.text.slice(-60)})`);
+  // The two swaps an agent makes, each with a hint; list_claims says when its limit cut the list.
+  const idForToken = await mcp("renew_claim", { id: firstId, token: firstId });
+  const pieceInTicket = await mcp("claim_work", { ticket: "SMD-9307 PR 4" });
+  const cut = await rest("GET", "/v1/claims?limit=1");
+  const whole = await rest("GET", "/v1/claims?limit=100");
+  assert(idForToken.isError && /that is a claim id; the token is the wc_ value claim_work returned$/.test(idForToken.text) && pieceInTicket.isError && /pass the ticket's key as `ticket` and the rest \(e\.g\. `PR 4`\) as `piece`$/.test(pieceInTicket.text)
+      && cut.body.truncated === true && (cut.body.claims as unknown[]).length === 1 && whole.body.truncated === false && (whole.body.claims as unknown[]).length > 1,
+    `a claim id for the token and a piece in the ticket are refused with a hint; list_claims' truncated true when the limit cut it, false when not (${idForToken.text.slice(-60)} | ${pieceInTicket.text.slice(-60)} | ${cut.body.truncated} ${whole.body.truncated})`);
   // The writer releases its own over MCP with its token; again from anyone: already_released.
   const own = await mcp("release_claim", { id: String(mine?.id), token, reason: "merged" });
   const again = await rest("POST", `/v1/claims/${mine?.id}/release`, {}, KEYS.rival);
