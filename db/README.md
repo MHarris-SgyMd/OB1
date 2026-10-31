@@ -2413,7 +2413,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
-| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks; without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
+| | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for 016's `merge_entities`, and since 053 for `record_thought_entities`, which upserts (`ON CONFLICT DO UPDATE`): Postgres checks it for every call, conflict or none, so until SMD-2216 a `--grant` role could not record a mention |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
@@ -4112,7 +4112,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
@@ -4137,6 +4137,38 @@ another job key's pool), `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS` for an agent
 id on what they write, and a role a plain `migrate.ts --grant` provisions (the
 `capture`, `worker` and `extraction` groups, `server` for the worker key, `structure` for consolidation's relation facets since 084). It
 has no `--job`.
+
+**A migration.** `migrate.ts` holds the `ob1:migrate` advisory lock while it
+writes (SMD-3379 PR 1a). The scheduler waits it out at its start, before its
+passes' starts check the schema, saying so once, then takes the ledger's
+newest name and row count (`schema_migrations`). Each `--poll` after that it
+reads both: the ledger moved, or the lock held by one run at two polls in a
+row (every run takes it where 096 cannot take PUBLIC's grant back, and a
+no-op is gone by the next poll), and the passes stop at once — a stop on
+093, as the operator's second signal is — the row ends without the held
+read, and it exits 75 (`MIGRATION_EXIT`, `config.mjs`); a hand run is run
+again once the migration is done. `db/supervise.ts` runs the scheduler again
+at once on a 75, no try counted, its row's `restart` saying `in_s` 0 and
+code 75: the next process waits the migration out and takes its start's
+reads again on the schema it left. Its code is the coordinator's — in
+compose the baked image, which `up -d --build` replaces by recreating the
+coordinator, stopping the scheduler before the migrate service runs; so a 75
+is seen in compose when the server image did not change, or the migrator
+runs beside a running stack. Past three such ends in a row, each within a
+minute of its start, it falls back to the clock (SMD-3379 PR 1c-1). Once the
+passes have returned their leases, a statement of the scheduler's or its
+passes' waiting on a lock — the migration's, as a rule, which it would wait
+out and could deadlock — is cancelled until the run ends, on its own
+connections alone: each carries `application_name` `ob1-sleep <id>`, one id
+a process. A lease return is not cancelled (one cancelled kept its lease to
+its TTL, 15 min), so a migration that locks `thought_work_claims` still
+holds the exit until it ends. The lock is a signal, not a barrier: the
+passes stop a poll or two after it is taken, and until then a migration that
+needs a lock a pass holds may still fail, at its `lock_timeout` or at once
+on a deadlock — at the default 5 s poll two polls outlast Postgres' 1 s
+`deadlock_timeout`, so there the cancel ends the wait more often than it
+spares the deadlock. For a migration that alters a table the passes write,
+stop the coordinator first.
 
 **What wakes it.** A live write — one the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -5438,7 +5470,10 @@ row's `updated_at`, the database's `now()`.
   on its own: `in_s`, the seconds from the row's stamp to the next try (`null`
   when it holds until the service is recreated: no `OB1_WORKER_KEY`, or a
   setting that is not digits), `code`, the follower's exit status, and
-  `tries`, the ends in a row — 1, 2, 4, 8, then every 15 minutes. It keeps
+  `tries`, the ends in a row — 1, 2, 4, 8, then every 15 minutes; a follower
+  the sleep scheduler, exiting 75 on a migration seen, runs again at once,
+  `in_s` 0 and no try counted — past three in a row, each within a minute of
+  its start, on the clock again (SMD-3379 PR 1c-1). It keeps
   what the follower wrote last, its `refused` included, and writes a row of
   its own for one that wrote none. The follower's next stamp replaces it.
 
@@ -5858,11 +5893,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1874 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1882 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 117 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 432 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 436 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

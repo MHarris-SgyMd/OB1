@@ -4485,6 +4485,15 @@ else {
       assert(/!\s+sleep\s+held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min \(last stamped 30 s ago, every 60 s\); its last sleep ended/.test(row(heldSleep.out, "sleep")) && !/refused at a pass's start/.test(row(heldSleep.out, "sleep"))
              && /→ sleep is held: pull the model its log names.*Its supervisor runs it again on its own in 4 min.* — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(heldSleep.out, "sleep")) && !/start it again/.test(fix(heldSleep.out, "sleep")),
         `a scheduler its supervisor holds reads held, with the kind's remedy and its next try (${row(heldSleep.out, "sleep")} | ${fix(heldSleep.out, "sleep")})`);
+      // Restarting after a migration (SMD-3379 PR 1c-1): said so at any age, a
+      // long one adding that the coordinator may be gone, with its recreate.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, restart: { in_s: 0, code: 75, tries: 0 } }), 30);
+      const migFix = fix((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, restart: { in_s: 0, code: 75, tries: 0 } }), 3_600);
+      const migLongFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/→ sleep is restarting after a migration: its supervisor ran it again at once, and the new process stamps once its start has read — it waits there while migrate\.ts holds ob1:migrate, the database does not answer, or its passes' start checks run\.$/.test(migFix)
+             && /or its passes' start checks run\. This long, a migrate\.ts may hang holding the lock — a second run names its holder — or the coordinator may be gone — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator/.test(migLongFix),
+        `a scheduler restarting after a migration says so, a long one that its coordinator may be gone (${migFix} | ${migLongFix})`);
       // Its guard: no worker key, held until a recreate.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }), 10);
       const guardSleep = fix((await run(LOG_ON)).out, "sleep");

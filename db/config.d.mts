@@ -420,6 +420,8 @@ export const GRANT_LOCK: string;
 export const MIGRATE_LOCK: string;
 /** Who holds MIGRATE_LOCK in this database, read without taking it: `pid`, `backend_start`; `$1` is MIGRATE_LOCK. */
 export const MIGRATE_LOCK_HOLDER_SQL: string;
+/** The sleep scheduler's exit on a migration seen, which db/supervise.ts restarts at once (SMD-3379 PR 1c-1). */
+export const MIGRATION_EXIT: 75;
 /** The order groups are issued and documented in; a plain `migrate.ts --grant <role>` issues them all. */
 export const ROLE_GRANT_GROUPS: readonly RoleGrantGroup[];
 /** Groups a release removed, each with why: `migrate.ts --groups` refuses one by name (`sleep`, SMD-3315). */
