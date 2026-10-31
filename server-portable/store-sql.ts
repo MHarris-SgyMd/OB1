@@ -1057,8 +1057,8 @@ export class SqlStore implements ThoughtStore {
     if (reviewers !== "no-114") {
       for (const p of proposals) {
         const r = reviewers.get(p.id);
-        // An empty name is none, as the reply reads it (pass 2).
-        p.reviewer = r && (r.name || r.agentId) ? r : null;
+        // An empty name is none, as the reply reads it (pass 2); the agent's id stays out (pass 3, ListedReviewer).
+        p.reviewer = r && (r.name || r.agentId) ? { name: r.name, agentRecorded: r.agentId !== null, kind: r.kind, kindNow: r.kindNow } : null;
       }
     }
     return { proposals, next, remaining, reviewersRead: reviewers !== "no-114" };

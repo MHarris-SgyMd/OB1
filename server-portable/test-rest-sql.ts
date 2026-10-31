@@ -544,14 +544,16 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   const raw = await pair("raw");
   await sql`SELECT review_supersession_proposal(${raw.pid}::uuid, 'reject', NULL, NULL, NULL, false)`;
   const listedRest = await rest("GET", "/v1/proposals?status=all&limit=200");
-  const byId = new Map(((listedRest.body.proposals ?? []) as { id: string; status: string; reviewer: { name?: string; agentId?: string | null } | null }[]).map((p) => [p.id, p]));
+  const byId = new Map(((listedRest.body.proposals ?? []) as { id: string; status: string; reviewer: { name?: string; agentRecorded?: boolean; agentId?: unknown } | null }[]).map((p) => [p.id, p]));
   const listedMcp = await mcp("list_supersession_proposals", { status: "rejected", limit: 200 });
   const cBlock = listedMcp.text.split("\n\n").find((blk) => blk.includes(`proposal ${c.pid}`)) ?? "";
-  const scRow = ((listedMcp.sc.proposals ?? []) as { id: string; reviewer: { agentId?: string | null } | null }[]).find((p) => p.id === c.pid);
-  assert(listedRest.body.reviewersRead === true && byId.get(c.pid)?.reviewer?.name === "writer" && typeof byId.get(c.pid)?.reviewer?.agentId === "string"
+  const scRow = ((listedMcp.sc.proposals ?? []) as { id: string; reviewer: { agentRecorded?: boolean; agentId?: unknown } | null }[]).find((p) => p.id === c.pid);
+  // No agent id: whether one was recorded (review pass 3) — in REST's value and the MCP value both.
+  assert(listedRest.body.reviewersRead === true && byId.get(c.pid)?.reviewer?.name === "writer" && byId.get(c.pid)?.reviewer?.agentRecorded === true
+      && [...byId.values()].every((p) => p.reviewer === null || !("agentId" in p.reviewer))
       && byId.get(b.pid)?.reviewer?.name === "writer" && [...byId.values()].filter((p) => p.status === "pending").every((p) => p.reviewer === null)
       && byId.get(raw.pid)?.status === "rejected" && byId.get(raw.pid)?.reviewer === null
-      && /\n {3}decided by: writer, a key the registry has not classified/.test(cBlock) && typeof scRow?.reviewer?.agentId === "string" && listedMcp.sc.reviewersRead === true,
+      && /\n {3}decided by: writer, a key the registry has not classified/.test(cBlock) && scRow?.reviewer?.agentRecorded === true && !("agentId" in (scRow?.reviewer ?? {})) && listedMcp.sc.reviewersRead === true,
     `the listing names who decided each decided row, through REST and MCP, and none on a pending one (${cBlock.split("\n").pop()})`);
   const again = await review(b.pid, { decision: "accept" });
   assert(again.status === 409 && again.body.code === "REFUSED_ALREADY_ACCEPTED" && again.body.supersedingId === b.n, `an accepted row's accept: 409 REFUSED_ALREADY_ACCEPTED (${again.status} ${JSON.stringify(again.body)})`);

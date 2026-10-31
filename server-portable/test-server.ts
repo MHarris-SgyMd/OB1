@@ -6453,7 +6453,7 @@ console.log("\n[33] list_supersession_proposals names who decided each decided r
     reviewedAt: status === "pending" ? null : "2026-10-02T00:00:00.000Z", reviewNote: null, supersedingId: null,
     older: side("00000000-0000-4000-8000-0000000033b1"), newer: side("00000000-0000-4000-8000-0000000033b2"), lineage: false, sameCapturer: false, reviewer,
   });
-  const R = { name: "op", agentId: "00000000-0000-4000-8000-0000000033b9", kind: null, kindNow: "operator" };
+  const R = { name: "op", agentRecorded: true, kind: null, kindNow: "operator" };
   const page = (reviewersRead: boolean, rows: unknown[]) => renderSupersessionProposals({ ok: true, value: { status: "all", proposals: rows, cursor: null, remaining: 0, pastCursor: false, reviewersRead } } as never);
   const read = page(true, [row("00000000-0000-4000-8000-0000000033c1", "rejected", R), row("00000000-0000-4000-8000-0000000033c2", "pending", null), row("00000000-0000-4000-8000-0000000033c3", "accepted", null)]);
   const t = read.content[0].text;
@@ -6464,14 +6464,14 @@ console.log("\n[33] list_supersession_proposals names who decided each decided r
       && of("00000000-0000-4000-8000-0000000033c3").endsWith("\n   decided by: not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer")
       && !t.includes(REVIEWERS_UNREAD),
     `a decided row names who decided (the kind now, said so; none recorded, said so), a pending row none, and no short-of-114 note (${of("00000000-0000-4000-8000-0000000033c1").split("\n").pop()})`);
-  const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentId: string; kind: string | null; kindNow: string | null } | null }[] };
-  assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentId === R.agentId && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
-    "…its value carries the reviewer's agent and kinds, not its name");
+  const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentRecorded: boolean; kind: string | null; kindNow: string | null } | null }[] };
+  assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentRecorded === true && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
+    "…its value carries whether an agent was recorded and the kinds, not the name");
   // The listing's words for rows the server never decided: a keyless run's, and one with an agent and no name (pass 2).
-  const keyless = page(true, [row("00000000-0000-4000-8000-0000000033c5", "rejected", { name: "consolidate", agentId: null, kind: null, kindNow: null })]).content[0].text;
-  const nameless = page(true, [row("00000000-0000-4000-8000-0000000033c6", "accepted", { name: null, agentId: R.agentId, kind: "operator", kindNow: "operator" })]).content[0].text;
+  const keyless = page(true, [row("00000000-0000-4000-8000-0000000033c5", "rejected", { name: "consolidate", agentRecorded: false, kind: null, kindNow: null })]).content[0].text;
+  const nameless = page(true, [row("00000000-0000-4000-8000-0000000033c6", "accepted", { name: null, agentRecorded: true, kind: "operator", kindNow: "operator" })]).content[0].text;
   assert(keyless.includes("\n   decided by: consolidate, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)")
-      && nameless.includes(`\n   decided by: agent ${R.agentId}, operator, no name`),
+      && nameless.includes("\n   decided by: an agent with no name, operator"),
     "the listing: a keyless run's decision and an agent with no name, each in the listing's words");
   // A stale row (reopened, 067) names none though the page read them; a page from a REST core before PR 2 (no
   // reviewersRead) says neither a line nor the short-of-114 note (review pass 1 of PR 2).

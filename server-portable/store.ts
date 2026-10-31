@@ -765,8 +765,17 @@ export type SupersessionProposal = {
    * none (a raw call, or a decision before 114 that wrote no pointer), and on a
    * brain short of 114 (the page's reviewersRead says which).
    */
-  reviewer: Reviewer | null;
+  reviewer: ListedReviewer | null;
 };
+
+/**
+ * A decided proposal's reviewer as the listing gives it (SMD-3338 PR 2): the
+ * key's name and its kinds, and whether an agent was recorded — not which: no
+ * other read shows a key's agent id to another key, and it outlives a
+ * rotation, so it would tie one key's decisions together for any reader
+ * (review pass 3). The decision's own reply carries the caller's id.
+ */
+export type ListedReviewer = Omit<Reviewer, "agentId"> & { agentRecorded: boolean };
 
 /**
  * Who wrote a proposal's side (094, SMD-2707): the keys 050 and 073 stamp on
