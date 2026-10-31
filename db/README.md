@@ -2230,8 +2230,8 @@ the audit row names an agent and stamped it at the write; the rest stay NULL.
 Two CHECKs hold a kind to the registry's and to a row naming an agent, and an
 unreviewed row to no reviewer. `--list` prints `decided by:` on an accepted or
 rejected row, read beside the listing by the page's ids (the listing is not
-redefined, so the tool, `GET /v1/proposals` and the GUI do not show it yet:
-SMD-3338), with the kind the key had when it decided, else the registry's now
+redefined; the tool and `GET /v1/proposals` read it the same way since SMD-3338,
+the GUI not yet), with the kind the key had when it decided, else the registry's now
 ("classified after it decided"); `--accept`/`--reject` print it after deciding,
 read in the decision's transaction. Needs 008, 029, 046 and 050; a re-apply
 fills only rows with no reviewer. No grant moves: every role this README has
@@ -5921,8 +5921,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1885 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1048 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1886 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1049 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 436 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

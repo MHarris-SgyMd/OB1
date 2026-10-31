@@ -6406,4 +6406,33 @@ console.log("\n[32] review_supersession_proposal's reply, branch by branch: what
     `the grant's hint adds the server group alone; 029 missing is named; anything else nothing (${hint})`);
 }
 
+console.log("\n[33] list_supersession_proposals names who decided each decided row, and says once when a brain short of 114 records none (SMD-3338 PR 2)");
+{
+  const { renderSupersessionProposals, REVIEWERS_UNREAD } = await import("./render.ts");
+  const side = (id: string) => ({ id, content: "a side", created_at: "2026-10-01T00:00:00.000Z", edited: false, writer: null, supersededBy: null, takes: false, lapses: [], walkCapped: false });
+  const row = (id: string, status: string, reviewer: unknown) => ({
+    id, status, verdict: "newer_supersedes_older", confidence: 0.9, reason: null, similarity: 0.9, judgeKey: "consolidate:stub@p4", judgedAt: "2026-10-01T00:00:00.000Z",
+    reviewedAt: status === "pending" ? null : "2026-10-02T00:00:00.000Z", reviewNote: null, supersedingId: null,
+    older: side("00000000-0000-4000-8000-0000000033b1"), newer: side("00000000-0000-4000-8000-0000000033b2"), lineage: false, sameCapturer: false, reviewer,
+  });
+  const R = { name: "op", agentId: "00000000-0000-4000-8000-0000000033b9", kind: null, kindNow: "operator" };
+  const page = (reviewersRead: boolean, rows: unknown[]) => renderSupersessionProposals({ ok: true, value: { status: "all", proposals: rows, cursor: null, remaining: 0, pastCursor: false, reviewersRead } } as never);
+  const read = page(true, [row("00000000-0000-4000-8000-0000000033c1", "rejected", R), row("00000000-0000-4000-8000-0000000033c2", "pending", null), row("00000000-0000-4000-8000-0000000033c3", "accepted", null)]);
+  const t = read.content[0].text;
+  const blocks = t.split("\n\n");
+  const of = (id: string) => blocks.find((b) => b.includes(`proposal ${id}`)) ?? "";
+  assert(of("00000000-0000-4000-8000-0000000033c1").endsWith("\n   decided by: op, operator — classified after it decided")
+      && !of("00000000-0000-4000-8000-0000000033c2").includes("decided by:")
+      && of("00000000-0000-4000-8000-0000000033c3").endsWith("\n   decided by: not recorded — no actor named the decision")
+      && !t.includes(REVIEWERS_UNREAD),
+    `a decided row names who decided (the kind now, said so; none recorded, said so), a pending row none, and no short-of-114 note (${of("00000000-0000-4000-8000-0000000033c1").split("\n").pop()})`);
+  const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentId: string; kind: string | null; kindNow: string | null } | null }[] };
+  assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentId === R.agentId && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
+    "…its value carries the reviewer's agent and kinds, not its name");
+  const unreadDecided = page(false, [row("00000000-0000-4000-8000-0000000033c1", "rejected", null)]).content[0].text;
+  const unreadPending = page(false, [row("00000000-0000-4000-8000-0000000033c2", "pending", null)]).content[0].text;
+  assert(unreadDecided.split(REVIEWERS_UNREAD).length === 2 && !unreadDecided.includes("decided by:") && !unreadPending.includes(REVIEWERS_UNREAD),
+    "a brain short of 114: said once, with no decided-by line, and only where a decided row is listed");
+}
+
 report();

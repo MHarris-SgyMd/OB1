@@ -10,7 +10,7 @@
  * meet, and the normalisers below keep each row shape in one place.
  */
 
-import type { ReviewResult } from "./proposal-review.ts";
+import type { Reviewer, ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
 
@@ -346,7 +346,11 @@ export type ProposalPosition = { confidence: string; judgedAt: string; id: strin
  * gave, before a row the writers' read drops (review pass 1: counted after the drop, a row gone in between was
  * counted as one still to come).
  */
-export type ProposalPage = { proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number };
+export type ProposalPage = {
+  proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number;
+  /** Whether each decided row's reviewer was read (114, SMD-2608): false on a brain short of 114, whose rows record none (SMD-3338). */
+  reviewersRead: boolean;
+};
 
 /** A page of list_thoughts: the thoughts, and the last one's place when more follow (else null). */
 export type ThoughtListPage = { thoughts: ThoughtListItem[]; next: ListPosition | null };
@@ -754,6 +758,14 @@ export type SupersessionProposal = {
   lineage: boolean;
   /** Since migration 094 (SMD-2707): one agent captured both sides (ob1_capturer_of); false on a brain short of 094. */
   sameCapturer: boolean;
+  /**
+   * Who decided an accepted or rejected row (114's columns, SMD-2608), with
+   * the registry's kind now beside the kind the key had when it decided
+   * (SMD-3338): null on a pending or stale row, on a row that records none (a
+   * raw call, or a decision before 114 that wrote no pointer), and on a brain
+   * short of 114 (the page's reviewersRead says which).
+   */
+  reviewer: Reviewer | null;
 };
 
 /**
@@ -800,6 +812,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     newer: proposalSide(r, "newer"),
     lineage: r.lineage === true,
     sameCapturer: r.same_capturer === true,
+    reviewer: null,
   };
 }
 

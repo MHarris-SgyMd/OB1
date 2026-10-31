@@ -539,6 +539,16 @@ console.log("\n[3a] review_supersession_proposal (SMD-3338): a decision through 
   assert(hAcc.status === 200 && hAcc.body.written === false && !hRej.isError && hRej.sc.cleared === false && hRej.sc.previousPointerWritten === false
       && hRej.text.startsWith(`Rejected proposal ${h.pid}, which was accepted: ${h.n}'s pointer onto ${h.o} was there before the accept, so it stays`) && (await pointer(h.n)) === h.o,
     `a reject of an accept that wrote nothing leaves the pointer and says why (${hRej.text.split("\n")[0]})`);
+  // PR 2: the listing names who decided each decided row — REST's value and the MCP text — and none on a pending one.
+  const listedRest = await rest("GET", "/v1/proposals?status=all&limit=200");
+  const byId = new Map(((listedRest.body.proposals ?? []) as { id: string; status: string; reviewer: { name?: string; agentId?: string | null } | null }[]).map((p) => [p.id, p]));
+  const listedMcp = await mcp("list_supersession_proposals", { status: "rejected", limit: 200 });
+  const cBlock = listedMcp.text.split("\n\n").find((blk) => blk.includes(`proposal ${c.pid}`)) ?? "";
+  const scRow = ((listedMcp.sc.proposals ?? []) as { id: string; reviewer: { agentId?: string | null } | null }[]).find((p) => p.id === c.pid);
+  assert(listedRest.body.reviewersRead === true && byId.get(c.pid)?.reviewer?.name === "writer" && typeof byId.get(c.pid)?.reviewer?.agentId === "string"
+      && byId.get(b.pid)?.reviewer?.name === "writer" && [...byId.values()].filter((p) => p.status === "pending").every((p) => p.reviewer === null)
+      && /\n {3}decided by: writer, a key the registry has not classified/.test(cBlock) && typeof scRow?.reviewer?.agentId === "string" && listedMcp.sc.reviewersRead === true,
+    `the listing names who decided each decided row, through REST and MCP, and none on a pending one (${cBlock.split("\n").pop()})`);
   const again = await review(b.pid, { decision: "accept" });
   assert(again.status === 409 && again.body.code === "REFUSED_ALREADY_ACCEPTED" && again.body.supersedingId === b.n, `an accepted row's accept: 409 REFUSED_ALREADY_ACCEPTED (${again.status} ${JSON.stringify(again.body)})`);
 

@@ -24,7 +24,7 @@ import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { reviewProposal, type ReviewResult } from "./proposal-review.ts";
+import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ListCursorRefused, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
@@ -1046,7 +1046,14 @@ export class SqlStore implements ThoughtStore {
         if (!WRITERS_MISSING.test((e as Error).message)) throw e;
       }
     }
-    return { proposals: withWriters(rows, writers, read).map(normaliseProposal), next, remaining };
+    // SMD-3338: who decided each accepted or rejected row (114's columns, SMD-2608), by the page's ids as the writers
+    // are — the listing (110) is not widened, since 110 re-applied after a wider form fails. Probed, not caught: a
+    // brain short of 114 lists its rows as before, the page saying it read none.
+    const proposals = withWriters(rows, writers, read).map(normaliseProposal);
+    const decided = proposals.filter((p) => p.status === "accepted" || p.status === "rejected").map((p) => p.id);
+    const reviewers = await reviewersOf(this.sql, decided);
+    if (reviewers !== "no-114") for (const p of proposals) p.reviewer = reviewers.get(p.id) ?? null;
+    return { proposals, next, remaining, reviewersRead: reviewers !== "no-114" };
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {

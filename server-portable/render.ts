@@ -193,7 +193,10 @@ const safeProposals: Safe<ProposalsResult> = (v) => ({
     older: safeSide(p.older), newer: safeSide(p.newer),
     // SMD-2707: the flags are words and booleans; the writers' names are in the text.
     sameCapturer: p.sameCapturer, writerFlags: standingFlags(p),
+    // SMD-3338: who decided, as the decision's reply carries it — the agent and the kinds; the key's name is in the text.
+    reviewer: p.reviewer ? { agentId: p.reviewer.agentId, kind: oneOf(SAID_BY, p.reviewer.kind), kindNow: oneOf(SAID_BY, p.reviewer.kindNow) } : null,
   })),
+  reviewersRead: v.reviewersRead,
 });
 /** One side of a proposal in the value: its id, date and edit, and (094) its trust, whose text it is and what supersedes it. */
 const safeSide = (s: ProposalSide) => ({
@@ -768,7 +771,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
-  return render(o, ({ status, lineage, judgeKey, proposals: data, cursor, remaining, pastCursor }) => {
+  return render(o, ({ status, lineage, judgeKey, proposals: data, cursor, remaining, pastCursor, reviewersRead }) => {
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
     const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
     // SMD-3249: how many more follow, and the cursor that lists them.
@@ -834,7 +837,9 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       const review = p.status === "pending"
         ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL ${accept}   reject: … --reject ${p.id}` +
           (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
-        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${stoodSide(p) ? ` — the ${stoodSide(p)} side stands` : ""}${note ? `: ${note}` : ""}`;
+        : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${stoodSide(p) ? ` — the ${stoodSide(p)} side stands` : ""}${note ? `: ${note}` : ""}` +
+          // SMD-3338: who decided it (114), as the decision's reply names it — on a brain short of 114 said once, above.
+          (reviewersRead && (p.status === "accepted" || p.status === "rejected") ? `\n   decided by: ${reviewerText(p.reviewer)}` : "");
       // 070 (SMD-2313): a lineage pair — one side derived from the other
       // — is never proposed since 066; a row standing on one is the
       // reviewer's to reject, said with the command while it is theirs.
@@ -852,7 +857,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         // in review pass 2, spaces passed for the line's own words in 3, stripped look-alikes for the real key in 4).
         `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}\n${review}`;
     });
-    const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
+    const unread = (data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "") +
+      (!reviewersRead && data.some((p) => p.status === "accepted" || p.status === "rejected") ? ` ${REVIEWERS_UNREAD}` : "");
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
@@ -1623,6 +1629,9 @@ export const resetHint = (msg: string): string =>
     : "";
 
 // ── review_supersession_proposal (SMD-3338) ──────────────────────────────────
+
+/** The listing's word for a brain short of 114: its decided rows record no reviewer (SMD-2608). */
+export const REVIEWERS_UNREAD = "Who decided each row is not shown: this brain is short of migration 114 (cd db && bun migrate.ts --url <url>).";
 
 /**
  * Who the row records as deciding it (114, SMD-2608): the key's name and its
