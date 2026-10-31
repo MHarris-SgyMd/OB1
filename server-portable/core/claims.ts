@@ -3,8 +3,10 @@
 // REST core and the MCP server answer them alike. The database decides every
 // rule: who holds a claim (the key and the token), what is in the way, who may
 // force a release (an operator by agent id). This file passes the caller's
-// envelope, turns 115's answers into values and refusals, and keeps the token —
-// a bearer secret to its key — in claim_work's one answer and nowhere else: no
+// envelope and turns 115's answers into values and refusals, saying what 115
+// cannot: a claim held by the caller's own key, and one refused only because
+// the registry cannot give the caller's agent id. It keeps the token — a bearer
+// secret to its key — in claim_work's one answer and a bind parameter: no
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
@@ -29,14 +31,14 @@ export const TAKEN_OVER = "lapsed; taken over";
 /** 115's clamp on list_work_claims' limit. */
 const LIST_MAX = 1000;
 
-// ownKey: the claim's holder is the caller's own key — another session of it, or this one without its token — so the
-// words can say so rather than name the caller's key as if it were someone else's.
-const held = (principal: Principal) => (c: WorkClaim): HeldClaim => ({ id: c.id, issue: c.issue, piece: c.piece, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.holder === principal.name });
+/** The claim's holder is the caller's own key — another session of it, or this one without its token — so the words say so rather than name the caller's key as someone else's. */
+const ownKey = (principal: Principal, c: WorkClaim | null) => !!c && c.holder === principal.name;
+const held = (principal: Principal) => (c: WorkClaim): HeldClaim => ({ id: c.id, issue: c.issue, piece: c.piece, holder: c.holder, holderKind: c.holderKind, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: ownKey(principal, c) });
 /** A claim that ended, refused a renewal: by whom and why, and whether it was taken over — work to stop. */
 const releasedRefusal = (id: string, c: WorkClaim | null) =>
   refuse({ code: "CLAIM_RELEASED", retryable: false, id, releasedAt: c?.releasedAt ?? null, takenOver: c?.releaseReason === TAKEN_OVER, releasedBy: c?.releasedBy ?? null, reason: c?.releaseReason ?? null });
 const notYoursRefusal = (principal: Principal, id: string, c: WorkClaim | null, forced: boolean) =>
-  refuse({ code: "CLAIM_NOT_YOURS", retryable: false, id, holder: c?.holder ?? "", forced, ownKey: !!c && c.holder === principal.name, expiresAt: c?.expiresAt ?? null });
+  refuse({ code: "CLAIM_NOT_YOURS", retryable: false, id, holder: c?.holder ?? "", forced, ownKey: ownKey(principal, c), expiresAt: c?.expiresAt ?? null });
 /** A token as claim_work mints it: lower-case hex. One a model upper-cased is the same token. */
 const tokenOf = (t: string | undefined) => t?.toLowerCase();
 

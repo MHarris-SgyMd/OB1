@@ -821,7 +821,7 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
   }
 }
 
-console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a claim over MCP with one key refuses the same work over REST with another, naming the first; renew and release the holder's own, its token useless to another key; a read key lists and may not claim, a capture-only key neither; arguments 115 refuses answer 400 by their rule; an operator's forced release records its reason; the token in claim_work's own reply alone");
+console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a claim over MCP with one key refuses the same work over REST with another, naming the first; renew and release the holder's own, its token useless to another key; a read key lists and may not claim, a capture-only key neither; arguments 115 refuses answer 400 by their rule; an operator's forced release records its reason; the holder's own claim while the registry cannot give its id; two sessions of one key; a takeover; the swaps' hints and list_claims' cut; the token in claim_work's own reply alone");
 {
   type Claim = { id: string; issue: string; piece: string | null; holder: string; state: string; releasedByKind?: string | null; releaseReason?: string | null };
   const TOKEN = /^wc_[0-9a-f]{64}$/;

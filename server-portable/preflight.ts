@@ -2927,8 +2927,9 @@ if (configFailed) {
          * grant, soft (a role without it is refused the claim calls alone, naming work_claims); and statement logging,
          * which prints a bind value whole unless log_parameter_max_length is 0 — so a renewal's or a release's token
          * in a log — and the other settings that print one: a failed statement's parameters
-         * (log_parameter_max_length_on_error), sampled statements, auto_explain's and pgaudit's. Each read with
-         * current_setting(name, true), so an extension not loaded reads as null, not a fault. Nothing to read before 115: a skip, the ledger row says a brain is behind.
+         * (log_parameter_max_length_on_error), sampled statements, a verbose or parameter-printing auto_explain,
+         * debug_print_plan and pgaudit. Each read with current_setting(name, true), so an extension not loaded reads
+         * as null, not a fault. Nothing to read before 115: a skip, the ledger row says a brain is behind.
          */
         {
           // Constants of this file, spelled into the statement: Bun's unsafe binds a JS array as no text[].

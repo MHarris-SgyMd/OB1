@@ -64,7 +64,7 @@ export type Refusal =
   | { code: "REFUSED_LIVE_LEASE_NEEDS_WORKER"; retryable: false }    // release_stale_leases' include_live without a worker_id
   | { code: "RUN_WORKER_DRAIN_NOT_AVAILABLE"; retryable: false };    // run_worker without dry_run: true — the executing drain is deferred (SMD-2304)
 
-/** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder and times — never its label, another key's free text, nor anything that proves ownership. */
+/** A claim in the way of a claim or a renewal, as a refusal names it: its id, work, holder, times and whether the caller's own key holds it — never its label, another key's free text, nor anything that proves ownership. */
 export type HeldClaim = { id: string; issue: string; piece: string | null; holder: string; holderKind: string | null; claimedAt: string; expiresAt: string; ownKey: boolean };
 
 /** What is wrong with a caller's `metadata` argument (SMD-2014). */
