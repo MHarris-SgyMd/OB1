@@ -42,7 +42,7 @@
 
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5 space-y-4">
 		<p class="text-sm text-text-muted">
-			The consolidation pass proposes; nothing is written to a thought until a reviewer accepts a proposal (<code>cd db &amp;&amp; bun consolidate.ts --url $DATABASE_URL --accept</code> or <code>--reject</code>). Most confident first. Before an accept, read the pair in <code>--list</code> or the list_supersession_proposals tool: they name the writer flags and the pointers an accept would clear, which this page does not.
+			The consolidation pass proposes; nothing is written to a thought until a reviewer accepts a proposal (<code>cd db &amp;&amp; bun consolidate.ts --url $DATABASE_URL --accept</code> or <code>--reject</code>, or the review_supersession_proposal tool). Most confident first. Before an accept, read the pair in <code>--list</code> or the list_supersession_proposals tool: they name the writer flags and the pointers an accept would clear, which this page does not.
 		</p>
 		{#if data.proposals.length === 0}
 			<p class="text-sm text-text-muted" data-testid="empty">No {data.q.status === 'all' ? '' : `${data.q.status} `}proposal{data.q.lineage === 'only' ? ' on a lineage pair' : data.q.lineage === 'none' ? ' off a lineage pair' : ''}.</p>

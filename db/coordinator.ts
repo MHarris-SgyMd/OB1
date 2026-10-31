@@ -83,7 +83,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { followerKey, STAMP_TIMEOUT_MS, supervise, type FollowerState, type Supervisor } from "./supervise.ts";
 import { andList, consoleWriter, readNumber, wrapperLine, type Writer } from "./cli.ts";
-import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S } from "./pass-stamp.ts";
+import { BOARD_INTERVAL_RULE, DEFAULT_BOARD_INTERVAL_S, MIN_STAMP_EVERY_S, rowWriter } from "./pass-stamp.ts";
 import { closeThenExit, databaseUrlIfAny, openSql } from "./connect.ts";
 import { COORDINATOR_KEY, COORDINATOR_PASSES, STALE_AFTER_INTERVALS, type Coordinated, type CoordinatorValue } from "../server-portable/brain-info.ts";
 
@@ -385,10 +385,9 @@ export function coordinatorValue(o: {
 }
 
 /**
- * The row's writer: on each change, every `everyS`, and once more ended. One
- * write at a time, in order, each bounded by `timeoutMs` — the database may be
- * what is down — and its value taken as it runs, so its times are the stamp's.
- * A failure is said once until a write lands; the passes never wait on it.
+ * The row's writer: pass-stamp.ts's rowWriter — on each change, every
+ * `everyS`, and once more ended, one bounded write at a time, a failure said
+ * once — with this statement. The passes never wait on it.
  *
  * The row is one coordinator's at a time (review pass 3): a write replaces a
  * row of its own `id` or its own `host`, or one ended, stale or not JSON —
@@ -404,19 +403,14 @@ export function coordinatorValue(o: {
 function coordinatorRow(o: { sql: SQL | null; id: string; host: string; value: (ended: boolean) => CoordinatorValue; everyS: number; timeoutMs: number; err: (line: string) => void }): { changed(): void; end(): Promise<void> } {
   const sql = o.sql;
   if (sql === null) return { changed() {}, async end() {} };
-  let chain: Promise<void> = Promise.resolve();
-  let unwritten = false;
-  let notOurs = false;
-  let ended = false;
   const staleS = STALE_AFTER_INTERVALS * o.everyS;
-  const write = (end: boolean): Promise<void> => {
-    chain = chain.then(async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        // An object, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
-        // The CASE keeps a value that is not JSON from reaching the cast.
-        const wrote = (await Promise.race([
-          sql`INSERT INTO ob1_config (key, value) VALUES (${COORDINATOR_KEY}, (${o.value(end)}::jsonb)::text)
+  return rowWriter({
+    value: o.value,
+    everyS: o.everyS,
+    timeoutMs: o.timeoutMs,
+    // An object, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
+    // The CASE keeps a value that is not JSON from reaching the cast.
+    write: async (value) => ((await sql`INSERT INTO ob1_config (key, value) VALUES (${COORDINATOR_KEY}, (${value}::jsonb)::text)
               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
                 WHERE CASE WHEN ob1_config.value IS JSON OBJECT
                            THEN ob1_config.value::jsonb->>'id' IS NOT DISTINCT FROM ${o.id}
@@ -424,34 +418,10 @@ function coordinatorRow(o: { sql: SQL | null; id: string; host: string; value: (
                                 OR ob1_config.value::jsonb->'ended' = 'true'::jsonb
                                 OR ob1_config.updated_at < now() - make_interval(secs => ${staleS})
                            ELSE true END
-              RETURNING 1 AS wrote`,
-          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${o.timeoutMs / 1000} s`)), o.timeoutMs); }),
-        ])) as unknown[];
-        unwritten = false;
-        if (wrote.length === 0 && !notOurs) {
-          o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, from another host, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`);
-        }
-        notOurs = wrote.length === 0;
-      } catch (e) {
-        if (!unwritten) o.err(`coordinator: could not stamp ${COORDINATOR_KEY} (${(e as Error).message}) — the passes run on, and it is tried again at the next change and every ${o.everyS} s`);
-        unwritten = true;
-      } finally {
-        clearTimeout(timer);
-      }
-    });
-    return chain;
-  };
-  const tick = setInterval(() => void write(false), o.everyS * 1000);
-  return {
-    changed() {
-      if (!ended) void write(false);
-    },
-    async end() {
-      ended = true;
-      clearInterval(tick);
-      await write(true);
-    },
-  };
+              RETURNING 1 AS wrote`) as unknown[]).length > 0,
+    failed: (e) => o.err(`coordinator: could not stamp ${COORDINATOR_KEY} (${e.message}) — the passes run on, and it is tried again at the next change and every ${o.everyS} s`),
+    declined: () => o.err(`coordinator: ${COORDINATOR_KEY} is another live coordinator's, from another host, so this one's state is not stamped — two coordinators run their passes twice; this one takes the row over once the other's ends or goes stale (${staleS} s unstamped)`),
+  });
 }
 
 export type CoordinatorOptions = {

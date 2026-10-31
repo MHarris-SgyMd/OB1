@@ -327,6 +327,7 @@ const WORDS: Record<ToolName, Words> = {
   update_thought: { render: (o) => say.renderUpdate(o), fault: writeFault("update_thought failed: ") },
   delete_thought: { render: (o) => say.renderDelete(o), fault: writeFault("delete_thought failed: ") },
   reset_capture_stamp: { render: (o) => say.renderResetCaptureStamp(o), fault: writeFault("reset_capture_stamp failed: ", say.resetHint) },
+  review_supersession_proposal: { render: (o) => say.renderReviewProposal(o), fault: writeFault("review_supersession_proposal failed: ", say.reviewHint) },
   retry_failed: { render: (o) => say.renderRetryFailed(o), fault: writeFault("retry_failed failed: ") },
   release_stale_leases: { render: (o) => say.renderReleaseStaleLeases(o), fault: writeFault("release_stale_leases failed: ") },
   run_worker: { render: (o) => say.renderRunWorker(o), fault: writeFault("run_worker failed: ") },

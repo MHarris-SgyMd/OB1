@@ -17,6 +17,7 @@ export const OPERATIONS = {
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases" },
   reset_capture_stamp: { method: "POST", path: "/v1/thoughts/{id}/reset-capture-stamp" },
   retry_failed: { method: "POST", path: "/v1/workers/retry" },
+  review_supersession_proposal: { method: "POST", path: "/v1/proposals/{id}/review" },
   run_worker: { method: "POST", path: "/v1/workers/run" },
   scan_thoughts: { method: "POST", path: "/v1/scans" },
   search: { method: "POST", path: "/v1/search/compat" },

@@ -112,6 +112,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     update_thought: { id: ID, content: "new text", supersedes: null },
     delete_thought: { id: ID, detach_citations: true },
     reset_capture_stamp: { id: ID },
+    review_supersession_proposal: { id: ID, decision: "accept", direction: "older", note: "a note & more?", force: true },
     retry_failed: { work_type: "extract:x@p1" },
     release_stale_leases: { work_type: "extract:x@p1", include_live: false },
     run_worker: { work_type: "extract:x@p1", dry_run: true, limit: 3 },

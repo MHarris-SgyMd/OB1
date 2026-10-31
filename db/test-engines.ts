@@ -702,7 +702,7 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
 // words before connecting, and the session settings they make.
 // ---------------------------------------------------------------------------
 {
-  const { run, budgetSession, budgetMemory, schedulerSession, statementTimedOut } = await import("./sleep.ts");
+  const { run, budgetSession, budgetMemory, schedulerSession, SCHEDULER_TAG, statementTimedOut } = await import("./sleep.ts");
   const inProcess = async (opts: Record<string, unknown>) => {
     seen = 0;
     const w = capture();
@@ -731,8 +731,10 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   const noTimeout = budgetSession({ statementTimeout: 0, workMem: 1, maintenanceWorkMem: 1 });
   ok(JSON.stringify(session) === JSON.stringify({ statement_timeout: "300s", work_mem: "4MB", maintenance_work_mem: "64MB" }) && !("statement_timeout" in noTimeout)
       && JSON.stringify(budgetMemory({ workMem: 4, maintenanceWorkMem: 64 })) === JSON.stringify({ work_mem: "4MB", maintenance_work_mem: "64MB" })
-      // The scheduler's own: the memory settings and statement_timeout 0, beating a role's or database's own (review pass 2).
-      && JSON.stringify(schedulerSession({ workMem: 4, maintenanceWorkMem: 64 })) === JSON.stringify({ statement_timeout: "0", work_mem: "4MB", maintenance_work_mem: "64MB" }),
+      // The scheduler's own: the memory settings and statement_timeout 0, beating a role's or database's own (review pass 2),
+      // and its name, which a migration's stop cancels by (SMD-3379 PR 1c-1).
+      && JSON.stringify(schedulerSession({ workMem: 4, maintenanceWorkMem: 64 })) === JSON.stringify({ statement_timeout: "0", work_mem: "4MB", maintenance_work_mem: "64MB", application_name: SCHEDULER_TAG })
+      && /^ob1-sleep [0-9a-f]{8}$/.test(SCHEDULER_TAG),
      `sleep's budgetSession makes the three settings a pass's connections open with — no timeout at 0, so the role's or the database's own stands — and budgetMemory the two the scheduler's own take (${JSON.stringify(session)}; ${JSON.stringify(noTimeout)})`);
   // A statement timed out is 57014 in statement_timeout's words; an operator's cancel is 57014 too, and no budget's (review pass 1).
   const timedOut = { name: "PostgresError", errno: "57014", message: "canceling statement due to statement timeout" };

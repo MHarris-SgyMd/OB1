@@ -23,6 +23,9 @@ WORKDIR /app
 # bundle runs scripts/fork-index.ts's main block, which rewrites FORK.md.
 COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/connect.ts db/worker-bootstrap.ts db/ingest-*.ts db/reembed.ts db/weekly-digest.ts db/lease.ts db/pass-stamp.ts /app/db/
 COPY server-portable/*.ts /app/server-portable/
+# The trust words (core/filter.ts, no imports of its own), which the store's
+# proposal guard ranks WRITER flags by (standing.ts, SMD-3338).
+COPY server-portable/core/filter.ts /app/server-portable/core/
 COPY scripts/fragments.ts scripts/fork-index.ts /app/scripts/
 COPY evals/linear-corpus.ts /app/evals/
 # The emitters. A pipeline's emitter is copied here, at the path its line in

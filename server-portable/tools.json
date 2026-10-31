@@ -78,6 +78,10 @@
       "scope": "write"
     },
     {
+      "name": "review_supersession_proposal",
+      "scope": "write"
+    },
+    {
       "name": "retry_failed",
       "scope": "write"
     },

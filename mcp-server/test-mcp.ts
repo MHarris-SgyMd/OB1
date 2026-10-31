@@ -307,7 +307,7 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   assert(unsayable.isError && unsayable.sc.code === "FAILED" && unsayable.text.startsWith("Error: "), `a value that does not render: FAILED, coded (${JSON.stringify(unsayable.sc).slice(0, 80)})`);
   answer = () => ok({});
   // tools/list in index.ts's registration order.
-  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "retry_failed", "release_stale_leases", "run_worker", "job_status", "scan_thoughts"];
+  const order = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_supersession_proposals", "thought_stats", "thought_changes", "list_thought_ids", "list_logged_searches", "worker_status", "task_status", "brain_info", "capture_thought", "update_thought", "delete_thought", "reset_capture_stamp", "review_supersession_proposal", "retry_failed", "release_stale_leases", "run_worker", "job_status", "scan_thoughts"];
   const listed = (((await rpc("tools/list", {}, "write-raw")).body?.result as { tools?: { name: string }[] } | undefined)?.tools ?? []).map((t) => t.name);
   assert(same(listed, order), `tools/list in index.ts's order (${listed.slice(0, 4).join(",")}…)`);
   // /health decided by the first key the REST core knows, as index.ts authenticates the first.
