@@ -52,7 +52,7 @@ import { reviewProposal } from "../server-portable/proposal-review.ts";
 import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, readJudgeWindow, recordSubject, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -67,7 +67,7 @@ import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
-import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { passDumpFile, run as runSleep } from "./sleep.ts";
 import { readThoughts } from "./weekly-digest.ts";
@@ -8771,7 +8771,7 @@ if (want("10h")) {
       const nothingOther = await otherStatus(nothingIds);
       assert(naming.code === 0 && older === "added" && nothingRun.code === 3 && ownCalls - asked === 2 && nothingClaims.every((c) => c === "pending") && nothingStanding === 0 && nothingOther === "succeeded,succeeded"
         && /\n {2}2 of the judge model's last 2 answers, across runs, gave no subject \(2 naming nothing a key holds\), more than 20% of the 5 the alarm reads \(db\/subject-sweep\.ts, JUDGE_ALARM\): the model, not the thoughts, is likely at fault, so the sweep stops here\./.test(nothingRun.stderr)
-        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject it closed on 1 of them stays closed until each is asked again\. Once the model is right, run it again\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off\.\n/.test(nothingRun.stderr),
+        && /\n {4}Check OB1_JUDGE_MODEL \(stub-judge\), the chat endpoint and OB1_SUBJECT_REASONING\. The 2 thought\(s\) it named nothing for are back in the pool, and the out-of-date subject it closed on 1 of them stays closed until each is asked again\. Once the model is right, run it again\. The trip holds the pool's following runs, a scheduler's, until another judge model, or a run with --judge-checked once the model is checked\. If it is right already, thoughts that truly have no subject, asked together as a hand-back or a pooling again brings them, tripped it: --judge-checked --limit 2 asks the 2 handed back, first in the pool, with the alarm off\.\n/.test(nothingRun.stderr),
         `a judge naming nothing, empty or a ticket the thought does not name, stops the run at its second answer of five, exit 3: the two claims it finished back in the pool, the four it never took still there, the out-of-date subject it closed said, another work's claims as they were (the naming's exit ${naming.code}, the older subject ${older}; exit ${nothingRun.code}, ${ownCalls - asked} asked, claims ${nothingClaims.join(",")}, ${nothingStanding} standing, the other work's ${nothingOther}): ${nothingRun.stderr.trim().slice(0, 500)}`);
 
       // …and --judge-checked --limit 2, as the line offers, asks the two handed back, first in the pool, and no other
@@ -8814,8 +8814,8 @@ if (want("10h")) {
       const unreadBy = (await windowOf())?.by.join(",");
       assert(unreadRun.code === 3 && ownCalls - asked === 2 && unreadClaims.join(",") === "failed,failed,pending,pending,pending,pending" && unreadBy === "stub-judge"
         && /\n {2}2 of the judge model's last 2 answers, across runs, gave no subject \(2 not JSON of the expected shape\), more than 20% of the 5 the alarm reads/.test(unreadRun.stderr)
-        && /Once the model is right, run again with --retry-failed, which puts back the pool's failed claims, the 2 this run failed among them\.\n/.test(unreadRun.stderr) && !/back in the pool/.test(unreadRun.stderr)
-        && !/--judge-checked/.test(unreadRun.stderr),
+        && /Once the model is right, run again with --retry-failed, which puts back the pool's failed claims, the 2 this run failed among them\. The trip holds the pool's following runs, a scheduler's, until another judge model, or a run with --judge-checked once the model is checked\.\n/.test(unreadRun.stderr) && !/back in the pool/.test(unreadRun.stderr)
+        && !/If it is right already|--judge-checked --limit/.test(unreadRun.stderr),
         `…and one whose answers are not JSON, its two claims failed, for --retry-failed, no --judge-checked offered (exit ${unreadRun.code}, ${ownCalls - asked} asked, claims ${unreadClaims.join(",")}): ${unreadRun.stderr.trim().slice(0, 400)}`);
 
       // --retry-failed with the judge unchanged: the claims it returned come first, and a trip in a run that returned
@@ -8855,16 +8855,30 @@ if (want("10h")) {
         && /\n {2}2 of the judge model's last 2 answers, across runs, gave no subject \(2 naming nothing a key holds\)/.test(sameRun.stderr) && /The 2 thought\(s\) it named nothing for are back in the pool/.test(sameRun.stderr),
         `…and a judge left as it was trips again on the thoughts it handed back, and hands them back again (exit ${sameRun.code}, ${ownCalls - asked} asked, claims ${sameClaims.join(",")}): ${sameRun.stderr.trim().slice(0, 300)}`);
 
+      // The trip holds the pool's following runs, a scheduler's, which no one is there to pass --judge-checked to (PR
+      // 6a): one does not start under it, exit 3, nothing claimed or asked, and a run by hand, a dry run here, is told.
+      // Its stop is a backstop: a follower the hold let start would wait at the empty pool to its end, exit 0.
+      asked = ownCalls;
+      const heldDry = await alarmRun({ dryRun: true });
+      const heldFollow = await alarmRun({ follow: 1, signal: AbortSignal.timeout(20_000) });
+      const followHeldClaims = await statusOf([firstT, secondT]);
+      assert(heldFollow.code === 3 && ownCalls - asked === 0 && followHeldClaims.join(",") === "pending,pending"
+        && /\n {2}The garbage-judge alarm's last trip, at [^,]+, on answers from stub-judge, holds the pool's following runs, a scheduler's, until a run with --judge-checked or another judge model, and this run follows with stub-judge: it does not start \(db\/subject-sweep\.ts, JUDGE_ALARM\)\./.test(heldFollow.stderr)
+        && /^ {2}The garbage-judge alarm's last trip, at [^,]+, on answers from stub-judge, holds the pool's following runs, a scheduler's, until a run with --judge-checked or another judge model$/m.test(heldDry.stdout),
+        `the trip holds the pool's following runs: one does not start under it, exit 3, nothing claimed or asked, and a dry run is told (exit ${heldFollow.code}, ${ownCalls - asked} asked, claims ${followHeldClaims.join(",")}): ${heldFollow.stderr.trim().slice(0, 300)} | ${heldDry.stdout.trim().slice(0, 300)}`);
+
       // …where --judge-checked, for a judge checked and found right, runs with the alarm off: it asks both and finishes
-      // them, exit 0, the window as it was.
+      // them, exit 0, and lifts the hold, said, the window as it was but for that (PR 6a).
       const beforeChecked = await windowOf();
       asked = ownCalls;
       const checkedRun = await alarmRun({ judgeChecked: true });
       const checkedClaims = await statusOf([firstT, secondT]);
       const afterChecked = await windowOf();
       assert(checkedRun.code === 0 && ownCalls - asked === 2 && checkedClaims.join(",") === "succeeded,succeeded" && /; the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedRun.stdout)
-        && afterChecked !== null && JSON.stringify(afterChecked) === JSON.stringify(beforeChecked) && !/gave no subject/.test(checkedRun.stderr),
-        `…where --judge-checked runs with the alarm off: both asked and finished, exit 0, the window as it was (exit ${checkedRun.code}, ${ownCalls - asked} asked, claims ${checkedClaims.join(",")}, window ${JSON.stringify(afterChecked)?.slice(0, 120)}): ${checkedRun.stderr.trim().slice(0, 300)}`);
+        && beforeChecked?.held === true && afterChecked?.held === false && JSON.stringify({ ...afterChecked, held: true }) === JSON.stringify(beforeChecked)
+        && /^ {2}--judge-checked: the hold the garbage-judge alarm's last trip, at [^,]+, put on the pool's following runs is lifted$/m.test(checkedRun.stdout)
+        && !/holds the pool's following runs/.test(checkedRun.stdout) && !/gave no subject/.test(checkedRun.stderr),
+        `…where --judge-checked runs with the alarm off: both asked and finished, exit 0, the hold lifted, said, the window as it was but for that (exit ${checkedRun.code}, ${ownCalls - asked} asked, claims ${checkedClaims.join(",")}, window ${JSON.stringify(afterChecked)?.slice(0, 160)}): ${checkedRun.stderr.trim().slice(0, 300)}`);
 
       // A breakage that starts late is judged over the window, not diluted by the answers before it: one empty answer
       // in five is a fifth and no more, so the run goes on, and two in the last five stop it at the eighth. Only those
@@ -9458,6 +9472,151 @@ if (want("10h")) {
       garbledAnswers = savedGarbled;
       onOwn = null;
       owns.splice(owns.length - alarmOwns.length, alarmOwns.length);
+    }
+
+    // The options a scheduler drives the sweep with (PR 6a, sleep's from PR 6b), on the alarm's stage, the alarm off as
+    // for the cases before its own (a share of 1). Every run ends by its limit or its stop, a timeout's its backstop: a
+    // following run waits at an empty pool to its stop.
+    owns.push(["sweep-pass-good", '{"subject":"the sweep pass case work","deliverables":[]}']);
+    /** The words a following run says through its caller's row, in order, as sleep's `through` stands in for the row. */
+    const stamped: string[] = [];
+    const throughRow = {
+      key: "heartbeat:sleep", stamp: async (o: string) => { stamped.push(`stamp:${o}`); }, end: async (o: string) => { stamped.push(`end:${o}`); },
+      during: <T,>(p: Promise<T>) => p, alive: async () => {},
+    } as unknown as PassStamper;
+    const backstop = () => AbortSignal.timeout(60_000);
+    try {
+      await sql`DELETE FROM thoughts`;
+      await alarmAt(48, 1);
+      // Refused where they do not apply: a following dry run, a following run beside --judge-checked, which no
+      // scheduler can pass, a follow of no whole number of seconds, and session settings beside a client of the
+      // caller's, which they would not reach.
+      const followDry = await sweep({ follow: 1, dryRun: true });
+      const followChecked = await sweep({ follow: 1, judgeChecked: true });
+      const followHalf = await sweep({ follow: 0.5 });
+      const lent = new SQL({ url: URL_!, max: 1 });
+      const sessionLent = await caught((writer) => sweepSubjects({ sql: lent, env, session: { application_name: "ob1-sweep-lent" }, writer })).finally(() => lent.close({ timeout: 5 }));
+      assert(followDry.code === 2 && /^follow is a scheduler's run of the sweep, and a dry run writes, pools and asks nothing to follow: drop one of them\.$/m.test(followDry.stderr)
+          && followChecked.code === 2 && /^follow is a scheduler's run of the sweep, and --judge-checked is a hand run's word that the judge was checked, which no scheduler can give: drop one of them\.$/m.test(followChecked.stderr)
+          && followHalf.code === 2 && /^follow must be a decimal integer >= 0$/m.test(followHalf.stderr)
+          && sessionLent.code === 2 && /^session settings reach a client the sweep opens itself: pass url without sql, or set them on your client\.$/m.test(sessionLent.stderr),
+        `a scheduler's options are refused where they do not apply (exits ${followDry.code}, ${followChecked.code}, ${followHalf.code}, ${sessionLent.code}): ${[followDry, followChecked, followHalf, sessionLent].map((r) => r.stderr.trim().split("\n")[0].slice(0, 80)).join(" | ")}`);
+
+      // A following run waits at the empty pool, its word ok through its caller's row at each poll, claims a thought
+      // 113's trigger pools meanwhile, and ends at its stop, a follower's end, exit 0, its word stopped; banner false
+      // leaves its start's lines out.
+      const followStop = new AbortController();
+      const following = sweep({ follow: 1, stamper: throughRow, banner: false, signal: AbortSignal.any([followStop.signal, backstop()]) });
+      const polled = await pollUntil(async () => stamped.filter((w) => w === "stamp:ok").length >= 2, 20_000);
+      const [followT] = await seedAll(["Follow note 1: sweep-pass-good work, captured while a run follows."]);
+      const followTaken = await pollUntil(async () => (await claimOf(followT))?.status === "succeeded", 20_000);
+      followStop.abort();
+      const followRun = await following;
+      assert(polled && followTaken && followRun.code === 0 && /1 subject\(s\) recorded \(1 by stub-judge\)/.test(followRun.stdout) && /stopped after 1 thought\(s\)/.test(followRun.stderr)
+          && stamped.at(-1) === "end:stopped" && stamped.slice(0, -1).every((w) => w === "stamp:ok") && !/^ {2}(subjects|egress|agent):/m.test(followRun.stdout),
+        `a following run waits at the empty pool, says ok through its caller's row at each poll, claims a thought pooled meanwhile, and ends at its stop, exit 0, its word stopped, its start's lines left out (polled ${polled}, taken ${followTaken}; exit ${followRun.code}; words ${stamped.join(",")}): ${followRun.stdout.trim().slice(0, 300)} | ${followRun.stderr.trim().slice(0, 200)}`);
+
+      // …at its --limit it ends as a run does, exit 0, its word stopped; and its provider's refusal ends it, exit 2, the
+      // thought in hand back in the pool, its word failed.
+      stamped.length = 0;
+      const limitIds = await seedAll(["Follow note 2: sweep-pass-good work.", "Follow note 3: sweep-pass-good work."]);
+      const limitFollow = await sweep({ follow: 1, limit: 2, stamper: throughRow, signal: backstop() });
+      const limitWords = stamped.join(",");
+      stamped.length = 0;
+      const [refusedT] = await seedAll(["Follow note 4: sweep-pass-good work."]);
+      judgeMode = "refuse";
+      const refusedFollow = await sweep({ follow: 1, stamper: throughRow, signal: backstop() }).finally(() => { judgeMode = "answer"; });
+      assert(limitFollow.code === 0 && (await statusOf(limitIds)).join(",") === "succeeded,succeeded" && limitWords === "end:stopped"
+          && refusedFollow.code === 2 && (await claimOf(refusedT))?.status === "pending" && stamped.join(",") === "end:failed",
+        `…at its limit a following run ends, exit 0, stopped; its provider's refusal ends it, exit 2, failed (exits ${limitFollow.code} and ${refusedFollow.code}; words ${limitWords} and ${stamped.join(",")})`);
+
+      // The admit gate (SMD-3379 PR 1b): asked before the pool and before each claim, the run holding no claim and
+      // asking nothing while it waits; a stop there ends the run, 130, or a following run's 0, nothing claimed.
+      const gateIds = await seedAll(["Gate note 1: sweep-pass-good work."]);
+      await drop([refusedT]);
+      const gate = heldGate(1);
+      const gateAsked = ownCalls;
+      const gated = sweep({ admit: gate.admit, signal: backstop() });
+      const gateHeld = await pollUntil(async () => gate.waiting === 1, 20_000);
+      const heldClaims = (await statusOf(gateIds)).join(","), heldAsked = ownCalls - gateAsked;
+      gate.open();
+      const gateRun = await gated;
+      const [stillT] = await seedAll(["Gate note 2: sweep-pass-good work, pending through both stops."]);
+      const poolGate = heldGate(0), claimGate = heldGate(1);
+      const [poolStop, claimStop] = [new AbortController(), new AbortController()];
+      const stopsAsked = ownCalls;
+      const atPool = sweep({ admit: poolGate.admit, signal: poolStop.signal, follow: 1 });
+      const atClaim = sweep({ admit: claimGate.admit, signal: claimStop.signal });
+      const bothWait = await pollUntil(async () => poolGate.waiting === 1 && claimGate.waiting === 1, 20_000);
+      poolStop.abort();
+      claimStop.abort();
+      const [atPoolRun, atClaimRun] = await Promise.all([atPool, atClaim]);
+      const stillClaim = (await claimOf(stillT))?.status;
+      assert(gateHeld && heldClaims === "pending" && heldAsked === 0 && gateRun.code === 0 && gate.asked === 3 && (await statusOf(gateIds)).join(",") === "succeeded"
+          && bothWait && atPoolRun.code === 0 && /\n {2}stopped at the admit gate: the caller's signal was aborted; nothing was named, pooled or claimed\n/.test(atPoolRun.stderr) && poolGate.asked === 1
+          && atClaimRun.code === 130 && /stopped after 0 thought\(s\)/.test(atClaimRun.stderr) && stillClaim === "pending" && ownCalls === stopsAsked,
+        `the admit gate before the pool and each claim holds the run with nothing claimed or asked, and a stop there ends it, 0 following, 130 not, a pending thought left so (held ${gateHeld}: claims ${heldClaims}, ${heldAsked} asked; exit ${gateRun.code}, the gate asked ${gate.asked} times; stops: both waiting ${bothWait}, exits ${atPoolRun.code} at the pool's gate, asked ${poolGate.asked}, and ${atClaimRun.code} at the claim's, the thought ${stillClaim}, ${ownCalls - stopsAsked} asked): ${atPoolRun.stderr.trim().slice(0, 200)}`);
+      await drop([stillT]);
+
+      // The call in hand's own abort beside the stop (db/lease.ts's InHandAbort, sleep's N12 to come): none is in hand
+      // as the thoughts begin, nor one younger than the age asked; the call it aborts goes back unanswered and so
+      // unjudged, behind the pool, and the run goes on, asking it again.
+      await alarmAt(48, 1);
+      let abortInHand: InHandAbort = () => -1;
+      let atBegin = -1, younger = -1, aborted = -1;
+      const [slowT] = await seedAll(["Abort note 1: slow-judge sweep-pass-good work."]);
+      onOwn = async (thought) => {
+        if (!thought.includes("Abort note 1") || aborted !== -1) return;
+        younger = abortInHand(60_000);
+        aborted = abortInHand(0);
+      };
+      const abortAsked = ownCalls;
+      const abortRun = await sweep({ onPass: (_stop, a) => { abortInHand = a; atBegin = a(0); }, signal: backstop() }).finally(() => { onOwn = null; });
+      const abortWindow = await windowOf();
+      const abortClaim = (await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${slowT}::uuid AND work_type = ${POOL}`)[0] as { status: string; attempt_count: number };
+      assert(atBegin === 0 && younger === 0 && aborted === 1 && abortRun.code === 0 && ownCalls - abortAsked === 2 && abortClaim.status === "succeeded" && abortClaim.attempt_count === 1
+          && abortWindow?.answers.length === 1 && /^ {2}2 thought\(s\) in [^:]*: 1 subject\(s\) recorded \(1 by stub-judge\); 1 set back unanswered, the call in hand aborted by the caller$/m.test(abortRun.stdout),
+        `the call in hand's own abort passes over a call younger than asked and none at the start, and sets back the one it aborts, unanswered and unjudged, the run asking it again (at the start ${atBegin}, younger ${younger}, aborted ${aborted}; exit ${abortRun.code}, ${ownCalls - abortAsked} asked, claim ${JSON.stringify(abortClaim)}, ${abortWindow?.answers.length} answer(s) in the window): ${abortRun.stdout.trim().slice(-250)}`);
+
+      // The scheduler's session settings on the connections the run opens (connect.ts's `session`): its
+      // application_name read off pg_stat_activity while the judge is asked.
+      const [sessionT] = await seedAll(["Session note 1: sweep-pass-good work."]);
+      let sessionConns = -1;
+      onOwn = async (thought) => {
+        if (!thought.includes("Session note 1")) return;
+        sessionConns = ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'ob1-sweep-session'`) as { n: number }[])[0].n;
+      };
+      const sessionRun = await sweep({ session: { application_name: "ob1-sweep-session" }, signal: backstop() }).finally(() => { onOwn = null; });
+      assert(sessionRun.code === 0 && sessionConns >= 1 && (await claimOf(sessionT))?.status === "succeeded",
+        `the scheduler's session settings reach the connections the run opens (exit ${sessionRun.code}, ${sessionConns} of its connections named so)`);
+
+      // The trip's hold is its judge model's (judgeHeld): another judge model is neither held by it nor lifts it with
+      // --judge-checked; a window holds only beside a trip's stamp, read tolerantly.
+      await sql`
+        INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00', 'by', jsonb_build_array('stub-judge'), 'held', true)::text)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      const otherEnv = { ...env, OB1_JUDGE_MODEL: "stub-judge-2" };
+      const otherChecked = await sweep({ judgeChecked: true }, otherEnv);
+      const stillHeld = (await windowOf())?.held;
+      stamped.length = 0;
+      const otherStop = new AbortController();
+      const otherFollowing = sweep({ follow: 1, stamper: throughRow, signal: AbortSignal.any([otherStop.signal, backstop()]) }, otherEnv);
+      const otherPolled = await pollUntil(async () => stamped.includes("stamp:ok"), 20_000);
+      otherStop.abort();
+      const otherFollow = await otherFollowing;
+      const kept = (w: Record<string, unknown>) => readJudgeWindow(JSON.stringify({ pool: POOL, answers: [], ...w }), POOL).held;
+      const held = (by: string[], h: boolean) => ({ pool: POOL, answers: [], tripped: "2000-01-01 00:00:00+00", by, held: h });
+      assert(otherChecked.code === 0 && stillHeld === true && !/is lifted/.test(otherChecked.stdout) && otherPolled && otherFollow.code === 0
+          && judgeHeld(held(["stub-judge"], true), "stub-judge") && !judgeHeld(held(["stub-judge"], true), "stub-judge-2") && judgeHeld(held([], true), "stub-judge-2") && !judgeHeld(held(["stub-judge"], false), "stub-judge")
+          && kept({ tripped: "t", by: ["a"], held: true }) && !kept({ tripped: null, by: ["a"], held: true }) && !kept({ tripped: "t", by: ["a"], held: "true" }) && !kept({ tripped: "t", by: ["a"] })
+          && !readJudgeWindow(JSON.stringify({ pool: "another", answers: [], tripped: "t", by: ["a"], held: true }), POOL).held,
+        `the trip's hold is its judge model's: another neither is held nor lifts it, and a window holds only beside a trip's stamp (another's --judge-checked exit ${otherChecked.code}, held after ${stillHeld}; its following run polled ${otherPolled}, exit ${otherFollow.code})`);
+    } finally {
+      Object.assign(JUDGE_ALARM, { window: alarmDefaults.window, share: 1 });
+      onOwn = null;
+      judgeMode = "answer";
+      owns.splice(owns.findIndex(([w]) => w === "sweep-pass-good"), 1);
+      await sql`DELETE FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY}`;
     }
     // The filed ticket in SQL against metadataTicket, value by value: the key's length at its edge, and what JavaScript's
     // trim takes that the locale's [[:space:]] may not (review pass 4, cold read: a no-break space about an id).
