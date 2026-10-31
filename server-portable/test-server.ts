@@ -3248,7 +3248,7 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   const { normaliseProposal } = await import("./store.ts");
   const capped = render([proposal(1, op, hook, { newer: { ...proposal(1, op, hook).newer, walkCapped: true } })]);
   const cv = (capped as unknown as { structuredContent: { proposals: { older: Record<string, unknown>; newer: Record<string, unknown> }[] } }).structuredContent.proposals[0];
-  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full"
+  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full"
       && capped.content[0].text.includes(`By: session-hook (agent) · trust agent · a capture-only key's text\n      ${walkCappedLine()}`) && capped.content[0].text.split(walkCappedLine()).length === 2
       && cv.newer.walkCapped === true && !("walkCapped" in cv.older) && !r1.content[0].text.includes(walkCappedLine()),
     `a side the listing left unread says so under it, once, and the value marks it; a side read carries neither (${cv.newer.walkCapped}, ${"walkCapped" in cv.older})`);
@@ -6378,6 +6378,69 @@ console.log("\n[31] A search answered without a vector says so — search_though
     `search: nothing found without a vector is an error naming the endpoint, what was matched and why nothing came of it; its value the code, the word and what was matched (${unavailable.content[0].text.slice(-200)})`);
   const plainCompat = renderSearch({ ok: true, value: { results: [] } } as never);
   assert(plainCompat.content[0].text === '{"results":[]}', "…and with a vector, the shape exactly");
+}
+
+console.log("\n[32] review_supersession_proposal's reply, branch by branch: what a reject undid of an accept or replaced, the lapse, the reviewer's kind, each refusal's either side, and the grant's hint (SMD-3338 review pass 3)");
+{
+  const { renderReviewProposal, reviewHint } = await import("./render.ts");
+  const P = "00000000-0000-4000-8000-0000000033a1", N = "00000000-0000-4000-8000-0000000033a2", O = "00000000-0000-4000-8000-0000000033a3", L = "00000000-0000-4000-8000-0000000033a4";
+  const AG = "00000000-0000-4000-8000-0000000033a5";
+  const base = {
+    id: P, decision: "reject", status: "rejected", forced: false, previousStatus: "pending", previousPointerWritten: null, supersedingId: null, supersededId: null,
+    written: null, cleared: false, lapsed: [], reviewer: { name: "op", agentId: AG, kind: "operator", kindNow: "operator" }, reviewerRecorded: true, writersUnread: false, caller: "op",
+  };
+  const say = (v: Record<string, unknown>) => renderReviewProposal({ ok: true, value: { ...base, ...v } } as never);
+  const text = (v: Record<string, unknown>) => say(v).content[0].text;
+  const head = (v: Record<string, unknown>) => text(v).split("\n")[0];
+  // A reject: of a pending row, of an accept it cleared, of one whose pointer was there before, of one re-pointed since, of a rejected row.
+  assert(head({}) === `Rejected proposal ${P}.`, `a reject of a pending row says only that (${head({})})`);
+  const cleared = head({ previousStatus: "accepted", previousPointerWritten: true, cleared: true, supersedingId: N, supersededId: O });
+  assert(cleared === `Rejected proposal ${P}, which was accepted: the supersedes pointer its accept wrote is cleared (${N} no longer supersedes ${O}). A capture-only pointer that accept cleared stays cleared.`,
+    `…of an accept it cleared: the pair, and what it leaves (${cleared})`);
+  const before = head({ previousStatus: "accepted", previousPointerWritten: false, supersedingId: N, supersededId: O });
+  assert(before.startsWith(`Rejected proposal ${P}, which was accepted: ${N}'s pointer onto ${O} was there before the accept, so it stays`), `…of an accept that wrote nothing: the pointer stays (${before})`);
+  const since = head({ previousStatus: "accepted", previousPointerWritten: true, supersedingId: N, supersededId: O });
+  assert(since === `Rejected proposal ${P}, which was accepted: ${N}'s pointer was changed since, so there was nothing of the accept's to clear.`, `…of an accept re-pointed since: nothing to clear (${since})`);
+  const again = head({ previousStatus: "rejected" });
+  assert(again === `Rejected proposal ${P} again: this decision, its note and its reviewer replace the earlier reject's.`, `…of a rejected row: it replaces the earlier (${again})`);
+  // An accept: its pointer, one already held, a lapse, a brain short of 094 or 114.
+  const acc = { decision: "accept", status: "accepted", written: true, cleared: null, supersedingId: N, supersededId: O };
+  assert(head(acc) === `Accepted proposal ${P}: ${N} now supersedes ${O}.` && head({ ...acc, written: false }).endsWith("(the pointer already held that value, and a reject will leave it)."),
+    `an accept says the pointer, and one already held that a reject leaves (${head({ ...acc, written: false })})`);
+  const lapse = text({ ...acc, lapsed: [{ id: L, onto: N }] });
+  assert(lapse.includes(`Lapsed: ${L} no longer supersedes ${N} — its capturer's capture-only pointer, cleared by this accept; a reject of this proposal does not restore it.`), "…each lapsed pointer, and that a reject does not restore it");
+  const unread = /The WRITER check did not run: this brain is short of migration 094/;
+  assert(unread.test(text({ ...acc, writersUnread: true })) && !unread.test(text(acc)), "…the WRITER check unrun on a brain short of 094 said, and only there");
+  const no114 = /The row records no reviewer: this brain is short of migration 114/;
+  assert(no114.test(text({ reviewerRecorded: false, reviewer: null })) && !no114.test(text({})), "…a brain short of 114 said, and only there");
+  // Who decided: the kind then; else the registry's now, said so; neither; no agent; none; yours.
+  const by = (r: Record<string, unknown> | null, caller = "someone else") => text({ reviewer: r, caller }).split("\n").pop();
+  assert(by({ name: "op", agentId: AG, kind: "agent", kindNow: "operator" }) === "Decided by: op, agent."
+      && by({ name: "op", agentId: AG, kind: null, kindNow: "operator" }) === "Decided by: op, operator — classified after it decided."
+      && by({ name: "op", agentId: AG, kind: null, kindNow: null }) === "Decided by: op, a key the registry has not classified."
+      && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (the key did not resolve in the registry)."
+      && by(null) === "Decided by: not recorded — no actor named the decision."
+      && by({ name: "op", agentId: AG, kind: "operator", kindNow: "operator" }, "op") === "Decided by: op (your key), operator.",
+    `the reviewer: its kind then, else now said so, neither, no agent, none, yours (${by({ name: "op", agentId: AG, kind: null, kindNow: "operator" })})`);
+  // Refusals, each condition's two sides.
+  const refused = (r: Record<string, unknown>) => renderReviewProposal({ ok: false, refusal: { retryable: false, id: P, ...r } } as never).content[0].text;
+  const lineage = (status: string | null) => refused({ code: "REFUSED_LINEAGE_PAIR", status, flags: [] });
+  assert(lineage("rejected").includes("Left as it is, it stays rejected, the expected decision") && lineage("pending").includes("Rejecting it is the expected decision")
+      && lineage("pending").includes("force: true writes the pointer anyway"), "a lineage pair: a rejected row stays rejected, a pending one is to reject; force named as writing the harm");
+  const flag = [{ stands: "newer", captureOnly: true, lowerTrust: false, how: "would" }];
+  const writer = (status: string, edited: boolean) => refused({ code: "REFUSED_WRITER", status, flags: flag, edited, lapses: { older: 0, newer: 0 } });
+  assert(writer("rejected", false).endsWith("; left as it is, it stays rejected.") && writer("pending", false).endsWith(", or reject it.")
+      && writer("pending", true).includes("(force also accepts over a text edited since judged)") && !writer("pending", false).includes("edited since judged"),
+    "a WRITER flag: a rejected row stays rejected, a pending one may be rejected; an edited text said only when edited");
+  const cycle = (chainTooLong: boolean) => refused({ code: "REFUSED_PROPOSAL_WOULD_CYCLE", supersedingId: N, supersededId: O, chainTooLong });
+  assert(cycle(true).includes("is longer than update_thought walks (1000 thoughts)") && !cycle(true).includes("would close a loop —") && cycle(false).includes("would close a loop —"),
+    "a cycle: a chain too long to walk is not called a loop, and a loop is");
+  const odd = refused({ code: "NOT_FOUND", id: "x\nID: forged" });
+  assert(odd.startsWith('No proposal with id "x ID: forged"') && !odd.includes("\n"), `no such proposal: the id quoted, on one line (${odd.slice(0, 60)})`);
+  // The grant's hint: the server group alone, added — not every group.
+  const hint = reviewHint("permission denied for table supersession_proposals");
+  assert(hint.includes("--grant <role> --groups server") && reviewHint("function review_supersession_proposal(uuid) does not exist").includes("migration 029") && reviewHint("connection refused") === "",
+    `the grant's hint adds the server group alone; 029 missing is named; anything else nothing (${hint})`);
 }
 
 report();
