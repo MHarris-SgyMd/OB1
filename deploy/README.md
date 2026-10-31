@@ -3427,6 +3427,20 @@ decision 4, amended), and not a brain key. To change it, edit
 `OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
 and provision, which patches n8n's copy.
 
+**The runner's status row** (SMD-3476 PR 3b). The runner stamps
+`heartbeat:orchestration-runner` in `ob1_config` at its start, at each run's
+start and end, every minute, and once more at its stop: the pipelines it
+holds, those running, and how its last run ended. The brain's status surface
+reads it — `task_status` (`GET /v1/status`), preflight's `tasks` row and
+`brain_info` — so the runner shows there as running, idle, stale or stopped
+beside the coordinator's passes, its last run in words. A runner stopped with
+its profile (`compose stop`, an `up` without `--profile orchestration`) ends its
+row and is said, not warned on; one that went stale — it died, or lost the
+database — is, its fix `compose --profile orchestration up -d
+orchestration-runner`, or for a profile retired for good `DELETE FROM ob1_config
+WHERE key = 'heartbeat:orchestration-runner'`. Its role's worker
+group writes the row, so the grants below are unchanged.
+
 **The runner's database role** (SMD-2289). The runner reaches Postgres as
 `ob1_orchestration_runner`, not the superuser. It is a LOGIN role that is not
 a superuser and owns nothing. It holds the grant groups its ingester and
