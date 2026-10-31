@@ -1691,9 +1691,10 @@ else {
   assert(new RegExp(`${rx(KEY)}: 6 thoughts — .* — the sleep scheduler runs this key`).test(otherCheckout) && !/stopped before it finished/.test(otherCheckout),
          `a checkout configured otherwise still reads the scheduler's key by its row (${otherCheckout})`);
   // A switch made since its word — the record this configuration's now — is the scheduler's to take up, not "finish it" (review pass 2).
-  await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: recordedBefore } } });
+  // Held too, as the scheduler lists it, the set-aside's words alone say it (SMD-3379 PR 1c-2 review pass 3).
+  await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: recordedBefore } }, holds: [{ pass: "reembed", why: "model-switch", until: null }] });
   const schedMade = await run(SQL_ENV);
-  assert(/the sleep scheduler runs this key, .*; set aside until its next poll — the brain records this stack's model now, or none — and the next sleep with work takes this key up/.test(row(schedMade.out, "re-embed pass")) && !/Finish it/.test(fix(schedMade.out, "re-embed pass")),
+  assert(/the sleep scheduler runs this key, .*; set aside until its next poll — the brain records this stack's model now, or none — and the next sleep with work takes this key up/.test(row(schedMade.out, "re-embed pass")) && !/held out/.test(row(schedMade.out, "re-embed pass")) && !/Finish it/.test(fix(schedMade.out, "re-embed pass")),
          `a switch made since the scheduler's word leaves the key the scheduler's (${row(schedMade.out, "re-embed pass")} | ${fix(schedMade.out, "re-embed pass")})`);
   // A scheduler stopped: "finish it" by hand, or start the scheduler, which runs it — one or the other (review pass 3).
   await hb("heartbeat:sleep", { running: false, outcome: "stopped", ended: true });
@@ -4282,11 +4283,14 @@ else {
       // paused with a pass waiting for its provider, the wait said beside the pause, and warned of (review pass 2).
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, slept: { from: await at(7200), to: await at(3600) }, paused: { since: await at(40) } }), 10);
       const betweenRow = row((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, paused: { since: await at(40) } }), 10);
+      const noSleepRow = row((await run(LOG_ON)).out, "sleep");
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null }, paused: { since: await at(40) } }), 10);
       const pausedWaitRow = row((await run(LOG_ON)).out, "sleep");
       assert(/✓\s+sleep\s+paused by a live call for 40 s \(last stamped 10 s ago, every 60 s\); its work waiting, the next sleep beginning once the brain is quiet — the last sleep ended 60 min ago; a live write pauses it; a search does not$/.test(betweenRow)
+             && /✓\s+sleep\s+paused by a live call for 40 s \(last stamped 10 s ago, every 60 s\); its work waiting, the next sleep beginning once the brain is quiet — no sleep yet; a live write pauses it/.test(noSleepRow)
              && /!\s+sleep\s+paused by a live call for 40 s, waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); its passes waiting between thoughts, going on once the brain is quiet, extract waiting for the provider at its start — the sleep began 2 min ago; a live write pauses it/.test(pausedWaitRow),
-        `paused between sleeps, the work waits for the next; paused with a provider wait, the wait said and warned of (${betweenRow} | ${pausedWaitRow})`);
+        `paused between sleeps, the work waits for the next, or before the first; paused with a provider wait, the wait said and warned of (${betweenRow} | ${noSleepRow} | ${pausedWaitRow})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);

@@ -4998,7 +4998,7 @@ if (configFailed) {
               : h.paused
                 ? s && !s.to
                   ? `its passes waiting between thoughts, going on once the brain is quiet${waitingFor || waitingMid ? `, ${waitWords}` : ""} — the sleep began ${since(s.from)} ago`
-                  : `its work waiting, the next sleep beginning once the brain is quiet${s?.to ? ` — the last sleep ended ${since(s.to)} ago` : ""}`
+                  : `its work waiting, the next sleep beginning once the brain is quiet — ${s?.to ? `the last sleep ended ${since(s.to)} ago` : "no sleep yet"}`
               : h.running
                 ? waitingFor || waitingMid
                   ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
