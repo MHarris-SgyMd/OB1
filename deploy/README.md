@@ -2146,12 +2146,17 @@ supersede which"):
   does a whole brain);
 - an import dated older than thoughts already judged.
 
-**Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged
-again by the next pass, which settles it unless the conflict still stands,
-when it waits for a person again (067). `--list` shows the queue.
-`--accept <id>` or `--reject <id>` decides one, with `--note` giving your
-reason. When the listing says the judge did not state which thought is
-current, an accept needs `--direction newer` or `--direction older`.
+**Consolidation applies no proposal.** Each proposal waits for a
+reviewer: a person, or an agent's write key through the
+`review_supersession_proposal` tool (SMD-3338), the proposal recording
+the key (its kind too, once you classify it). One whose text moved under
+it (a stale row) is judged again by the next pass, which settles it
+unless the conflict still stands, when it waits for a reviewer again
+(067). `--list` shows the queue. `--accept <id>` or `--reject <id>`
+decides one, with `--note` giving your reason; the tool takes the same
+over MCP or REST (`POST /v1/proposals/{id}/review`). When the listing
+says the judge did not state which thought is current, an accept needs
+`--direction newer` or `--direction older`.
 
 Since migration 084 the pass also stores its related, evolves and duplicate
 verdicts as `relation` facets on the newer thought — edges, not proposals,
@@ -3421,6 +3426,20 @@ The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
 `OB1_RUNNER_KEY`, recreate the runner (`compose up -d orchestration-runner`),
 and provision, which patches n8n's copy.
+
+**The runner's status row** (SMD-3476 PR 3b). The runner stamps
+`heartbeat:orchestration-runner` in `ob1_config` at its start, at each run's
+start and end, every minute, and once more at its stop: the pipelines it
+holds, those running, and how its last run ended. The brain's status surface
+reads it — `task_status` (`GET /v1/status`), preflight's `tasks` row and
+`brain_info` — so the runner shows there as running, idle, stale or stopped
+beside the coordinator's passes, its last run in words. A runner stopped with
+its profile (`compose stop`, an `up` without `--profile orchestration`) ends its
+row and is said, not warned on; one that went stale — it died, or lost the
+database — is, its fix `compose --profile orchestration up -d
+orchestration-runner`, or for a profile retired for good `DELETE FROM ob1_config
+WHERE key = 'heartbeat:orchestration-runner'`. Its role's worker
+group writes the row, so the grants below are unchanged.
 
 **The runner's database role** (SMD-2289). The runner reaches Postgres as
 `ob1_orchestration_runner`, not the superuser. It is a LOGIN role that is not
