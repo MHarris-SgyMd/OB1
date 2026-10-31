@@ -23,7 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   bun db/extract-entities.ts --url … --subjects [rules]     # each pooled thought's own subject (db/subject-sweep.ts, migration 113's pool; --switch-key when another pool is named; its --timeout is 900 s with the judge model's reasoning on, 300 off)
+ *   bun db/extract-entities.ts --url … --subjects [rules]     # each pooled thought's own subject (db/subject-sweep.ts, migration 113's pool; --switch-key when another pool is named; its --timeout is 900 s with the judge model's reasoning on, 300 off; --judge-checked, its garbage-judge alarm off, for a judge model checked and found right)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
@@ -216,11 +216,11 @@ const FLAGS = {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one",
   follow: "optional", dump: "one", job: "one",
   status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
-  subjects: "optional",
+  subjects: "optional", "judge-checked": "none",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>", subjects: "[rules] (the subject sweep: with --url, --limit, --timeout, --retry-failed, --switch-key, --dry-run)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>", subjects: "[rules] (the subject sweep: with --url, --limit, --timeout, --retry-failed, --switch-key, --judge-checked, --dry-run)" };
 /** The flags the subject sweep reads (db/subject-sweep.ts): any other beside --subjects is the pass's, refused rather than dropped. */
-const SUBJECT_FLAGS: ReadonlySet<string> = new Set(["subjects", "url", "limit", "timeout", "retry-failed", "switch-key", "dry-run"]);
+const SUBJECT_FLAGS: ReadonlySet<string> = new Set(["subjects", "url", "limit", "timeout", "retry-failed", "switch-key", "judge-checked", "dry-run"]);
 
 /**
  * What one extraction run is asked to do — the CLI's flags, typed (SMD-2304).
@@ -2211,7 +2211,7 @@ if (import.meta.main) {
     const value = cli.value("subjects");
     const others = Object.keys(FLAGS).filter((f) => !SUBJECT_FLAGS.has(f) && cli.has(f as keyof typeof FLAGS));
     if ((value !== undefined && value !== "rules") || others.length > 0) {
-      console.error(`extract-entities.ts: --subjects takes "rules" or no value, and goes with --url, --limit, --timeout, --retry-failed, --switch-key and --dry-run alone${others.length ? `, not ${others.map((f) => `--${f}`).join(", ")}` : ""}.\n${flagList(FLAGS, HINTS)}`);
+      console.error(`extract-entities.ts: --subjects takes "rules" or no value, and goes with --url, --limit, --timeout, --retry-failed, --switch-key, --judge-checked and --dry-run alone${others.length ? `, not ${others.map((f) => `--${f}`).join(", ")}` : ""}.\n${flagList(FLAGS, HINTS)}`);
       process.exit(2);
     }
     const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
@@ -2220,8 +2220,13 @@ if (import.meta.main) {
     const sql = openSql(url, { max: 2 });
     let uninstall = () => {};
     await closeThenExit(sql, async () => {
-      return sweepSubjects({ sql, url, model: value !== "rules", limit, timeout, retryFailed: cli.has("retry-failed"), switchKey: cli.has("switch-key"), dryRun: cli.has("dry-run"), onPass: (stop) => { uninstall = stopOnSignals(stop); } }).finally(() => uninstall());
+      return sweepSubjects({ sql, url, model: value !== "rules", limit, timeout, retryFailed: cli.has("retry-failed"), switchKey: cli.has("switch-key"), judgeChecked: cli.has("judge-checked"), dryRun: cli.has("dry-run"), onPass: (stop) => { uninstall = stopOnSignals(stop); } }).finally(() => uninstall());
     });
+  }
+  // The sweep's own flag, which the pass would drop: refused, as the pass's beside --subjects are.
+  if (cli.has("judge-checked")) {
+    console.error(`extract-entities.ts: --judge-checked goes with --subjects alone: it turns the subject sweep's garbage-judge alarm off.\n${flagList(FLAGS, HINTS)}`);
+    process.exit(2);
   }
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
