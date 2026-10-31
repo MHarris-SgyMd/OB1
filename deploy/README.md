@@ -992,7 +992,9 @@ policy at boot, so every reboot left a brain serving and not sleeping (on
 until started by hand). Each is now a child of the coordinator
 (`db/coordinator.ts`), which runs the passes `OB1_PASSES` names, each through
 `db/supervise.ts`, and, when one ends on its own — a refusal (exit 2), a crash — runs it
-again after 1, 2, 4, 8, then every 15 minutes, its heartbeat ended with when.
+again after 1, 2, 4, 8, then every 15 minutes, its heartbeat ended with when;
+the sleep scheduler that ends on a migration (exit 75) it runs again at once
+(SMD-3379 PR 1c-1).
 The container never exits, so the runtime has nothing to restart in a loop. A
 fix outside `deploy/.env` (a model pulled, the migrations applied) is met at
 the next try; one in `deploy/.env` needs the coordinator recreated, which
@@ -2144,12 +2146,17 @@ supersede which"):
   does a whole brain);
 - an import dated older than thoughts already judged.
 
-**Consolidation applies no proposal.** Each proposal waits for a person. One whose text moved under it (a stale row) is judged
-again by the next pass, which settles it unless the conflict still stands,
-when it waits for a person again (067). `--list` shows the queue.
-`--accept <id>` or `--reject <id>` decides one, with `--note` giving your
-reason. When the listing says the judge did not state which thought is
-current, an accept needs `--direction newer` or `--direction older`.
+**Consolidation applies no proposal.** Each proposal waits for a
+reviewer: a person, or an agent's write key through the
+`review_supersession_proposal` tool (SMD-3338), the proposal recording
+the key (its kind too, once you classify it). One whose text moved under
+it (a stale row) is judged again by the next pass, which settles it
+unless the conflict still stands, when it waits for a reviewer again
+(067). `--list` shows the queue. `--accept <id>` or `--reject <id>`
+decides one, with `--note` giving your reason; the tool takes the same
+over MCP or REST (`POST /v1/proposals/{id}/review`). When the listing
+says the judge did not state which thought is current, an accept needs
+`--direction newer` or `--direction older`.
 
 Since migration 084 the pass also stores its related, evolves and duplicate
 verdicts as `relation` facets on the newer thought — edges, not proposals,
@@ -2213,7 +2220,10 @@ vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call), then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. Anything that refuses re-embed — the embedding
+order above is built in. A migration run beside it — `migrate.ts`' lock held
+at two polls, or the ledger moved — stops its passes and ends it with exit
+75, and the coordinator starts it again at once to wait the migration out
+(SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses re-embed — the embedding
 key, credit, the model not served — or its endpoint down sets it down for
 that sleep, said in its log and on `heartbeat:sleep`, and extraction and
 consolidation run on; the next sleep with work tries again. **Upgrading a

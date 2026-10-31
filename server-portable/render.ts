@@ -19,7 +19,7 @@
 
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
-import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
+import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
@@ -30,7 +30,8 @@ import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
-import type { Captured, Deleted, HeadWindow, KeptKey, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
+import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -326,57 +327,10 @@ export function actorLine(m: Record<string, unknown>): string | null {
 // the trust words, where the operator GUI reads it too (SMD-2280).
 export { INGESTED_NOTICE, ingestedNotice };
 
-/** 074's ladder as a rank — operator 3, agent 2, ingested 1 — and 0 for no trust recorded or a word off it, below every word (filter.ts). */
-export function trustRank(t: string | null | undefined): number {
-  const i = (TRUST as readonly string[]).indexOf(t ?? "");
-  return i < 0 ? 0 : TRUST.length - i;
-}
-
-/**
- * Why a proposal is flagged WRITER (SMD-2707): the side that stands, which of
- * the two rules it meets, and how sure the side is — `stood` on an accepted
- * row (its superseding_id), `would` when the verdict or --direction names it,
- * `if` for each side an undirected verdict leaves to the reviewer.
- */
-export type StandingFlag = { stands: "newer" | "older"; captureOnly: boolean; lowerTrust: boolean; how: "stood" | "would" | "if"; sameKey?: true };
-
-/**
- * The WRITER flags on a proposal (SMD-2707). The side that stands is the
- * superseding one: on an accepted row the one its superseding_id names;
- * else `direction` when given (review_supersession_proposal takes it over
- * the verdict, 029), else the verdict's, and both sides for an undirected
- * verdict, each the reviewer may pick. It is flagged when its text is a
- * capture-only key's and the accept would pass another's standing to it —
- * the other side's capturer is another, or the accept would take the side
- * (ob1_accept_takes) though one key captured both — or both sides have a
- * trust recorded and its ranks below the other's — a side with none recorded
- * is not flagged for it (the maintainer's choice, review pass 1: an
- * unclassified key's, a raw write's or an unbackfilled row's is not a lower
- * one). Nothing on a row from before 094, which carries no writer. One rule
- * for the reply, `--list` and the CLI's accept guard.
- */
-export function standingFlags(
-  p: { verdict: string; sameCapturer: boolean; status?: string; supersedingId?: string | null; older: { id?: string; writer: ProposalWriter | null; takes?: boolean }; newer: { id?: string; writer: ProposalWriter | null; takes?: boolean } },
-  direction?: "newer" | "older",
-): StandingFlag[] {
-  const stood = p.status === "accepted" && p.supersedingId ? (p.supersedingId === p.newer.id ? "newer" : p.supersedingId === p.older.id ? "older" : null) : null;
-  const named = stood ?? direction ?? (p.verdict === "newer_supersedes_older" ? "newer" : p.verdict === "older_supersedes_newer" ? "older" : null);
-  const how: StandingFlag["how"] = stood ? "stood" : named ? "would" : "if";
-  const sides: ("newer" | "older")[] = named ? [named] : ["newer", "older"];
-  return sides.flatMap((stands) => {
-    const me = p[stands].writer, other = p[stands === "newer" ? "older" : "newer"].writer;
-    if (!me || !other) return [];
-    // One capturer's two thoughts pass nobody's standing — unless the accept
-    // would take the side all the same: the other side taken since (a write
-    // key's edit, its chain accepted over a third's), as 092 reads it
-    // (review pass 4).
-    const captureOnly = me.captureOnly && (!p.sameCapturer || p[stands].takes === true);
-    const lowerTrust = trustRank(me.trust) > 0 && trustRank(other.trust) > 0 && trustRank(me.trust) < trustRank(other.trust);
-    // sameKey: flagged though one key captured both — said, or the two By:
-    // lines read alike with no reason shown (review pass 5).
-    return captureOnly || lowerTrust ? [{ stands, captureOnly, lowerTrust, how, ...(captureOnly && p.sameCapturer ? { sameKey: true as const } : {}) }] : [];
-  });
-}
+// 074's rank and SMD-2707's WRITER rule live in standing.ts, which the
+// decision's guard (proposal-review.ts) reads without this file's imports.
+export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
 export function standingFlagText(f: StandingFlag): string {
@@ -441,7 +395,7 @@ export const WALK_CAP = 25;
  * would take and lapse is not shown; the accept guard reads it in full.
  */
 export function walkCappedLine(): string {
-  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`;
+  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full`;
 }
 
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
@@ -900,7 +854,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
-    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}${next}`;
+    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "filters" && r.made
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
@@ -1667,6 +1621,98 @@ export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
     ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
+
+// ── review_supersession_proposal (SMD-3338) ──────────────────────────────────
+
+/**
+ * Who the row records as deciding it (114, SMD-2608): the key's name and its
+ * kind — the kind it had when it decided, else the registry's now, said so —
+ * a decision with no agent id said so, none recorded said so. The name
+ * through the replies' cleaner, on one line; yours said so.
+ */
+export function reviewerText(r: Reviewer | null, caller?: string): string {
+  if (!r || (!r.name && !r.agentId)) return "not recorded — no actor named the decision";
+  const kind = r.kind ?? (r.kindNow ? `${r.kindNow} — classified after it decided` : "a key the registry has not classified");
+  const name = r.name ? `${snipText(r.name, 80)}${caller !== undefined && r.name.trim() === caller.trim() ? " (your key)" : ""}` : null;
+  return name && r.agentId ? `${name}, ${kind}` : name ? `${name}, no agent id recorded (the key did not resolve in the registry)` : `agent ${r.agentId}, ${kind}, no name`;
+}
+
+/**
+ * review_supersession_proposal's reply (SMD-3338): what the decision wrote or
+ * cleared, a second write the caller did not ask for — a capture-only
+ * pointer the accept's lapse cleared (082) — each named, and who the row
+ * records as deciding it. A refusal names its check, what waives it, and the
+ * decision expected instead, in the CLI's words with the tool's arguments.
+ */
+export function renderReviewProposal(o: Outcome<ProposalReview, ProposalReviewCode>): Reply {
+  return render(o, (v) => {
+    // A reject says what it undid of an accept, and what it did not — the
+    // pointer the accept found there, one changed since, a capture-only
+    // pointer its lapse cleared — and that it replaced an earlier reject
+    // (review pass 2: each read "Rejected proposal X." alone).
+    const pair = `${v.supersedingId} no longer supersedes ${v.supersededId}`;
+    const head = v.decision === "accept"
+      ? `Accepted proposal ${v.id}: ${v.supersedingId} now supersedes ${v.supersededId}${v.written ? "" : " (the pointer already held that value, and a reject will leave it)"}.`
+      : v.previousStatus === "accepted"
+        ? v.cleared
+          ? `Rejected proposal ${v.id}, which was accepted: the supersedes pointer its accept wrote is cleared (${pair}). A capture-only pointer that accept cleared stays cleared.`
+          : v.previousPointerWritten === false
+            ? `Rejected proposal ${v.id}, which was accepted: ${v.supersedingId}'s pointer onto ${v.supersededId} was there before the accept, so it stays — update_thought's supersedes: null clears it if it is wrong.`
+            : `Rejected proposal ${v.id}, which was accepted: ${v.supersedingId}'s pointer was changed since, so there was nothing of the accept's to clear.`
+        : v.previousStatus === "rejected"
+          ? `Rejected proposal ${v.id} again: this decision, its note and its reviewer replace the earlier reject's.`
+          : `Rejected proposal ${v.id}.`;
+    const lapsed = v.lapsed.map((l) => `Lapsed: ${l.id} no longer supersedes ${l.onto} — its capturer's capture-only pointer, cleared by this accept; a reject of this proposal does not restore it.`);
+    const unread = v.writersUnread ? ["The WRITER check did not run: this brain is short of migration 094 (cd db && bun migrate.ts --url <url>)."] : [];
+    const by = v.reviewerRecorded ? `Decided by: ${reviewerText(v.reviewer, v.caller)}.` : "The row records no reviewer: this brain is short of migration 114 (cd db && bun migrate.ts --url <url>); the audit trail names the key of an accept's write.";
+    return [head, ...lapsed, ...unread, by].join("\n");
+  }, (r) => {
+    const force = "pass force: true if the accept still holds";
+    switch (r.code) {
+      // The id quoted, bounded, on one line: a non-uuid one is the caller's own text (review pass 1).
+      case "NOT_FOUND": return `No proposal with id ${JSON.stringify(snipText(r.id, 80))}, or a thought it names is gone — list_supersession_proposals gives the proposal ids (not the thoughts').`;
+      case "REFUSED_EDITED_SINCE":
+        return `Refused: the ${r.olderEdited && r.newerEdited ? "older and newer thoughts have" : r.olderEdited ? "older thought has" : "newer thought has"} been edited since the pair was judged (a stale proposal's has), so the verdict is about a text that is gone. Read both (fetch takes their ids) and ${force}, or reject it.`;
+      // Force is no remedy here, only a choice to write the harm (review pass 2): said so.
+      case "REFUSED_LINEAGE_PAIR":
+        return `Refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it. ${r.status === "rejected" ? "Left as it is, it stays rejected, the expected decision" : "Rejecting it is the expected decision"}. force: true writes the pointer anyway, and the derivation then names an input search treats as superseded — only if that is what you mean (with a direction on an undirected verdict)${r.flags.length ? `; it also accepts over its WRITER flag: ${r.flags.map(standingFlagText).join("; ")}` : ""}.`;
+      case "REFUSED_WRITER": {
+        const lapses = { older: { lapses: Array(r.lapses.older) }, newer: { lapses: Array(r.lapses.newer) } };
+        return `Refused: ${writerFlagsText(r.flags, lapses).replaceAll("--direction", "direction")}. Read both writers (list_supersession_proposals with status ${r.status}) and ${force}${r.edited ? " (force also accepts over a text edited since judged)" : ""}${r.status === "rejected" ? "; left as it is, it stays rejected" : ", or reject it"}.`;
+      }
+      case "REFUSED_REVIEW_ARGUMENT":
+        return r.problem === "direction_on_reject" ? "Refused: direction goes with an accept — it picks the side that stands; a reject takes none."
+          : r.problem === "force_on_reject" ? "Refused: force goes with an accept — it waives an accept's checks; a reject has none to waive."
+          : `Refused: a note may not begin with "${PASS_SETTLED_PREFIX}" — that marker is the consolidation pass's own (migration 067), and a rejection carrying it is read as the pass's and set stale again when a text moves.`;
+      case "REFUSED_DIRECTION_REQUIRED": return `Refused: the judge did not say which is current (${r.verdict}); pass direction: "newer" or "older".`;
+      case "REFUSED_ALREADY_ACCEPTED": return `Refused: proposal ${r.id} is already accepted (its pointer is ${r.supersedingId}'s). A reject first clears that pointer if it still holds this proposal's value — not one that was there before the accept, nor a capture-only pointer the accept cleared — and the proposal can then be accepted again.`;
+      case "REFUSED_ALREADY_SUPERSEDES": return `Refused: ${r.supersedingId} already supersedes a third thought, ${r.currentId}; the column holds one predecessor, so decide which — edit that thought (update_thought's supersedes), or reject this proposal.`;
+      case "REFUSED_PROPOSAL_WOULD_CYCLE": return r.chainTooLong
+        ? `Refused: the supersedes chain below ${r.supersededId} is longer than update_thought walks (1000 thoughts), so whether ${r.supersedingId}'s pointer would close a loop cannot be told. Reject this proposal, or shorten the chain first.`
+        : `Refused: writing ${r.supersedingId}'s pointer onto ${r.supersededId} would close a loop — ${r.supersededId} already supersedes it, directly or through a chain. Reject this proposal, or clear the other pointer first.`;
+      case "REFUSED_SUPERSEDED_GONE": return `Refused: ${r.supersededId} no longer exists, so there is nothing to supersede; reject this proposal.`;
+      default: return mutationRefusalText(r);
+    }
+  }, (v) => ({
+    id: v.id, decision: v.decision, status: v.status, previousStatus: v.previousStatus, previousPointerWritten: v.previousPointerWritten, forced: v.forced, supersedingId: v.supersedingId, supersededId: v.supersededId,
+    written: v.written, cleared: v.cleared, lapsed: v.lapsed,
+    reviewer: v.reviewer ? { agentId: v.reviewer.agentId, kind: oneOf(SAID_BY, v.reviewer.kind), kindNow: oneOf(SAID_BY, v.reviewer.kindNow) } : null,
+    reviewerRecorded: v.reviewerRecorded, writersUnread: v.writersUnread,
+  }));
+}
+
+/**
+ * review_supersession_proposal's fault: the review function runs as the
+ * caller (029, SECURITY INVOKER), so a server role without UPDATE on
+ * supersession_proposals — the server group's since SMD-3338 — is refused the
+ * decision; a database before 029 has no queue.
+ */
+export const reviewHint = (msg: string): string =>
+  /permission denied for (table|relation) supersession_proposals/.test(msg)
+    ? " — this server's database role may not decide a proposal: add the server group to its grants (cd db && bun migrate.ts --url <the owner's connection> --grant <role> --groups server), which holds UPDATE on supersession_proposals since SMD-3338"
+    : /review_supersession_proposal|supersession_proposals/.test(msg) && /does not exist|could not find/i.test(msg)
+      ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied"
+      : "";
 
 // ── The worker actions (SMD-2283 PR 3) ───────────────────────────────────────
 // Each answers its result as JSON, the value itself beside it; a refusal its

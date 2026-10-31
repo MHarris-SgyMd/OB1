@@ -599,7 +599,9 @@ with no active Linear link between them now (079's `child_of`, `blocks`,
 `blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
 after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
-`consolidate.ts --list` and the `list_supersession_proposals` tool list them —
+`consolidate.ts --list` and the `list_supersession_proposals` tool list them, and
+`consolidate.ts --accept`/`--reject` and the `review_supersession_proposal` tool decide
+them (SMD-3338) —
 one pass's alone with `--key` or `judge_key`, the pass key each proposal names
 (109), a page at a time with `--after` (pages of 50) or `after` (up to 200), the
 cursor the page before ended with, under the filters it was made with (110) —
@@ -827,6 +829,45 @@ one told to use the operator's own key — and a database before 086 is named in
 fault; the REST core answers the code and its status. `thought_changes` reads the event
 as "reset by <key>", and a decline's line names the reset as the way out.
 
+## Deciding a supersession proposal (SMD-3338)
+
+**`review_supersession_proposal(id, decision, direction?, note?, force?)`** is a
+**write-scoped** tool — `POST /v1/proposals/{id}/review` on the REST core — that accepts
+or rejects a proposal `list_supersession_proposals` listed: `db/consolidate.ts
+--accept`/`--reject` for a client — an agent over MCP, or a REST caller (the operator
+GUI's buttons are SMD-3322's). Any write
+key may decide, an agent's included (the maintainer's call, 2026-10-26, amending
+029's "the machine proposes, someone confirms"); the proposal's row records the key
+that decided (migration 114), so once the operator classifies the keys (`set_agent_kind`) a
+person's decision is told from an agent's. A
+read or capture key does not see it.
+
+It runs the CLI's own decision (`proposal-review.ts`): in one transaction under 029's
+review lock and the proposal row's (so the pass's in-place re-judge of a stale row waits
+for it, rather than landing between the guard and the decision), the guard, 029's
+`review_supersession_proposal`, the read of the capture-only pointers its accept cleared
+(082) and the read of who decided. An accept writes `supersedes` on the side the verdict
+names as current, or the one `direction` names (required for an undirected verdict); a
+reject records the decision and, on an accepted row, clears the pointer its accept wrote.
+An accept is refused by name — 409 over REST — when a text moved since the pair was judged
+(`REFUSED_EDITED_SINCE`; a stale proposal's did), when one side's `derived_from` names the
+other (`REFUSED_LINEAGE_PAIR`, whose expected decision is a reject), or when the proposal
+is flagged WRITER (`REFUSED_WRITER`: the side to stand is a capture-only key's text, or of
+a lower trust than the other); `force: true` waives those three, as `--force` does, and
+nothing else. 029's own refusals keep their names: `REFUSED_DIRECTION_REQUIRED` (400),
+`REFUSED_ALREADY_ACCEPTED`, `REFUSED_ALREADY_SUPERSEDES`, `REFUSED_PROPOSAL_WOULD_CYCLE`
+(409), `REFUSED_SUPERSEDED_GONE` (422), and `NOT_FOUND` for no such proposal. A direction
+or force on a reject, and a note beginning with the pass's marker (067), are
+`REFUSED_REVIEW_ARGUMENT` (400). The reply names what was written or cleared, each pointer
+the lapse cleared, and who the row records as deciding it — with the kind the key had
+then, or else the registry's kind now, said so.
+
+029's review function runs as the caller (SECURITY INVOKER), so the server's role needs
+`UPDATE` on `supersession_proposals`, the server group's since SMD-3338: a role granted
+before it is refused the decision — the MCP reply naming the grant, REST answering
+`FAILED` with Postgres's "permission denied" — until `migrate.ts
+--grant <role> --groups server` is run for it; every other tool runs as before.
+
 ## A write copied to another brain: `client_key` (SMD-3314)
 
 A thought captured on two brains separately gets two ids, while an edit, a delete or a
@@ -1000,7 +1041,12 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
   `REFUSED_SUPERSEDES_UNKNOWN`, `REFUSED_WOULD_CYCLE`, `REFUSED_CITED` (with
   `citedBy`), and `REFUSED` for a refusal the store names that this server does not
-  know. The worker actions': `REFUSED_EMPTY_WORK_TYPE`, `REFUSED_LIVE_LEASE_NEEDS_WORKER`,
+  know. A proposal's decision's: `NOT_FOUND`, `REFUSED_EDITED_SINCE`, `REFUSED_LINEAGE_PAIR`,
+  `REFUSED_WRITER` (each with the proposal's `id`, the WRITER and lineage ones with the
+  `flags` force would also waive), `REFUSED_REVIEW_ARGUMENT` (with its `problem`),
+  `REFUSED_DIRECTION_REQUIRED` (with the `verdict`), `REFUSED_ALREADY_ACCEPTED`,
+  `REFUSED_ALREADY_SUPERSEDES`, `REFUSED_PROPOSAL_WOULD_CYCLE`, `REFUSED_SUPERSEDED_GONE`
+  (with the thoughts' ids; SMD-3338). The worker actions': `REFUSED_EMPTY_WORK_TYPE`, `REFUSED_LIVE_LEASE_NEEDS_WORKER`,
   `RUN_WORKER_DRAIN_NOT_AVAILABLE` — the codes their REST POSTs answer as a 400. Which
   facts a refusal carries is declared beside its code (`core/refusal.ts`'s `FACTS`),
   so a new code does not compile until they are.
@@ -1141,20 +1187,20 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1224 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
-bun test-auth.ts          # 191 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 509 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
+bun test-server.ts        # 1265 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-auth.ts          # 193 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
+bun test-rest.ts          # 522 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 845 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts and decide mode, chunking, the entity gate and genre, the provider's state and the vector mender, and a thought's own subject: its rules, its key and the question pinned by hash (SMD-3306)
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 226 — fully local provider, no credential
 bun run test:sql          # 297 — store conformance, real Postgres in a container
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 269 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 301 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 116 — a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
-../db/with-postgres.sh bun test-preflight.ts  # 998 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
+../db/with-postgres.sh bun test-preflight.ts  # 999 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
 OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # 441 — one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
-OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 557 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
+OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 558 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`

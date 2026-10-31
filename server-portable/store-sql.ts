@@ -24,6 +24,7 @@ import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
+import { reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ListCursorRefused, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
@@ -899,6 +900,12 @@ export class SqlStore implements ThoughtStore {
     // decides who may, and names the actor in the event it appends.
     const rows = await this.sql`SELECT ob1_reset_capture_stamp(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseResetStamp(rows[0]?.r);
+  }
+
+  async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {
+    // SMD-3338: one transaction, under 029's lock — the CLI's own decision
+    // (proposal-review.ts). The audit rows name the actor as its envelope does.
+    return reviewProposal(this.sql, { id: opts.id, decision: opts.decision, note: opts.note ?? null, direction: opts.direction ?? null, force: opts.force === true, actor: actorPayload(opts.actor), actorName: opts.actor?.name ?? "" });
   }
 
   async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {

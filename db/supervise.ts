@@ -58,6 +58,17 @@
  * STAMP_TIMEOUT_MS, the row is left as it is and the log says so; the next
  * follower writes its own.
  *
+ * A migration. The sleep scheduler, ended with MIGRATION_EXIT (75) — it saw
+ * migrate.ts take its lock or the ledger move (SMD-3379 PR 1c-1) — runs again
+ * at once, its try not counted, the ends before it forgotten after a long
+ * run, the row's restart saying in_s 0 and code 75: the next process waits
+ * the migration out at its start and takes its start's reads again on the
+ * schema it left. It runs the code this process has — in compose the
+ * coordinator's baked image, which `up -d --build` replaces by recreating the
+ * coordinator; from a checkout, the checkout's as it then is. More than
+ * MIGRATION_RESTARTS such ends in a row, each within a minute of its start,
+ * fall back to the clock.
+ *
  * A stop. Each stop() goes on to the follower, whose own rules apply (the
  * first SIGTERM stops it after the work in hand, the second hard); once it
  * has ended, `done` settles with 0. Waiting or held, it settles at once.
@@ -74,13 +85,23 @@ import type { SQL } from "bun";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { embeddingContract, reembedKey } from "./config.mjs";
+import { embeddingContract, MIGRATION_EXIT, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, stampKey, TRIGGER_SIGNAL, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
 export const RESTART_MS = { first: 60_000, max: 900_000, reset: 900_000 } as const;
+/**
+ * The sleep scheduler, ended with MIGRATION_EXIT — a migration seen
+ * (SMD-3379 PR 1c-1) — runs again at once, no try counted, so the next
+ * process waits the migration out and reads its start again. Past this many
+ * such ends in a row, each within MIGRATION_QUICK_MS of its start, it is run
+ * again on the clock as any end is: a follower that saw a migration at every
+ * start would otherwise spin.
+ */
+export const MIGRATION_RESTARTS = 3;
+export const MIGRATION_QUICK_MS = 60_000;
 /** The longest a heartbeat write may take before it is left: the database may be what is down. */
 export const STAMP_TIMEOUT_MS = 10_000;
 /** The longest a follower's last output is waited for once it has exited. */
@@ -160,7 +181,9 @@ function jobOf(worker: StampingWorker, key: string): string | undefined {
 export async function endRow(sql: SQL, opts: { worker: StampingWorker; key: string; since: Date; restart: RestartMark; refused?: string }): Promise<void> {
   // Objects, not JSON text: Bun binds a string to jsonb as a JSON string (test-live [3]).
   const fresh = { v: 1, ...(jobOf(opts.worker, opts.key) === undefined ? {} : { job: jobOf(opts.worker, opts.key) }), every_s: MIN_STAMP_EVERY_S, running: false, outcome: "failed" };
-  const set = { running: false, ended: true, restart: opts.restart, ...(opts.restart.code === 0 ? {} : { outcome: "failed" }), ...(opts.refused ? { refused: opts.refused } : {}) };
+  // The scheduler's migration seen (in_s 0) is no failure: its own "stopped" kept (SMD-3379 PR 1c-1, review pass 4).
+  const ok = opts.restart.code === 0 || (opts.restart.code === MIGRATION_EXIT && opts.restart.in_s === 0);
+  const set = { running: false, ended: true, restart: opts.restart, ...(ok ? {} : { outcome: "failed" }), ...(opts.refused ? { refused: opts.refused } : {}) };
   await sql`
     INSERT INTO ob1_config (key, value)
     SELECT ${opts.key}, ((CASE WHEN c.updated_at >= ${opts.since} AND c.value IS JSON OBJECT THEN c.value::jsonb ELSE ${fresh}::jsonb END
@@ -185,6 +208,8 @@ export type SuperviseOptions = {
   sql: SQL | null;
   /** The waits, RESTART_MS unless a test drives them faster. */
   waits?: { first: number; max: number; reset: number };
+  /** MIGRATION_QUICK_MS unless a test drives it faster. */
+  migrationQuickMs?: number;
   /**
    * A trigger's period, in ms (SMD-3476): while the follower runs, it is sent
    * TRIGGER_SIGNAL this often, one pass each — board-sync's clock, the
@@ -209,6 +234,7 @@ export type Supervisor = {
 export function supervise(opts: SuperviseOptions): Supervisor {
   const env = opts.env ?? process.env;
   const waits = opts.waits ?? RESTART_MS;
+  const quickMs = opts.migrationQuickMs ?? MIGRATION_QUICK_MS;
   const { out, err } = opts.writer ?? consoleWriter;
   const key = followerKey(opts.worker, env);
   const stopped = new AbortController();
@@ -254,6 +280,8 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       return 0;
     }
     let tries = 0;
+    /** MIGRATION_EXIT ends in a row, each within MIGRATION_QUICK_MS of its start. */
+    let migrationsInRow = 0;
     while (!stopped.signal.aborted) {
       const began = new Date();
       const piped = opts.label !== undefined;
@@ -301,11 +329,23 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       child = null;
       if (stopped.signal.aborted) break;
       const ranMs = Date.now() - began.getTime();
+      // The scheduler's migration seen: run again at once, the try not
+      // counted, unless it keeps ending so at once (SMD-3379 PR 1c-1). Only
+      // quick ones count: a first 75 after a long run is the migration it is
+      // for (review pass 1). Another follower's 75 is any end (review pass 2).
+      migrationsInRow = code === MIGRATION_EXIT && ranMs < quickMs ? migrationsInRow + 1 : 0;
+      if (opts.worker === "sleep" && code === MIGRATION_EXIT && migrationsInRow <= MIGRATION_RESTARTS) {
+        // A long run ends the ends in a row before it, as on the clock (review pass 2).
+        if (ranMs >= waits.reset) tries = 0;
+        err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)} — a migration seen; restarting after a migration, at once, to wait it out and read its start again${key && opts.sql ? `, ${key} says so` : ""}`);
+        await stamp(began, { in_s: 0, code, tries });
+        continue;
+      }
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);
       tell({ state: "waiting", since: Date.now(), next: next.getTime(), code: code ?? 1, tries });
-      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
+      err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : code === MIGRATION_EXIT && opts.worker === "sleep" ? ` — a migration seen at each of its last ${MIGRATION_RESTARTS + 1} starts` : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }
