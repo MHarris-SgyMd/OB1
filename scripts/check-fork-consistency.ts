@@ -9867,8 +9867,8 @@ const PARITY_SCRIPT = "db/ci-parity.sh";
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
-    "deploy-stack-brains": "a second brain, the tier refresh and a canary beside that stack, on Docker",
-    "deploy-stack-auth": "the import runner and the authorization server on that stack, on Docker",
+    "deploy-stack-brains": "the tier refresh and a canary beside that stack, on Docker",
+    "deploy-stack-auth": "a second brain and the edge proxy beside that stack, then the import runner and the authorization server on it, on Docker",
     "auth-poc": "the authorization POC's own stacks in Docker (eval-auth.ts --up)",
   },
   scripts: {
