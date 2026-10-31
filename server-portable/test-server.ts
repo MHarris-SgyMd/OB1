@@ -1776,7 +1776,7 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
   const lastOff = [
     { ...rv.last, pipeline: "../x" }, { ...rv.last, ok: "yes" }, { ...rv.last, stage: "upload" }, { ...rv.last, counts: { inserted: -1 } }, { ...rv.last, counts: { deleted: 1 } }, { ...rv.last, for_s: -5 },
   ].map((l) => runnerOf({ ...rv, last: l }));
-  assert(runnerRefused.every((r) => r === null) && lastOff.every((r) => r !== null && r.last === undefined),
+  assert(runnerRefused.every((r) => r === null) && lastOff.every((r) => r !== null && r.last === undefined && r.lastUnread === true) && runnerOf({ ...rv, last: undefined })?.lastUnread === undefined,
     `a runner row not of the shape is refused whole, and a last run not of the shape left off, the row still saying the runner is up (${runnerRefused.map((r) => (r === null ? "·" : "KEPT")).join("")} / ${lastOff.map((r) => (r?.last === undefined ? "·" : "KEPT")).join("")})`);
   const carried = parseHeartbeats([{ key: "heartbeat:orchestration-runner", value: JSON.stringify(rv), at, age_s: 10 }, { key: "heartbeat:orchestration-runner", value: JSON.stringify({ ...rv, v: 2 }), at, age_s: 10 }]);
   assert(carried.runner?.pipelines === 4 && carried.ignored === 1 && carried.heartbeats.length === 0,
@@ -1791,6 +1791,7 @@ console.log("\n[13t] The status surface's rules, without a database: the coordin
       && busy.state === "running" && /^running gmail, x-twitter — /.test(busy.words)
       && stoppedShort.state === "idle" && /its last run, x-twitter, stopped at its emitter 40 s ago \(emitted 0\)/.test(stoppedShort.words)
       && /no run since it started/.test(unrun.words)
+      && /its last run not of the shape, so not said/.test(runnerTask({ ...rv, last: { ...rv.last, stage: "upload" } }).words) && !/no run since it started/.test(runnerTask({ ...rv, last: { ...rv.last, stage: "upload" } }).words)
       && runnerTask(rv, 181).state === "stale" && runnerTask({ ...rv, ended: true }).state === "stopped",
     `the runner is a task of its own, never coordinated: idle or running the pipelines it names, stale, stopped, and its last run said, a run stopped short not a state (${idle.words} | ${stoppedShort.words})`);
   // Last, after the coordinator, its children and the other rows.

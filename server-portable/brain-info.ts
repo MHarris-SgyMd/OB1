@@ -604,6 +604,8 @@ export type RunnerValue = {
 /** The runner's row as the record carries it: its value read in full, the last run's age as of the read, and its stamp judged against the database's clock. */
 export type RunnerBeat = Omit<RunnerValue, "v" | "every_s" | "ended" | "last"> & {
   last?: Omit<RunnerLast, "for_s"> & { endedS: number };
+  /** The row named a last run not of the shape, left off: a run happened that cannot be said (review pass 2). */
+  lastUnread?: true;
   at: string;
   ageS: number;
   everyS: number;
@@ -636,6 +638,7 @@ export function parseRunner(r: { value: unknown; at: unknown; age_s: unknown }):
     pipelines: v.pipelines as number,
     running: running as string[],
     ...(last ? { last } : {}),
+    ...(v.last !== undefined && !last ? { lastUnread: true as const } : {}),
     at: r.at,
     ageS: Math.max(0, Math.round(ageS)),
     everyS,
@@ -1822,7 +1825,7 @@ function runnerStatus(r: RunnerBeat): TaskStatus {
   const l = r.last;
   const counts = l?.counts ? Object.entries(l.counts).filter(([, n]) => (n ?? 0) > 0).map(([k, n]) => `${k} ${n}`).join(", ") : "";
   const last = l === undefined
-    ? "no run since it started"
+    ? r.lastUnread ? "its last run not of the shape, so not said" : "no run since it started"
     : `its last run, ${l.pipeline}, ${l.ok ? "succeeded" : l.stage ? `stopped at its ${l.stage}` : "failed in the runner"} ${ago(l.endedS)} ago (emitted ${l.emitted}${counts ? `; ${counts}` : ""})`;
   return {
     task: "orchestration-runner", job: null, key: RUNNER_KEY, coordinated: false, at: r.at, ageS: r.ageS, state,
