@@ -4465,10 +4465,11 @@ call for 40 s; held out: consolidate (provider)", `task_status` reads it
 running, and preflight's `sleep` row adds "its passes waiting between
 thoughts, going on once the brain is quiet … a live write pauses it". The
 re-embed and consolidate pass rows each name their own pass's hold, or the
-pause. A re-arm past its time while paused waits for the quiet. None of
-these warn. A row the scheduler ended or let go stale keeps its holds as its
-last word, without their times; one supervise restarts loses them at the
-new process's first stamp.
+pause. A provider wait goes on beside the pause, and is warned of as ever;
+a pause between sleeps says the work waits for the next. A re-arm past its
+time while paused waits for the quiet. A pause warns of nothing. An ended or
+stale row keeps its holds as its last word, without their times, beside a
+supervisor's restart too, until the new process's first stamp.
 
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there

@@ -1581,7 +1581,12 @@ else {
   const schedHeld = row((await run(SQL_ENV)).out, "re-embed pass");
   await hb("heartbeat:sleep", { running: true, paused: { since: new Date(Date.now() - 40_000).toISOString() } });
   const schedPaused = row((await run(SQL_ENV)).out, "re-embed pass");
+  // Set down and held, as the scheduler writes both: said once, by the set-down's own words (review pass 2).
+  await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } }, holds: [{ pass: "reembed", why: "provider", until: null }] });
+  const schedHeldDown = row((await run(SQL_ENV)).out, "re-embed pass");
   await hb("heartbeat:sleep", { running: true });
+  assert(/\(stamped 1\d s ago; asleep, its passes running\); re-embed set down for this sleep \(provider\)/.test(schedHeldDown) && !/held out/.test(schedHeldDown),
+         `re-embed set down and held is said once, by the set-down (${schedHeldDown})`);
   assert(/the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; held out: reembed \(outage\)\)/.test(schedHeld)
          && /the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(schedPaused),
          `the re-embed pass row says re-embed held out, or the scheduler paused (${schedHeld} | ${schedPaused})`);
@@ -2109,6 +2114,10 @@ else {
   assert(/the sleep scheduler runs this key \(stamped 20 s ago; held out: consolidate \(provider, re-arms in 4 min\)\)/.test(consHeld) && !/extract/.test(consHeld)
          && /the sleep scheduler runs this key \(stamped 20 s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(consPaused),
          `the consolidate pass row says its own pass held out, not another's, or the scheduler paused (${consHeld} | ${consPaused})`);
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", waiting: ["consolidate"], paused: { since: new Date(Date.now() - 40_000).toISOString() } })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consPausedWait = row((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
+  assert(/\(stamped 20 s ago; paused by a live call, its passes going on once the brain is quiet, consolidate waiting for the provider at its start\)/.test(consPausedWait),
+         `paused with its pass waiting for the provider, the consolidate pass row says both (${consPausedWait})`);
   // Asleep, the scheduler's own claim holds a live lease beside the workers
   // profile's old ended row: not "start it again", a second worker (review
   // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
@@ -4269,6 +4278,15 @@ else {
       const pausedRow = row((await run(LOG_ON)).out, "sleep");
       assert(/✓\s+sleep\s+paused by a live call for 40 s; held out: consolidate \(provider\) \(last stamped 10 s ago, every 60 s\); its passes waiting between thoughts, going on once the brain is quiet — the sleep began 2 min ago; a live write pauses it; a search does not$/.test(pausedRow),
         `paused: the row says for how long, that the passes go on once the brain is quiet and that a live write pauses it, its held pass beside, no warning (${pausedRow})`);
+      // Paused between sleeps, its work waits for the next, the last sleep not read as current;
+      // paused with a pass waiting for its provider, the wait said beside the pause, and warned of (review pass 2).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: false, slept: { from: await at(7200), to: await at(3600) }, paused: { since: await at(40) } }), 10);
+      const betweenRow = row((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null }, paused: { since: await at(40) } }), 10);
+      const pausedWaitRow = row((await run(LOG_ON)).out, "sleep");
+      assert(/✓\s+sleep\s+paused by a live call for 40 s \(last stamped 10 s ago, every 60 s\); its work waiting, the next sleep beginning once the brain is quiet — the last sleep ended 60 min ago; a live write pauses it; a search does not$/.test(betweenRow)
+             && /!\s+sleep\s+paused by a live call for 40 s, waiting for the provider at a pass's start \(last stamped 10 s ago, every 60 s\); its passes waiting between thoughts, going on once the brain is quiet, extract waiting for the provider at its start — the sleep began 2 min ago; a live write pauses it/.test(pausedWaitRow),
+        `paused between sleeps, the work waits for the next; paused with a provider wait, the wait said and warned of (${betweenRow} | ${pausedWaitRow})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);

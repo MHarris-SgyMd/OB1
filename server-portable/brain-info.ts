@@ -1880,18 +1880,18 @@ export function restartWords(h: WorkerHeartbeat): string | null {
 export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly SleepHold["pass"][] } = {}): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
-  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped.
-  const held = restartWords(h);
-  if (held !== null) return `${held} (${when})`;
-  // A worker that said it ended is stopped, fresh or not (review pass 1: it
-  // read "alive"); one that ended on a failure says so (review pass 2), and a
-  // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
-  // row says its own in preflight's words, "at a pass's start".
   // The sleep scheduler's held passes, beside the state, never instead of it;
   // an ended or stale row's are its last word, re-armed by nothing (SMD-3379
   // PR 1c). "Held out", apart from the restart's "held" and the thoughts held back (review pass 1).
   const shown = h.holds?.filter((x) => !opts.leave?.includes(x.pass)) ?? [];
   const holds = (live: boolean) => shown.length ? `; ${live ? "" : "at its last word, "}held out: ${shown.map((x) => holdWords(x, h, live)).join(", ")}` : "";
+  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped. Its holds said too (review pass 2).
+  const held = restartWords(h);
+  if (held !== null) return `${held}${holds(false)} (${when})`;
+  // A worker that said it ended is stopped, fresh or not (review pass 1: it
+  // read "alive"); one that ended on a failure says so (review pass 2), and a
+  // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
+  // row says its own in preflight's words, "at a pass's start".
   if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"}${holds(false)} (${when})`;
   if (h.stale) return `stale${holds(false)} (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
@@ -1903,7 +1903,8 @@ export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly Slee
   // Paused by a live call is the state, before running or waiting — its
   // passes run nothing meanwhile — for how long by the row's own clock
   // (SMD-3379 PR 1c; draft 5's §4, review pass 1).
-  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(h.paused.since)) / 1000))}`
+  // A provider wait goes on beside the pause (draft 5's §3, review pass 2).
+  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(h.paused.since)) / 1000))}${at === null ? "" : `, waiting for the provider${at}`}`
     : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
   return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
 }

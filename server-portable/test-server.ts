@@ -1508,6 +1508,12 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const pausedIdle = parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: false, paused: { since: pausedAt } }), at, age_s: 30 }]).heartbeats[0]!;
   assert(beatState(pausedIdle) === "running" && heartbeatState(pausedIdle).startsWith("paused by a live call for 60 s"),
     `a paused row reads running in task_status and paused in its words, even with no pass running (${beatState(pausedIdle)}, ${heartbeatState(pausedIdle)})`);
+  // A provider wait beside the pause, and a row supervise ended with its holds said as its last word (review pass 2).
+  const pausedWaits = sleepWords({ paused: { since: pausedAt }, waiting: ["extract"] });
+  const restartHolds = heldState(heldRow(5, { in_s: 60, code: 1, tries: 1 }, { holds: [{ pass: "extract", why: "lookup", until: null }] }));
+  assert(pausedWaits === "paused by a live call for 60 s, waiting for the provider at a pass's start (last stamped 30 s ago, every 60 s)"
+      && restartHolds.startsWith("held: exited 1, 1 end(s) in a row — its supervisor runs it again in 55 s; at its last word, held out: extract (lookup) (last stamped 5 s ago"),
+    `a paused row keeps its provider wait beside the pause, and a restarting row its holds (${pausedWaits} | ${restartHolds})`);
   // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
   const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
   assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"

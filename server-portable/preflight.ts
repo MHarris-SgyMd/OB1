@@ -316,12 +316,15 @@ const asleepWords = (h: Pick<WorkerHeartbeat, "paused">) => (h.paused ? "paused 
  * (SMD-2752 PR 3), nor those waiting mid-pass for one that stopped
  * answering (SMD-2905) — or running.
  */
-const passWords = (sleeping: WorkerHeartbeat, pass: SleepHold["pass"], awake: string) => {
-  const hold = sleeping.holds?.find((x) => x.pass === pass);
+const passWords = (sleeping: WorkerHeartbeat, pass: SleepHold["pass"], awake: string, leaveHold = false) => {
+  // `leaveHold`: the row says the hold in words of its own (re-embed's set-down or set-aside, review pass 2).
+  const hold = leaveHold ? undefined : sleeping.holds?.find((x) => x.pass === pass);
   if (hold) return `held out: ${holdWords(hold, sleeping)}`;
-  if (sleeping.paused) return asleepWords(sleeping);
+  const waits = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null) : null;
+  // Paused, a provider wait goes on beside it (draft 5's §3, review pass 2).
+  if (sleeping.paused) return `${asleepWords(sleeping)}${waits ? `, ${waits}` : ""}`;
   if (!sleeping.running) return awake;
-  return sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : asleepWords(sleeping);
+  return waits ? `asleep, ${waits}` : asleepWords(sleeping);
 };
 /** The rows to check for passes waiting on their provider: re-embed's is the embedding endpoint, the others' chat (SMD-2679 PR 4b). */
 const providerRows = (passes: readonly string[]) =>
@@ -4355,7 +4358,7 @@ if (configFailed) {
                 const sleeping = runner.beat;
                 // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
                 const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "awake, its passes waiting for the brain to go quiet";
-                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake)})`;
+                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake, runner.down !== null || runner.clears !== null)})`;
                 // Its failed rows: retried once their cause is fixed, or one the
                 // provider refuses permanently accepted — a retry of that fails
                 // again, every sleep (review pass 1: main's way out was lost).
@@ -4991,8 +4994,11 @@ if (configFailed) {
             const sleepWords = h.stale || h.ended
               ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
               // Paused: heartbeatState says by what and for how long (SMD-3379 PR 1c).
+              // Between sleeps, its work waits for the next (review pass 2: an ended sleep read as current).
               : h.paused
-                ? `its passes waiting between thoughts, going on once the brain is quiet${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
+                ? s && !s.to
+                  ? `its passes waiting between thoughts, going on once the brain is quiet${waitingFor || waitingMid ? `, ${waitWords}` : ""} — the sleep began ${since(s.from)} ago`
+                  : `its work waiting, the next sleep beginning once the brain is quiet${s?.to ? ` — the last sleep ended ${since(s.to)} ago` : ""}`
               : h.running
                 ? waitingFor || waitingMid
                   ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
