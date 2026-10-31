@@ -11,7 +11,7 @@ import { heardFrom } from "../provider-health.ts";
 import { ListCursorRefused, storeKind, UUID_RE, type AuditChange, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
-import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
+import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
 import { BRAIN_INFO_TOOL_DEADLINE_MS, HEALTH_DEADLINE_MS } from "../deadlines.ts";
 import type { Principal } from "../auth.ts";
@@ -600,6 +600,13 @@ export type WorkerStatusResult = { pools: WorkerStatusRow[] };
 
 export async function workerStatus(ctx: Ctx, _principal: Principal, _input: Input<"worker_status">): Promise<Outcome<WorkerStatusResult>> {
   return ok({ pools: await (await ctx.store()).workerStatus() });
+}
+
+// ── task_status (SMD-3476 PR 3) ──────────────────────────────────────────────
+
+/** Each of the brain's tasks in one word, from the heartbeat rows: the status surface (brain-info.ts's taskStates), which brain_info and preflight read too. */
+export async function taskStatus(ctx: Ctx, _principal: Principal, _input: Input<"task_status">): Promise<Outcome<TaskStatusResult>> {
+  return ok(taskStates(await (await ctx.store()).heartbeats()));
 }
 
 // ── brain_info ───────────────────────────────────────────────────────────────

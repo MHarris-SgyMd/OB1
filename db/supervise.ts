@@ -39,6 +39,10 @@
  * the environment's, which nothing changes without a recreate, so either
  * holds until the stop, the follower never started.
  *
+ * A trigger (`every`, SMD-3476): while the follower runs it is sent
+ * TRIGGER_SIGNAL every `every` ms, a pass each — board-sync's clock, which its
+ * --loop kept before. Nothing else about it changes.
+ *
  * The row. When the follower ends, its heartbeat (db/pass-stamp.ts) is ended
  * with `restart` — `in_s`, the seconds from the row's own stamp to the next
  * try (null: none until a recreate), `code`, the follower's exit status, and
@@ -69,6 +73,10 @@
  * first SIGTERM stops it after the work in hand, the second hard); once it
  * has ended, `done` settles with 0. Waiting or held, it settles at once.
  *
+ * Its state (`onState`, SMD-3476 PR 3): running from each start, waiting
+ * after each end of its own with the next try's time, held by a guard, and
+ * stopped — what the coordinator's own row says of each child.
+ *
  * As a command it is retired (its foot): a container from before SMD-3476
  * that runs it holds, running nothing, rather than restart in a loop.
  */
@@ -79,7 +87,7 @@ import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { embeddingContract, MIGRATION_EXIT, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
-import { MIN_STAMP_EVERY_S, stampKey, type StampingWorker } from "./pass-stamp.ts";
+import { MIN_STAMP_EVERY_S, stampKey, TRIGGER_SIGNAL, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
 
 /** The waits before a follower that ended on its own runs again: the first, the cap it doubles to, and the run that starts the count again. */
@@ -111,6 +119,13 @@ export type RestartMark = { in_s: number | null; code: number; tries: number };
 
 /** A guard's refusal: what the log says, and the start refusal's kind the row names. */
 export type GuardRefusal = { kind: "identity" | "usage"; line: string };
+
+/** What a supervisor says of its follower (`onState`), its times this process's Date.now(): running, waiting to run again, held by a guard, or stopped. */
+export type FollowerState =
+  | { state: "running"; since: number }
+  | { state: "waiting"; since: number; next: number; code: number; tries: number }
+  | { state: "held"; since: number; refused: GuardRefusal["kind"] }
+  | { state: "stopped"; since: number };
 
 /**
  * The guards, in the words of the compose file before SMD-3476: the worker key first, then each
@@ -195,8 +210,17 @@ export type SuperviseOptions = {
   waits?: { first: number; max: number; reset: number };
   /** MIGRATION_QUICK_MS unless a test drives it faster. */
   migrationQuickMs?: number;
+  /**
+   * A trigger's period, in ms (SMD-3476): while the follower runs, it is sent
+   * TRIGGER_SIGNAL this often, one pass each — board-sync's clock, the
+   * coordinator's since its --loop retired. Its ends, refusals and rows are a
+   * follower's as ever. Unset, it is sent nothing.
+   */
+  every?: number;
   stampTimeoutMs?: number;
   writer?: Writer;
+  /** Told each change of the follower's state; a throw from it is said, never the follower's end. */
+  onState?: (state: FollowerState) => void;
 };
 
 export type Supervisor = {
@@ -235,14 +259,24 @@ export function supervise(opts: SuperviseOptions): Supervisor {
     }
   };
 
+  const tell = (state: FollowerState): void => {
+    try {
+      opts.onState?.(state);
+    } catch (e) {
+      err(`supervise: ${opts.worker}'s state could not be told (${(e as Error).message})`);
+    }
+  };
+
   const done = (async (): Promise<number> => {
     const guard = guardRefusal(opts.worker, env, opts);
     if (guard) {
       err(guard.line);
       err(`supervise: ${opts.worker} is held, not started — that is deploy/.env's to mend, and the coordinator's recreate (up -d coordinator) to read; it does not exit, so the runtime does not restart it in a loop (SMD-3214)`);
+      tell({ state: "held", since: Date.now(), refused: guard.kind });
       // Its last word kept — the scheduler's last sleep, its held thoughts — and the guard's kind on it.
       await stamp(new Date(0), { in_s: null, code: 2, tries: 0 }, guard.kind);
       if (!stopped.signal.aborted) await new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve(), { once: true }));
+      tell({ state: "stopped", since: Date.now() });
       return 0;
     }
     let tries = 0;
@@ -261,10 +295,30 @@ export function supervise(opts: SuperviseOptions): Supervisor {
           stdio: ["ignore", piped ? "pipe" : "inherit", piped ? "pipe" : "inherit"],
           detached: true,
         });
+        tell({ state: "running", since: began.getTime() });
         const drained = piped
           ? Promise.all([labelled(child.stdout as ReadableStream<Uint8Array>, opts.label!, out), labelled(child.stderr as ReadableStream<Uint8Array>, opts.label!, err)])
           : Promise.resolve();
-        code = await child.exited;
+        // The trigger's clock, from the follower's start: its first pass is its own, at start.
+        const running = child;
+        // A signal that cannot be sent (the child gone between the check and the kill, a user it may not signal) is
+        // said once and the clock goes on: a throw on the timer would end this process, every pass with it.
+        let unsent = false;
+        const tick = opts.every === undefined ? undefined : setInterval(() => {
+          if (running.exitCode !== null || running.signalCode !== null) return;
+          try {
+            running.kill(TRIGGER_SIGNAL);
+            unsent = false;
+          } catch (e) {
+            if (!unsent) err(`supervise: ${opts.worker}'s trigger could not be sent (${(e as Error).message}); the clock goes on`);
+            unsent = true;
+          }
+        }, opts.every);
+        try {
+          code = await child.exited;
+        } finally {
+          clearInterval(tick);
+        }
         // The pumps never reject (labelled), so a drain cut short by the timer leaves nothing unhandled.
         await Promise.race([drained, Bun.sleep(DRAIN_MS)]);
       } catch (e) {
@@ -290,10 +344,12 @@ export function supervise(opts: SuperviseOptions): Supervisor {
       tries = ranMs >= waits.reset ? 1 : tries + 1;
       const waitMs = restartWait(tries, waits.first, waits.max);
       const next = new Date(Date.now() + waitMs);
+      tell({ state: "waiting", since: Date.now(), next: next.getTime(), code: code ?? 1, tries });
       err(`supervise: ${opts.worker} exited ${code} after ${seconds(ranMs)}${code === 2 ? " — a refusal, its lines above say why" : code === MIGRATION_EXIT && opts.worker === "sleep" ? ` — a migration seen at each of its last ${MIGRATION_RESTARTS + 1} starts` : ""}; it runs again at ${next.toISOString()} (in ${seconds(waitMs)}, end ${tries} in a row)${key && opts.sql ? `, ${key} says so` : ""}. A fix in deploy/.env needs the coordinator recreated (up -d coordinator), which starts it at once (SMD-3214).`);
       await stamp(began, { in_s: Math.round(waitMs / 1000), code: code ?? 1, tries });
       await sleepUnless(waitMs, stopped.signal);
     }
+    tell({ state: "stopped", since: Date.now() });
     return 0;
   })();
 

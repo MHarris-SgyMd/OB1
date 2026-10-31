@@ -40,6 +40,7 @@ export function createCore(deps: CoreDeps) {
     listThoughtIds: bind(ctx, reads.listThoughtIds),
     listLoggedSearches: bind(ctx, reads.listLoggedSearches),
     workerStatus: bind(ctx, reads.workerStatus),
+    taskStatus: bind(ctx, reads.taskStatus),
     brainInfo: reads.brainInfoReader(ctx),
     jobStatus: bind(ctx, reads.jobStatus),
     scanThoughts: bind(ctx, reads.scanThoughts),

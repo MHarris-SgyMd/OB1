@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, type ReembedDown, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -343,6 +343,9 @@ function runningRow(key: string, c: PassCounts, words: string, tail = ""): { sta
   };
 }
 
+/** The coordinator started again, as restartCommand words a pass's restart (db/config.mjs's coordinatorUp): recreated, with no deps. */
+const COORDINATOR_UP = "podman compose -f deploy/compose.yaml up -d --no-deps --force-recreate coordinator, with the -f files and -p the stack was started with (docker compose alike)";
+
 /** How long a pending proposal may wait before the proposals row warns, in days (SMD-2680). */
 const PROPOSALS_WARN_DAYS = 7;
 
@@ -363,7 +366,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -4842,10 +4845,10 @@ if (configFailed) {
         }
 
         // The long-running workers' heartbeats (SMD-2261, db/pass-stamp.ts):
-        // board-sync's --loop and the extraction and consolidation followers
-        // stamp one after every pass. The sleep scheduler's, at least every
-        // minute, its followers through it (SMD-1794), is its own row below
-        // (SMD-2678). One older than three
+        // board-sync's trigger passes (SMD-3476) and the extraction and
+        // consolidation followers stamp one after every pass. The sleep
+        // scheduler's, at least every minute, its followers through it
+        // (SMD-1794), is its own row below (SMD-2678). One older than three
         // of its own intervals is a stopped worker — board-sync was down four
         // days (2026-09-27 to 10-01) while the tier row above passed. A fresh
         // one whose last pass
@@ -5113,6 +5116,41 @@ if (configFailed) {
               fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler just after a live call, when its passes have returned their leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped asleep, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no wake stops and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
             }
             add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
+          }
+        }
+
+        // The status surface (SMD-3476 PR 3, docs/brain-coordinator.md row 13):
+        // each task in one word, by brain-info.ts's taskStates — what
+        // task_status answers and brain_info carries, so the three agree. The
+        // workers and sleep rows above say what to do for a pass; this row
+        // adds the coordinator's own word — a pass it started that has
+        // written no heartbeat (missing), a coordinator gone quiet.
+        {
+          const w = facts.workers;
+          if (w === null) {
+            add("tasks", "skip", "the heartbeat rows were not read — the workers row says why.");
+          } else {
+            const { tasks, ignored } = taskStates(w);
+            const tail = ignored ? `; ${ignored} heartbeat row(s) not of the shape, ignored` : "";
+            if (tasks.length === 0) {
+              add("tasks", "skip", `no task has stamped a heartbeat on this brain${tail}.`);
+            } else {
+              const detail = tasks.map((t) => `${t.job ?? t.task} ${t.state}`).join(", ") + tail;
+              const wrong = tasks.filter((t) => !(TASK_OK as readonly string[]).includes(t.state));
+              const fixes = wrong.map((t) => {
+                const name = t.job ?? t.task;
+                if (t.task === "coordinator") {
+                  // As the workers row's: a coordinator taken away on purpose leaves a row only its retirement clears (review pass 1).
+                  const retire = `Retired on purpose: DELETE FROM ob1_config WHERE key = '${t.key}'.`;
+                  return t.state === "stale"
+                    ? `The coordinator has not stamped for ${ago(t.ageS ?? 0)}: it stopped, or cannot reach the database — start it again: ${COORDINATOR_UP}. ${retire}`
+                    : `The coordinator stopped: start it again — ${COORDINATOR_UP}. ${retire}`;
+                }
+                if (t.state === "missing") return `${name}: ${t.words} — the coordinator's log says why (compose logs coordinator).`;
+                return `${name}: ${t.words} — the ${t.task === "sleep" ? "sleep" : "workers"} row says what to do.`;
+              });
+              add("tasks", wrong.length ? "warn" : "ok", detail, wrong.length ? fixes.join(" ") : undefined);
+            }
           }
         }
 

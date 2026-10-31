@@ -1003,6 +1003,18 @@ that is not digits, holds that pass until that recreate, the follower never
 started. Preflight's `workers` and `sleep` rows say a held pass is held, its
 cause and its next try, rather than "start it again".
 
+The coordinator stamps a row of its own, `heartbeat:coordinator`: the passes
+`OB1_PASSES` asks for and each child's state, every minute and on each
+change (SMD-3476 PR 3). The status surface reads it beside the passes' own
+rows: `task_status` (`GET /v1/status`, a read key) says each task in one word —
+running, idle, starting, restarting, refused, failed, stale, stopped, or
+missing when the coordinator started a pass that has written no heartbeat —
+and preflight's `tasks` row and `brain_info` read the same states. After a
+reboot, `task_status` is the one read that says whether everything came back.
+The row is one coordinator's: a second started beside it (`compose run
+coordinator`, a checkout's run) writes nothing over it and says so in its log —
+two coordinators run their passes twice.
+
 `jev` is `unless-stopped` as well, and needs no supervisor: serving, it
 never exits on its own. A fetch that fails or hashes wrong, an engine that does
 not load and a port taken are tried again on the same clock, the service
@@ -1906,7 +1918,7 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 
 Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
 (SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
-read it. The row warns at once when the loop says it stopped (`compose stop`)
+read it. The row warns at once when it says it stopped (`compose stop coordinator`)
 or its supervisor holds it — a refusal, which it tries again on its own, the
 row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
 board, an interval or findings cap it does not take, an endpoint the egress
@@ -1918,13 +1930,14 @@ it; such a warning in the start-up log clears on the next `bun preflight.ts`.
 `db/README.md`, "Long-running workers report their liveness", has the row's
 shape.
 
-Every `OB1_BOARD_SYNC_INTERVAL` seconds (300) it runs `bun db/sync-linear.ts`
-once: a few requests list every issue's identifier, last-updated time and names
-(a hundred a page), one query reads the brain's ticket rows, and the difference
-is the work — a new
-issue is captured (vector, tags, and the facets Linear knows: project, status,
-priority, labels, parent), a moved or edited one is updated in place with a
-fresh vector, an unchanged one costs nothing. There is no state file: the brain
+Every `OB1_BOARD_SYNC_INTERVAL` seconds (300), on the coordinator's clock
+(SMD-3476; the tool's own `--loop` is retired), `bun db/sync-linear.ts
+--trigger`, which the coordinator starts and signals, runs a pass: a few
+requests list every issue's identifier, last-updated time and names (a hundred
+a page), one query reads the brain's ticket rows, and the difference is the
+work — a new issue is captured (vector, tags, and the facets Linear knows:
+project, status, priority, labels, parent), a moved or edited one is updated in
+place with a fresh vector, an unchanged one costs nothing. There is no state file: the brain
 is the state, so a pass that dies is finished by the next one. The same command
 runs from a checkout against any brain (`bun db/sync-linear.ts --url … --audit`
 is the lockstep census alone; `db/README.md`, "The board in the brain"). The
