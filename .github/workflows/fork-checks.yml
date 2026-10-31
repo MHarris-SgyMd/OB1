@@ -3323,8 +3323,8 @@ jobs:
         run: .github/ci/full-stack-up.sh
 
       # The two steps below ran in deploy-stack-brains until SMD-3471, about
-      # 19 s of that job, the second-longest: neither reads the canary's state,
-      # and ob1b and the edge are gone when the second ends. Here they meet the
+      # 20 s of that job: neither reads the canary's state, and ob1b and the
+      # edge are gone when the second ends. Here they meet the
       # stack as they met it there, just up from full-stack-up.sh, before this
       # job's steps change it.
       # SMD-2873. A second brain beside the stack, from its own env file: the
