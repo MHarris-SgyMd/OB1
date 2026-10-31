@@ -26,6 +26,13 @@
  *   answer, so n8n marks the run failed. One deadline bounds the whole run.
  *   GET /health            no key; whether it is up, and how many pipelines it holds.
  *
+ * Its row (SMD-3476 PR 3b): `heartbeat:orchestration-runner` in ob1_config
+ * (brain-info.ts's RunnerValue) — the pipelines it holds, those running, and
+ * how its last run ended — stamped at its start, each run's start and end,
+ * every minute, and ended at its stop, so the brain's status surface
+ * (task_status, preflight's tasks row, brain_info) says the runner is up,
+ * busy, idle, stale or stopped. Its role's worker group writes ob1_config.
+ *
  * The request names a pipeline and nothing else. The export is read from the
  * imports directory, never sent through n8n, so n8n's run data holds the
  * report and not the export.
@@ -62,6 +69,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SYSTEM_RE } from "../../db/ingest-contract.ts";
 import { RESERVED_SYSTEMS, scopeProblem } from "../../db/ingest-items.ts";
+import { MIN_STAMP_EVERY_S, rowWriter } from "../../db/pass-stamp.ts";
+import { PIPELINE_NAME, RUNNER_COUNTS, RUNNER_KEY, RUNNER_STAGES, type RunnerValue } from "../../server-portable/brain-info.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
@@ -132,7 +141,8 @@ export type Pipeline = {
 /** A host a live-API emitter names: reached through the runner's proxy by CONNECT, on this port only. */
 export type Host = { host: string; port: number };
 
-const NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
+/** A pipeline's name: the rule its row's names are read by too (brain-info.ts), one rule. */
+const NAME_RE = PIPELINE_NAME;
 /** What the image has to run an emitter with. */
 const INTERPRETERS = ["python3", "bun"];
 
@@ -279,7 +289,8 @@ function strayLines(bytes: Uint8Array, p: Pipeline): string[] {
   return out;
 }
 
-const TALLY_KEYS = ["inserted", "updated", "patched", "unchanged", "skipped", "held", "stale"] as const;
+/** The ingester's count names: the ones the runner's row carries (brain-info.ts), so the row drops none (review pass 1). */
+const TALLY_KEYS = RUNNER_COUNTS;
 export type Tally = Record<(typeof TALLY_KEYS)[number], number>;
 /** The ingester's count line (`tier=stable  inserted 5  updated 0 …`), or null when it printed none. */
 function parseTally(stdout: string): Tally | null {
@@ -646,7 +657,8 @@ export function startProxy(p: Pipeline, port: number, o: ProxyOptions = {}): Pro
   });
 }
 
-export type Stage = "emitter" | "one-source" | "ingest" | "reembed";
+/** Where a run stops short: the stages the runner's row names (brain-info.ts), one list (review pass 1). */
+export type Stage = (typeof RUNNER_STAGES)[number];
 export type Report = {
   pipeline: string;
   ok: boolean;
@@ -670,6 +682,36 @@ export function statusOf(r: Report): number {
   if (r.stage === "emitter" || r.stage === "one-source") return 422;
   if (r.stage === "ingest" && r.exit === 2) return 422;
   return 500;
+}
+
+/** The runner's row's period (SMD-3476 PR 3b): it stamps this often while up, so a runner that stopped goes stale as a pass does. */
+export const RUNNER_STAMP_EVERY_S = MIN_STAMP_EVERY_S;
+/** Each row write's bound: the last, at the stop, fits compose's 15 s grace after stopLive's 5 s. */
+const RUNNER_STAMP_TIMEOUT_MS = 5000;
+
+/** The last run that ended: its pipeline, its report (null: the runner failed on it), and when, by this process's clock. */
+export type LastRun = { pipeline: string; report: Report | null; at: number };
+
+/**
+ * The runner's row (brain-info.ts's RunnerValue): the pipelines it holds,
+ * those running now, and how its last run ended — its outcome, the stage it
+ * stopped at, what it emitted and counted — that run's age counted back from
+ * `now`, the stamp's own time. A count the ingester did not print is left
+ * off. Pure.
+ */
+export function runnerValue(o: { pipelines: number; running: Iterable<string>; last: LastRun | null; now: number; everyS: number; ended?: boolean }): RunnerValue {
+  const r = o.last?.report ?? null;
+  const tally = r?.counts ?? null;
+  const counts = tally ? Object.fromEntries(RUNNER_COUNTS.filter((k) => Number.isSafeInteger(tally[k]) && tally[k] >= 0).map((k) => [k, tally[k]])) : {};
+  const last = o.last === null ? undefined : {
+    pipeline: o.last.pipeline,
+    ok: r?.ok ?? false,
+    ...(r?.stage ? { stage: r.stage } : {}),
+    emitted: r?.emitted ?? 0,
+    ...(Object.keys(counts).length ? { counts } : {}),
+    for_s: Math.max(0, Math.round((o.now - o.last.at) / 1000)),
+  };
+  return { v: 1, every_s: o.everyS, pipelines: o.pipelines, running: [...new Set(o.running)].sort(), ...(last ? { last } : {}), ...(o.ended ? { ended: true as const } : {}) };
 }
 
 /** reembed is one pass over the whole brain at a time: two pipelines' passes would see each other's leases. */
@@ -778,8 +820,13 @@ function keyStatus(req: Request, key: string): 0 | 401 | 403 {
   return timingSafeEqual(digest(given), digest(key)) ? 0 : 403;
 }
 
+/** Told as each run starts and ends (the row, SMD-3476 PR 3b): its pipeline, and its report, null when the runner failed on it. */
+export type ServeHooks = { started?(pipeline: string): void; ended?(pipeline: string, report: Report | null): void };
+
 /** The service, and a proxy for each networked pipeline. `port: 0` picks one (the self-check). */
-export async function serve(c: Config, port = DEFAULT_PORT): Promise<{ port: number; stop: (force?: boolean) => void }> {
+export async function serve(c: Config, port = DEFAULT_PORT, hooks: ServeHooks = {}): Promise<{ port: number; stop: (force?: boolean) => void }> {
+  // A hook that throws is said, never the run's failure.
+  const tell = (f: () => void) => { try { f(); } catch (e) { console.error(`runner: a run's hook failed: ${(e as Error).message}`); } };
   const byName = new Map(c.pipelines.map((p) => [p.name, p]));
   const busy = new Set<string>();
   const proxies = new Map<string, Proxy>();
@@ -816,12 +863,16 @@ export async function serve(c: Config, port = DEFAULT_PORT): Promise<{ port: num
       if (!p) return Response.json({ ok: false, why: `no pipeline ${JSON.stringify(m[1])} in the allowlist` }, { status: 404 });
       if (busy.has(p.name)) return Response.json({ ok: false, pipeline: p.name, why: "a run of this pipeline is already going" }, { status: 409 });
       busy.add(p.name);
+      tell(() => hooks.started?.(p.name));
+      let report: Report | null = null;
       try {
         const r = await runPipeline(c, p, proxies.get(p.name));
+        report = r;
         console.log(`${new Date().toISOString()} ${p.name}: ${r.ok ? "ok" : `${r.stage}: ${r.why}`} (emitted ${r.emitted}${r.counts ? `, inserted ${r.counts.inserted}, updated ${r.counts.updated}, unchanged ${r.counts.unchanged}` : ""})`);
         return Response.json(r, { status: statusOf(r) });
       } finally {
         busy.delete(p.name);
+        tell(() => hooks.ended?.(p.name, report));
       }
     },
   });
@@ -1225,6 +1276,56 @@ async function selfCheck(): Promise<number> {
     expect(`the emitter's environment holds neither the database URL nor the key (${n.status} ${nr.why ?? ""})`, n.status === 200 && nr.ok);
   } finally {
     server.stop(true);
+  }
+
+  // The row (SMD-3476 PR 3b): each run's start and end reach the hooks with
+  // its report, a hook that throws fails no run, and the row the service
+  // writes from them — through rowWriter, its statement a stand-in here — says
+  // what it holds, what runs and how the last run ended, and ended at the stop.
+  {
+    const told: string[] = [];
+    let lastRun: LastRun | null = null;
+    const runningNow = new Set<string>();
+    const rows: RunnerValue[] = [];
+    const row = rowWriter<RunnerValue>({
+      value: (ended) => runnerValue({ pipelines: pipelines.length, running: runningNow, last: lastRun, now: Date.now(), everyS: RUNNER_STAMP_EVERY_S, ended }),
+      everyS: RUNNER_STAMP_EVERY_S,
+      timeoutMs: 1000,
+      write: async (v) => { rows.push(v); return true; },
+      failed: () => {},
+    });
+    const hooked = await serve(config({}), 0, {
+      started: (name) => { told.push(`start ${name}`); runningNow.add(name); row.changed(); },
+      ended: (name, report) => { told.push(`end ${name} ${report?.ok ?? "none"}`); runningNow.delete(name); lastRun = { pipeline: name, report, at: Date.now() }; row.changed(); },
+    });
+    const throwing = await serve(config({}), 0, { started: () => { throw new Error("planted"); }, ended: () => { throw new Error("planted"); } });
+    try {
+      const run = (srv: { port: number }, name: string) => fetch(`http://127.0.0.1:${srv.port}/run/${name}`, { method: "POST", headers: { "x-runner-key": key } });
+      const ok = await run(hooked, "writes");
+      await ok.body?.cancel();
+      const failed = await run(hooked, "fails");
+      await failed.body?.cancel();
+      await row.end();
+      const thrown = await run(throwing, "writes");
+      await thrown.body?.cancel();
+      expect(`the hooks are told each run's start and end, with its report (${told.join(", ")})`, told.join(", ") === "start writes, end writes true, start fails, end fails false");
+      expect(`a hook that throws fails no run (${thrown.status})`, thrown.status === 200);
+      const during = rows.find((v) => v.running.includes("writes"));
+      const after = rows.at(-1);
+      expect(`the row says the run under way, then the last run's end — where it stopped and what it emitted — and ended at the stop (${JSON.stringify(after)})`,
+        during !== undefined && during.last === undefined && after?.ended === true && JSON.stringify(after.running) === "[]" && after.pipelines === pipelines.length
+          && after.last?.pipeline === "fails" && after.last.ok === false && after.last.stage === "emitter" && after.last.emitted === 0 && after.last.counts === undefined
+          && after.last.for_s >= 0 && after.last.for_s < 10);
+      const written = rows.find((v) => v.last?.pipeline === "writes");
+      expect(`a run that succeeded is said with its counts, a count the ingester did not print left off (${JSON.stringify(written?.last)})`,
+        written?.last?.ok === true && written.last.counts?.inserted === 2 && !("stage" in written.last));
+      const noReport = runnerValue({ pipelines: 1, running: ["a", "a"], last: { pipeline: "b", report: null, at: 0 }, now: 5000, everyS: 60 });
+      expect(`a run the runner failed on is not ok and names no stage; each running pipeline once (${JSON.stringify(noReport)})`,
+        noReport.last?.ok === false && !("stage" in noReport.last) && noReport.last.for_s === 5 && JSON.stringify(noReport.running) === '["a"]' && !("ended" in noReport));
+    } finally {
+      hooked.stop(true);
+      throwing.stop(true);
+    }
   }
 
   // The bounds on one run: a second call while one is going, a step past the
@@ -1660,8 +1761,35 @@ if (import.meta.main) {
     if (reach === "reached") await refuseStart(`an emitter uid reached a port of the runner's on 127.0.0.1: the egress rules that close emitters' network are not in place. The image's command sets them (runner.Dockerfile); start the runner with it`);
   }
   if (!existsSync(c.importsDir)) console.error(`runner: ${c.importsDir} does not exist; every emitter will find no export`);
+  // Its row (SMD-3476 PR 3b): up, what it holds and runs, and its last run —
+  // stamped at its start, each run's start and end, every
+  // RUNNER_STAMP_EVERY_S, and ended at the stop — which the status surface
+  // reads (task_status, preflight's tasks row, brain_info). Its role's worker
+  // group writes ob1_config; with no DATABASE_URL there is no row.
+  const running = new Set<string>();
+  let last: LastRun | null = null;
+  const rowSql = c.env.DATABASE_URL ? new SQL({ url: c.env.DATABASE_URL, max: 1 }) : null;
+  const row = rowSql === null
+    ? { changed() {}, async end() {} }
+    : rowWriter({
+      value: (ended) => runnerValue({ pipelines: c.pipelines.length, running, last, now: Date.now(), everyS: RUNNER_STAMP_EVERY_S, ended }),
+      everyS: RUNNER_STAMP_EVERY_S,
+      timeoutMs: RUNNER_STAMP_TIMEOUT_MS,
+      // An object, not JSON text: Bun binds a string to jsonb as a JSON string.
+      write: async (value) => {
+        await rowSql`INSERT INTO ob1_config (key, value) VALUES (${RUNNER_KEY}, (${value}::jsonb)::text)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+        return true;
+      },
+      failed: (e) => console.error(`runner: could not stamp ${RUNNER_KEY} (${e.message}) — runs go on, and it is tried again at the next run and every ${RUNNER_STAMP_EVERY_S} s`),
+    });
+  const hooks: ServeHooks = {
+    started: (name) => { running.add(name); row.changed(); },
+    ended: (name, report) => { running.delete(name); last = { pipeline: name, report, at: Date.now() }; row.changed(); },
+  };
   let s!: Awaited<ReturnType<typeof serve>>;
-  try { s = await serve(c); } catch (e) { await refuseStart(`could not listen: ${(e as Error).message}`); }
+  try { s = await serve(c, DEFAULT_PORT, hooks); } catch (e) { await refuseStart(`could not listen: ${(e as Error).message}`); }
+  row.changed();
   console.log(`runner: listening on :${s.port}, ${c.pipelines.length} pipeline(s)${c.pipelines.length ? `: ${c.pipelines.map((p) => `${p.name} (uid ${emitterUid(p.name)}${p.network.length ? `, network ${p.network.map((h) => `${h.host}:${h.port}`).join(", ")} through its proxy` : ""})`).join(", ")}` : " (none converted yet — deploy/orchestration/pipelines.json)"}`);
   if (root) {
     // An emitter's files in /tmp are its own.
@@ -1676,6 +1804,8 @@ if (import.meta.main) {
     // Said, so a run the stop cut off leaves a trace here as well as a 502 at the door (review pass 5).
     if (live.size) console.error(`runner: stopping; ${live.size} running step(s) stopped, and the run(s) they belong to get no report`);
     await stopLive();
+    // Its row says it stopped, within its write's bound (RUNNER_STAMP_TIMEOUT_MS).
+    await row.end();
     process.exit(0);
   };
   process.on("SIGTERM", stop);

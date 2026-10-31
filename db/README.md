@@ -2407,7 +2407,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
-| | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
+| | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
@@ -3017,7 +3017,8 @@ bun extract-entities.ts --url … --subjects rules        # …the rules alone, 
 bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes, pools and asks nothing
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
+bun extract-entities.ts --url … --subjects --judge-checked # the garbage-judge alarm off, for a judge model checked and found right
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3368,14 +3369,16 @@ thought is filed under disagrees with is no current subject at a naming either,
 so a ticket moved before 113, or under another pool, is read then. An answer that is not
 JSON with a subject, a call past the limit, a row the egress gate refuses and a
 key the door refuses each fail the claim, the subject standing, are said, and
-exit 1, as the pass fails a malformed answer; `--retry-failed` puts the failed
+exit 1, as the pass fails a malformed answer, or 3 once the judge's answers trip
+the garbage-judge alarm (below); `--retry-failed` puts the failed
 claims back in the pool. `--limit` counts the claims taken, the oldest pooled
 first. A run's summary counts the subjects it recorded in place of a standing
 one, and how many of those took a new key, and a claim no longer the run's when
 it released it. A changed judge model leaves its predecessor's
 subjects standing, current at the same question, and is not asked the thoughts
 its predecessor named nothing for: the pool's key names whether a model is asked,
-not which. Nothing asks them again yet.
+not which. Nothing asks them again yet, but the garbage-judge alarm (below) hands
+back those a judge it stops named nothing for.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
 been measured on the question (the stable brain's, today); its counts follow
 `OB1_SUBJECT_REASONING` too, a model's subject found with reasoning off counted
@@ -3398,6 +3401,72 @@ thought with no current subject while its pool is not named), and reads on
 through a signal, as the pass's does; its pages go by thought id, so with
 `--limit` it counts the first by id, which a run need not take first. Sleep
 does not run the sweep yet: that is SMD-3306 PR 6, on SMD-3379's scheduler.
+
+**A judge that answers garbage stops the sweep, exit 3 (SMD-3306 PR 5b).** The
+pass's alarm (SMD-2266, above), for the judge model, judged after each claim the
+judge answered: a call can take 900 s, and an answer that names nothing finishes
+its claim, the record that the thought was asked. The window is the pool's last
+48 answers, kept across runs in `ob1_config` (`subject_judge_window`, written
+under its row's lock), so the answers of small runs, and of runs side by side,
+add up; a run stops once 10 of them, more than a fifth of 48, gave no subject:
+not JSON of the expected shape, or a subject naming nothing a key holds (an
+empty one, or only a ticket, release or PR the thought does not name, the
+model's invention or its copy of the question's example). A judge answering
+garbage stops at its 10th answer however the runs fall. A call past the limit, a
+row the egress gate refuses and a thought the rules key or find current are no
+answers; a key the door refuses is one that gave a key. It says so on stderr in
+two lines: the counts, then what to check (`OB1_JUDGE_MODEL`, naming the judge
+models whose answers gave no subject when another run's was not this one's, the
+chat endpoint, `OB1_SUBJECT_REASONING`) and what it did. In one transaction the
+window's claims finished as named nothing, by whichever run, go back to the
+pool, at its head, while still finished with no subject standing (one another
+transaction holds is passed over, its end that one's: one that rolls back leaves
+it finished), and the window starts again, stamped with the trip. Nothing else
+would ask them again (a changed judge model leaves them finished, above). A
+claim a run finishes as named nothing is judged in the finish's own transaction,
+so it is in the window or not finished at all. Every other run of the pool that
+began before the stamp, read as written from the run's start, stops at its next
+claim, or at the answer in hand, whose claim, finished as named nothing, goes
+back with the rest, exit 3, said. Every answer counts, on a thought asked again
+as on a new one, so a judge left as it was trips again at the next run, and what
+it named nothing for goes back each time. A judge that is right can trip it too,
+on thoughts that truly have no subject asked together: a trip's hand-back brings
+them up together, as does a pooling again (`subject_pool_filled` blanked, a
+switch of key and back, `OB1_SUBJECT_REASONING` turned off), which asks again
+every thought the model named nothing for. Once the judge is checked,
+`--judge-checked` runs with the alarm off, reading none of that run's answers
+nor another run's stamp, so beside a run that trips it asks what that run hands
+back. The line offers it only when the answers naming nothing trip the alarm by
+themselves, since an unread answer is the judge's failure, and with `--limit`
+the count handed back, which, first in the pool, are all it then asks; without a
+limit it asks the whole pool unguarded. `--subjects rules`, which asks no judge
+model, refuses it. An out-of-date subject it closed on one stays closed until
+that thought is asked again, which the line says. Those it could not read stay
+failed, as the pass leaves its malformed rows, and `--retry-failed` puts back
+the pool's failed claims, this run's among them; a trip in a run whose
+`--retry-failed` returned any says those were chosen for failing, as the pass
+says of its first judgement after a `--retry-*`. It exits 3, ahead of the 1 of
+claims failed, and of a first signal's 130 when the claim the signal let finish
+trips it; a second signal at once exits 130, the claim in hand unjudged, unless
+its finish holds the window's lock: that lands, judged, and a trip it made may
+go unsaid, while one held past the CLI's 3 s grace is undone by the server, its
+claim back in the pool. A database lost as a trip is written leaves none of it,
+unless its commit landed as the connection went, said, exit 3: the window still
+holds the answers before, so the next answer giving no subject trips it again.
+It reads an answer's shape, not its truth: on 100 canary thoughts the 27B had
+keyed, `qwen2.5:7b`, the metadata model's default, which judges when
+`OB1_JUDGE_MODEL` is unset, answered every one in shape and named nothing for
+one, and gave the 27B's key for 60 of the other 99, where the 27B named nothing
+for 1 of the 63 it was asked in the canary's first naming run. So a weaker judge
+passes it, as does one answering a placeholder (`none`, `unknown`), which keys
+as a phrase (no canary subject is one), and `--subjects rules` stays the way for
+a brain whose judge model has not been measured on the question. A working judge
+that often names nothing trips it now and then: by a Monte Carlo of the rule,
+one naming nothing for 5% of the thoughts it is asked, in random order, trips
+within 1,000 answers 1.4% of the time, for 10% 75%, and for 15% always. Nor does
+it catch a judge that never ends its answer: `qwen3.5:0.8b`, thinking, ran 3 of
+3 canary thoughts to the 300 s limit, and a call past the limit is no answer, so
+each such claim fails at the limit a call, through the pool.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -3953,6 +4022,34 @@ already held the value) it moves the superseding thought's `updated_at` (001's
 trigger fires on any column), which two readers take as an edit: a client's
 `if_unchanged_since` from before the acceptance is refused, and 021's evidence
 rule stops vouching for that thought's vector, as after any edit.
+
+**Deciding over the contract (SMD-3338).** The `review_supersession_proposal`
+tool — `POST /v1/proposals/{id}/review` on the REST core, `{decision:
+"accept"|"reject", direction?, note?, force?}` — is `--accept` and `--reject`
+for a client: an agent over MCP, or a REST caller — the operator GUI's buttons
+are SMD-3322's. It runs the CLI's own decision
+(`server-portable/proposal-review.ts`, which `--accept`/`--reject` call too):
+the lineage-pair and WRITER guards, 029's review, and the reads of what its
+lapse cleared and of who decided, in one transaction that takes 029's lock and
+then the proposal's row before its first read, so the row checked is the row
+decided — the pass's in-place re-judge of a stale row (063), which takes the row
+alone, waits for it. A write to a side that takes neither (a re-capture's trust,
+an edit of `derived_from`) can still land between the guard and the decision, as
+it can just after. A reject says what it undid of an accept (not a pointer that
+was there before it, nor a capture-only pointer its lapse cleared) and when it
+replaces an earlier reject. Each check is refused by name
+(`REFUSED_EDITED_SINCE` — a stale row's text moved too — `REFUSED_LINEAGE_PAIR`,
+`REFUSED_WRITER`), and `force: true` waives those three on an accept, as
+`--force` does, and nothing else; a direction or force on a reject, and a note
+beginning with the pass's marker, are refused as the CLI refuses them. Any write
+key may decide, an agent's included — the maintainer's amendment (2026-10-26) of
+029's "the machine proposes, someone confirms": the proposal's row records who
+decided (114), so once the operator classifies the keys (`set_agent_kind`) a
+person's decision is told from an agent's; an unclassified key's reads "a key
+the registry has not classified". 029's own comment stays as written; the file
+is frozen. A read or capture key does not see the tool. The review function runs
+as the caller, so the server's role needs the server group's `UPDATE` on
+`supersession_proposals` (Grants, below).
 
 **Stale rows (063, 067).** A pending proposal whose text moved under the
 verdict is set `stale` by `rebuild_derived` (an edit, a supersession, a
@@ -5893,11 +5990,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1882 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1926 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1048 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 436 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 477 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
