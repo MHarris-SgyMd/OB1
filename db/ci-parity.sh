@@ -37,27 +37,22 @@ ROOT="$PWD"
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
 # The lane keeps the last one in LAST_ROW, which at_row writes for wait_lane.
 row() {
-  local ok="$1" name="$2" verdict="$3"
-  if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✓"; else printf "  \033[31m✗\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✗"; fi
+  local name="$2" verdict="$3" colour=32 mark=✓
+  [ "$1" = ok ] || colour=31 mark=✗
+  printf "  \033[%sm%s\033[0m %-48s %s\n" "$colour" "$mark" "$name" "$verdict"
+  LAST_ROW="$name $mark"
 }
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, over twice the slowest honest row here under both lanes' load;
-# OB1_PARITY_ROW_LIMIT sets another. limit SECS CMD... runs CMD as timeout(1)
-# would. CMD runs in a process group of its own (set -m), so ending the group
-# ends what CMD started too, even what outlived its parent (not what left the
-# group, as a setsid does); its stdin is /dev/null, as in CI. Past SECS a
-# watchdog ends the group and limit returns 124, whatever CMD's exit, even
-# where timeout(1) would give 137 for a KILL. When CMD exits first, what it
-# left in the group is ended, so nothing of it holds the substitution's output
-# open. Outside the terminal's group CMD gets no Ctrl-C, ^\ or hangup, so
-# limit's trap ends the group; nor a ^Z, which stops the shells and not the
-# rows, whose limits run on. Called only inside a command substitution, whose
-# subshell confines the set -m limit leaves on, and with 2>&1: with stderr a
-# terminal, bash 3.2's set -m would take the terminal from the shell that ran
-# this script.
+# OB1_PARITY_ROW_LIMIT sets another. Scratch files go in PARITY_TMP, macOS's
+# TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
-case "$ROW_LIMIT" in *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;; esac
+case "$ROW_LIMIT" in
+  *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;;
+esac
+PARITY_TMP="${TMPDIR:-/tmp}"
+PARITY_TMP="${PARITY_TMP%/}"
 # end_group PGID: TERM to a row's process group, and KILL to what is left of
 # it 10 s on (CI's --kill-after); nothing to wait for when it is already gone.
 end_group() {
@@ -67,15 +62,27 @@ end_group() {
   kill -s KILL -- -"$1" 2>/dev/null
   return 0
 }
+# limit SECS CMD... runs CMD as timeout(1) would. CMD runs in a process group
+# of its own (set -m), so ending the group ends what CMD started too, even what
+# outlived its parent (not what left the group, as a setsid does); its stdin is
+# /dev/null, as in CI. Past SECS a watchdog ends the group and limit returns
+# 124, whatever CMD's exit, even where timeout(1) would give 137 for a KILL.
+# When CMD exits first, what it left in the group is ended, so nothing of it
+# holds the substitution's output open. Outside the terminal's group CMD gets
+# no Ctrl-C, ^\ or hangup, so limit's trap ends the group; nor a ^Z, which
+# stops the shells and not the rows, whose limits run on. Called only inside a
+# command substitution, whose subshell confines the set -m limit leaves on, and
+# with 2>&1: with stderr a terminal, bash 3.2's set -m would take the terminal
+# from the shell that ran this script.
 limit() {
-  local secs="$1" tmp="${TMPDIR:-/tmp}" armed='' pid='' dog='' rc; shift
+  local secs="$1" armed='' pid='' dog='' rc; shift
   # Set before CMD starts, so no signal falls between. A signal that lands
   # after a fork and before its pid is kept takes it from $!: the row's, or
   # the watchdog's, whose group ending as well is no harm (set +u around it:
   # bash 3.2 calls an unset $! unbound even with a default).
   trap 'set +u; pid=${pid:-$!} dog=${dog:-$!}; set -u; [ -z "$dog" ] || kill -s TERM -- -"$dog" 2>/dev/null; end_group "$pid"; rm -f "$armed"; exit 130' HUP INT QUIT TERM
   # There while the watchdog has not fired.
-  armed=$(mktemp "${tmp%/}/ci-parity-limit.XXXXXX") || { trap - HUP INT QUIT TERM; return 1; }
+  armed=$(mktemp "$PARITY_TMP/ci-parity-limit.XXXXXX") || { trap - HUP INT QUIT TERM; return 1; }
   set -m
   "$@" < /dev/null &
   pid=$!
@@ -307,8 +314,7 @@ pair_rows() {
 # follow a lane: NAME.out its rows so far, NAME.now the row in hand, since
 # when, and the row before (SMD-3647).
 start_lanes() {
-  local tmp="${TMPDIR:-/tmp}"
-  LANES=$(mktemp -d "${tmp%/}/ci-parity-lanes.XXXXXX")
+  LANES=$(mktemp -d "$PARITY_TMP/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
   echo "  … the other two lanes write to $LANES: free.out the database-free lane's rows, pair.out test-upgrade's and test-preflight's"
   free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
@@ -321,12 +327,12 @@ stop_tree() {
   for child in $(pgrep -P "$1"); do stop_tree "$child"; done
   kill "$1" 2>/dev/null
 }
+drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID; do stop_tree "$pid"; done
   drop_lanes
 }
-drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
 # A lane still going says which row it has in hand, for how long, and the row
 # before it; or that its rows are done, or none begun.
