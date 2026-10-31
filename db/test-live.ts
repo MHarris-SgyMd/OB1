@@ -101,20 +101,22 @@ if (!URL_) {
  * at every run's end. [38r], the scheduler's re-embed cases, came out of [38]
  * (SMD-3392), and [9f], re-embed's follower outage cases, out of [9]
  * (SMD-2679 PR 4a-2b). The four are split so that each cell's job takes
- * about a quarter of the four's ~885 s, ~221 s, by the section times of
- * main's runs to 4490b54b as their logs stamp them (SMD-3469): sleep has
- * [38] and [10g], 200 s of sections, and [39]; long [38b], [9] and [9f],
- * 194 s, and [17]; extract [10] and [38r], 182 s, and five short sections;
- * the rest its own 163 s, [10h] and [10e]. A cell's job runs ~18 s past its
- * sections (~25 s for the rest's, with test-search-path.ts), so a section
- * added to a cell adds to the run's length once that cell is the longest.
+ * about a quarter of the four's, ~230 s, by the section times main's CI logs
+ * stamp in its runs from 7301d0f5 to b07061d4 (SMD-3469): sleep has [38] and
+ * [10g], ~200–205 s of sections, and [39]; long [38b], [9] and [9f], ~193 s,
+ * and [17] and [43]; extract [10] and [38r], ~182 s, and five short
+ * sections; the rest its own ~165–190 s and [10h]. The rest's sections wait
+ * on the CPU, not on timers, so its time moves most with the runner's speed,
+ * and it takes the least. A cell's job runs ~18 s past its sections (~25 s
+ * for the rest's, with test-search-path.ts), so a section added to a cell
+ * adds to the run's length once that cell's job is the run's longest.
  * db/README.md states each shard's assertion count beside the full run's,
  * and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["10g", "38", "39"],
-  long: ["9", "9f", "17", "38b"],
-  extract: ["10", "10f", "37", "37b", "38r", "41", "43"],
+  long: ["9", "9f", "17", "38b", "43"],
+  extract: ["10", "10e", "10f", "37", "37b", "38r", "41"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
