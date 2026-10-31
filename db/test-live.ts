@@ -16114,6 +16114,12 @@ if (want("37b")) {
     await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 0, code: 75, tries: 0 } });
     const migrated = await row("heartbeat:sleep");
     assert(migrated?.outcome === "stopped" && migrated.restart?.code === 75, `a migration's at-once restart keeps the scheduler's "stopped" (${JSON.stringify(migrated)})`);
+    // An ended row is paused by nothing, and keeps its held passes as its last word (SMD-3379 PR 1c).
+    await ssql`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", paused: { since: new Date().toISOString() }, holds: [{ pass: "extract", why: "provider", until: null }] })}, updated_at = now() WHERE key = 'heartbeat:sleep'`;
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 1, tries: 1 } });
+    const unpaused = await row("heartbeat:sleep");
+    assert(unpaused !== null && !("paused" in unpaused) && unpaused.ended === true && unpaused.holds?.length === 1 && unpaused.holds[0].pass === "extract" && unpaused.holds[0].why === "provider" && unpaused.holds[0].until === null,
+      `an ended scheduler's row loses its pause and keeps its held passes (${JSON.stringify(unpaused)})`);
     // A follower that exited 0 on its own keeps its outcome; a value not JSON is replaced, never a reason to fail.
     await ssql`UPDATE ob1_config SET value = 'not json', updated_at = now() WHERE key = 'heartbeat:sleep'`;
     await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 0, tries: 1 } });

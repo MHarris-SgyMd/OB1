@@ -4448,6 +4448,23 @@ by hand with the scheduler stopped. One whose windows are all kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
+Since SMD-3379 PR 1c-2 the readers take two fields that no scheduler writes
+yet; 1c-3 writes them. `paused { since }` is the scheduler paused by a live
+call, its gate closed since then (the database's clock), its passes waiting
+between thoughts. It is read on a live row alone, and `db/supervise.ts`
+drops it from a row it ends. `holds` is the passes the scheduler holds out
+of its work, one to three, each `{ pass, why, until }`:
+- `pass` is `reembed`, `extract` or `consolidate`;
+- `why` is one of re-embed's set-down kinds (above), `lookup` or
+  `model-switch`;
+- `until` is the time it re-arms, or null for an event rather than a time.
+
+`brain_info` and preflight's `sleep` row say them beside the state — "running
+a pass, paused by a live call for 40 s; held: consolidate (provider)" and
+"asleep, its passes paused by a live call, going on once the brain is quiet"
+— and warn of neither. An ended row keeps its holds as its last word,
+without their times.
+
 Preflight's `consolidate pass` row reads a fresh `heartbeat:sleep` as the
 scheduler working the current judge's key, its pass's start wait said there
 too, rather than asking for a second worker.
@@ -5893,11 +5910,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1882 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1883 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 436 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 437 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

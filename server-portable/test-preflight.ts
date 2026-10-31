@@ -4244,6 +4244,12 @@ else {
         `beside board-sync's heartbeat the workers row names board-sync alone, the scheduler its own row (${row(mixedOut.out, "workers")})`);
       assert(/✓\s+sleep\s+running a pass \(last stamped 10 s ago, every 60 s\); asleep, its passes running — for 2 min; a live write wakes it; a search does not$/.test(row(asleepOut.out, "sleep")),
         `asleep: the row says so, for how long, and that a live write wakes it, a search not (${row(asleepOut.out, "sleep")})`);
+      // Paused by a live call, a pass held (SMD-3379 PR 1c), read before a
+      // scheduler writes them: the row says both, and warns of neither.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null }, paused: { since: await at(40) }, holds: [{ pass: "consolidate", why: "provider", until: null }] }), 10);
+      const pausedRow = row((await run(LOG_ON)).out, "sleep");
+      assert(/✓\s+sleep\s+running a pass, paused by a live call for 40 s; held: consolidate \(provider\) \(last stamped 10 s ago, every 60 s\); asleep, its passes paused by a live call, going on once the brain is quiet — for 2 min; a live write wakes it; a search does not$/.test(pausedRow),
+        `paused: the row says for how long and that the passes go on once the brain is quiet, its held pass beside, no warning (${pausedRow})`);
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);

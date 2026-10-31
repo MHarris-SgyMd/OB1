@@ -307,6 +307,8 @@ const providerWaitWords = (passes: readonly string[], midPass = false) => `${pas
 /** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
 const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
   [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
+/** A sleeping scheduler's passes, running or paused by a live call (SMD-3379 PR 1c), as its `sleep` row and the rows of the passes it runs say them. */
+const asleepWords = (h: Pick<WorkerHeartbeat, "paused">) => `asleep, its passes ${h.paused ? "paused by a live call, going on once the brain is quiet" : "running"}`;
 /** The rows to check for passes waiting on their provider: re-embed's is the embedding endpoint, the others' chat (SMD-2679 PR 4b). */
 const providerRows = (passes: readonly string[]) =>
   [passes.some((p) => p !== "reembed") ? "the model provider rows here (--deep probes chat)" : null, passes.includes("reembed") ? "the embedding provider row here (--deep calls it)" : null].filter((r) => r !== null).join(" and ");
@@ -4340,7 +4342,7 @@ if (configFailed) {
                 const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
                 // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
                 const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "awake, its passes waiting for the brain to go quiet";
-                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : awake})`;
+                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? asleepWords(sleeping) : awake})`;
                 // Its failed rows: retried once their cause is fixed, or one the
                 // provider refuses permanently accepted — a retry of that fails
                 // again, every sleep (review pass 1: main's way out was lost).
@@ -4560,7 +4562,7 @@ if (configFailed) {
                 // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2),
                 // nor do those waiting mid-pass for one that stopped answering (SMD-2905).
                 const waitingFor = sleeping.waiting?.length || sleeping.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeping.waiting ?? null, sleeping.waitingMidPass ?? null)}` : null;
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${sleeping.running ? waitingFor ?? asleepWords(sleeping) : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
@@ -4980,7 +4982,7 @@ if (configFailed) {
               : h.running
                 ? waitingFor || waitingMid
                   ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
-                  : `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
+                  : `${asleepWords(h)}${s ? ` — for ${since(s.from)}` : ""}`
                 : s && s.to
                   ? h.resting
                     ? `awake — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget || ", at its clock with nothing left to do"}; the next begins after a live call and the quiet`

@@ -1461,6 +1461,42 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(migrating.every((m, i) => m.startsWith(`restarting after a migration — its supervisor ran it again ${["20 s", "33 min"][i]} ago, and the new process stamps once its start has read — it waits there while migrate.ts holds ob1:migrate, the database does not answer, or its passes' start checks run`))
       && /^held: exited 75, 1 end\(s\) in a row — its supervisor runs it again in 60 s/.test(heldState(heldRow(0, { in_s: 60, code: 75, tries: 1 }))),
     `a 75 run again at once reads restarting after a migration at any age, one on the clock reads held (${migrating.join(" | ")})`);
+  // Paused by a live call and the held passes (SMD-3379 PR 1c), read before a
+  // scheduler writes them: paused on a live sleep row alone, of the shape;
+  // holds of the shape, kept on an ended row; neither off another worker's.
+  const pausedAt = "2026-10-05T11:59:30.000Z";
+  const pausedOf = (extra: Record<string, unknown>, age_s = 1) => parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, running: true, ...extra }), at, age_s }]).heartbeats[0];
+  const pausedRows = [
+    pausedOf({ paused: { since: pausedAt } }), pausedOf({ paused: { since: pausedAt }, ended: true }), pausedOf({ paused: { since: pausedAt }, outcome: "stopped" }),
+    pausedOf({ paused: { since: pausedAt } }, 3_600), pausedOf({ paused: { since: "yesterday" } }), pausedOf({ paused: pausedAt }),
+    markOf("heartbeat:board-sync", { paused: { since: pausedAt } }),
+  ].map((h) => h?.paused ?? null);
+  assert(JSON.stringify(pausedRows) === JSON.stringify([{ since: pausedAt }, null, null, null, null, null, null]),
+    `the scheduler's pause is carried on a live row alone, of the shape, never off an ended, stopped or stale row or another worker's (${JSON.stringify(pausedRows)})`);
+  const until = "2026-10-05T12:01:30.000Z";
+  const okHolds = [{ pass: "extract", why: "provider", until }, { pass: "reembed", why: "model-switch", until: null }];
+  const holdRows = [
+    okHolds, [], [{ pass: "extract", why: "provider", until }, { pass: "extract", why: "model", until: null }],
+    [{ pass: "board-sync", why: "provider", until: null }], [{ pass: "extract", why: "linear-key", until: null }],
+    [{ pass: "extract", why: "provider", until: "soon" }], [{ pass: "extract", why: "provider" }],
+    [{ pass: "reembed", why: "outage", until }, { pass: "extract", why: "lookup", until: null }, { pass: "consolidate", why: "provider", until: null }, { pass: "extract", why: "model", until: null }],
+    { pass: "extract", why: "provider", until: null },
+  ].map((holds) => markOf("heartbeat:sleep", { holds })?.holds ?? null);
+  assert(JSON.stringify(holdRows) === JSON.stringify([okHolds, null, null, null, null, null, null, null, null])
+      && JSON.stringify(markOf("heartbeat:sleep", { holds: okHolds, ended: true })?.holds) === JSON.stringify(okHolds)
+      && markOf("heartbeat:board-sync", { holds: okHolds })?.holds === undefined,
+    `the scheduler's held passes are carried when of the shape — one to three, each pass once, a reason of the list, a time or null — kept on an ended row, never off another worker's (${JSON.stringify(holdRows)})`);
+  // Their words, beside the state: the pause's length and each re-arm by the row's own clock; an ended row's as its last word.
+  const sleepWords = (extra: Record<string, unknown>) => heartbeatState(parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true, ...extra }), at, age_s: 30 }]).heartbeats[0]!);
+  const pausedSays = sleepWords({ paused: { since: pausedAt } });
+  const holdsSay = sleepWords({ holds: okHolds });
+  const pastSays = sleepWords({ holds: [{ pass: "extract", why: "provider", until: "2026-10-05T12:00:10.000Z" }] });
+  const endedSays = sleepWords({ holds: okHolds, running: false, outcome: "stopped", ended: true });
+  assert(pausedSays === "running a pass, paused by a live call for 60 s (last stamped 30 s ago, every 60 s)"
+      && holdsSay === "running a pass; held: extract (provider, re-arms in 60 s), reembed (model-switch) (last stamped 30 s ago, every 60 s)"
+      && pastSays === "running a pass; held: extract (provider, re-arming now) (last stamped 30 s ago, every 60 s)"
+      && endedSays === "stopped; at its last word, held: extract (provider), reembed (model-switch) (last stamped 30 s ago, every 60 s)",
+    `a pause reads its length, and the held passes their reasons and re-arms beside the state, an ended row's as its last word (${pausedSays} | ${holdsSay} | ${pastSays} | ${endedSays})`);
   // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
   const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
   assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"
