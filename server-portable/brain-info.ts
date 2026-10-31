@@ -493,8 +493,10 @@ export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
  */
 export const SLEEP_HOLD_WHY = [...REEMBED_DOWN, "lookup", "model-switch"] as const;
 export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
+/** The passes the sleep scheduler runs, as its `holds` names them. */
+export const SLEEP_PASSES = ["reembed", "extract", "consolidate"] as const;
 /** A pass the sleep scheduler holds (WorkerHeartbeat.holds). */
-export type SleepHold = { pass: "reembed" | "extract" | "consolidate"; why: SleepHoldWhy; until: string | null };
+export type SleepHold = { pass: (typeof SLEEP_PASSES)[number]; why: SleepHoldWhy; until: string | null };
 
 /** A `holds` value as db/sleep.ts writes it, or undefined: one to three passes, each once, each of the shape. */
 function parseHolds(h: unknown): SleepHold[] | undefined {
@@ -502,10 +504,10 @@ function parseHolds(h: unknown): SleepHold[] | undefined {
   const out: SleepHold[] = [];
   for (const x of h as Record<string, unknown>[]) {
     if (x === null || typeof x !== "object") return undefined;
-    if (!(x.pass === "reembed" || x.pass === "extract" || x.pass === "consolidate") || out.some((o) => o.pass === x.pass)) return undefined;
+    if (!(SLEEP_PASSES as readonly unknown[]).includes(x.pass) || out.some((o) => o.pass === x.pass)) return undefined;
     if (!(SLEEP_HOLD_WHY as readonly unknown[]).includes(x.why)) return undefined;
     if (!(x.until === null || (typeof x.until === "string" && UTC_INSTANT.test(x.until)))) return undefined;
-    out.push({ pass: x.pass, why: x.why as SleepHoldWhy, until: x.until as string | null });
+    out.push({ pass: x.pass as SleepHold["pass"], why: x.why as SleepHoldWhy, until: x.until as string | null });
   }
   return out;
 }
@@ -518,7 +520,7 @@ function parseHolds(h: unknown): SleepHold[] | undefined {
  */
 export function holdWords(hold: SleepHold, h: Pick<WorkerHeartbeat, "at" | "ageS" | "paused">, live = true): string {
   if (hold.until === null || !live) return `${hold.pass} (${hold.why})`;
-  const left = (Date.parse(hold.until) - Date.parse(h.at)) / 1000 - h.ageS;
+  const left = -secondsSince(h, hold.until);
   return `${hold.pass} (${hold.why}, ${left > 0 ? `re-arms in ${ago(left)}` : h.paused ? "re-arms once the brain is quiet" : "re-arming now"})`;
 }
 
@@ -1843,6 +1845,11 @@ export function ago(s: number): string {
   return s < 90 ? `${Math.round(s)} s` : s < 90 * 60 ? `${Math.round(s / 60)} min` : s < 48 * 3600 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
 }
 
+/** The seconds from `t`, an instant on the database's clock, to now, by a heartbeat's own: its age, and its stamp less `t` — negative for a time still to come. */
+export function secondsSince(h: Pick<WorkerHeartbeat, "at" | "ageS">, t: string): number {
+  return h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000;
+}
+
 /**
  * How long past its supervisor's next try a row may stay unstamped before
  * the supervisor is taken for gone: db/supervise.ts's longest wait, 15 min —
@@ -1901,10 +1908,10 @@ export function heartbeatState(h: WorkerHeartbeat, opts: { leave?: readonly Slee
   // does one waiting mid-pass for a provider that stopped answering (SMD-2905).
   const at = h.waiting?.length ? (h.waitingMidPass?.length ? ", at a pass's start and mid-pass" : " at a pass's start") : h.waitingMidPass?.length ? " mid-pass" : null;
   // Paused by a live call is the state, before running or waiting — its
-  // passes run nothing meanwhile — for how long by the row's own clock
-  // (SMD-3379 PR 1c; draft 5's §4, review pass 1).
-  // A provider wait goes on beside the pause (draft 5's §3, review pass 2).
-  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(h.paused.since)) / 1000))}${at === null ? "" : `, waiting for the provider${at}`}`
+  // passes run nothing meanwhile — for how long by the row's own clock, a
+  // provider wait going on beside it (SMD-3379 PR 1c; draft 5's §3 and §4,
+  // review passes 1 and 2).
+  const state = h.paused ? `paused by a live call for ${ago(Math.max(0, secondsSince(h, h.paused.since)))}${at === null ? "" : `, waiting for the provider${at}`}`
     : h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
   return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""}${holds(true)} (${when})`;
 }
