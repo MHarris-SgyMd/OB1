@@ -10,6 +10,7 @@
  * meet, and the normalisers below keep each row shape in one place.
  */
 
+import type { ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
 
@@ -1782,6 +1783,23 @@ export interface ThoughtStore {
   }): Promise<ResetStampResult>;
 
   /**
+   * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
+   * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
+   * lapse cleared (082) and the reviewer the row records (114), in one
+   * transaction, the CLI's --accept/--reject's own. The review function runs
+   * as the caller (029, SECURITY INVOKER): a role without UPDATE on
+   * supersession_proposals throws, as does a database before 029.
+   */
+  reviewProposal(opts: {
+    id: string;
+    decision: "accept" | "reject";
+    note?: string;
+    direction?: "newer" | "older";
+    force?: boolean;
+    actor?: Actor;
+  }): Promise<ReviewResult>;
+
+  /**
    * Resolve a key digest and its configured name to a stable agent id,
    * registering the pair on first sight. Migration 010.
    *
@@ -2036,7 +2054,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

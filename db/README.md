@@ -2407,7 +2407,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
-| | `supersession_proposals` (029) | `SELECT` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without it `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). The writes stay the worker group's. A role granted before SMD-2680 needs `--grant` again |
+| | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
@@ -3953,6 +3953,34 @@ already held the value) it moves the superseding thought's `updated_at` (001's
 trigger fires on any column), which two readers take as an edit: a client's
 `if_unchanged_since` from before the acceptance is refused, and 021's evidence
 rule stops vouching for that thought's vector, as after any edit.
+
+**Deciding over the contract (SMD-3338).** The `review_supersession_proposal`
+tool — `POST /v1/proposals/{id}/review` on the REST core, `{decision:
+"accept"|"reject", direction?, note?, force?}` — is `--accept` and `--reject`
+for a client: an agent over MCP, or a REST caller — the operator GUI's buttons
+are SMD-3322's. It runs the CLI's own decision
+(`server-portable/proposal-review.ts`, which `--accept`/`--reject` call too):
+the lineage-pair and WRITER guards, 029's review, and the reads of what its
+lapse cleared and of who decided, in one transaction that takes 029's lock and
+then the proposal's row before its first read, so the row checked is the row
+decided — the pass's in-place re-judge of a stale row (063), which takes the row
+alone, waits for it. A write to a side that takes neither (a re-capture's trust,
+an edit of `derived_from`) can still land between the guard and the decision, as
+it can just after. A reject says what it undid of an accept (not a pointer that
+was there before it, nor a capture-only pointer its lapse cleared) and when it
+replaces an earlier reject. Each check is refused by name
+(`REFUSED_EDITED_SINCE` — a stale row's text moved too — `REFUSED_LINEAGE_PAIR`,
+`REFUSED_WRITER`), and `force: true` waives those three on an accept, as
+`--force` does, and nothing else; a direction or force on a reject, and a note
+beginning with the pass's marker, are refused as the CLI refuses them. Any write
+key may decide, an agent's included — the maintainer's amendment (2026-10-26) of
+029's "the machine proposes, someone confirms": the proposal's row records who
+decided (114), so once the operator classifies the keys (`set_agent_kind`) a
+person's decision is told from an agent's; an unclassified key's reads "a key
+the registry has not classified". 029's own comment stays as written; the file
+is frozen. A read or capture key does not see the tool. The review function runs
+as the caller, so the server's role needs the server group's `UPDATE` on
+`supersession_proposals` (Grants, below).
 
 **Stale rows (063, 067).** A pending proposal whose text moved under the
 verdict is set `stale` by `rebuild_derived` (an edit, a supersession, a
@@ -5893,8 +5921,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1882 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1045 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1885 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1048 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 436 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
