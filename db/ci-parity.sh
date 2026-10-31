@@ -4,8 +4,8 @@
 # test-upgrade and test-preflight, which run beside them on a second as CI's do;
 # and beside both, in a lane of their own, the suites and self-checks that need
 # none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
-# Each row says how long it took, and is stopped as a failure at a time limit,
-# 600 s unless OB1_PARITY_ROW_LIMIT says otherwise (SMD-3647).
+# Each row says how long it took, and one still running at its time limit, 600 s
+# unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647).
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
@@ -35,7 +35,7 @@ cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
-# The lane keeps the last one, for wait_lane's "still going" line.
+# The lane keeps the last one in LAST_ROW, which at_row writes for wait_lane.
 row() {
   local ok="$1" name="$2" verdict="$3"
   if [ "$ok" = ok ]; then printf "  \033[32m✓\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✓"; else printf "  \033[31m✗\033[0m %-48s %s\n" "$name" "$verdict"; LAST_ROW="$name ✗"; fi
@@ -47,14 +47,17 @@ row() {
 # would. CMD runs in a process group of its own (set -m), so ending the group
 # ends what CMD started too, even what outlived its parent (not what left the
 # group, as a setsid does); its stdin is /dev/null, as in CI. Past SECS a
-# watchdog ends the group and limit returns 124, whatever CMD's exit. When CMD
-# exits first, what it left in the group is ended, so nothing of it holds the
-# substitution's output open. Outside the terminal's group CMD gets no Ctrl-C
-# or hangup, so limit's trap ends the group. Called only inside a command
-# substitution, with 2>&1: with stderr a terminal, bash 3.2's set -m would take
-# the terminal from the shell that ran this script.
+# watchdog ends the group and limit returns 124, whatever CMD's exit, even
+# where timeout(1) would give 137 for a KILL. When CMD exits first, what it
+# left in the group is ended, so nothing of it holds the substitution's output
+# open. Outside the terminal's group CMD gets no Ctrl-C, ^\ or hangup, so
+# limit's trap ends the group; nor a ^Z, which stops the shells and not the
+# rows, whose limits run on. Called only inside a command substitution, whose
+# subshell confines the set -m limit leaves on, and with 2>&1: with stderr a
+# terminal, bash 3.2's set -m would take the terminal from the shell that ran
+# this script.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
-case "$ROW_LIMIT" in '' | *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;; esac
+case "$ROW_LIMIT" in *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;; esac
 # end_group PGID: TERM to a row's process group, and KILL to what is left of
 # it 10 s on (CI's --kill-after); nothing to wait for when it is already gone.
 end_group() {
@@ -66,10 +69,13 @@ end_group() {
 }
 limit() {
   local secs="$1" tmp="${TMPDIR:-/tmp}" armed='' pid='' dog='' rc; shift
-  # Set before CMD starts, so no signal falls between.
-  trap '[ -z "$dog" ] || kill -s TERM -- -"$dog" 2>/dev/null; end_group "$pid"; rm -f "$armed"; exit 130' HUP INT TERM
+  # Set before CMD starts, so no signal falls between. A signal that lands
+  # after a fork and before its pid is kept takes it from $!: the row's, or
+  # the watchdog's, whose group ending as well is no harm (set +u around it:
+  # bash 3.2 calls an unset $! unbound even with a default).
+  trap 'set +u; pid=${pid:-$!} dog=${dog:-$!}; set -u; [ -z "$dog" ] || kill -s TERM -- -"$dog" 2>/dev/null; end_group "$pid"; rm -f "$armed"; exit 130' HUP INT QUIT TERM
   # There while the watchdog has not fired.
-  armed=$(mktemp "${tmp%/}/ci-parity-limit.XXXXXX") || return 1
+  armed=$(mktemp "${tmp%/}/ci-parity-limit.XXXXXX") || { trap - HUP INT QUIT TERM; return 1; }
   set -m
   "$@" < /dev/null &
   pid=$!
@@ -84,7 +90,7 @@ limit() {
   fi
   # A watchdog that fired ends once the group is gone, KILLed or not.
   wait "$dog" 2>/dev/null
-  trap - HUP INT TERM
+  trap - HUP INT QUIT TERM
   return "$rc"
 }
 
@@ -323,7 +329,7 @@ stop_lanes() {
 drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
 # A lane still going says which row it has in hand, for how long, and the row
-# before it.
+# before it; or that its rows are done, or none begun.
 wait_lane() {
   local at='' row='' last=''
   if kill -0 "$1" 2>/dev/null; then
@@ -349,12 +355,12 @@ main() {
   BASE_ENV=$(env | LC_ALL=C sort)
   # A closed terminal's hangup reaches every process of this script's group,
   # the lanes and the pair lane's with-postgres.sh among them, and limit's trap
-  # passes it on to each row's own group; so main() only exits, since stopping
-  # the pair lane too could cut its with-postgres.sh's container removal short.
-  # A HUP sent to this script alone leaves the lanes to finish, each row within
-  # its limit.
+  # ends each row's own group; so main() only exits, since stopping the pair
+  # lane too could cut its with-postgres.sh's container removal short. A HUP
+  # sent to this script alone exits once the database lane's row in hand ends,
+  # leaving the lanes to run on unreported, each row within its limit.
   trap 'exit 129' HUP
-  trap 'stop_lanes; exit 130' INT TERM
+  trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
