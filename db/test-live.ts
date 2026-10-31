@@ -48,6 +48,8 @@ import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findin
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
+import { reviewProposal } from "../server-portable/proposal-review.ts";
+import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, recordSubject, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
@@ -10415,6 +10417,51 @@ if (want("16")) {
   assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
     "…and 114 put back, its backfill names the keyless accept from its audit row");
 
+  // SMD-3338: the REST core decides as its own role — the capture and server groups, not the worker's: the guard, 029's
+  // review and the pointer it writes and clears, the lapse's read and the reviewer's, all under that role; without the
+  // server group's UPDATE on the queue the decision is refused whole, and the tool's fault hint names the grant. Under
+  // a name of its own, so the worker's audit rows below stay the ones they count; the row left rejected, as it was.
+  const GROLE = "ob1_live_reviewer";
+  const gUrl = URL_.replace(/\/\/[^@]*@/, `//${GROLE}:ob1reviewer@`);
+  const [{ mayCreate: mayCreateG }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+  if (gUrl === URL_ || !mayCreateG) {
+    skip("the REST core's role (capture and server groups) decides a proposal, and is refused without the server group's UPDATE", gUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+  } else {
+    const dropG = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${GROLE}') THEN EXECUTE 'DROP OWNED BY ${GROLE}'; EXECUTE 'DROP ROLE ${GROLE}'; END IF; END $$`);
+    await dropG();
+    try {
+      await sql.unsafe(`CREATE ROLE ${GROLE} LOGIN PASSWORD 'ob1reviewer'`);
+      const granted = await migrateInProcess({ grant: GROLE, groups: "capture,server" });
+      const asRole = new SQL({ url: gUrl, max: 1 });
+      try {
+        const actor = actorPayload({ name: "rest-core-reviewer", via: "open-brain-api" });
+        // Each call caught, so a grant gone missing fails its cell rather than the shard (review pass 1).
+        const asReviewer = (req: Omit<Parameters<typeof reviewProposal>[1], "actor" | "actorName">) =>
+          reviewProposal(asRole, { ...req, actor, actorName: "rest-core-reviewer" }).catch((e: unknown): Awaited<ReturnType<typeof reviewProposal>> => ({ ok: false, error: `threw: ${(e as Error).message}`, writers: null }));
+        // Unforced first: the guard's reads (the lineage predicate, 094's writers and walks) run under the role, and
+        // 029 answers the text edited since.
+        const guarded = await asReviewer({ id: directed.id, decision: "accept" });
+        const accepted = await asReviewer({ id: directed.id, decision: "accept", force: true });
+        const acceptedPointer = await supersedesOf(reversal);
+        const rejected = await asReviewer({ id: directed.id, decision: "reject", note: "the REST core's role" });
+        assert(granted.code === 0 && guarded.error === "EDITED_SINCE" && guarded.writers !== null && guarded.writers !== "no-094"
+            && accepted.ok && acceptedPointer !== null && rejected.ok && rejected.cleared === true && (await supersedesOf(reversal)) === null
+            && (rejected.reviewer as { name?: string } | null)?.name === "rest-core-reviewer" && (await reviewerOf(directed.id)).by === "rest-core-reviewer",
+          `a role holding the capture and server groups alone runs the guard, accepts and rejects a proposal, recorded under its actor (${granted.code}; ${JSON.stringify(guarded).slice(0, 80)} | ${JSON.stringify(accepted).slice(0, 80)} | ${JSON.stringify(rejected).slice(0, 80)})`);
+        await sql.unsafe(`REVOKE UPDATE ON supersession_proposals FROM ${GROLE}`);
+        let fault = "";
+        try { await reviewProposal(asRole, { id: directed.id, decision: "accept", force: true, actor, actorName: "rest-core-reviewer" }); } catch (e) { fault = (e as Error).message; }
+        const [after] = await sql`SELECT status FROM supersession_proposals WHERE id = ${directed.id}::uuid`;
+        assert(/permission denied for table supersession_proposals/.test(fault) && reviewHint(fault).includes("--grant") && after.status === "rejected" && (await supersedesOf(reversal)) === null,
+          `…and without the server group's UPDATE the accept is refused whole, the fault's hint naming the grant (${fault.slice(0, 80)}; ${after.status})`);
+      } finally {
+        await asRole.close();
+      }
+    } finally {
+      await dropG();
+    }
+  }
+
   // --retry-failed re-judges the failed thought's pairs.
   hemlockIsProse = false;
   const retried = await consolidate("--retry-failed");
@@ -11810,20 +11857,30 @@ if (want("16")) {
     const pc = await propose(top, S8);
     const bc = blk((await consolidate("--list")).out, pc);
     const refusedC = await consolidate("--accept", pc);
-    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`)
+    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); an accept (consolidate.ts --accept, review_supersession_proposal) reads it in full`)
         && !/WRITER|writer:/.test(bc)
         && refusedC.code === 1 && refusedC.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's — the other side's key too, but the accept would take this side from it")
         && (await supersedesOf(S8)) === null,
       `past the listing's cap --list says the side's walks were not read and flags nothing; the accept guard reads them in full and refuses the taking (${bc.replace(/\n/g, " ⏎ ").slice(0, 300)} | ${refusedC.out.trim().slice(0, 200)})`);
     // A brain short of 094: the accept says the writer check did not run and
     // the rest answers as before.
+    // …and one that clears a capture-only pointer (082, before 094): no guard reads the writers, and the lapse is
+    // still said — the guard's probe left the transaction whole (review pass 1: a failed savepoint around the
+    // writers' read left 029's events in a subtransaction, and the lapse read found none).
+    const C3 = await cap("[16w] the hook's word on the standup, before 094", HOOK);
+    const N3 = await cap("[16w] the hook's next word on the standup, before 094", HOOK, C3);
+    const W3 = await cap("[16w] the operator's word on the standup, before 094", OPER);
+    const p3 = await propose(W3, C3);
     await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
     const plainR = await consolidate("--accept", pr);
+    const lapsedR = await consolidate("--accept", p3);
     // 094 put back, and 107 after it: the listing as shipped.
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") || f.endsWith("_listing_caps_its_walks.sql") });
     assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
       `…and on a brain short of 094 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);
-    await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid, ${pc}::uuid)`;
+    assert(lapsedR.code === 0 && lapsedR.out.includes(`lapsed: ${N3} no longer supersedes ${C3} — its capturer's capture-only pointer, cleared by this accept`) && (await supersedesOf(N3)) === null,
+      `…and an accept there that clears a capture-only pointer still names it (${lapsedR.out.trim().replace(/\n/g, " ⏎ ").slice(0, 240)})`);
+    await sql`DELETE FROM supersession_proposals WHERE id IN (${pw}::uuid, ${pr}::uuid, ${pj}::uuid, ${pu}::uuid, ${pl}::uuid, ${pe}::uuid, ${pc}::uuid, ${p3}::uuid)`;
     await sql`DELETE FROM thoughts WHERE content LIKE '[16w]%'`;
   }
 
