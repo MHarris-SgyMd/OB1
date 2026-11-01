@@ -45,6 +45,7 @@ export const TOOLS = [
   { name: "thought_stats", scope: "read" },
   { name: "thought_changes", scope: "read" },
   { name: "brain_info", scope: "read" },
+  { name: "list_claims", scope: "read" },
   { name: "capture_thought", scope: "capture" },
   { name: "update_thought", scope: "write" },
   { name: "delete_thought", scope: "write" },
@@ -53,6 +54,9 @@ export const TOOLS = [
   { name: "retry_failed", scope: "write" },
   { name: "release_stale_leases", scope: "write" },
   { name: "run_worker", scope: "write" },
+  { name: "claim_work", scope: "write" },
+  { name: "renew_claim", scope: "write" },
+  { name: "release_claim", scope: "write" },
 ] as const satisfies readonly ToolEntry[];
 
 /** Every tool name as a literal union — the type a tool name is checked against. */

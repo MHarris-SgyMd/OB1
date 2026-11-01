@@ -592,7 +592,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       if (outcome.ok) return answered(c, name, route.ok, outcome.value, p);
       const r = outcome.refusal as Refusal;
       const status = REFUSAL_STATUS[r.code];
-      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 ? RETRY_AFTER : {});
+      // A 503 the caller may retry says when; one that waits on an operator (CLAIM_UNATTRIBUTED's set-up causes) does not.
+      return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 && r.retryable ? RETRY_AFTER : {});
     });
   }
 
@@ -815,5 +816,7 @@ function answered(c: Context, name: ToolName, status: 200 | 201 | 202, value: ob
     const base = linkBase(c);
     return c.json({ ...value, poll: `${base}/v1/jobs/${jobId}`, stream: `${base}/v1/jobs/${jobId}/stream` }, 202, { Location: `${base}/v1/jobs/${jobId}` });
   }
+  // claim_work's answer can carry its token, a secret: no cache keeps it (RFC 6749's rule for a token's answer, SMD-3598).
+  if (name === "claim_work") return c.json(value, status, { "Cache-Control": "no-store" });
   return c.json(value, status);
 }
