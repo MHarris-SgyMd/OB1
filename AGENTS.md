@@ -33,31 +33,54 @@ DESCRIBE THE EXACT WORK.
 - Do not edit sibling worktrees unless explicitly asked.
 - Before staging or committing, run `git status --short` and stage only files that belong to the current task.
 - If `main` or another branch changed underneath the worktree, pause before merging or rebasing unless the task explicitly says to finish the PR end to end.
-- After a branch is merged and the worktree is clean, remove the finished worktree with `git worktree remove /ABSOLUTE/PATH/TO/PROJECT-WORKTREE`.
+- After a branch is merged and the worktree is clean, release its claims ("Claim your work", step 6), then remove the finished worktree with `git worktree remove /ABSOLUTE/PATH/TO/PROJECT-WORKTREE`.
 
 ### Claim your work
 
-Every brain records who holds which work, so two agents never build one change (SMD-3596). This repo's board syncs into the **stable** brain, the one sessions capture on. Claim there, through its MCP server: `open-brain` in this repo's Claude Code setup, `http://127.0.0.1:8010/mcp` on the maintainer's machine. A canary is a separate claim domain, so a claim there protects nothing.
+Every brain records who holds which work, so two agents never build one change (SMD-3596). This repo's board syncs into the maintainer's **stable** brain, the one sessions capture on. Claim there, through the MCP server that reaches it: `open-brain`, at `http://127.0.0.1:8010/mcp`, on the maintainer's machine. A canary is a separate claim domain, so a claim there protects nothing. If your brain isn't that one (its `search` finds no SMD tickets), this repo has no claim domain for you: skip the claim steps and say so.
 
-1. **Before recommending or starting work,** call `list_claims`: with `ticket` for one ticket, or with no argument for every live claim when choosing among several. Once SMD-3599 ships, a result's `claimed` label tells you the same. Leave held work alone; name its holder and when its lease ends instead.
-2. **When you create the branch,** call `claim_work`:
+If the brain has no `claim_work` tool, say which cause it is:
+- its release predates SMD-3598;
+- your key lacks write scope;
+- the connector is down.
+
+Then, in place of step 1, check `git worktree list`, the branches carrying the ticket's id, and its Linear status before recommending or starting it.
+
+1. **Before recommending or starting work,** call `list_claims` with `include_ended: true`: with `ticket` for one ticket, or without it for every claim when choosing among several.
+   - Leave a live claim's work alone, and name its label, holder and lease end.
+   - A `lapsed` claim that was never released, whose branch or PR still exists, is paused work, not free work. Name it, and ask the user before claiming.
+   - `list_claims` stays the check until this line names another, such as SMD-3599's `claimed` label.
+2. **Before you create the branch,** call `claim_work` with:
    - `ticket`;
-   - `piece` for one PR of several, such as `PR 2`;
-   - a `label` naming your tool, machine and branch, such as `codex@laptop michaelharris/smd-1234-short-name`.
+   - `piece` for one PR of several, spelled as the ticket's plan names it (`PR 1b-2`) or as `list_claims` already shows it;
+   - a `label` naming your tool, machine and branch, such as `codex@laptop codex/smd-1234-short-name`.
 
-   Then move the ticket to In Progress, for people reading Linear. A `WORK_CLAIMED` refusal means another agent holds the work: stop, and tell the user who.
-3. **Keep the token** `claim_work` returns in `.work-claims/<claim id>.json` at the worktree's root, mode 600:
+   Then create the branch, and move the ticket to In Progress for people reading Linear. On `WORK_CLAIMED`, read whose claim is in the way:
+   - **its id is in your `.work-claims/`:** it is yours. Work under it, or release it and claim the piece.
+   - **your key's, but not in your files:** another session of yours. Stop, and give the user its label from `list_claims`.
+   - **another key's:** stop, and tell the user who holds it.
+3. **Keep the token** `claim_work` returns in `.work-claims/<claim id>.json` at the worktree's root, and nowhere else. Make the directory first:
 
-   ```json
-   {"id": "<claim id>", "token": "wc_…", "ticket": "SMD-1234", "piece": "PR 2"}
+   ```sh
+   mkdir -p .work-claims && chmod 700 .work-claims && printf '*\n' > .work-claims/.gitignore
    ```
 
-   The directory is git-ignored. Never put the token in a commit, PR, ticket, comment, thought or log: under your key it proves the claim to anyone.
-4. **Renew** with `renew_claim` (the id and the token) about hourly while you work; the lease is four hours. Claude Code's session hook renews from the token file once it has a claim key (`recipes/session-capture-hook/`, "Renewing work claims"). A refusal saying the claim ended, or lapsed and was taken over, means stop work on it.
-5. **Release** at merge or abandon: call `release_claim` with the id, the token and a `reason` (the merged PR, or why the work was dropped), then delete the token file. A session that ends with its PR still open keeps its claim.
-6. **If you lose the token,** wait for the lease to lapse and claim the work again: your key takes over its own lapsed claim with a new token. Or ask an operator for a forced release, with a reason.
+   Then write the file and `chmod 600` it. `server` is the MCP server you claimed through:
 
-If the brain has no `claim_work` tool, because its release predates SMD-3598, say so and go on without a claim. Give sessions an agent-kind key. The operator key, which can force-release any claim, belongs to the person.
+   ```json
+   {"id": "<claim id>", "token": "wc_…", "ticket": "SMD-1234", "piece": "PR 2", "server": "open-brain"}
+   ```
+
+   The directory's own `.gitignore` keeps it out of git on any branch. This git-ignored file is the one place the token may be written: never a commit, PR, ticket, comment, thought or log. Under your key, it proves the claim to anyone. Don't run `git stash -a` or `git clean -X` while it is there.
+4. **Renew** with `renew_claim` (the id and the token) at each commit, before each push, after each long test run, and on each resume. If two of those are more than about three hours apart, renew in between: the lease is four hours. Claude Code's session hook also renews from the token file once it has the key (`recipes/session-capture-hook/`, "Renewing work claims"), but it is a backstop, so renew yourself.
+   - On resume, or after a compaction, read `.work-claims/` and renew each claim in it.
+   - A refusal saying the claim was released, or lapsed and was taken over, means stop work on it and tell the user. So does a `<claim id>.ended.json` in `.work-claims/`, which the hook leaves when it finds the claim ended; read its `ended.message`. Don't claim the work again without asking.
+   - `WORK_CLAIMED` on a renewal means your claim lapsed and another claim now covers its work: stop while that one holds.
+5. **When you open the PR,** renew with `lease_seconds: 604800` (a week), and add `"lease_seconds": 604800` to the token file. The claim then holds while the PR waits for review, and the hook renews it at that lease.
+6. **Release** at merge or abandon, before removing the worktree. Call `release_claim` with the id, the token and a `reason` (the merged PR, or why the work was dropped), then delete the token file. If the reply says the claim had already ended because it was taken over, someone else may have built the work: tell the user before merging or deleting anything.
+7. **If you lose the token,** wait for the lease to lapse and claim the work again: your key takes over its own lapsed claim with a new token. Or ask an operator for a forced release, with a reason.
+
+**Keys.** A claim belongs to its key's agent id: the key that claimed it renews it, and no other. Give sessions an agent-kind key, set with `SELECT set_agent_kind('<key name>', 'agent');`. The operator key, which can force-release any claim, belongs to the person. Switch a session's key only when it holds no live claims.
 
 ### Quick checks
 

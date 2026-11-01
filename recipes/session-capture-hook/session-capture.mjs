@@ -78,7 +78,7 @@
  * chains and log: a brain away delays no other).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, realpathSync, utimesSync, linkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, openSync, closeSync, appendFileSync, statSync, lstatSync, chmodSync, realpathSync, utimesSync, linkSync } from "node:fs";
 import { join, basename, relative, isAbsolute, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
@@ -420,8 +420,9 @@ export function loadBrains() {
   }
   const shared = sharedSettings(cfg);
   const keyOf = (b) => { const k = b.key || (b.key_file ? readFileSync(b.key_file, "utf8").trim() : ""); return k ? String(k) : ""; };
-  // The work claims' key (SMD-3602): the key an agent claims with, or one
-  // minted under its name, which renews the claims a worktree keeps tokens for.
+  // The work claims' key (SMD-3602): the very key an agent claims with — its
+  // connector's own, since a server takes one key per name — which renews the
+  // claims a worktree keeps tokens for.
   const claimKeyOf = (b, where) => {
     if (b.claim_key !== undefined && b.claim_key_file !== undefined) throw new Error(`${where} sets both "claim_key" and "claim_key_file" — give one`);
     const k = b.claim_key || (b.claim_key_file ? readFileSync(b.claim_key_file, "utf8").trim() : "");
@@ -472,7 +473,7 @@ export function loadBrains() {
     if (b.connector !== undefined && seenConnectors.has(b.connector)) throw new Error(`${CONFIG_PATH} names connector "${b.connector}" for two brains — a connector's writes reach one brain`);
     if (b.connector !== undefined) seenConnectors.add(b.connector);
     const claimKey = claimKeyOf(b, `brain "${name}" in ${CONFIG_PATH}`);
-    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...(claimKey ? { claimKey } : {}), ...shared } };
+    return { name, listed: true, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...(claimKey ? { claimKey } : {}), ...shared } };
   });
 }
 
@@ -1229,7 +1230,7 @@ export const SECRET_PATTERNS = [
   // agent under the key that holds it. The 64-hex rule never sees it — its lookbehind refuses a run after `_` — and
   // the entropy rule skips hex (SMD-3615). Read on the raw text, a URL's included. An underscore beside it does not
   // excuse it (markdown's `_…_`, a `claim_` prefix), nor upper case (a model may echo one so): the token is the run.
-  ["work-claim token", /(?<![A-Za-z0-9])wc_[0-9a-f]{64}(?![0-9a-f])/i],
+  ["work-claim token", /(?<![A-Za-z0-9])wc\\?_[0-9a-f]{64}(?![0-9a-f])/i], // `wc\_` as markdown escapes it (SMD-3602)
   ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})\s{2}\S)/i],
 ];
 
@@ -2813,24 +2814,28 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 
 // ── Work claims (SMD-3602) ───────────────────────────────────────────────────
 //
-// An agent claims its ticket on the brain when it makes the branch
+// An agent claims its ticket on the brain before it makes the branch
 // (claim_work, SMD-3598) and keeps the token in `.work-claims/<claim id>.json`
 // at its worktree's root, git-ignored, mode 600. The hook renews each claim
-// whose token the session's worktree holds, through the config's `claim_key`:
-// at a compaction and a session's end, and, with the `--claims` hook pasted,
-// every quarter lease while tools run and prompts arrive. It never claims (a
-// branch for a ticket and a scratch branch look alike) and never releases (a
-// session can end with its PR open): a claim ends at its release, or lapses
-// when nothing renews it.
+// whose token the session's worktree holds, through the config's `claim_key`
+// — the very key the agent claims with: at a compaction and a session's end,
+// and, with the `--claims` hook pasted, every quarter lease while tools run and
+// prompts arrive. It never claims (a branch for a ticket and a scratch branch
+// look alike) and never releases (a session can end with its PR open): a claim
+// ends at its release, or lapses when nothing renews it. The agent renews too;
+// the hook is the backstop.
 
 export const CLAIMS_DIRNAME = ".work-claims";
 const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
 const UUID_ONLY_RE = new RegExp(`^${UUID}$`, "i");
+const CLAIM_FILE_RE = new RegExp(`^(${UUID})\\.json$`, "i");
+/** Any token-shaped run, masked out of what the hook says — a server's words, a ticket, a path (review pass 1: an echo reached the log). */
+const scrubTokens = (s) => String(s).replace(/wc\\?_[0-9a-f]{8,}/gi, "wc_[masked]");
 /** The server's default lease (migration 115), which a renewal without lease_seconds sets. */
 const DEFAULT_LEASE_S = 14_400;
 /** How often a working session renews a claim: a quarter of its lease, between one minute and an hour. */
 export const renewEveryMs = (leaseS) => Math.min(60, Math.max(1, leaseS / 240)) * 60_000;
-/** A checkpoint renews whatever was not renewed in the last minute. */
+/** A checkpoint renews whatever was not attempted in the last minute. */
 const CHECKPOINT_RENEW_MS = 60_000;
 const CLAIM_STATE_DIR = () => join(STATE_DIR, "claims");
 const claimStatePath = (id) => join(CLAIM_STATE_DIR(), `${id}.json`);
@@ -2838,32 +2843,57 @@ function readClaimState(id) { try { return JSON.parse(readFileSync(claimStatePat
 function writeClaimState(id, st) {
   try { mkdirSync(CLAIM_STATE_DIR(), { recursive: true, mode: 0o700 }); writeFileSync(claimStatePath(id), JSON.stringify(st), { mode: 0o600 }); } catch { /* a stamp failure only means an earlier renewal */ }
 }
+const lstatOf = (p) => { try { return lstatSync(p); } catch { return null; } };
+const isClaimsDir = (d) => lstatOf(join(d, CLAIMS_DIRNAME))?.isDirectory() === true;
 
-/** The worktree holding `dir`: the nearest directory up with a `.git` (a checkout's directory, a worktree's file); null outside one. */
+/**
+ * The worktree holding `dir`, its symlinks resolved: the nearest directory up
+ * with a `.git` that keeps a `.work-claims/` — past a submodule's or a nested
+ * repo's own `.git` (review pass 1) — else the nearest with a `.git`; null
+ * outside one.
+ */
 export function worktreeRoot(dir) {
   if (typeof dir !== "string" || !isAbsolute(dir)) return null;
-  for (let d = dir; ; d = dirname(d)) {
-    if (existsSync(join(d, ".git"))) return d;
-    if (dirname(d) === d) return null;
+  let d = dir;
+  try { d = realpathSync(dir); } catch { /* gone: walk the path as given */ }
+  let first = null;
+  for (;; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) {
+      if (isClaimsDir(d)) return d;
+      first ??= d;
+    }
+    if (dirname(d) === d) return first;
   }
 }
 
-/** The token files a worktree holds, by name: `{ path, claim }`, or `{ path, bad }` naming what is wrong — never the token. */
+/**
+ * The token files a worktree holds: `{ path, claim }`, or `{ path, bad }`
+ * naming what is wrong — never the token. Only `<claim id>.json`, a regular
+ * file in a real directory: a symlink, which could point the hook's write at
+ * another file or send another tree's token, is refused (review pass 1).
+ */
 export function claimFiles(root) {
   const dir = join(root, CLAIMS_DIRNAME);
+  const st = lstatOf(dir);
+  if (!st) return [];
+  if (!st.isDirectory()) return [{ path: dir, bad: st.isSymbolicLink() ? "a symlink, not a directory: make it a directory of its own" : "not a directory" }];
   let names;
   try { names = readdirSync(dir); } catch { return []; }
   return names.filter((n) => n.endsWith(".json") && !n.endsWith(".ended.json")).sort().map((n) => {
     const path = join(dir, n);
+    const named = CLAIM_FILE_RE.exec(n)?.[1]?.toLowerCase();
+    if (!named) return { path: join(dir, scrubTokens(n)), bad: "not named <claim id>.json" };
+    if (!lstatOf(path)?.isFile()) return { path, bad: "not a regular file (a symlink?)" };
     let c;
     try { c = JSON.parse(readFileSync(path, "utf8")); } catch { return { path, bad: "not JSON" }; }
     if (!c || typeof c !== "object" || Array.isArray(c)) return { path, bad: "not a JSON object" };
     if (typeof c.id !== "string" || !UUID_ONLY_RE.test(c.id)) return { path, bad: `no claim id (a uuid) in "id"` };
+    if (c.id.toLowerCase() !== named) return { path, bad: `its "id" is not the claim its name says` };
     if (typeof c.token !== "string" || !CLAIM_TOKEN_RE.test(c.token)) return { path, bad: `no token (wc_ and 64 hex digits) in "token"` };
     if (c.lease_seconds != null && !(Number.isInteger(c.lease_seconds) && c.lease_seconds >= 60 && c.lease_seconds <= 604_800)) return { path, bad: `a "lease_seconds" that is not 60 to 604800` };
     if (c.server != null && !(typeof c.server === "string" && CONNECTOR_RE.test(c.server))) return { path, bad: `a "server" that is no MCP server's name` };
-    const text = (v) => (typeof v === "string" && v.trim() ? oneLine(v).slice(0, 100) : undefined);
-    return { path, claim: { id: c.id.toLowerCase(), token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server ?? undefined } };
+    const text = (v) => (typeof v === "string" && v.trim() ? scrubTokens(oneLine(v)).slice(0, 100) : undefined);
+    return { path, claim: { id: named, token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server ?? undefined } };
   });
 }
 
@@ -2872,68 +2902,87 @@ const claimLabel = (c) => `${c.ticket ? `${c.ticket}${c.piece ? ` ${c.piece}` : 
 
 /**
  * The brain a claim is renewed on: the one whose `connector` is the claim's
- * `server`, or, with no server named, the one brain with a `claim_key`.
- * `{ brain }` or `{ skip }` saying why none.
+ * `server`; with no server named, the config's one brain, if it has a
+ * `claim_key`. With several brains a file names its server: a token goes to
+ * no brain that did not issue it (review pass 1). `{ brain }` or `{ skip }`.
  */
 function brainForClaim(claim, brains) {
-  const keyed = brains.filter((b) => b.cfg.claimKey);
   if (claim.server) {
-    const b = keyed.find((x) => x.cfg.connector === claim.server);
+    const b = brains.find((x) => x.cfg.claimKey && x.cfg.connector === claim.server);
     return b ? { brain: b } : { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" and a claim_key` };
   }
-  if (keyed.length === 1) return { brain: keyed[0] };
-  return { skip: keyed.length ? `several brains have a claim_key (${keyed.map((b) => b.name).join(", ")}) — name the brain's MCP server as "server" in the token file` : `no brain in ${CONFIG_PATH} has a claim_key` };
+  if (brains.length > 1) return { skip: `the config lists several brains — name the claim's MCP server as "server" in the token file` };
+  return brains[0].cfg.claimKey ? { brain: brains[0] } : { skip: `no brain in ${CONFIG_PATH} has a claim_key` };
 }
 
 /**
- * One renewal through the brain's claim key. `ok` with the new expiry; `ended`
- * — the claim was released, or lapsed and another claim took its work (stop
- * work on it); `keep` — anything else: the brain away, the registry away, a
- * key that is not the holder's, a claim this brain does not have. Each with a
- * line for the log, which names the claim and never its token.
+ * One renewal through the brain's claim key. `ok` with the new expiry;
+ * `ended` — the claim was released, by its holder, an operator, or a takeover
+ * after it lapsed (stop work on it); `keep` — anything else, the token kept: the
+ * brain away, the registry away, a key that is not the holder's, a claim this
+ * brain does not have, and WORK_CLAIMED — lapsed while another claim covers its
+ * work, which 115 renews once that claim ends (review pass 1). Each with a line
+ * for the log: the code first, the token never.
  */
 export async function renewClaim(cfg, claim) {
   const what = claimLabel(claim);
   let result;
   try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "renew_claim", arguments: { id: claim.id, token: claim.token, ...(claim.lease ? { lease_seconds: claim.lease } : {}) } }, 15_000); }
-  catch (e) { return { keep: true, line: `kept: ${what} — ${oneLine(String(e?.message ?? e)).slice(0, 200)}` }; }
+  catch (e) { return { keep: true, line: `kept: ${what} — ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}` }; }
   const text = textOfResult(result);
   if (!result?.isError) {
     const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
     return { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
   }
   const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
-  const said = oneLine(text).slice(0, 300);
+  const said = `${code ? `${code}: ` : ""}${scrubTokens(oneLine(text)).slice(0, 300)}`;
   if (SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) return { keep: true, line: `kept: ${what} — the claim key cannot call renew_claim: a key without write scope, or a brain from before SMD-3598` };
-  if (code === "CLAIM_RELEASED" || code === "WORK_CLAIMED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
-  if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the key the agent claimed with, or one minted under its name)"}` };
+  if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
+  if (code === "WORK_CLAIMED") return { keep: true, line: `kept: ${what} — ${said} (stop work while that claim holds; it renews once it ends)` };
+  if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (claimed on another brain? name its MCP server as "server" in the token file)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
 }
 
 /**
- * An ended claim's token file becomes `<name>.ended.json`: the work, the code
+ * An ended claim's token file becomes `<id>.ended.json`: the work, the code
  * and the brain's words, the token dropped — it proves nothing now. Only when
- * the file still holds the token renewed: one the agent rewrote meanwhile is
- * left alone.
+ * the file is still a regular file holding the token renewed: one the agent
+ * rewrote meanwhile is left alone. Written to a fresh file and renamed into
+ * place, so a symlink planted at the name is replaced, never followed (review
+ * pass 1). Returns whether the file was ended.
  */
 function endClaimFile(path, claim, ended) {
+  const tmp = `${path}.${process.pid}.tmp`;
   try {
-    const now = JSON.parse(readFileSync(path, "utf8"));
-    if (String(now?.token ?? "").toLowerCase() !== claim.token) return;
-    writeFileSync(path.replace(/\.json$/, ".ended.json"), `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, ended: { ...ended, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600 });
+    if (!lstatOf(path)?.isFile()) return false;
+    if (String(JSON.parse(readFileSync(path, "utf8"))?.token ?? "").toLowerCase() !== claim.token) return false;
+    writeFileSync(tmp, `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, ended: { ...ended, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(tmp, path.replace(/\.json$/, ".ended.json"));
     unlinkSync(path);
-  } catch { /* gone or unreadable: the next run reads it again */ }
+    return true;
+  } catch {
+    try { unlinkSync(tmp); } catch { /* none */ }
+    return false;
+  }
 }
 
 async function renewOne(b, path, claim) {
   useStateRoot(b.root);
+  // The hook owns the file it renews from: one a Write tool left at 644, or a
+  // directory others can list, is closed first (review pass 1).
+  let closed = "";
+  try {
+    if (process.platform !== "win32") {
+      for (const [p, mode] of [[dirname(path), 0o700], [path, 0o600]]) if (statSync(p).mode & 0o077) { chmodSync(p, mode); closed = " (its token file was readable by others: now mode 600, its directory 700)"; }
+    }
+  } catch { /* gone */ }
   const o = await renewClaim(b.cfg, claim);
-  if (o.ended) { endClaimFile(path, claim, o.ended); try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
+  // An ended claim's stamp goes with its file; one whose file could not be
+  // ended keeps a stamp, or every event would ask again (review pass 1).
+  if (o.ended && endClaimFile(path, claim, o.ended)) { try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
   else writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
-  let open = "";
-  try { if (process.platform !== "win32" && existsSync(path) && statSync(path).mode & 0o077) open = ` (its token file is readable by others — chmod 600 ${path})`; } catch { /* gone */ }
-  o.line += open;
+  o.line += closed;
   log(`claims: ${o.line}`);
   return o;
 }
@@ -2942,11 +2991,12 @@ async function renewOne(b, path, claim) {
  * Renew the claims whose tokens the worktree holding `cwd` keeps: those due —
  * a quarter lease since the last attempt, or, with `force` (a checkpoint), a
  * minute — or, with `now` (a run by hand, the hook's child), every claim, or
- * the files `only` names. Each is stamped before its call, so a second event
- * at the same moment finds it not due. A file that cannot be renewed
+ * the claims `only` names by id. Each is stamped before its call, so a second
+ * event at the same moment finds it not due. A file that cannot be renewed
  * (unreadable, no brain for it) is logged under `force` or `now` alone: a
  * quiet hook on every tool would log it every time. With `detach` the calls go
- * to a child, as the capture's do. Returns the outcomes.
+ * to a child, told the claims by id (an id is no secret, a path might be), as
+ * the capture's do. Returns the outcomes.
  */
 export async function renewClaims(cwd, brains, { force = false, now: atOnce = false, detach = false, only } = {}) {
   const root = worktreeRoot(cwd);
@@ -2955,7 +3005,7 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
   const work = [], outcomes = [];
   const skip = (line) => { outcomes.push({ skipped: true, line }); if (force || atOnce) { useStateRoot(brains[0].root); log(`claims: ${line}`); } };
   for (const f of claimFiles(root)) {
-    if (only && !only.includes(f.path)) continue;
+    if (only && !only.includes(f.claim?.id)) continue;
     if (f.bad) { skip(`skipped ${f.path}: ${f.bad}`); continue; }
     const { brain, skip: why } = brainForClaim(f.claim, brains);
     if (!brain) { skip(`skipped ${claimLabel(f.claim)}: ${why}`); continue; }
@@ -2970,7 +3020,7 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
     useStateRoot(work[0].brain.root);
     ensureDirs();
     const fd = openSync(LOG_PATH(), "a", 0o600);
-    const child = spawn(process.execPath, [SELF, "--renew-claims", "--cwd", root, ...work.flatMap((w) => ["--file", w.f.path])], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
+    const child = spawn(process.execPath, [SELF, "--renew-claims", "--cwd", root, ...work.flatMap((w) => ["--claim", w.f.claim.id])], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
     child.unref();
     closeSync(fd);
     return [...outcomes, { detached: child.pid }];
@@ -2986,7 +3036,7 @@ async function checkClaims(brain, tag) {
   let names;
   try { names = ((await rpc({ ...cfg, key: cfg.claimKey }, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name); } catch (e) { console.error(`session-capture: ${tag}the claim key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
   if (!names.includes("renew_claim")) { console.error(`session-capture: ${tag}the claim key cannot call renew_claim — ${names.includes("list_claims") || names.includes("capture_thought") ? "give claim_key the write key your agents claim with" : "this brain's server is from before SMD-3598: upgrade it"}`); return 1; }
-  console.log(`${tag}claim key: ok — it can renew claims. The claims renewed are those whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/; the key must be the one the agent claimed with, or one minted under its name`);
+  console.log(`${tag}claim key: ok — it can renew claims. The claims renewed are those whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/; the key must be the very key the agent claims with (its connector's own: a server takes one key per name)`);
   return 0;
 }
 
@@ -3189,19 +3239,21 @@ export async function main(argv) {
       const c = await checkBrain(b.cfg, tag, onSecret);
       code = Math.max(code, c, await checkWrites(b, brains, tag), await checkClaims(b, tag));
     }
+    // OB1_CLAIM_KEY is the one-brain shape's; beside a brains list it is read by no brain (review pass 1).
+    if (process.env.OB1_CLAIM_KEY && brains.some((b) => b.listed)) console.error(`warning: OB1_CLAIM_KEY is set but no brain uses it — it is read for the one-brain shape alone; with a brains list give the brain its own claim_key`);
     return code;
   }
   if (has(args, "--renew-claims")) {
     // The claims a worktree keeps tokens for, renewed now: by hand (the
     // current directory's worktree, or --cwd's), or as the hook's child, told
-    // which files it stamped (SMD-3602).
+    // by id which claims it stamped (SMD-3602).
     let brains;
     try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
-    const files = flagAll(args, "--file").filter(Boolean);
+    const ids = flagAll(args, "--claim").map((s) => s.toLowerCase()).filter(Boolean);
     const cwd = flag(args, "--cwd") || process.cwd();
     const dir = isAbsolute(cwd) ? cwd : join(process.cwd(), cwd);
-    const outcomes = await renewClaims(dir, brains, { now: true, ...(files.length ? { only: files } : {}) });
-    if (process.stdout.isTTY || !files.length) {
+    const outcomes = await renewClaims(dir, brains, { now: true, ...(ids.length ? { only: ids } : {}) });
+    if (process.stdout.isTTY || !ids.length) {
       if (!outcomes.length) console.log(`no claims to renew: ${worktreeRoot(dir) ? `no token files in ${join(worktreeRoot(dir), CLAIMS_DIRNAME)}/` : "not inside a git worktree"}`);
       for (const o of outcomes) console.log(o.line);
     }
@@ -3329,8 +3381,10 @@ export async function main(argv) {
   const event = String(hook.hook_event_name ?? "");
   const sync = process.env.OB1_SESSION_CAPTURE_SYNC === "1";
   // The claims hook (SMD-3602): renew what is due, nothing captured or copied.
-  // Exit 0 whatever happens: a renewal's fate is the log's.
-  if (has(args, "--claims")) {
+  // Exit 0 whatever happens: a renewal's fate is the log's. On an event the
+  // hook captures on, a command given --claims by hand still captures, the
+  // renewal after it (review pass 1: it silently captured nothing).
+  if (has(args, "--claims") && !eventSpec(event)) {
     try { await renewClaims(hook.cwd, brains, { detach: !sync }); } catch (e) { useStateRoot(brains[0].root); log(`claims: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
     return 0;
   }

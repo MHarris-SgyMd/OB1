@@ -164,15 +164,16 @@ Then paste the hook `--print-hook claude-code --fan-out` prints (step 4): an asy
 - **What is skipped.** An edit or delete of a thought the brain never got (made before the copying began, or by the brain's own writers) is skipped and logged. A pointer it does not know — a `derived_from` or `supersedes` naming such a thought, a board-sync row's id, or one that would close a loop there — is dropped and the write sent again, and so is metadata its server refuses. A fault on the brain (its REST core or store restarting) holds the queue, as the brain being away does. A capture whose text that brain already holds lands on that thought, now named by the first brain's id too, and the log says so. A copy refused for good — an input the brain's server cannot validate among them — goes to `writes/dead/`, pruned after thirty days. The brain's log names each copy by its tool and id, never its text.
 - `--check` names the connector and where its writes go, and for each receiving brain that its write key can capture, edit and delete and that its server keeps a `client_key` (a server from before migration 112 fails it), with what its queue holds and how old its oldest copy is.
 
-**Renewing work claims** (SMD-3602): an agent claims its ticket on the brain when it creates the branch (`claim_work`, SMD-3598) and keeps the token it gets back in `.work-claims/<claim id>.json` at its worktree's root, mode 600:
+**Renewing work claims** (SMD-3602): an agent claims its ticket on the brain before it creates the branch (`claim_work`, SMD-3598). It keeps the token it gets back in `.work-claims/<claim id>.json` at its worktree's root, mode 600, in a directory of mode 700 holding a `.gitignore` of `*`:
 
 ```json
 { "id": "<the claim id>", "token": "wc_…", "ticket": "SMD-1234", "piece": "PR 2", "lease_seconds": 14400, "server": "open-brain" }
 ```
 
-`id` and `token` are required. `ticket` and `piece` name the work in the log. `lease_seconds` is the lease each renewal sets (60 to 604800; the server's four hours if absent). `server` is the MCP server the claim was made through. Git-ignore the directory (`.work-claims/` in `.gitignore`, or `.git/info/exclude` in a repo you don't own): the token proves the claim to anyone holding your key.
+- **The fields.** `id` and `token` are required, and the file is named by the id. `ticket` and `piece` name the work in the log. `lease_seconds` is the lease each renewal sets: 60 to 604800, or the server's four hours if absent. An agent sets it to a week when it opens its PR. `server` is the MCP server the claim was made through. It is required when the config lists several brains, so a token never goes to a brain that didn't issue it.
+- **Keeping it out of git.** The directory's own `.gitignore` keeps it out of git on any branch and in any repo. `.work-claims` in the repo's `.gitignore` does too. The token proves the claim to anyone holding your key.
 
-Give the brain the agent's key as `claim_key` (or `claim_key_file`): the key the agent claims with, or a write key minted under the same name (`bun server-portable/keygen.ts --name claude-code --scope write`). A claim belongs to the key's agent id, which a second key under the same name shares.
+Give the brain the agent's key as `claim_key` (or `claim_key_file`): the very key the agent claims with, which for Claude Code is the `x-brain-key` of its brain connector. A claim belongs to the key's agent id, and only that key can renew it. A second key can't share the id: the server takes one key per name in `MCP_ACCESS_KEYS`, and its preflight fails, keeping the REST core down, when a name appears twice. The claims hook needs the capture config of step 1 as well; it adds to it and doesn't stand alone.
 
 ```json
 {
@@ -183,14 +184,26 @@ Give the brain the agent's key as `claim_key` (or `claim_key_file`): the key the
 }
 ```
 
-The one-brain shape takes `claim_key` too, and `OB1_CLAIM_KEY` in the environment wins over it.
+The one-brain shape takes `claim_key` too, and `OB1_CLAIM_KEY` in the environment wins over it. Beside a `brains` list the variable is read by no brain, and `--check` warns.
 
-- **When it renews.** At a compaction and at a session's end it renews each claim the worktree holds a token for, unless that claim was renewed within the last minute. On a Stop hook's turn it renews only the claims that are due. With the claims hook pasted (step 4), every tool call and every prompt renews what is due. A claim is due a quarter of its lease after the last attempt, which is hourly on the default four hours, never more often than every minute or less often than every hour. A session waiting overnight renews nothing, and its claim lapses. Its next prompt renews it, unless another agent has taken the work meanwhile.
-- **It never claims and never releases.** Claiming stays the agent's explicit step at branch creation, since the hook can't tell a branch for a ticket from a scratch branch. A session can end with its PR still open, so a claim ends when the agent releases it at merge or abandon, or lapses when nothing renews it.
-- **When the claim has ended**, released or taken over after it lapsed, the token file becomes `<name>.ended.json`. It keeps the work, the code and the brain's words (`lapsed and was taken over by …: stop work on it`) and drops the token.
-- **Anything else keeps the file**, and the next due event tries again: the brain away, its agent registry away, a token the brain does not match, a claim key that is not the holder's, or a claim this brain does not have (claimed on another brain: name it in `server`). Each of these is a `claims: kept:` line in the log.
-- **Which brain.** With `server` given, the brain whose `connector` it is. Without one, the one brain with a `claim_key`; with two, the claim is skipped and a checkpoint logs why.
-- **The log** names each claim by its work and id, never its token. A token file others can read is renewed, and the line says to `chmod 600` it. `bun session-capture.mjs --renew-claims [--cwd <dir>]` renews a worktree's claims now and prints what happened. `--check` says whether the claim key can call `renew_claim`.
+- **When it renews.**
+  - **At a compaction and at a session's end:** each claim the worktree holds a token for, unless it was attempted within the last minute.
+  - **On a Stop hook's turn:** only the claims that are due.
+  - **With the claims hook pasted (step 4):** every tool call and every prompt renews what is due.
+
+  A claim is due a quarter of its lease after the last attempt: hourly on the default four hours, and hourly on a week's lease too, never more often than every minute or less often than every hour. A lease under four minutes is renewed every minute, so it has less than a quarter of its time to spare. A session waiting overnight renews nothing, and its claim lapses unless its lease is longer; its next prompt renews it, unless another agent has taken the work meanwhile.
+- **Where it looks.** The session's working directory, symlinks resolved, up to the nearest directory with a `.git` that keeps a `.work-claims/`. That walk passes a submodule's own `.git`. A session must run inside its worktree: one whose working directory is the main checkout, editing a worktree by path, renews nothing there.
+- **It never claims and never releases.** Claiming stays the agent's explicit step, since the hook can't tell a branch for a ticket from a scratch branch. A session can end with its PR still open, so a claim ends when the agent releases it at merge or abandon, or lapses when nothing renews it. The agent renews too; the hook is the backstop.
+- **When the claim has ended,** released by its holder, an operator, or a takeover after it lapsed, the token file becomes `<id>.ended.json`. It keeps the work, the code and the brain's words (`lapsed and was taken over by …: stop work on it`) and drops the token.
+- **Anything else keeps the file**, and the next due event tries again. Each case is a `claims: kept:` line in the log, the code first:
+  - the brain away, or its agent registry away (`CLAIM_UNATTRIBUTED`);
+  - a token the brain does not match;
+  - a claim key that is not the holder's;
+  - a claim this brain does not have (claimed on another brain: name it in `server`);
+  - `WORK_CLAIMED`: the claim lapsed and another claim covers its work. Migration 115 renews it once that claim ends, and the line says to stop work meanwhile.
+- **What it refuses to read.** A file not named `<claim id>.json`, one whose `id` its name does not match, a token file that is a symlink, and a `.work-claims` that is one. The hook writes `.ended.json` to a fresh file and renames it into place, so a symlink planted at that name is replaced, never followed.
+- **The log** names each claim by its work and id, never its token; a token-shaped run in a brain's words is masked. The hook owns the token files: one others can read, as a Write tool leaves it, is set to mode 600 and its directory to 700, and the line says so.
+- **By hand.** `bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]` renews a worktree's claims now, or the one named, and prints what happened. It exits 1 when one was not renewed. `--check` says whether the claim key can call `renew_claim`.
 
 To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
 
@@ -284,7 +297,15 @@ It prints a `PostToolUse` entry with `"matcher": "^mcp__open-brain__(capture_tho
 bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code --claims
 ```
 
-It prints a `PostToolUse` entry on every tool (`"matcher": "*"`) and a `UserPromptSubmit` entry, both `"async": true` and both running the script with `--claims`. They renew what is due and capture and copy nothing. The flag keeps them apart from the fan-out's `PostToolUse`, which would otherwise copy a write twice. A run with nothing due reads a directory and exits. Codex has no async hook: a Codex agent renews with `renew_claim` itself, and its session hook still renews at each event it fires.
+It prints a `PostToolUse` entry on every tool (`"matcher": "*"`) and a `UserPromptSubmit` entry, both `"async": true` and both running the script with `--claims`. They renew what is due and capture and copy nothing. The flag keeps them apart from the fan-out's `PostToolUse`, which would otherwise copy a write twice. On a session hook's own event a command given `--claims` still captures, then renews. A run with nothing due reads a directory and exits.
+
+**Merge, don't paste over.** The printed object is a whole `{"hooks": {…}}`. Settings that already hold the session hooks (and the fan-out's) take its entries inside their existing `hooks` object:
+- append its `PostToolUse` group to the `PostToolUse` array, beside the fan-out's;
+- add `UserPromptSubmit` as a new key.
+
+A second top-level `"hooks"` key would leave one of the two sets silently unread. `/hooks` in Claude Code lists what it loaded. The same applies to the fan-out's hook.
+
+Codex has no async hook. Its agent renews with `renew_claim` itself, and its session hook renews once, at SessionEnd, or on each due turn with `--print-hook codex --event Stop --min-interval <minutes>` pasted.
 
 **The time budget.** Claude Code gives SessionEnd hooks 1.5 seconds between them by default and raises that to the hook's own `timeout` (at most 60); Codex allows 1 second, at most 3. PreCompact shares no budget — a command hook's default of 600 seconds stands — but a compaction waits on the hook, so it is printed with the same `"timeout": 10`. The transcript file is written asynchronously and may lag the conversation by a message or two when a checkpoint fires; the session's end has them all. The hook does its local work — read, summarise, scan — in the foreground (about 50 ms on a 20 MB transcript) and hands the network call to a detached child, then exits 0. The child posts, records the new thought's id, and writes one line to the log.
 
@@ -359,12 +380,13 @@ bun recipes/session-capture-hook/test-session-capture.mjs   # no real brain or m
 
 Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the redaction (SMD-2127) — a SINGLE-LINE secret blanked (the value's span, quotes of every kind, three rules at one site as one marker, the fingerprint the blanked text's, provenance untouched, the marker in what reaches the endpoint and the key not, `redactions=N` in the log) and a MULTI-LINE key blob refused (PGP armor, a footer-less body, a name-split block, a word-shaped line, found on the raw sources), a misspelt `OB1_CAPTURE_ON_SECRET` refused on every path, `metadata.redactions` sent as the count and dropped-and-reposted when the server refuses the key (SMD-2168), and under `refuse` the refusal as it was — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, a session's end stepping aside for its checkpoint's child and posted by it once the checkpoint has landed, superseding it, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end; the segmenter's boundaries rule by rule and a session of four episodes — two compactions, a move, three tickets — captured one thought each with its own provenance, a re-ending superseding only the episode that changed, a secret in one episode refusing that episode alone, the newest five of seven handed to the run's child and the rest to a later run, the segmentation `--dry-run` prints (SMD-2013); and the opt-in model summary (SMD-2014) — the egress rule (local declared, never guessed; deny/allow/off), the config knobs read from the file and the environment, `modelSummary` returning the model's text on the happy path and the derived text on every fallback (off, unconfigured, egress-refused before anything is sent, a secret in the model's own words, an empty answer, an HTTP error, a timeout), `prepare` attaching the assistant excerpt only in model mode, and the end-to-end child posting the model's text with `metadata.summary_model` while `source` stays the harness. The server's own `capture_thought` `metadata` argument — a caller key stored, a reserved key refused — is covered by `server-portable/test-e2e-sql.ts`. The write fan-out (SMD-3314) runs against a second fake brain that keeps `client_key` as the server since migration 112 does: what is copied and what is not, every result shape, the order under a brain away or busy, the skipped, dropped and kept cases, `--check`, `--print-hook --fan-out` and the detached child. The claims renewal (SMD-3602) runs against a fake brain answering `renew_claim` as migration 115 does. It covers:
 
-- the worktree and token-file reads;
-- the quarter-lease interval and a file's own lease;
-- checkpoints, Stop turns and events the hook does not capture on;
-- released and taken-over claims ending their files without the token;
-- each kept case, a token file others can read, and no claim key or no worktree;
-- picking the brain among several;
-- the detached child, `--renew-claims`, `--print-hook --claims`, `--check` and the config's refusals.
+- the worktree walk, past a nested repo and through a symlinked directory, and the token-file reads, names and ids;
+- the quarter-lease interval, a file's own lease, and two runs at once renewing once;
+- checkpoints, Stop turns when due and not, events the hook does not capture on, and `--claims` on a session hook;
+- released and taken-over claims ending their files without the token, and a planted symlink replaced rather than followed;
+- each kept case (`WORK_CLAIMED`, `CLAIM_UNATTRIBUTED`, `REFUSED_CLAIM_INPUT`, a brain echoing the token, masked), an ended file that cannot be rewritten, and symlinked token files and directories skipped;
+- a token file others can read closed to 600, and no claim key or no worktree;
+- picking the brain among several, and a `server` naming a brain without a key;
+- the detached child at a tool and at a checkpoint, `--renew-claims` and `--claim`, `OB1_CLAIM_KEY`, `--print-hook --claims`, `--check` and the config's refusals.
 
 It runs in CI's repo-consistency job.

@@ -20,7 +20,9 @@ credentials.json
 token.json
 # An agent's work-claim tokens, one file per claim at a worktree's root
 # (AGENTS.md, "Claim your work"; SMD-3602): each proves its claim under the key.
-/.work-claims/
+# Unanchored and without a slash, so one made in a subdirectory, or a symlink
+# by the name, is ignored too (review pass 1).
+.work-claims
 gmail-sync-log.json
 sync-log.json
 
