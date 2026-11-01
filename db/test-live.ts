@@ -12002,6 +12002,25 @@ if (want("16")) {
   slowMs = 0;
   assert(blinkInCallC && calls - blinkFromC === 1 && blinkCodeC <= 1,
          `…and one deleted while a closure began and ended during its first pair's call has nothing more judged (${calls - blinkFromC} call(s), exit ${blinkCodeC})`);
+  // …and one edited while a closure began and ended in its worker's pause
+  // after a 503: the retry's first pair asks the gate from before the pause,
+  // reads the thought again and sends its old text no more (review pass 2).
+  // An edit, not a delete: a deleted thought has no candidates to judge.
+  const retryNewer = await seed("[16g] The gatehouse opens at two now.", 30, 0, ["gatehouse"]);
+  const retryGateC = liveGate();
+  const retryLinesC: string[] = [];
+  judgeUnavailable = 1;
+  const retryRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: retryGateC.admit, writer: { out: (l) => retryLinesC.push(l), err: (l) => retryLinesC.push(l) } });
+  const retryPausingC = await pollUntil(async () => retryLinesC.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  const retrySeenFrom = seen.length;
+  retryGateC.close();
+  await sql`UPDATE thoughts SET content = '[16g] The gatehouse opens at three now.' WHERE id = ${retryNewer}::uuid`;
+  retryGateC.open();
+  const retryCodeC = await retryRunC;
+  judgeUnavailable = 0;
+  const retrySeen = seen.slice(retrySeenFrom).map((p) => (p.b.includes("at two now") ? "old" : p.b.includes("at three now") ? "new" : "other"));
+  assert(retryPausingC && !retrySeen.includes("old") && retrySeen.includes("new") && retryCodeC <= 1,
+         `…and one edited while a closure began and ended in its worker's pause after a 503: the judge sees its old text no more, its pairs judged at its new text (${retrySeen.join(",")}, exit ${retryCodeC})`);
   // The newer side edited while its worker waits before its second pair:
   // still its claim (063 requeues a judged thought only through its
   // proposals), so it goes back to the pool for its new text — the run, its
