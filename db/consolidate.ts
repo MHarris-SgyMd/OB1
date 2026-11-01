@@ -1611,9 +1611,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return false;
   }
 
-  async function processRow(row: Row, workerId: string): Promise<Outcome> {
-    /** When the worker took the thought up: its first pass of the gate's (SMD-3379 PR 1c-3a). */
-    const takenAt = Date.now();
+  /**
+   * One attempt at a thought. `asked`: the worker's last pass of the admit gate
+   * for it, its row's read the first, kept across attempts and moved on by each
+   * pair's pass (SMD-3379 PR 1c-3a): a closure since — one that opened again
+   * during a call or a provider pause — reads both sides again at the next
+   * pair, the first pair of a retry included (review pass 1).
+   */
+  async function processRow(row: Row, workerId: string, asked: { at: number }): Promise<Outcome> {
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1660,10 +1665,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
     const call = inCall.get(workerId);
-    // The worker's last pass of the gate, the claim's taking the first: a
-    // closure since — one that opened again during a pair's call — reads
-    // both sides again too (SMD-3379 PR 1c-3a).
-    let lastAsk = takenAt;
     for (const [pairIndex, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
@@ -1675,12 +1676,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // first stop that follows it (review passes 3 and 4).
         if (call?.aborted) throw new AbortedInHand();
         try {
-          through = await idleWhile(call, admitted(ADMIT, gate, lastAsk));
+          through = await idleWhile(call, admitted(ADMIT, gate, asked.at));
         } catch (e) {
           throw new AdmitThrow(e);
         }
         if (!through) throw new StoppedBetweenPairs();
-        lastAsk = Date.now();
+        asked.at = performance.now();
         // After the gate held it both sides are read again: the live write
         // that closed the gate may be a delete or an edit of the thought or of
         // any older side still to judge, whose text must not go to the judge
@@ -2009,6 +2010,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
+        /** When the batch's rows were read (performance.now()): each thought's first `asked` (SMD-3379 PR 1c-3a, review pass 1). */
+        let readAt = 0;
         try {
           const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
@@ -2025,6 +2028,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
+          readAt = performance.now();
           const rows = (await sql`
             SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
@@ -2060,9 +2064,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
+            const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId);
+                outcome = await processRow(row, workerId, asked);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
                 // The admit gate's own error, not the thought's: the pass ends with it.

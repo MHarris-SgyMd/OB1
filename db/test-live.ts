@@ -6272,6 +6272,25 @@ if (want("10")) {
   const blinkSummary = blinkLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
   assert(blinkInCall && calls - blinkFrom === 1 && blinkCode <= 1 && /, 1 deleted mid-pass/.test(blinkSummary),
          `…and one deleted while a closure began and ended during its first window's call has nothing more sent, counted deleted (${calls - blinkFrom} call(s), exit ${blinkCode}: ${blinkSummary.trim().slice(0, 160)})`);
+  // …and a note sent in one call, deleted while a closure began and ended in
+  // the worker's pause after a 503: the retry asks the gate first, reads the
+  // claim again and sends nothing more (review pass 1: the retry's own taking
+  // time passed over the closure, and a one-call note had no gate at all).
+  const retryNote = await seed("Priya mended the retried gate latch.");
+  const retryGate = liveGate();
+  const retryFrom = calls;
+  const retryLines: string[] = [];
+  unavailableCalls = 1;
+  const retryRun = runExtract({ url: URL_!, env, workers: 1, admit: retryGate.admit, writer: { out: (l) => retryLines.push(l), err: (l) => retryLines.push(l) } });
+  const retryPausing = await pollUntil(async () => retryLines.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  retryGate.close();
+  await sql`SELECT delete_thought(${retryNote}::uuid, NULL::jsonb)`;
+  retryGate.open();
+  const retryCode = await retryRun;
+  unavailableCalls = 0;
+  const retrySummary = retryLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(retryPausing && calls - retryFrom === 1 && retryCode <= 1 && /, 1 deleted mid-pass/.test(retrySummary),
+         `…and one sent in one call, deleted while a closure began and ended in its worker's pause after a 503, is not sent again (${calls - retryFrom} call(s), exit ${retryCode}: ${retrySummary.trim().slice(0, 160)})`);
   // A long note edited while its worker waits before its second window,
   // under a key the trigger does not requeue — ob1_config pointed elsewhere
   // for the edit alone — so the claim is still the worker's: nothing more of

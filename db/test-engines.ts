@@ -932,7 +932,7 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const { admitted, liveGate } = await import("./lease.ts");
   const gate = liveGate();
   const run = new AbortController();
-  const began = Date.now();
+  const began = performance.now();
   ok(!gate.closed && (await admitted(gate.admit, run.signal)) === "open" && gate.admit.closedSince?.(began) === false,
     "a live gate begins open: an ask goes through at once, and it has not closed since");
   /** A signal that counts the listeners on it, to see each taken off. */
@@ -950,11 +950,12 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const asked = admitted(gate.admit, waiter.ac.signal);
   const early = await Promise.race([asked, Bun.sleep(50).then(() => "pending" as const)]);
   const listening = waiter.live;
+  const held = gate.waiting;
   gate.open();
-  ok(early === "pending" && listening === 1 && (await asked) === "waited" && waiter.live === 0 && !gate.closed,
-    `closed, an ask waits until the gate opens and reads waited, its listener taken off (${early}, ${listening} → ${waiter.live})`);
+  ok(early === "pending" && listening === 1 && held === 1 && (await asked) === "waited" && waiter.live === 0 && gate.waiting === 0 && !gate.closed,
+    `closed, an ask waits until the gate opens and reads waited, held and let go, its listener taken off (${early}, ${listening} → ${waiter.live}, ${held} held)`);
   await Bun.sleep(2);
-  const since = Date.now();
+  const since = performance.now();
   ok((await admitted(gate.admit, run.signal, began)) === "waited" && (await admitted(gate.admit, run.signal, since)) === "open"
       && gate.admit.closedSince?.(began) === true && gate.admit.closedSince?.(since) === false,
     "open again, an ask whose worker last passed before the closure reads waited — the closure opened again during its call — and one after it open");
@@ -962,12 +963,23 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   gate.close();
   const stoppedAsk = admitted(gate.admit, stopping.ac.signal);
   stopping.ac.abort();
-  // Its listener goes with the abort it heard (`once`), which the count does not see.
-  ok((await stoppedAsk) === false && (await admitted(gate.admit, stopping.ac.signal)) === false && gate.admit.closedSince?.(Date.now()) === true,
-    "a stop turns a waiting ask away, and an ask whose signal has already aborted at once, while closed");
+  // Its listener goes with the abort it heard (`once`), which the count does not see; the gate keeps no hold on it.
+  ok((await stoppedAsk) === false && gate.waiting === 0 && (await admitted(gate.admit, stopping.ac.signal)) === false && gate.waiting === 0 && gate.admit.closedSince?.(performance.now()) === true,
+    "a stop turns a waiting ask away, and an ask whose signal has already aborted at once, while closed, the gate holding neither");
   gate.open();
   gate.open();
   ok(!gate.closed && (await admitted(gate.admit, stopping.ac.signal)) === "open", "opened twice, it stays open; an open gate lets an aborted signal's ask through, as Admit's contract has it");
+  // On its own clock (review pass 1): a closure that opened again at t counts
+  // from t itself; opening an open gate moves nothing.
+  let clock = 10;
+  const timed = liveGate(() => clock);
+  timed.close();
+  timed.open();
+  const atOpen = [timed.admit.closedSince?.(10), timed.admit.closedSince?.(11)];
+  clock = 20;
+  timed.open();
+  ok(atOpen[0] === true && atOpen[1] === false && timed.admit.closedSince?.(11) === false,
+    `a closure that opened again at t counts from t on, and opening an open gate moves nothing (${JSON.stringify(atOpen)}, ${timed.admit.closedSince?.(11)})`);
 }
 
 // The scheduler's pause on its heartbeat (SMD-3379 PR 1c-3a): db/pass-stamp.ts'

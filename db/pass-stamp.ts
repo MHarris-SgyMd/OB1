@@ -196,9 +196,11 @@ export interface PassStamper {
   resting?(on: boolean): void;
   /**
    * The sleep scheduler paused by a live call (SMD-3379 PR 1c): its gate
-   * closed since `since` (the database's clock, an ISO instant), its passes
-   * waiting between thoughts — `paused { since }` in the value, left out
-   * while open (null). Cleared by the row's end. Only the scheduler sets it.
+   * closed since `since` — the database's clock in toISOString()'s form
+   * (`2026-10-31T12:00:00.000Z`), the only one brain-info reads — its passes
+   * waiting between thoughts: `paused { since }` in the value, left out while
+   * open (null). Written at the next stamp, so a caller wanting it seen at
+   * once stamps then. Cleared by the row's end. Only the scheduler sets it.
    */
   paused?(since: string | null): void;
   /**
