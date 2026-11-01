@@ -766,10 +766,10 @@ jobs:
 
     # The live suite in four shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
-    # SHARDS lists, split by their CI times so no cell outlasts the full-stack
-    # jobs; rest is [1] and every section SHARDS does not list. One job, not
-    # four copies of it, since the ruleset requires "Fork Checks passed" alone
-    # and not the cells' names (SMD-3168, SMD-3169).
+    # SHARDS lists, split by their CI times into cells about equally long
+    # (SMD-3469); rest is [1] and every section SHARDS does not list. One
+    # job, not four copies of it, since the ruleset requires "Fork Checks
+    # passed" alone and not the cells' names (SMD-3168, SMD-3169).
     strategy:
       fail-fast: false
       matrix:
