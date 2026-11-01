@@ -336,9 +336,9 @@ export type LiveGate = { readonly admit: Admit; readonly closed: boolean; readon
  * open() — or its signal aborts, rejected then — its listener taken off the
  * signal either way, as Admit's contract asks. `closedSince` is kept: closed
  * now, or opened again at or after `t`, on `now` — performance.now(), a clock
- * that never steps back, as the engines' `lastAsk` is (review pass 1: a wall
- * clock stepped back hid a closure); another `now` is a test's alone, as the
- * engines' `lastAsk` is always performance.now(). `waiting`: the asks it holds now.
+ * that never steps back, and the engines' `lastAsk` (review pass 1: a wall
+ * clock stepped back hid a closure); another `now` is a test's alone.
+ * `waiting`: the asks it holds now.
  */
 export function liveGate(now: () => number = () => performance.now()): LiveGate {
   let closed = false;
