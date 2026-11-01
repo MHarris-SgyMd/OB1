@@ -538,12 +538,15 @@
  *      working directory's file alone (SMD-2978: db-live ran
  *      server-portable/preflight.ts on a zod fetched at run time). Its probes
  *      pin which files turn it off
- *  45. no workflow, and no tracked .sh under .github/, db/, deploy/ or
- *      scripts/ that sets pipefail, pipes into `grep -q` (or --quiet,
- *      --silent): grep exits at its first match, a writer still writing dies
- *      of SIGPIPE, and pipefail reads 141 — a fatal step or a false "no
- *      match" (SMD-3652: the import runner's egress step failed at random);
- *      `grep … > /dev/null` reads to the end. Its probe pins what it refuses
+ *  45. no workflow, no .sh under .github/ci/ and no other .sh git tracks
+ *      or would track under .github/, db/, deploy/ or scripts/ that sets
+ *      pipefail pipes into a quiet grep (-q, --quiet, --silent, before or
+ *      after its pattern): grep exits at its first match, a writer still
+ *      writing dies of SIGPIPE, and pipefail makes the pipeline 141 — a fatal
+ *      step, or the wrong branch in a condition (SMD-3652: the import
+ *      runner's egress step failed at random); `grep … > /dev/null` reads to
+ *      the end. Its probe pins what it refuses and passes, and that it reads
+ *      db/with-postgres.sh and .github/ci/held-cases.sh
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
@@ -9856,21 +9859,45 @@ function checkNoAutoInstall() {
 }
 checkNoAutoInstall();
 
-// ── 45: no workflow step or pipefail script pipes into `grep -q` (SMD-3652) ──
+// ── 45: no workflow step or pipefail script pipes into a quiet grep (SMD-3652) ──
 /**
  * 45: `grep -q` exits at its first match. Whatever still writes into its pipe after that dies of SIGPIPE, and under
- * pipefail (every fork-checks.yml step, and each script that sets it) the pipeline's status is then 141: a fatal one
- * under `-e`, or a false "no match" in an `if`, `&&` or `||`. So "The import runner starts with its egress rules"
- * failed at random once the runner printed a stderr line after its listening line (SMD-3652, SMD-3334). `grep …
- * > /dev/null` reads to the end and keeps the status; a here-string or a file has no writer to kill. It reads every
- * workflow and each tracked .sh under .github/, db/, deploy/ and scripts/ that sets pipefail, comment lines aside,
- * for a `|` or `|&` (not `||`) into a grep whose flags, before its first operand, include q, `--quiet` or `--silent`.
+ * pipefail the pipeline's status is then 141: fatal under `-e`, and a "no match" in an `if`, `&&` or `||`, where it
+ * takes the wrong branch. So "The import runner starts with its egress rules" failed at random once the runner
+ * printed a stderr line after its listening line (SMD-3652, SMD-3334). `grep … > /dev/null` reads to the end and
+ * keeps the status; a here-string or a file has no writer to kill. Every workflow's steps run under pipefail (each
+ * sets `defaults.run.shell: bash`), so it reads each workflow, each .sh under .github/ci/ (a step runs or sources
+ * it), and each other .sh git tracks or would track under .github/, db/, deploy/ and scripts/ that sets pipefail. A
+ * line ending in `\` or `|` is read with the next; comment lines, single-quoted text and double-quoted text with no
+ * command substitution in it are not read. It refuses a `|` or `|&` (not `||`) into grep, egrep or fgrep, past any
+ * `VAR=value`, `sudo` or `command` before it, with a `-…q…` word, `--quiet` or `--silent` among its words, before
+ * or after its pattern, since GNU grep reads options after operands too: the word after `-e`, `-f`, `-m`, `-A`,
+ * `-B`, `-C`, `-d` or `-D` is that option's argument, and `--` ends the options.
  */
-const PIPE_INTO_GREP_Q = /(?<!\|)\|(?!\|)&?\s*grep(?:\s+-{1,2}[A-Za-z][A-Za-z-]*)*?\s+(?:-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)(?=\s|$)/;
-const PIPEFAIL_SET = /^\s*set\s+(?:-[A-Za-z]*o\s+pipefail|-o\s+pipefail)\b/m;
+const QUIET_GREP_OPTION = /^(?:-[A-Za-z0-9]*q[A-Za-z0-9]*|--quiet|--silent)$/;
+const GREP_OPTION_WITH_ARGUMENT = /^-[A-Za-z0-9]*[efmABCdD]$/;
+const PIPE_INTO_GREP = /(?<!\|)\|(?!\|)&?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|sudo|command)\s+)*(?:\S*\/)?[ef]?grep(?=\s|$)([^|;&<>()]*)/g;
+const PIPEFAIL_SET = /(?:^|[;&])[ \t]*set\b[^\n#;]*?[ \t]-[A-Za-z]*o[A-Za-z]*[ \t]+pipefail\b/m;
 function pipesIntoGrepQ(text: string): number[] {
   const out: number[] = [];
-  text.split("\n").forEach((l, i) => { if (!/^\s*#/.test(l) && PIPE_INTO_GREP_Q.test(l)) out.push(i + 1); });
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const first = i;
+    let l = lines[i];
+    if (/^\s*#/.test(l)) continue;
+    while (/(?:\\|\|)\s*$/.test(l) && i + 1 < lines.length) l = `${l.replace(/\\\s*$/, " ")} ${lines[++i]}`;
+    const bare = l.replace(/'[^']*'/g, "''").replace(/"(?:[^"\\$`]|\\.|\$(?!\())*"/g, '""');
+    for (const m of bare.matchAll(PIPE_INTO_GREP)) {
+      const words = m[1].trim().split(/\s+/).filter(Boolean);
+      let quiet = false;
+      for (let w = 0; w < words.length && !quiet; w++) {
+        if (words[w] === "--") break;
+        if (QUIET_GREP_OPTION.test(words[w])) quiet = true;
+        else if (GREP_OPTION_WITH_ARGUMENT.test(words[w])) w++;
+      }
+      if (quiet) { out.push(first + 1); break; }
+    }
+  }
   return out;
 }
 function checkNoPipeIntoGrepQ() {
@@ -9881,30 +9908,54 @@ function checkNoPipeIntoGrepQ() {
     ["if grep -E '^search' <<<\"$r\" | grep -E -qv '^search .$'; then", 1],
     ['cmd |& grep --quiet x', 1],
     ['cmd | grep --silent x && break', 1],
+    ['cmd | grep -e x -q', 1],
+    ['cmd | grep -m 1 -q x', 1],
+    ['cmd | grep x -q', 1],
+    ["cmd | grep -E 'a|b' -q", 1],
+    ['cmd | egrep -q x', 1],
+    ['cmd | LC_ALL=C grep -q x', 1],
+    ['cmd | sudo /usr/bin/grep -q x', 1],
+    ['cmd | \\\n  grep -q x', 1],
+    ['cmd |\n  grep -q x', 1],
+    ['x=$(cmd | grep -q y)', 1],
+    ['[ -n "$(cmd | grep -q y)" ]', 1],
     ['docker logs x 2>&1 | grep "runner: listening" > /dev/null', 0],
     ['grep -q "runner: listening" <<<"$(docker logs x 2>&1)"', 0],
     ["grep -qx 'OB1_TIER=stable' /tmp/env || echo no", 0],
     ['test -n "$a" || grep -q x file', 0],
+    ['cmd ||\n  grep -q x file', 0],
     ['up=$(curl -s x | grep -cx "pg_up 1" || true)', 0],
     ["cmd | grep -F -- '-q' > /dev/null", 0],
+    ['cmd | grep -e -q x > /dev/null', 0],
+    ['cmd | grep --color=never x > /dev/null', 0],
+    ['cmd | xargs grep -q x', 0],
+    ["echo 'a | grep -q b'", 0],
     ['          # docker logs x | grep -q y', 0],
   ];
+  const sets: [string, boolean][] = [
+    ["set -euo pipefail", true], ["set -eo pipefail", true], ["set -o pipefail", true], ["set -e -o pipefail", true],
+    ["set -o errexit -o pipefail", true], ["  set -Eeuo pipefail", true], ["cd x; set -eo pipefail", true],
+    ["set -e", false], ["set +o pipefail", false], ["# set -euo pipefail", false], ["echo set -o pipefail-ish", false],
+  ];
   const wrong = cases.map(([t, n]) => ({ t, want: n, got: pipesIntoGrepQ(t).length })).filter((c) => c.got !== c.want);
-  if (wrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify(wrong)}): a | or |& into grep with q, --quiet or --silent among its flags fails; || into grep, a here-string, a file, grep -c and grep > /dev/null pass, as does a comment (SMD-3652)`);
+  const setsWrong = sets.filter(([t, want]) => PIPEFAIL_SET.test(t) !== want).map(([t]) => t);
+  if (wrong.length || setsWrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify({ wrong, setsWrong })}): a | or |& into grep, egrep or fgrep with a q option, --quiet or --silent among its words fails, before or after its pattern, past an env prefix, sudo or a path, across a line ending in \\ or |, and in a command substitution; || into grep, a here-string, a file, grep -c, grep > /dev/null, a -q that is an option's argument or follows --, xargs grep, quoted text and a comment pass; set -…o pipefail is read in each form, set +o and a comment are not (SMD-3652)`);
   const wdir = join(ROOT, ".github", "workflows");
   const workflows = existsSync(wdir) ? readdirSync(wdir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => `.github/workflows/${f}`) : [];
   if (!workflows.length) { fail(".github/workflows", "no workflow found — check 45 reads each one for a pipe into grep -q (SMD-3652)"); return; }
   let scripts: string[] = [];
   try {
     scripts = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".github", "db", "deploy", "scripts"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
-      .split("\0").filter((f) => f.endsWith(".sh") && existsSync(join(ROOT, f)) && PIPEFAIL_SET.test(readFileSync(join(ROOT, f), "utf8")));
+      .split("\0").filter((f) => f.endsWith(".sh") && existsSync(join(ROOT, f)) && (f.startsWith(".github/ci/") || PIPEFAIL_SET.test(readFileSync(join(ROOT, f), "utf8"))));
   } catch (e) {
     console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 reads the workflows alone)`);
   }
-  if (!scripts.includes("db/with-postgres.sh")) fail(SELF, "check 45 does not read db/with-postgres.sh as a script that sets pipefail — the reading is broken, not the tree clean");
+  for (const known of ["db/with-postgres.sh", ".github/ci/held-cases.sh"]) {
+    if (!scripts.includes(known)) fail(SELF, `check 45 does not read ${known}, which runs under pipefail — the reading is broken, not the tree clean`);
+  }
   for (const f of [...workflows, ...scripts.sort()]) {
     for (const line of pipesIntoGrepQ(readFileSync(join(ROOT, f), "utf8"))) {
-      fail(`${f}:${line}`, `a pipe into grep -q under pipefail: grep exits at its first match, and a writer still writing dies of SIGPIPE, so the pipeline reads 141 — fatal under -e, a false "no match" in a condition — write \`grep … > /dev/null\`, which reads to the end, or grep a here-string or a file (check 45, SMD-3652)`);
+      fail(`${f}:${line}`, `a pipe into grep -q under pipefail: grep exits at its first match, and a writer still writing dies of SIGPIPE, so pipefail makes the pipeline 141 — fatal under -e, the wrong branch in a condition — write \`grep … > /dev/null\`, which reads to the end, or grep a here-string or a file (check 45, SMD-3652)`);
     }
   }
 }
