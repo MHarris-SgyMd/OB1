@@ -1648,9 +1648,11 @@ jobs:
       # resolver): the control resolves within them, first, so the resolver
       # upstream of Docker's has just answered for the name and a proxy that
       # could ask it would have its answer in that time too (review pass 1).
-      # The proxy's lookup must exit getent's "not found" (2) or a
-      # timeout's (busybox 143, coreutils 124), since a missing `timeout`
-      # (127) is no refusal. The forwarder's self-check runs from the copy
+      # The control has three tries, since musl resends a lost query only
+      # after 2.5 s (review pass 3), and the proxy's lookup follows the one
+      # that resolved. The proxy's lookup must exit getent's "not found" (2)
+      # or a timeout's (busybox 143, coreutils 124), since a missing
+      # `timeout` (127, or 126 under some engines) is no refusal. The forwarder's self-check runs from the copy
       # compose.yaml mounts, beside both lookups. The proxy logs a
       # client by the PROXY line, as neither the forwarder nor itself. And with
       # the proxy stopped, a decoy answering to the proxy's name on `edge` is
@@ -1664,12 +1666,15 @@ jobs:
           IMAGE="$(jq -r .services.api.image <<<"$cfg")"
           docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check > "$RUNNER_TEMP/forwarder-self-check" 2>&1 & selfcheck=$!
           # Waited for and shown on an early exit too, until it is waited for below.
-          trap 'wait; cat "$RUNNER_TEMP/forwarder-self-check" 2>/dev/null || true' EXIT
+          trap 'wait; echo "the forwarder self-check, waited for:"; cat "$RUNNER_TEMP/forwarder-self-check" 2>/dev/null || true' EXIT
           # --init bounds the control: without it getent runs as PID 1, ignores
           # the timeout's TERM, and the control waits as long as it likes
-          # (traefik's image, measured: `timeout 2 sleep 5` exits 0 once sleep ends; with --init, 143 after 2 s).
-          docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null \
-            || { echo "getent in the proxy's image resolves no outside name from open-brain_edge within 2 s, so the refusal below proves nothing" >&2; exit 1; }
+          # (traefik's image, measured on podman: `timeout 2 sleep 5` exits 0 once sleep ends; with --init, 143 after 2 s).
+          resolved=""
+          for _ in 1 2 3; do
+            if docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null; then resolved=1; break; fi
+          done
+          [ -n "$resolved" ] || { echo "getent in the proxy's image resolves no outside name from open-brain_edge within 2 s, in three tries, so the refusal below proves nothing" >&2; exit 1; }
           rc=0; docker compose -f compose.yaml exec -T proxy timeout 2 getent hosts example.com || rc=$?
           [ "$rc" != 0 ] || { echo "the proxy resolved an outside name" >&2; exit 1; }
           [ "$rc" = 2 ] || [ "$rc" = 143 ] || [ "$rc" = 124 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor a 2 s timeout's (143, 124), so it refused nothing" >&2; exit 1; }
@@ -1688,6 +1693,9 @@ jobs:
           if [ -z "$client" ] || [ "$client" = null ] || [[ "$own" == *" $client "* ]]; then echo "the proxy logged /health from '$client', one of the forwarder's or the proxy's own addresses ($own): no PROXY line naming the client" >&2; exit 1; fi
           stopped=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose -f compose.yaml stop proxy
+          # --no-deps: the proxy alone comes back, so migrate does not run again
+          # and only the proxy's health is waited for (SMD-3472); nothing else
+          # was stopped.
           trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy' EXIT
           # A raw TCP listener, so it counts a connection whatever its first bytes:
           # the forwarder opens with the PROXY line, which an HTTP server refuses
@@ -1866,14 +1874,17 @@ jobs:
             pids+=("$!"); calls+=("${*:2}")
           }
           # settle FROM TO: wait for each call FROM to TO-1 not yet settled,
-          # printing its output in the order it was made, and fail if any failed.
+          # printing its output, then its exit code if it failed, in call order
+          # within the range, and fail if any failed. The release modes settle
+          # as they end, so the 12 calls before them print last. A log that
+          # cannot be read fails too: in the trap's `||` errexit is off.
           settle() {
             local i rc failed=0
             for ((i = $1; i < $2; i++)); do
               if [ -n "${settled[$i]:-}" ]; then continue; fi
               rc=0; wait "${pids[$i]}" || rc=$?
               settled[i]=1
-              cat "$dir/$i.log"
+              cat "$dir/$i.log" || failed=1
               if [ "$rc" != 0 ]; then failed=1; echo "proxy_loads ${calls[$i]}: exit $rc" >&2; fi
             done
             return "$failed"
@@ -1882,8 +1893,8 @@ jobs:
           # output printed, so a failure leaves no render running and hides
           # none, and the step fails if any of them failed, wherever a later
           # edit adds one (review pass 2: `|| true` here passed a failing call
-          # made after the last settle).
-          trap 'st=$?; settle 0 "${#pids[@]}" || st=1; rm -f compose.release.yaml .bun-view.*.json; exit "$st"' EXIT
+          # made after the last settle). An exit's own code is kept.
+          trap 'st=$?; settle 0 "${#pids[@]}" || [ "$st" != 0 ] || st=1; rm -f compose.release.yaml .bun-view.*.json; exit "$st"' EXIT
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
@@ -2162,7 +2173,8 @@ jobs:
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
           carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
-          # --no-deps: the overlay changes the proxy alone (check 28's OVERLAYS), and without it each up ran migrate again (SMD-3472).
+          # --no-deps: the overlay changes the proxy alone (check 28's OVERLAYS); without it each up ran migrate again
+          # and waited on every dependency's health, none of which this step touches (SMD-3472).
           docker compose -f compose.yaml -f compose.api-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
