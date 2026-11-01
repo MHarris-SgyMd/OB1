@@ -20,8 +20,8 @@
 # artifact. So the shape is exercised before a tag ever is, and a change to a
 # Dockerfile or to compose.yaml is judged the way a release would judge it. A
 # pull request's rehearsal builds arm64 too only when it changes what can
-# build differently there (SMD-3473, "Whether this rehearsal builds both
-# platforms").
+# build differently there, or is a release cut (SMD-3473, "Whether this
+# rehearsal builds both platforms").
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash here only
 # runs docker and gh. It refuses a tag that does not name releases.json's last
@@ -138,15 +138,17 @@ jobs:
           # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
           bun scripts/release-artifacts.ts facts $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --out "$GITHUB_OUTPUT" | grep -v -e '^[a-z_]*_labels<<' -e '^org\.opencontainers' -e '^__OB1_EOF__$'
 
-      # SMD-3473: a pull request's rehearsal builds both platforms only when it
+      # SMD-3473: a pull request's rehearsal builds both platforms when it
       # changes what can build differently on arm64 — the two Dockerfiles (the
       # base image, every RUN), this file, and each package.json and bun.lock a
-      # Dockerfile copies, whose `bun install` runs under QEMU for arm64 — or
-      # .dockerignore and dashboard/, which build the same on both (dashboard
-      # builds on the build platform) but are kept from the ticket's list. A
-      # change elsewhere is source the image copies, which builds the same on
-      # both, so its rehearsal builds amd64 alone and still brings the stack up
-      # from it. A dispatched rehearsal builds both; a tag always does. The
+      # Dockerfile copies, whose `bun install` runs under QEMU for arm64. It
+      # also does for .dockerignore and dashboard/, which build the same on
+      # both (dashboard builds on the build platform) but are kept from the
+      # ticket's list, and for releases.json, which only a cut changes, so the
+      # tree a tag publishes has built both first (review pass 2). Any other
+      # change builds the same on both, whether the images copy it or not, so
+      # its rehearsal builds amd64 alone and still brings the stack up from
+      # it. A dispatched rehearsal builds both; a tag always does. The
       # pull request's checkout is its merge commit, so HEAD^1..HEAD is what it
       # changes, each path as it is: unquoted, and a rename as its two sides.
       # Whatever the step cannot read builds both, and says so, rather than
@@ -168,7 +170,7 @@ jobs:
           [ -s "$changed" ] || both "no change read from HEAD^1..HEAD"
           while IFS= read -r -d '' f; do
             case "$f" in
-              "$SERVER_DOCKERFILE" | "$MIGRATE_DOCKERFILE" | .dockerignore | .github/workflows/release.yml | dashboard/*) both "$f changed" ;;
+              "$SERVER_DOCKERFILE" | "$MIGRATE_DOCKERFILE" | .dockerignore | .github/workflows/release.yml | dashboard/* | releases.json) both "$f changed" ;;
             esac
           done < "$changed"
           # Each package.json and bun.lock the two Dockerfiles copy, read from
@@ -178,7 +180,8 @@ jobs:
           locks="$(sed '/^[[:space:]]*#/d' "$SERVER_DOCKERFILE" "$MIGRATE_DOCKERFILE" | grep -oE '[A-Za-z0-9_./-]+/(package\.json|bun\.lock)' | sort -u)" || true
           [ -n "$locks" ] || both "no package.json or bun.lock read from $SERVER_DOCKERFILE or $MIGRATE_DOCKERFILE"
           while IFS= read -r -d '' f; do
-            if grep -qxF -- "$f" <<<"$locks"; then both "$f changed"; fi
+            # A name holding a newline would be two patterns to grep; none is a lockfile.
+            if [[ "$f" != *$'\n'* ]] && grep -qxF -- "$f" <<<"$locks"; then both "$f changed"; fi
           done < "$changed"
           echo "amd64 alone: nothing changed that builds differently on arm64"
           echo "both=false" >> "$GITHUB_OUTPUT"
