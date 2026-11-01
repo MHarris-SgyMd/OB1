@@ -939,6 +939,14 @@ async function writesArm() {
     const rowOf = (html: string) => new RegExp(`<li[^>]*id="proposal-${planted}"[\\s\\S]*?<\\/li>`).exec(html)?.[0] ?? "";
     const actionIn = (row: string, name: "accept" | "reject") => unescape(new RegExp(`formaction="(\\?\\/${name}[^"]*)"`).exec(row)?.[1] ?? `?/${name}`);
     const decide = (action: string, extra: Record<string, string> = {}) => post(`/proposals${action}`, { id: planted, ...extra });
+    // A decision on a proposal no row lists (gone since, decided since, past the limit) is said at the top, not dropped
+    // with no row to sit beside (review pass 1); and Enter in a row's note submits nothing — the form's default button,
+    // its first, is a disabled one, where it was Accept (review pass 1).
+    const firstPage = await get(ALL);
+    const ghost = await post("/proposals?/reject&status=all&limit=200", { id: "00000000-0000-4000-8000-0000000033ff" });
+    assert(ghost.status === 404 && /data-testid="review-error"[^>]*>[^<]*No such proposal/.test(ghost.html), `a decision on a proposal the page does not list is refused, said at the top (${ghost.status})`);
+    const reviewForm = /<form[^>]*data-testid="review"[^>]*>[\s\S]*?<\/form>/.exec(rowOf(firstPage.html))?.[0] ?? "";
+    assert(/^<form[^>]*>\s*(?:<!--[^>]*-->\s*)*<button[^>]*\bdisabled\b/.test(reviewForm), "…and a row's form has a disabled default button first, so Enter in its note decides nothing");
     const landed = async (posted: { status: number; location: string; setCookies: string[] }) => {
       const flash = posted.setCookies.find((c) => c.startsWith(`${COOKIE}_proposals=`)) ?? "";
       const r = await fetch(`${BASE}${ALL}`, { redirect: "manual", headers: { cookie: `${cookie}; ${flash}` } });
@@ -949,9 +957,11 @@ async function writesArm() {
       return { redirected: posted.status === 303 && posted.location === `/dashboard${ALL}` && flash !== "", status: r.status, html, cleared, row };
     };
     const decidedBy = (row: string) => /data-testid="decided-by"[^>]*>Decided by ([^<]+)</.exec(row)?.[1] ?? "";
+    // The signed-in key's name, as the nav shows it: the decided-by line must name it (review pass 1).
+    const who = /data-testid="who"[^>]*>([^<·]+?)\s*·/.exec((await get(ALL)).html)?.[1]?.trim() ?? "";
     const rejected = await landed(await decide(actionIn(rowOf((await get(ALL)).html), "reject"), { note: "the GUI smoke's reject" }));
     assert(rejected.redirected && rejected.cleared && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Rejected proposal ${planted}`).test(rejected.html)
-        && /rejected/.test(rejected.row) && /the GUI smoke&#39;s reject|the GUI smoke's reject/.test(rejected.row) && decidedBy(rejected.row) !== "" && decidedBy(rejected.row) !== "not recorded",
+        && /rejected/.test(rejected.row) && /the GUI smoke&#39;s reject|the GUI smoke's reject/.test(rejected.row) && who !== "" && decidedBy(rejected.row).startsWith(`${who} (`),
       `the write key rejects the planted proposal: 303 back to the page, which says so, clears its cookie, and shows the row rejected, its note and who decided (${rejected.status}, ${decidedBy(rejected.row) || "no decider"})`);
     // An accept the core's checks refuse — CI marks the planted proposal edited since judged — is said beside its
     // proposal with "Accept anyway", nothing written; that form's post is the force a reviewer who read both means.
@@ -965,7 +975,7 @@ async function writesArm() {
     assert(accepted.redirected && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Accepted proposal ${planted}`).test(accepted.html) && /accepted/.test(accepted.row) && /Reject \(undo the accept\)/.test(accepted.row),
       `the write key accepts it: 303 back, the page saying so and offering the reject that undoes it (${accepted.status})`);
     const undone = await landed(await decide(actionIn(accepted.row, "reject")));
-    assert(undone.redirected && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Rejected proposal ${planted}, which was accepted: the pointer its accept wrote is cleared`).test(undone.html),
+    assert(undone.redirected && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Rejected proposal ${planted}, which was accepted: the pointer its accept wrote is cleared\\. A capture-only pointer that accept may have cleared stays cleared`).test(undone.html),
       `…and rejects it again: the page says the accept's pointer is cleared (${undone.status})`);
   }
 

@@ -62,7 +62,8 @@ function doneFrom(value: string): string | null {
 	if (op === 'reject') {
 		const said: Record<string, string> = {
 			plain: `Rejected proposal ${id}.`,
-			cleared: `Rejected proposal ${id}, which was accepted: the pointer its accept wrote is cleared. A capture-only pointer that accept cleared stays cleared.`,
+			// The reject's answer does not say whether the accept had cleared any capture-only pointer: said as an if (review pass 1).
+			cleared: `Rejected proposal ${id}, which was accepted: the pointer its accept wrote is cleared. A capture-only pointer that accept may have cleared stays cleared.`,
 			held: `Rejected proposal ${id}, which was accepted: its pointer was there before the accept, so it stays.`,
 			moved: `Rejected proposal ${id}, which was accepted: its pointer was changed since, so there was nothing of the accept’s to clear.`,
 			again: `Rejected proposal ${id} again: this decision, its note and its reviewer replace the earlier reject’s.`,
@@ -132,7 +133,15 @@ function refusedWords(code: string | undefined, facts: Record<string, unknown>, 
 		case 'NOT_FOUND': return 'No such proposal: it may have gone with one of its thoughts. The list below is current.';
 		case 'REFUSED_EDITED_SINCE': return 'A thought was edited since this pair was judged (a stale proposal’s was), so the verdict is about a text that is gone. Read both; accept anyway if it still holds, or reject it.';
 		case 'REFUSED_LINEAGE_PAIR': return `One side derives from the other (a lineage pair): accepting writes the pointer while the derivation still names its input, which search then treats as superseded. ${stays}; accept anyway only if that is what you mean.`;
-		case 'REFUSED_WRITER': return `The side that would stand is a capture-only key’s text, or of a lower trust than the other (the WRITER flag). Read both writers; accept anyway if it should stand${facts.status === 'rejected' ? '; left as it is, it stays rejected' : ', or reject it'}.`;
+		case 'REFUSED_WRITER': {
+			// What accepting anyway also does (review pass 1): the capture-only pointers onto the side that stands it clears,
+			// a second write past force that a reject does not restore, and the edit force also accepts over.
+			const side = (Array.isArray(facts.flags) ? (facts.flags[0] as { stands?: unknown } | undefined)?.stands : undefined) === 'older' ? 'older' : 'newer';
+			const lapses = (facts.lapses as Record<string, unknown> | undefined)?.[side];
+			const n = typeof lapses === 'number' && lapses > 0 ? lapses : 0;
+			const clears = n ? ` Accepting anyway also clears ${n === 1 ? 'a capture-only pointer' : `${n.toLocaleString('en-US')} capture-only pointers`} onto that side, which a reject does not restore.` : '';
+			return `The side that would stand is a capture-only key’s text, or of a lower trust than the other (the WRITER flag). Read both writers; accept anyway if it should stand${facts.edited === true ? ' (that also accepts over a text edited since judged)' : ''}${facts.status === 'rejected' ? '; left as it is, it stays rejected' : ', or reject it'}.${clears}`;
+		}
 		case 'REFUSED_DIRECTION_REQUIRED': return 'The judge did not say which thought is current: accept with the side that stands.';
 		case 'REFUSED_ALREADY_ACCEPTED': return 'This proposal is already accepted. A reject first clears its pointer if it still holds this proposal’s value; then it can be accepted again.';
 		case 'REFUSED_ALREADY_SUPERSEDES': return 'The side that would stand already supersedes a third thought, and a thought holds one predecessor: edit that thought’s pointer, or reject this proposal.';

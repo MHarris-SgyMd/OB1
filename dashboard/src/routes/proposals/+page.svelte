@@ -37,6 +37,12 @@
 	};
 	/** A refusal of a decision on this row: said beside it, with "Accept anyway" where force waives it. */
 	const refusalOf = (p: Proposal) => (form?.id === p.id ? form : null);
+	/**
+	 * A refusal said beside no row — none named, or one the page no longer lists (gone, decided since, moved past the
+	 * limit or out of the status) — is said at the top, with where to look and, where force waives it, "Accept anyway"
+	 * (review pass 1: it was dropped, the page looking as if nothing was asked).
+	 */
+	const unplaced = $derived(form?.error && !data.proposals.some((p) => p.id === form?.id) ? form : null);
 </script>
 
 <svelte:head><title>Proposals · Open Brain</title></svelte:head>
@@ -44,8 +50,17 @@
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Supersession proposals</h1>
 
-	{#if form?.error && !form.id}
-		<p class="text-sm text-amber-300" role="alert" data-testid="review-error">{form.error}</p>
+	{#if unplaced}
+		<p class="text-sm text-amber-300 [overflow-wrap:anywhere]" role="alert" data-testid="review-error">{unplaced.error}{#if unplaced.id} (proposal <span class="font-mono">{unplaced.id}</span>, not in this list: Status “all” and a larger How many show it){/if}</p>
+		{#if unplaced.id && unplaced.forceable}
+			<form method="POST" action={actionOf('accept')} data-testid="force">
+				<input type="hidden" name="id" value={unplaced.id} />
+				{#if unplaced.direction}<input type="hidden" name="direction" value={unplaced.direction} />{/if}
+				<input type="hidden" name="note" value={unplaced.note ?? ''} />
+				<input type="hidden" name="force" value="1" />
+				<button type="submit" class="button text-xs" aria-label="Accept proposal {unplaced.id} anyway">Accept anyway</button>
+			</form>
+		{/if}
 	{:else if data.done}
 		<p class="text-sm" role="status" data-testid="review-done">{data.done}</p>
 	{/if}
@@ -104,16 +119,19 @@
 							<!-- One form, a button per decision (SMD-3322 PR 4): the clicked button's formaction, the page's filters in it,
 							     and, on an undirected verdict, its side. -->
 							<form method="POST" class="flex flex-wrap gap-2 items-end" data-testid="review" aria-label="Decide proposal {p.id}">
+								<!-- The form's default button, disabled: Enter in the note submits nothing, where it clicked the first
+								     button, Accept, writing a pointer under a note typed for a reject (review pass 1). -->
+								<button type="submit" disabled hidden aria-hidden="true" tabindex="-1"></button>
 								<input type="hidden" name="id" value={p.id} />
 								{#if p.status !== 'accepted'}
 									{#if p.undirected}
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs">Accept: newer stands</button>
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs">Accept: older stands</button>
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs" aria-label="Accept proposal {p.id}: the newer stands">Accept: newer stands</button>
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs" aria-label="Accept proposal {p.id}: the older stands">Accept: older stands</button>
 									{:else}
-										<button type="submit" formaction={actionOf('accept')} class="button text-xs">Accept</button>
+										<button type="submit" formaction={actionOf('accept')} class="button text-xs" aria-label="Accept proposal {p.id}">Accept</button>
 									{/if}
 								{/if}
-								<button type="submit" formaction={actionOf('reject')} class="button text-xs">{p.status === 'accepted' ? 'Reject (undo the accept)' : p.status === 'rejected' ? 'Reject again' : 'Reject'}</button>
+								<button type="submit" formaction={actionOf('reject')} class="button text-xs" aria-label="Reject proposal {p.id}">{p.status === 'accepted' ? 'Reject (undo the accept)' : p.status === 'rejected' ? 'Reject again' : 'Reject'}</button>
 								<label class="flex flex-col gap-1 text-xs grow">Note (optional)
 									<input name="note" maxlength="2000" class="field" value={refused?.note ?? ''} />
 								</label>
@@ -127,7 +145,7 @@
 									{#if refused.direction}<input type="hidden" name="direction" value={refused.direction} />{/if}
 									<input type="hidden" name="note" value={refused.note ?? ''} />
 									<input type="hidden" name="force" value="1" />
-									<button type="submit" class="button text-xs">Accept anyway</button>
+									<button type="submit" class="button text-xs" aria-label="Accept proposal {p.id} anyway">Accept anyway</button>
 								</form>
 							{/if}
 						{/if}
