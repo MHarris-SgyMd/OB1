@@ -3653,6 +3653,7 @@ jobs:
           docker logs ob1-runner-egress 2>&1
           docker logs ob1-runner-egress 2>&1 | grep "runner: listening" > /dev/null
           pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do if [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ]; then basename "$p"; break; fi; done')
+          [ -n "$pid" ] || { echo "no process in ob1-runner-egress runs bun deploy/orchestration/runner.ts" >&2; exit 1; }
           eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
           echo "runner pid $pid CapEff $eff"
           [ "$eff" = "00000000000000e0" ]

@@ -545,8 +545,8 @@
  *      writing dies of SIGPIPE, and pipefail makes the pipeline 141 — a fatal
  *      step, or the wrong branch in a condition (SMD-3652: the import
  *      runner's egress step failed at random); `grep … > /dev/null` reads to
- *      the end. Its probe pins what it refuses and passes, and that it reads
- *      db/with-postgres.sh and .github/ci/held-cases.sh
+ *      the end. Its probe pins what it refuses and passes, and it fails if
+ *      it stops listing db/with-postgres.sh or .github/ci/held-cases.sh
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
@@ -9867,35 +9867,67 @@ checkNoAutoInstall();
  * printed a stderr line after its listening line (SMD-3652, SMD-3334). `grep … > /dev/null` reads to the end and
  * keeps the status; a here-string or a file has no writer to kill. Every workflow's steps run under pipefail (each
  * sets `defaults.run.shell: bash`), so it reads each workflow, each .sh under .github/ci/ (a step runs or sources
- * it), and each other .sh git tracks or would track under .github/, db/, deploy/ and scripts/ that sets pipefail. A
- * line ending in `\` or `|` is read with the next; comment lines, single-quoted text and double-quoted text with no
- * command substitution in it are not read. It refuses a `|` or `|&` (not `||`) into grep, egrep or fgrep, past any
- * `VAR=value`, `sudo` or `command` before it, with a `-…q…` word, `--quiet` or `--silent` among its words, before
- * or after its pattern, since GNU grep reads options after operands too: the word after `-e`, `-f`, `-m`, `-A`,
- * `-B`, `-C`, `-d` or `-D` is that option's argument, and `--` ends the options.
+ * it), and each other .sh git tracks or would track under .github/, db/, deploy/ and scripts/ that sets pipefail.
+ *
+ * It reads each line as the shell would, left to right: single-quoted text, double-quoted text with no command
+ * substitution in it, and a comment are not read. A line ending in `\` or `|` goes on in the next line that is not a
+ * comment, but a YAML block scalar's opening (`run: |`) does not. It refuses a `|` or `|&` (not `||`) into grep,
+ * egrep or fgrep, past any `VAR=value`, `env`, `sudo`, `command` or path before it, whose words make it quiet as GNU
+ * grep reads them, before or after its pattern: `--quiet`, `--silent`, or a q in a bundle of short options ahead of
+ * any that takes an argument (e, f, m, A, B, C, d, D; the rest of the bundle, or the next word, is that argument). A
+ * long option that takes one takes the next word, and `--` ends the options.
  */
-const QUIET_GREP_OPTION = /^(?:-[A-Za-z0-9]*q[A-Za-z0-9]*|--quiet|--silent)$/;
-const GREP_OPTION_WITH_ARGUMENT = /^-[A-Za-z0-9]*[efmABCdD]$/;
-const PIPE_INTO_GREP = /(?<!\|)\|(?!\|)&?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|sudo|command)\s+)*(?:\S*\/)?[ef]?grep(?=\s|$)([^|;&<>()]*)/g;
+const GREP_SHORT_WITH_ARGUMENT = "efmABCdD";
+const GREP_LONG_WITH_ARGUMENT = /^--(?:regexp|file|max-count|after-context|before-context|context|devices|directories|label|binary-files|include|exclude|exclude-from|exclude-dir|group-separator)$/;
+const PIPE_INTO_GREP = /(?<!\|)\|(?!\|)&?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|env|sudo|command)\s+)*(?:\S*\/)?[ef]?grep(?=\s|$)([^|;&<>()]*)/g;
 const PIPEFAIL_SET = /(?:^|[;&])[ \t]*set\b[^\n#;]*?[ \t]-[A-Za-z]*o[A-Za-z]*[ \t]+pipefail\b/m;
+const YAML_BLOCK_START = /:\s*[|>][-+0-9]*\s*$/;
+/** A line as check 45 reads it: single-quoted text, double-quoted text with no `$(` or backtick in it, and a comment out. */
+function shellCode(line: string): string {
+  let out = "";
+  for (let i = 0; i < line.length; ) {
+    const c = line[i];
+    if (c === "\\") { out += line.slice(i, i + 2); i += 2; continue; }
+    if (c === "'") { const j = line.indexOf("'", i + 1); out += "''"; i = j < 0 ? line.length : j + 1; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') j += line[j] === "\\" ? 2 : 1;
+      out += /\$\(|`/.test(line.slice(i + 1, j)) ? line.slice(i, j + 1) : '""';
+      i = j + 1;
+      continue;
+    }
+    if (c === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
+    out += c;
+    i++;
+  }
+  return out;
+}
+/** Whether grep's words, as GNU grep reads its options before and after its operands, make it quiet. */
+function grepIsQuiet(words: string[]): boolean {
+  for (let w = 0; w < words.length; w++) {
+    const word = words[w];
+    if (word === "--") return false;
+    if (word === "--quiet" || word === "--silent") return true;
+    if (GREP_LONG_WITH_ARGUMENT.test(word)) { w++; continue; }
+    if (word.startsWith("--") || !/^-[A-Za-z0-9]/.test(word)) continue;
+    for (let k = 1; k < word.length; k++) {
+      if (word[k] === "q") return true;
+      if (GREP_SHORT_WITH_ARGUMENT.includes(word[k])) { if (k === word.length - 1) w++; break; }
+    }
+  }
+  return false;
+}
 function pipesIntoGrepQ(text: string): number[] {
   const out: number[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const first = i;
-    let l = lines[i];
-    if (/^\s*#/.test(l)) continue;
-    while (/(?:\\|\|)\s*$/.test(l) && i + 1 < lines.length) l = `${l.replace(/\\\s*$/, " ")} ${lines[++i]}`;
-    const bare = l.replace(/'[^']*'/g, "''").replace(/"(?:[^"\\$`]|\\.|\$(?!\())*"/g, '""');
-    for (const m of bare.matchAll(PIPE_INTO_GREP)) {
-      const words = m[1].trim().split(/\s+/).filter(Boolean);
-      let quiet = false;
-      for (let w = 0; w < words.length && !quiet; w++) {
-        if (words[w] === "--") break;
-        if (QUIET_GREP_OPTION.test(words[w])) quiet = true;
-        else if (GREP_OPTION_WITH_ARGUMENT.test(words[w])) w++;
-      }
-      if (quiet) { out.push(first + 1); break; }
+    if (/^\s*#/.test(lines[i])) continue;
+    let l = shellCode(lines[i]);
+    // A comment line reads as blank (shellCode), so the join runs on past it.
+    while (/(?:\\|\|)\s*$/.test(l) && !YAML_BLOCK_START.test(l) && i + 1 < lines.length) l = `${l.replace(/\\\s*$/, " ")} ${shellCode(lines[++i])}`;
+    for (const m of l.matchAll(PIPE_INTO_GREP)) {
+      if (grepIsQuiet(m[1].trim().split(/\s+/).filter(Boolean))) { out.push(first + 1); break; }
     }
   }
   return out;
@@ -9910,26 +9942,40 @@ function checkNoPipeIntoGrepQ() {
     ['cmd | grep --silent x && break', 1],
     ['cmd | grep -e x -q', 1],
     ['cmd | grep -m 1 -q x', 1],
+    ['cmd | grep -qe x', 1],
     ['cmd | grep x -q', 1],
     ["cmd | grep -E 'a|b' -q", 1],
     ['cmd | egrep -q x', 1],
     ['cmd | LC_ALL=C grep -q x', 1],
+    ['cmd | env LC_ALL=C grep -q x', 1],
+    ['cmd | command grep -q x', 1],
     ['cmd | sudo /usr/bin/grep -q x', 1],
     ['cmd | \\\n  grep -q x', 1],
     ['cmd |\n  grep -q x', 1],
+    ['cmd | # the comment\n  grep -q x', 1],
+    ['cmd |\n  # the comment\n  grep -q x', 1],
     ['x=$(cmd | grep -q y)', 1],
     ['[ -n "$(cmd | grep -q y)" ]', 1],
+    ['echo "the canary\'s"; cmd | grep -q x; echo \'y\'', 1],
+    ["echo don\\'t | grep -q x; echo 'y'", 1],
     ['docker logs x 2>&1 | grep "runner: listening" > /dev/null', 0],
     ['grep -q "runner: listening" <<<"$(docker logs x 2>&1)"', 0],
     ["grep -qx 'OB1_TIER=stable' /tmp/env || echo no", 0],
     ['test -n "$a" || grep -q x file', 0],
     ['cmd ||\n  grep -q x file', 0],
+    ['        run: |\n          grep -q x file || exit 1', 0],
     ['up=$(curl -s x | grep -cx "pg_up 1" || true)', 0],
     ["cmd | grep -F -- '-q' > /dev/null", 0],
+    ['cmd | grep -F -- -q > /dev/null', 0],
     ['cmd | grep -e -q x > /dev/null', 0],
+    ['cmd | grep -eq x > /dev/null', 0],
+    ['cmd | grep --regexp -q x > /dev/null', 0],
+    ['cmd | grep -m1 x > /dev/null', 0],
     ['cmd | grep --color=never x > /dev/null', 0],
     ['cmd | xargs grep -q x', 0],
     ["echo 'a | grep -q b'", 0],
+    ['echo "a | grep -q b"', 0],
+    ['x # then a | grep -q b', 0],
     ['          # docker logs x | grep -q y', 0],
   ];
   const sets: [string, boolean][] = [
@@ -9939,7 +9985,7 @@ function checkNoPipeIntoGrepQ() {
   ];
   const wrong = cases.map(([t, n]) => ({ t, want: n, got: pipesIntoGrepQ(t).length })).filter((c) => c.got !== c.want);
   const setsWrong = sets.filter(([t, want]) => PIPEFAIL_SET.test(t) !== want).map(([t]) => t);
-  if (wrong.length || setsWrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify({ wrong, setsWrong })}): a | or |& into grep, egrep or fgrep with a q option, --quiet or --silent among its words fails, before or after its pattern, past an env prefix, sudo or a path, across a line ending in \\ or |, and in a command substitution; || into grep, a here-string, a file, grep -c, grep > /dev/null, a -q that is an option's argument or follows --, xargs grep, quoted text and a comment pass; set -…o pipefail is read in each form, set +o and a comment are not (SMD-3652)`);
+  if (wrong.length || setsWrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify({ wrong, setsWrong })}): a | or |& into grep, egrep or fgrep made quiet by its words fails — before or after its pattern, past VAR=value, env, sudo, command or a path, across a line ending in \\ or | and a comment line after it, in a command substitution, and with an apostrophe in a double-quoted string before it; || into grep, a here-string, a file, grep -c, grep > /dev/null, a q that is an option's argument or follows --, a YAML run: | above a first-line grep -q, xargs grep, quoted text and a comment pass; set -…o pipefail is read in each form, set +o and a comment are not (SMD-3652)`);
   const wdir = join(ROOT, ".github", "workflows");
   const workflows = existsSync(wdir) ? readdirSync(wdir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => `.github/workflows/${f}`) : [];
   if (!workflows.length) { fail(".github/workflows", "no workflow found — check 45 reads each one for a pipe into grep -q (SMD-3652)"); return; }
