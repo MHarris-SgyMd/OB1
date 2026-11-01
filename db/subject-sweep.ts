@@ -20,7 +20,7 @@
  *   pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model
  *   likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this
  *   run began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a
- *   following run held by the last trip (judgeHeld) · 130 a signal (the first after the call in hand, which can run to
+ *   following run a trip holds (judgeHeld), or a --judge-checked run whose model a trip named after it began · 130 a signal (the first after the call in hand, which can run to
  *   the limit a call; a second at once, the claim in hand handed back, unjudged, unless its finish holds the window's
  *   lock: that lands, judged, a trip it made said or not), or a caller's stop during the naming's waits or at the admit
  *   gate; a following run, a scheduler's, stopped by its first exits 0
@@ -67,8 +67,9 @@
  * (JUDGE_ALARM, PR 5b): the claims among those answers finished as named nothing, by whichever run, go back to the
  * pool, since nothing else would ask them again, and those it could not read stay failed. Each answer counts when it is
  * asked again as when it was new, and a judge checked and found right runs with --judge-checked, the alarm off. A rate
- * limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then ends the sweep; any
- * other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes, pools and asks nothing, counts
+ * limit, a server error or a lost connection is paused for, the thought back in the pool and claimed again when it
+ * comes up (TRANSIENT_PAUSES_MS), then ends the sweep; any other refusal of the request ends it, exit 2, as it ends the
+ * pass. A dry run writes, pools and asks nothing, counts
  * what a run would take (the pool's, or every thought with no current subject when its pool is not named yet or its
  * pooling broke off), reads on through a signal as the pass's does, and names the refusals a run would meet. Its pages
  * go in thought id order, so with --limit it counts the first by id, which a run, taking the oldest pooled first, need
@@ -90,18 +91,19 @@
  * `--subjects rules` stops at the rules, for a brain whose judge model has not been measured on the question.
  *
  * A scheduler drives the sweep much as it drives the claim passes (PR 6a; sleep runs it from PR 6b): following, an
- * empty pool polled until its stop, a follower's end (0); the admit gate before the pool, each claim and each call a
- * thought asks again after a provider pause; the call in hand's own abort beside the stop, its thought set back
+ * empty pool polled until its stop, a follower's end (0); the admit gate before the pool and each claim, a thought a
+ * provider error put back claimed again through it; the call in hand's own abort beside the stop, its thought set back
  * unanswered; its word through the scheduler's row; the scheduler's session settings on its connections, and a
  * statement past its statement_timeout thrown; its start's lines left out. Unlike a claim pass, an outage of the
  * provider or the database ends it (1), for the scheduler to start it again; the stop and the call's abort are its
  * caller's from its first claim, the gate before the pool hearing the caller's signal; and it reports no start (no
  * onStart) and runs no start check, 6b's (review passes 1 and 2, cold read). No one is there to pass --judge-checked,
  * so a trip holds the pool's following runs of each judge model it names, beside an earlier trip's not lifted: one does
- * not start while the window's last trip holds its model (judgeHeld), exit 3, until a run of that model with
- * --judge-checked --limit 1, once it is checked, lifts its hold — or with --limit the count the trip handed back, which
- * the held line names when the answers naming nothing tripped it alone. A run of another judge model is not held, and
- * lifts nothing; the pool's key changing starts a window of the new pool's at its first answer, so a switch back finds no
+ * not start while a trip's hold on its model stands (judgeHeld), exit 3, until a run of that model with --judge-checked
+ * --limit 1, once it is checked, lifts the hold it read as it began (heldSince), or with --limit the count of the last
+ * trip's hand-back still pending, which the held line offers the models that trip named when its answers naming nothing
+ * tripped it alone; a trip naming the model since the run began refuses the lift, exit 3, nothing claimed. A run of
+ * another judge model is not held, and lifts nothing; the pool's key changing starts a window of the new pool's at its first answer, so a switch back finds no
  * hold. Every answer counts as in a hand run (the maintainer's choice, 2026-10-31): a pooling again — a rules version
  * changed, the reasoning turned off, a pooling broken off or its mark blanked by hand — asks again together each thought
  * the judge named nothing for, and ten of them trip a judge that is right, a trip whose hold waits for that hand run.
@@ -121,7 +123,7 @@ import { actorKindOf } from "../server-portable/consolidate.ts";
 import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectPoolKey, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
-import { AdmitThrow, admitted, AbortedInHand, claimAfterWait, ClaimGoneAtGate, heartbeatFor, inHandCalls, setBack, sleepUnless, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { admitted, AbortedInHand, inHandCalls, setBack, sleepUnless, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import type { PassStamper } from "./pass-stamp.ts";
 import { andList, consoleWriter, numberProblem, type Writer } from "./cli.ts";
 import { databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -148,13 +150,6 @@ export const LEASE_MARGIN_S = 300;
  * test shortens them, as OUTAGE_MS is.
  */
 export const NAMING_WAIT = { sayMs: 30_000, quietMs: 1_000, pollMs: 250 };
-
-/**
- * How often a claim's lease is renewed while its call waits at the admit gate (PR 6a): `ms` 0 for a worker heartbeat's
- * period (db/lease.ts's heartbeatFor: a minute, or a third of the lease). Read as the run goes, so a test shortens it, as
- * NAMING_WAIT is (review pass 2, run-it: a minute's beat left the renewal untested).
- */
-export const GATE_BEAT = { ms: 0 };
 
 /**
  * The garbage-judge alarm (PR 5b): a run stops, exit 3, once more than `share` of `window` — 10 of 48 — of the judge
@@ -203,19 +198,30 @@ export type WindowAnswer = { g: "n" | "u" | "k"; t: string; m: string; f: boolea
  * an earlier trip's not lifted, each held until a run of it with --judge-checked lifts its own hold, the trip's stamp
  * and models kept (review pass 1: one flag, lifted by either of a trip's two models, let the other's runs start again
  * unchecked, cold read; another model's trip replaced the list, and the first model's runs started again, run-it).
- * `back` and `nothing`: what the last trip handed back, and whether the answers naming nothing tripped it by
- * themselves, so the held line offers what the trip line did, `--judge-checked --limit <back>`, to a judge that is
- * right (review pass 2, cold read: the held line's one thought lifted the hold, and the next run, asking the rest with
- * the alarm on, tripped again).
+ * `heldAt`: the stamp of the last trip that named each model held (heldSince), so a run with --judge-checked lifts
+ * the hold it read as it began and not one a trip naming its model put there since, whatever trips naming others came
+ * after (review pass 3, cold read: read off the last trip's models alone, a trip naming it, then one naming others,
+ * was lifted unseen, and the lift line named the last trip for a hold another had put there). `back` and `nothing`:
+ * the thoughts the last trip handed back, and whether the answers naming nothing tripped it by themselves, so the held
+ * line offers what the trip line did, --judge-checked with --limit the count of them still pending, to each model that
+ * trip named (review pass 2, cold read: the held line's one thought lifted the hold, and the next run, asking the rest
+ * with the alarm on, tripped again; review pass 3, cold read: a count kept as at the trip went stale as the thoughts
+ * were asked, and was offered to a model an earlier trip held).
  */
-export type JudgeWindow = { pool: string; answers: WindowAnswer[]; tripped: string | null; by: string[]; held: string[]; back: number; nothing: boolean };
+export type JudgeWindow = { pool: string; answers: WindowAnswer[]; tripped: string | null; by: string[]; held: string[]; heldAt: Record<string, string>; back: string[]; nothing: boolean };
 
 /**
- * Whether the window's last trip holds a following run of `judgeModel` (PR 6a): the model is among those it holds, not
- * yet lifted. Another judge model is not held: a trip is its judge's, and the pool's key does not name the model. Nor is
+ * Whether a trip's hold on a following run of `judgeModel` stands (PR 6a): the model is among those held, not yet
+ * lifted. Another judge model is not held: a trip is its judge's, and the pool's key does not name the model. Nor is
  * a run under another pool's key, whose window is its own (readJudgeWindow).
  */
 export const judgeHeld = (w: JudgeWindow, judgeModel: string): boolean => w.held.includes(judgeModel);
+
+/**
+ * The stamp of the trip whose hold on `judgeModel` stands, null when none does (PR 6a, review pass 3): the last trip
+ * that named it, or the last trip's in a window that keeps no stamp for it.
+ */
+export const heldSince = (w: JudgeWindow, judgeModel: string): string | null => (judgeHeld(w, judgeModel) ? (w.heldAt[judgeModel] ?? w.tripped) : null);
 
 /** A thought id as the window keeps it: the hand-back casts each to uuid. */
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -234,7 +240,7 @@ export function readJudgeWindow(value: string | null | undefined, pool: string):
     // None kept yet, or not a window.
   }
   const k = (typeof kept === "object" && kept !== null && !Array.isArray(kept) ? kept : {}) as Record<string, unknown>;
-  if (k.pool !== pool) return { pool, answers: [], tripped: null, by: [], held: [], back: 0, nothing: false };
+  if (k.pool !== pool) return { pool, answers: [], tripped: null, by: [], held: [], heldAt: {}, back: [], nothing: false };
   const answers = (Array.isArray(k.answers) ? k.answers : []).flatMap((a): WindowAnswer[] => {
     const e = (typeof a === "object" && a !== null ? a : {}) as Record<string, unknown>;
     return (e.g === "n" || e.g === "u" || e.g === "k") && typeof e.t === "string" && UUID_TEXT.test(e.t)
@@ -245,8 +251,11 @@ export function readJudgeWindow(value: string | null | undefined, pool: string):
   const tripped = typeof k.tripped === "string" && k.tripped !== "" ? k.tripped : null;
   // Held only with a trip to hold by: models beside no stamp are a hand edit's.
   const held = tripped !== null && Array.isArray(k.held) ? [...new Set(k.held.filter((m): m is string => typeof m === "string" && m !== ""))] : [];
-  const back = tripped !== null && typeof k.back === "number" && Number.isSafeInteger(k.back) && k.back > 0 ? k.back : 0;
-  return { pool, answers, tripped, by, held, back, nothing: tripped !== null && k.nothing === true };
+  // Each held model's stamp, text, and the thoughts handed back, ids: beside a trip's stamp only, as `held` is.
+  const at = tripped !== null && typeof k.heldAt === "object" && k.heldAt !== null && !Array.isArray(k.heldAt) ? (k.heldAt as Record<string, unknown>) : {};
+  const heldAt = Object.fromEntries(held.flatMap((m): [string, string][] => (typeof at[m] === "string" && at[m] !== "" ? [[m, at[m] as string]] : [])));
+  const back = tripped !== null && Array.isArray(k.back) ? [...new Set(k.back.filter((t): t is string => typeof t === "string" && UUID_TEXT.test(t)))] : [];
+  return { pool, answers, tripped, by, held, heldAt, back, nothing: tripped !== null && k.nothing === true };
 }
 
 /** What a watched statement answers when the caller's stop cancelled it. */
@@ -255,27 +264,17 @@ const STOPPED = Symbol("stopped");
 /** Thrown in a transaction to end it rolled back: a second signal before a finish's judgement had the window's lock. */
 const ROLLED_BACK = Symbol("rolled back");
 
-/** What a run that waited at the admit gate before a call it asks again found as it opened: its pool named away (2) or another run's trip (3), nothing more sent, its claim back in the pool as the run ends (review pass 2, run-it). */
-class EndedAtGate extends Error {
-  constructor(readonly end: { code: number; line: string }) {
-    super("ended at the admit gate before the call asked again");
-    this.name = "EndedAtGate";
-  }
-}
-
-/** A first stop that reached a run waiting at the admit gate before a call it asks again: the thought ends there, its claim back in the pool as the run ends. */
-class StoppedAtGate extends Error {
-  constructor() {
-    super("stopped at the admit gate before the call asked again");
-    this.name = "StoppedAtGate";
-  }
-}
-
 /** The least thought id: a cursor before every page. */
 const NIL_ID = "00000000-0000-0000-0000-000000000000";
 
 /** Leases a thought may take and lose, its worker gone, before its claim fails (claim_thoughts's p_max_attempts). */
 const MAX_ATTEMPTS = 3;
+
+/**
+ * How long a run's hand-back of its claims waits under a scheduler's session (releaseHeld), whatever the budget: past a
+ * short one, within the stop's grace (review pass 3). Read as the run goes, so a test shortens it, as NAMING_WAIT is.
+ */
+export const RELEASE_WAIT = { ms: 30_000 };
 
 /** What record_thought_subject answers. */
 export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; id?: string; stale?: boolean; gone?: boolean };
@@ -351,30 +350,29 @@ export interface SubjectSweepOptions {
   signal?: AbortSignal;
   /**
    * The sweep's stop as its thoughts begin, and the call's own abort: abortInHand(olderThanMs) aborts the judge's call
-   * in hand once it has run that long, each call's age from its own start — a thought the rules key, a provider pause, a
-   * wait at the admit gate and the writes after an answer hold no call — and its thought goes behind every one queued
-   * before it (db/lease.ts's setBack), unanswered and so unjudged, its place under --limit given back when it went back
-   * (one found deleted, or taken by another run, is done), and the run goes on to its next claim; one whose answer comes
-   * as it is aborted stands, answered. The sleep scheduler is to call it while its gate is closed (SMD-3379's N12).
+   * in hand once it has run that long, each call's age from its own start — a thought the rules key, a provider pause and
+   * the writes after an answer hold no call — and its thought goes behind every one queued before it (db/lease.ts's
+   * setBack), unanswered and so unjudged, its place under --limit given back when it went back (one edited and pooled
+   * again, taken by another run or deleted meanwhile gives none back), and the run goes on to its next claim; one whose
+   * answer comes as it is aborted stands, answered. The sleep scheduler is to call it while its gate is closed (SMD-3379's N12).
    */
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
    * Whole seconds between a following run's claims at an empty pool: it waits that long and claims again, until its
    * stop or its --limit, where a run without it ends at the empty pool. A following run is a scheduler's: it is
-   * stopped as a follower is, exit 0 (130 at once on the second stop), and it does not start while the judge's last
-   * trip holds the pool (judgeHeld): exit 3. Neither a dry run's nor beside --judge-checked, which no scheduler passes.
+   * stopped as a follower is, exit 0 (130 at once on the second stop), and it does not start while a trip's hold on
+   * its judge model stands (judgeHeld): exit 3. Neither a dry run's nor beside --judge-checked, which no scheduler passes.
    * The provider's or the database's outage ends it as it ends a run, exit 1, for its caller to start it again.
    */
   follow?: number;
   /**
    * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b): awaited before the pool's lock and naming, with the caller's
-   * signal, which it needs, and before each claim, with the sweep's stop, so a run waiting at it holds no claim; and
-   * before each call a thought asks again after a provider pause, as a window is, holding its claim, its lease renewed
-   * as it begins to wait and on a worker heartbeat's period (GATE_BEAT), the claim read again when the gate held it, so a
-   * thought deleted, edited or taken by another run meanwhile has nothing more sent, and the pool's name and another
-   * run's trip read too, either ending the run, 2 or 3, as before a claim. A stop while it waits, or a gate answering
-   * after the stop, ends the run there, nothing more named, pooled, claimed or sent, the claim in hand back in the pool.
-   * A run the trip's hold keeps from starting is refused before any gate. Unused by a dry run.
+   * signal, which it needs, and before each claim, with the sweep's stop, so a run waiting at it holds no claim. A
+   * thought a provider error put back is claimed again through it, as any is, the pool's name, another run's trip and
+   * the thought's own edits read at its claim (review pass 3, cold read: a gate of its own before the call asked again
+   * held the claim, which needed its lease kept, the claim read again and its losses counted apart, a seam in each
+   * pass). A stop while it waits, or a gate answering after the stop, ends the run there, nothing more named, pooled or
+   * claimed. A run the trip's hold keeps from starting is refused before any gate. Unused by a dry run.
    */
   admit?: Admit;
   /**
@@ -390,8 +388,8 @@ export interface SubjectSweepOptions {
    * does. A statement past its statement_timeout is thrown, as a claim pass's is, for the scheduler to read as its
    * budget's: the naming's write and its pooling too, whose waits have no end of their own but the timeout, where the
    * wait for writers polls and goes on; a pooling, a scan of every thought, can outlast it on a large brain. The run's
-   * hand-back of what it holds, at its end or a second stop, waits outside it, as a run without one waits, so a row held
-   * past it leaves no claim leased to its end. An answer judged after its claim's release (unread, or keyed) whose window
+   * hand-back of what it holds, at its end or a second stop, waits up to RELEASE_WAIT whatever the budget, so a row held
+   * past a short budget leaves no claim leased to its end, and one held longer does not hold the scheduler's stop. An answer judged after its claim's release (unread, or keyed) whose window
    * write passes it is not in the window, the claim as released. Refused beside `sql`, a caller's client, which it would
    * not reach.
    */
@@ -415,15 +413,13 @@ const PAGE = 100;
 type Candidate = {
   id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string; filed: string | null;
   standing_id: string | null; standing_key: string | null; standing_by: string | null; standing_judge: string | null; current: boolean;
-  /** md5(metadata::text), as read: what the claim's read after the admit gate compares (lease.ts's claimAfterWait). */
-  metadata_hash: string | null;
 };
 
 /**
  * What the loop does with a claimed thought's claim: finish it, fail it (with why), or nothing — the pool has it again,
  * it is gone, the finish ended it already (a model's empty answer), or a dry run claimed none.
  */
-type Done = { release: "succeeded" } | { release: "failed"; error: string } | { release: "none" };
+type Done = { release: "succeeded" } | { release: "failed"; error: string } | { release: "none" } | { release: "none"; again: true };
 
 /** The sweep, callable: the code the CLI exits with (the header's list). */
 export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> {
@@ -621,7 +617,7 @@ async function sweep(
   /** A thought's columns for the sweep, its standing subject beside it (`t` and `s`). */
   const CANDIDATE = sql`t.id, t.content, t.created_at, t.metadata, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fingerprint, ${filedTicketSql(sql)} AS filed,
            s.id::text AS standing_id, s.payload->>'key' AS standing_key, s.payload->>'by' AS standing_by, s.payload->>'judge_key' AS standing_judge,
-           NOT ${NO_CURRENT_SUBJECT} AS current, md5(t.metadata::text) AS metadata_hash`;
+           NOT ${NO_CURRENT_SUBJECT} AS current`;
 
   // The pool's name, its naming and its pooling, one run at a time: a run takes the pool's lock, a session advisory lock
   // on a connection of its own, before it reads the name, so two runs at a key's change do not both pool, the second
@@ -653,15 +649,32 @@ async function sweep(
   let tripBase: string | null = null;
   let named: string | null = null, filled: string | null = null, newPool = false;
   /**
-   * What the window's last trip holds, in words (judgeHeld): its lift a run of one thought, never the pool asked with
-   * the alarm off (review pass 1, cold read: "a run with --judge-checked", followed, asked the whole pool unguarded,
-   * after a trip on unread answers too, which PR 5b's review pass 4 had closed).
+   * What the window's trips hold, in words (judgeHeld): each model held with the trip that holds it, its lift a run of
+   * one thought, never the pool asked with the alarm off (review pass 1, cold read: "a run with --judge-checked",
+   * followed, asked the whole pool unguarded, after a trip on unread answers too, which PR 5b's review pass 4 had
+   * closed). `left`, how many of the last trip's hand-back are still pending, is offered to the models that trip named,
+   * when its answers naming nothing tripped it alone (review pass 3, cold read: kept as at the trip, the count went
+   * stale as they were asked, and was offered to a model an earlier trip of unread answers held).
    */
-  const heldLine = (w: JudgeWindow) =>
-    `The garbage-judge alarm's last trip, at ${w.tripped}, holds the pool's following runs, a scheduler's, of ${andList(w.held)}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing)` +
-    (w.nothing && w.back > 0 ? `; if it is right already, thoughts that truly have no subject tripped it, and --judge-checked --limit ${w.back} asks the ${w.back} it handed back, first in the pool, with the alarm off, lifting its hold too` : "");
-  /** Whether the run's judge model was held as it began: its lift is of that hold (review pass 2). */
-  let heldAtStart = false;
+  const heldLine = (w: JudgeWindow, left: number) => {
+    const offered = w.nothing && left > 0 ? w.held.filter((m) => heldSince(w, m) === w.tripped) : [];
+    return `The garbage-judge alarm holds the pool's following runs, a scheduler's, of ${andList(w.held.map((m) => `${m} (tripped at ${heldSince(w, m)})`))}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing)` +
+      (offered.length ? `; if ${offered.length === 1 ? offered[0] : `one of ${andList(offered)}`} is right already, thoughts that truly have no subject tripped it, and a run of it with --judge-checked --limit ${left} asks the ${left} the trip handed back still pending, first in the pool, with the alarm off, lifting its hold too` : "");
+  };
+  /** How many of the last trip's hand-back are still pending, for heldLine: none offered on a trip unread answers made. */
+  const leftOf = async (w: JudgeWindow): Promise<number> => {
+    if (!w.nothing || w.back.length === 0) return 0;
+    try {
+      const [{ n }] = (await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'pending' AND thought_id = ANY(${sql.array(w.back, "TEXT")}::uuid[])`) as { n: number }[];
+      return n;
+    } catch (e) {
+      // Refused for the pool too, said there.
+      if (sqlState(e) !== "42501") throw e;
+      return 0;
+    }
+  };
+  /** The stamp of the trip that held the run's judge model as it began, null when none did: its lift is of that hold alone (review passes 2 and 3). */
+  let heldAtStart: string | null = null;
   /** A stop's code, before the thoughts begin as after: a following run's stop is its end, 0 (review pass 1, cold read: 130 in the naming's waits). */
   const stoppedCode = FOLLOW_S > 0 ? 0 : 130;
   /**
@@ -672,29 +685,27 @@ async function sweep(
    */
   const budgetTimedOut = (e: unknown): boolean =>
     o.session !== undefined && sqlState(e) === "57014" && /statement timeout/i.test(String((e as Error)?.message ?? ""));
-  /** The window's last trip as the run began: a run with --judge-checked lifts that trip's hold, not one landing since, unseen (review pass 1, cold read). */
-  let tripAtStart: string | null = null;
   // The trip's hold (PR 6a), read before the pool's gate, so a held run waits at no gate first (review pass 2, cold
   // read): a following run, a scheduler's, does not start under it, exit 3, since no one is there to pass
   // --judge-checked; a hand run is told, and asks; --judge-checked lifts it once the pool is settled below; a run of a
   // model it does not hold is told whose it is, with its start's lines.
   if (MODEL) {
     const w = await windowNow(sql);
-    tripAtStart = w.tripped;
-    heldAtStart = judgeHeld(w, cfg.judgeModel);
+    heldAtStart = heldSince(w, cfg.judgeModel);
     if (ALARM) tripBase = w.tripped;
-    if (heldAtStart) {
+    if (heldAtStart !== null) {
+      const left = await leftOf(w);
       if (FOLLOW_S > 0) {
-        err(`\n  ${heldLine(w)}; this run follows with ${cfg.judgeModel}, so it does not start (db/subject-sweep.ts, JUDGE_ALARM).` +
+        err(`\n  ${heldLine(w, left)}; this run follows with ${cfg.judgeModel}, so it does not start (db/subject-sweep.ts, JUDGE_ALARM).` +
           `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run with --judge-checked --limit 1 lifts its hold.`);
         return 3;
       }
       // A run with --judge-checked says its lift as it lifts it.
-      if (!JUDGE_CHECKED || DRY_RUN) out(`  ${heldLine(w)}`);
-    } else if (w.held.length > 0) {
+      if (!JUDGE_CHECKED || DRY_RUN) out(`  ${heldLine(w, left)}`);
+    } else if (w.held.length > 0 && o.banner) {
       // Another model's hold: said, so a run of another judge model, one with --judge-checked among them, is not read
       // as lifting it (review pass 1, run-it: such a run said nothing, the hold standing).
-      say(`  ${heldLine(w)}; this run's judge model, ${cfg.judgeModel}, is not held${JUDGE_CHECKED && !DRY_RUN ? ", so --judge-checked lifts none of it" : ""}`);
+      say(`  ${heldLine(w, await leftOf(w))}; this run's judge model, ${cfg.judgeModel}, is not held${JUDGE_CHECKED && !DRY_RUN ? ", so --judge-checked lifts none of it" : ""}`);
     }
   }
   // The admit gate before the pool (SMD-3379 PR 1b's rule for a pass's pool and counts, PR 6a): the naming and the
@@ -1019,25 +1030,38 @@ async function sweep(
   // --judge-checked, the operator's word that the judge was checked and found right, lifts the trip's hold on the pool's
   // following runs of this run's judge model (PR 6a), under the window's lock, the trip's stamp and models kept, so no
   // run beside it reads a trip of its own in the write: another model's hold is that model's to be checked, and a trip
-  // landing since the run began, which no one has seen, is not lifted, said (review pass 1, cold read: one flag let a
-  // trip's other model start again unchecked, and a trip landing during the naming's waits was lifted unseen).
+  // naming this model since the run began, which no one has seen, is not lifted, and ends the run, nothing claimed
+  // (review pass 1, cold read: one flag let a trip's other model start again unchecked, and a trip landing during the
+  // naming's waits was lifted unseen; review pass 3, cold read: refused, the run went on, asking with the alarm off
+  // the thoughts that trip had just handed back first in the pool).
   if (JUDGE_CHECKED && !DRY_RUN) {
     try {
       const lift = await sql.begin(async (tx: SQL) => {
         const [row] = (await tx`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`) as { value: string }[];
         const w = readJudgeWindow(row?.value, POOL);
-        if (!judgeHeld(w, cfg.judgeModel)) return null;
-        // A trip since the run began that names this model is one no one has seen: not lifted; one naming others alone
-        // leaves this model's hold, held as the run began, to lift (review pass 2, cold read: any later trip refused it).
-        if (w.tripped !== tripAtStart && (w.by.includes(cfg.judgeModel) || !heldAtStart)) return { w, lifted: false };
-        await tx`UPDATE ob1_config SET value = ${JSON.stringify({ ...w, held: w.held.filter((m) => m !== cfg.judgeModel) })} WHERE key = ${JUDGE_WINDOW_KEY}`;
-        return { w, lifted: true };
+        const at = heldSince(w, cfg.judgeModel);
+        if (at === null) return null;
+        // Its own stamp moved: a trip naming this model since the run began, whatever trips naming others came after
+        // (review pass 2, cold read: any later trip refused it; review pass 3, cold read: read off the last trip's
+        // models, a trip naming it, then one naming others alone, was lifted unseen).
+        if (at !== heldAtStart) return { w, at, lifted: false };
+        // The hand-back of the trip that held it, when its answers naming nothing tripped it alone, first in the pool
+        // again, so --limit with the held line's count asks those (review pass 3, cold read: a claim pooled before them
+        // and released since came first).
+        if (w.nothing && at === w.tripped && w.back.length > 0) {
+          await tx`UPDATE thought_work_claims SET enqueued_at = (SELECT COALESCE(min(p.enqueued_at), now()) - interval '1 second' FROM thought_work_claims p WHERE p.work_type = ${POOL} AND p.status = 'pending')
+                    WHERE work_type = ${POOL} AND status = 'pending' AND thought_id = ANY(${sql.array(w.back, "TEXT")}::uuid[])`;
+        }
+        const heldAt = Object.fromEntries(Object.entries(w.heldAt).filter(([m]) => m !== cfg.judgeModel));
+        await tx`UPDATE ob1_config SET value = ${JSON.stringify({ ...w, held: w.held.filter((m) => m !== cfg.judgeModel), heldAt })} WHERE key = ${JUDGE_WINDOW_KEY}`;
+        return { w, at, lifted: true };
       });
       if (lift?.lifted) {
         const rest = lift.w.held.filter((m) => m !== cfg.judgeModel);
-        out(`  --judge-checked: the hold the garbage-judge alarm's last trip, at ${lift.w.tripped}, put on the pool's following runs of ${cfg.judgeModel} is lifted${rest.length ? `; its hold on ${andList(rest)} stands, each that model's to check` : ""}`);
+        out(`  --judge-checked: the hold the garbage-judge alarm's trip at ${lift.at} put on the pool's following runs of ${cfg.judgeModel} is lifted${rest.length ? `; its hold on ${andList(rest)} stands, each that model's to check` : ""}`);
       } else if (lift) {
-        err(`  --judge-checked lifts no hold: the garbage-judge alarm tripped${tripAtStart === null ? "" : " again"} at ${lift.w.tripped}, after this run began, on answers from ${andList(lift.w.by)}, and its hold on the pool's following runs of ${cfg.judgeModel} stands; check the judge again, then run again`);
+        err(`\n  --judge-checked lifts no hold: the garbage-judge alarm tripped${heldAtStart === null ? "" : " again"} at ${lift.at}, after this run began, on answers from ${cfg.judgeModel}, and its hold on the pool's following runs of it stands; nothing was claimed: check the judge again, then run again (db/subject-sweep.ts, JUDGE_ALARM).`);
+        return 3;
       }
     } catch (e) {
       if (sqlState(e) !== "42501") throw e;
@@ -1080,13 +1104,12 @@ async function sweep(
    * (review pass 2: a thought the sweep ended at was counted and in none); a thought edited mid-sweep, or given a
    * subject elsewhere while the model was asked and handed back, is taken twice, so, and then its outcome, as --limit
    * counts it. `taken`, for --limit, counts that one too. `setBack`: those whose call the caller aborted (abortInHand),
-   * put back unanswered, taken again when they come up; `reaped`: those whose lease ran out as their call waited at the
-   * admit gate, taken by another run or failed at their last attempt.
+   * put back unanswered, taken again when they come up.
    * `replaced` and `newKey` count within the recorded ones, `closed` within those the model named nothing for,
    * `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's when it released them, across them
    * all: no bucket of their own; `lostFailed` the failed ones among the lost, which the failure count leaves out.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, reaped: 0, lost: 0, lostFailed: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -1095,6 +1118,14 @@ async function sweep(
   let claimedSince: string | null = null;
   let llmMs = 0;
   let calls = 0;
+  /**
+   * The provider's transient errors since its last answer, and the pause before the next claim: the thought such an
+   * error failed goes back to the pool, and the run pauses holding no claim (TRANSIENT_PAUSES_MS), ending once the
+   * provider has not answered after the last pause.
+   */
+  let transients = 0, pauseMs = 0;
+  /** Whether the run's last hand-back of what it held landed (releaseHeld), for the stop line. */
+  let handedBack = true;
   /**
    * Why the sweep ended early, the provider, the database or the role, with its code; null when it ran out of
    * thoughts, reached its limit or was stopped. Written inside `one`, which control-flow analysis does not follow: the
@@ -1206,6 +1237,9 @@ async function sweep(
     const w = readJudgeWindow(value, POOL);
     if (w.tripped !== null && w.tripped !== tripBase) {
       const back = entry.f ? await handBack(tx, [entry.t]) : [];
+      // Back with that trip's own, so the held line counts it among them (review pass 3, run-it: the line offered the
+      // trip's ten, eleven back, and the second model's lift asked a thought of the backlog with the alarm off).
+      if (back.length > 0) await tx`UPDATE ob1_config SET value = ${JSON.stringify({ ...w, back: [...new Set([...w.back, ...back])] })} WHERE key = ${JUDGE_WINDOW_KEY}`;
       return { code: 3, line: stampLine(w, back.length > 0 ? entry : null) };
     }
     w.answers.push(entry);
@@ -1227,8 +1261,12 @@ async function sweep(
     // a run of that model with --judge-checked; a window whose answers name no model holds this run's. An earlier trip's
     // holds not lifted stand beside them (review pass 1, run-it: another model's trip replaced the list, and the first
     // model's runs started again unchecked, to trip again).
-    const heldNow = [...new Set([...w.held, ...(by.length ? by : [cfg.judgeModel])])];
-    await save({ pool: POOL, answers: [], tripped: stamp, by, held: heldNow, back: back.size, nothing: judgeTrips(nothing) });
+    const named = by.length ? by : [cfg.judgeModel];
+    const heldNow = [...new Set([...w.held, ...named])];
+    // Each model the trip names held since its stamp, an earlier trip's kept for the rest (review pass 3, cold read).
+    const heldAt = Object.fromEntries(heldNow.map((m): [string, string] => [m, named.includes(m) ? stamp : (heldSince(w, m) ?? stamp)]));
+    const earlier = w.held.filter((m) => !named.includes(m));
+    await save({ pool: POOL, answers: [], tripped: stamp, by, held: heldNow, heldAt, back: [...back], nothing: judgeTrips(nothing) });
     const gave = [unread ? `${unread} not JSON of the expected shape` : "", nothing ? `${nothing} naming nothing a key holds` : ""].filter(Boolean).join(", ");
     const models = by.length === 0 || (by.length === 1 && by[0] === cfg.judgeModel) ? cfg.judgeModel : `the answers giving no subject came from ${andList(by)}; this run's is ${cfg.judgeModel}`;
     return {
@@ -1241,7 +1279,7 @@ async function sweep(
         // The hold's two ways out, whatever tripped it: a judge fixed but kept, a run of one thought checks it in, the
         // pool's backlog never asked with the alarm off (PR 6a, review pass 1). The way past a false alarm is the offer
         // after, made only on answers naming nothing.
-        ` The trip holds the pool's following runs, a scheduler's, of ${andList(heldNow)}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing).` +
+        ` The trip holds the pool's following runs, a scheduler's, of ${andList(named)}${earlier.length ? ` (an earlier trip's hold on ${andList(earlier)} stands)` : ""}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing).` +
         // Offered only when the answers naming nothing trip it by themselves, an unread answer being the judge's
         // failure whatever the thought, and with a limit, the thoughts handed back first in the pool (review pass 4:
         // offered after unread answers alone, cold read, or with no limit, run-it, it ran a judge through the pool's
@@ -1270,12 +1308,13 @@ async function sweep(
   };
 
   /**
-   * What this worker holds, back in the pool, its attempt not counted: outside a scheduler's statement_timeout, where a
-   * claim's row held by another transaction past the budget left the claim leased to its end, unsaid (review pass 2,
-   * run-it), so it waits as a run without one does.
+   * What this worker holds, back in the pool, its attempt not counted: under a scheduler's session it waits up to
+   * RELEASE_WAIT whatever the budget, where a claim's row held by another transaction past a short budget left the claim
+   * leased to its end, unsaid (review pass 2, run-it), and an unbounded wait held the scheduler's stop, which awaits it
+   * (review pass 3, cold read).
    */
   const releaseHeld = () => sql.begin(async (tx: SQL) => {
-    if (o.session !== undefined) await tx`SET LOCAL statement_timeout = 0`;
+    if (o.session !== undefined) await tx`SELECT set_config('statement_timeout', ${String(RELEASE_WAIT.ms)}, true)`;
     await tx`SELECT release_claims_for_worker(${POOL}, ${workerId})`;
   });
   // The stop, as the pass's (db/lease.ts's PassStop): the first after the thought in hand; the second the call in hand
@@ -1303,103 +1342,52 @@ async function sweep(
    */
   const inCall = inHandCalls(() => stop.signal.aborted || ended);
   /**
-   * The admit gate before a call a thought asks again after a provider pause (SMD-3379 PR 1b's rule for a window; PR 6a,
-   * review pass 1, cold read: the calls after the pauses went out on a brain gone live): awaited holding the claim, its
-   * lease renewed as a worker's heartbeat would renew it, no call in hand for abortInHand. A first stop there ends the
-   * thought (StoppedAtGate), its claim back in the pool as the run ends; a rejection that is no stop ends the run with
-   * the caller's error (AdmitThrow); when the gate held it, the claim is read again, and a thought deleted, edited or
-   * no longer this run's has nothing more sent (ClaimGoneAtGate).
+   * The judge model's subject for a row, one call: the answer, an egress refusal, the thought left unanswered, or the
+   * provider's transient error with a pause left, for one() to put the thought back; throws to end the sweep.
    */
-  const gateBeforeCall = async (row: Candidate): Promise<void> => {
-    if (!o.admit) return;
-    // Renewed as it begins to wait, then on a worker heartbeat's period (lease.ts's heartbeatFor: a minute, or a third of
-    // the lease): what the failed call and the pause left of the lease could run out before a beat a third of the lease
-    // in (review pass 2, cold read).
-    await sql`SELECT 1 FROM renew_claims(${POOL}, ${workerId}, ${TTL_S})`.catch(() => {});
-    const renew = setInterval(() => { void sql`SELECT 1 FROM renew_claims(${POOL}, ${workerId}, ${TTL_S})`.catch(() => {}); }, GATE_BEAT.ms || heartbeatFor(TTL_S) * 1000);
-    let through: false | "open" | "waited";
-    try {
-      through = await admitted(o.admit, stop.signal);
-    } catch (e) {
-      throw new AdmitThrow(e);
-    } finally {
-      clearInterval(renew);
-    }
-    // A gate answering after the stop, or a stop during the claim's read, lets nothing more be sent, as at the claim's
-    // gate (review pass 2, cold read).
-    if (!through || stop.signal.aborted) throw new StoppedAtGate();
-    if (through === "waited") {
-      const claim = await claimAfterWait(sql, POOL, workerId, row.id, row.fingerprint, true, row.metadata_hash).catch(() => "ours" as const);
-      if (claim !== "ours") throw new ClaimGoneAtGate(claim);
-      if (stop.signal.aborted) throw new StoppedAtGate();
-      // What the claim loop reads before each claim, after a wait as long as the brain stayed live: the pool named away,
-      // or another run's trip — its judge model just found at fault, likely this one's — ends the run, nothing more sent
-      // (review pass 2, run-it: the call went out, then the run stopped, 2 or 3, a flagged model's subject recorded).
-      const moved = await poolMoved(sql, false);
-      if (moved !== null) throw new EndedAtGate({ code: 2, line: moved });
-      if (ALARM) {
-        const w = await windowNow(sql);
-        if (w.tripped !== null && w.tripped !== tripBase) throw new EndedAtGate({ code: 3, line: stampLine(w, null) });
-      }
-    }
-  };
-
-  /** The judge model's subject for a row: the answer, an egress refusal, or the thought left unanswered; throws to end the sweep. */
-  async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string }> {
+  async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string } | { transient: string }> {
     const side = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? {}, writer: actorKindOf(row.metadata) };
     const subject = { kind: "extraction" as const, actor, metadata: row.metadata ?? undefined, content: row.content };
     const call = inCall.get(workerId);
-    for (let attempt = 0; ; attempt++) {
-      const t0 = Date.now();
-      /** Whether a request was made (providerCall's gate refuses before any), and when its answer or error came: a pause after it is not the model's time. */
-      let made = true, came = 0;
-      // The call's age for abortInHand runs from its own start; the entry waits again once it settles (inCall).
-      if (call) {
-        call.waiting = false;
-        call.since = t0;
+    const t0 = Date.now();
+    /** Whether a request was made (providerCall's gate refuses before any), and when its answer or error came. */
+    let made = true, came = 0;
+    // The call's age for abortInHand runs from its own start; the entry waits again once it settles (inCall).
+    if (call) {
+      call.waiting = false;
+      call.since = t0;
+    }
+    try {
+      const a = await askOwnSubject(cfg, side, subject, call ? AbortSignal.any([hardStop.signal, call.abort.signal]) : hardStop.signal);
+      came = Date.now();
+      transients = 0;
+      return { key: a.key, answer: a.answer };
+    } catch (e) {
+      came = Date.now();
+      if (hardStop.signal.aborted) throw e;
+      // The caller aborted the call in hand (abortInHand): told apart from a timeout or the provider's error.
+      if (call?.aborted) throw new AbortedInHand();
+      if (e instanceof ProviderError && e.kind === "egress") {
+        made = false;
+        return { egress: e.message };
       }
-      try {
-        const a = await askOwnSubject(cfg, side, subject, call ? AbortSignal.any([hardStop.signal, call.abort.signal]) : hardStop.signal);
-        came = Date.now();
-        return { key: a.key, answer: a.answer };
-      } catch (e) {
-        came = Date.now();
-        // No call in hand from here until the next one starts — the pause, the gate, the claim's read and its lease's
-        // renewal — so the caller's abortInHand passes over them (review pass 2, run-it: marked in a call again as the
-        // pause ended, an abort there was counted as a call never sent).
-        if (call) call.waiting = true;
-        if (hardStop.signal.aborted) throw e;
-        // The caller aborted the call in hand (abortInHand): told apart from a timeout or the provider's error.
-        if (call?.aborted) throw new AbortedInHand();
-        if (e instanceof ProviderError && e.kind === "egress") {
-          made = false;
-          return { egress: e.message };
-        }
-        const kind = classifyError(e);
-        if (kind === "thought") {
-          // A timeout names the sweep's limit, which --timeout sets over the provider's knob the message names (review
-          // pass 2).
-          const timedOut = e instanceof ProviderError && e.kind === "timeout";
-          return { unanswered: timedOut ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
-        }
-        if (kind === "transient" && attempt < TRANSIENT_PAUSES_MS.length) {
-          // The pause holds no call (review pass 1, cold read: counted as the call's, an abort in it sent the next call
-          // already aborted), and the next call's time starts as it is sent. It then waits at the gate, as a window does.
-          await sleepUnless(TRANSIENT_PAUSES_MS[attempt], stop.signal);
-          if (stop.signal.aborted) throw e;
-          await gateBeforeCall(row);
-          // The next call can run to the limit again: its lease is moved on for it (031's renew_claims), so a claim
-          // asked again is not reaped and asked by another sweep meanwhile (review pass 1: four calls outran it).
-          await sql`SELECT 1 FROM renew_claims(${POOL}, ${workerId}, ${TTL_S})`.catch(() => {});
-          continue;
-        }
-        throw e;
-      } finally {
-        if (call) call.waiting = true;
-        if (made) {
-          calls++;
-          llmMs += (came || Date.now()) - t0;
-        }
+      const kind = classifyError(e);
+      if (kind === "thought") {
+        // A timeout names the sweep's limit, which --timeout sets over the provider's knob the message names (review
+        // pass 2).
+        const timedOut = e instanceof ProviderError && e.kind === "timeout";
+        return { unanswered: timedOut ? `timed out after ${cfg.timeoutMs / 1000} s, the sweep's limit a call, which --timeout sets` : (e as Error).message };
+      }
+      // The provider's transient error with a pause left: the thought goes back to the pool and the run pauses, holding
+      // no claim and so no call (review pass 1, cold read: a pause counted as the call's was aborted by abortInHand);
+      // past the last pause it ends the sweep.
+      if (kind === "transient" && transients < TRANSIENT_PAUSES_MS.length) return { transient: (e as Error).message };
+      throw e;
+    } finally {
+      if (call) call.waiting = true;
+      if (made) {
+        calls++;
+        llmMs += (came || Date.now()) - t0;
       }
     }
   }
@@ -1478,26 +1466,6 @@ async function sweep(
           }
           return { release: "none" };
         }
-        // The gate before a call asked again (gateBeforeCall): the caller's own error ends the run with it; a stop there
-        // ends the run, the claim back in the pool as it ends; a thought its wait saw deleted, edited or taken by another
-        // run has nothing more sent: deleted, as a gone thought; edited, as one edited mid-sweep, put back for its new text
-        // when its claim is still this run's (`moved`); its lease run out, taken by another run or failed at its last
-        // attempt, apart (review pass 2, cold read: counted edited and lost, it was neither).
-        if (e instanceof AdmitThrow) throw e.error;
-        if (e instanceof StoppedAtGate) return false;
-        if (e instanceof EndedAtGate) {
-          endedBy = e.end;
-          return false;
-        }
-        if (e instanceof ClaimGoneAtGate) {
-          if (e.claim === "deleted") n.gone++;
-          else if (e.claim === "lost") n.reaped++;
-          else {
-            n.stale++;
-            if (e.claim === "moved") await sql`SELECT requeue_thought_work(${POOL}, ${row.id}::uuid)`.catch(() => {});
-          }
-          return { release: "none" };
-        }
         if (stop.signal.aborted) return false;
         const kind = classifyError(e);
         // Not answering: the thought goes back to the end of the pool, so a thought the provider fails on whenever it
@@ -1507,6 +1475,28 @@ async function sweep(
           ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider${sentEffort === undefined ? "" : `, and OB1_SUBJECT_REASONING, which sent reasoning_effort ${JSON.stringify(sentEffort)}`}. Nothing was recorded for this thought.` }
           : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
         return false;
+      }
+      // The provider's transient error (ask): the thought goes back to the pool, behind those queued before it, its
+      // attempt not counted and its place under --limit given back, and the run pauses before its next claim, so the
+      // thought is claimed again through the admit gate, the pool's name, another run's trip and its own edits read as
+      // at any claim (review pass 3, cold read: held through the pause and a gate of its own, the claim needed its lease
+      // kept, read again and its losses counted apart). One edited and pooled again, or deleted, meanwhile is counted as
+      // a write would find it.
+      if ("transient" in a) {
+        pauseMs = TRANSIENT_PAUSES_MS[transients++];
+        try {
+          if (await setBack(sql, POOL, workerId, row.id)) {
+            taken--;
+            return { release: "none", again: true };
+          }
+          if (((await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${row.id}::uuid) AS there`) as { there: boolean }[])[0].there) n.stale++;
+          else n.gone++;
+        } catch (x) {
+          if (!databaseUnavailable(x)) throw x;
+          endedBy = { code: 1, line: databaseDown(x) };
+          return false;
+        }
+        return { release: "none" };
       }
       // Each outcome below but a closed subject writes nothing: a subject out of date stands, counted.
       if ("egress" in a) {
@@ -1744,6 +1734,13 @@ async function sweep(
     } else {
       for (;;) {
         if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break;
+        // The pause after the provider's transient error (TRANSIENT_PAUSES_MS), the thought it failed back in the pool:
+        // no claim held, a stop heard at once.
+        if (pauseMs > 0) {
+          await sleepUnless(pauseMs, stop.signal);
+          pauseMs = 0;
+          if (stop.signal.aborted) break;
+        }
         // The admit gate before each claim (SMD-3379 PR 1b, PR 6a): the run waits here holding no claim, and a stop
         // while it waits ends it there.
         if (o.admit && (!(await admitted(o.admit, stop.signal)) || stop.signal.aborted)) break;
@@ -1807,6 +1804,8 @@ async function sweep(
         inCall.begin(workerId).waiting = true;
         const done = await one(row).finally(() => inCall.end(workerId));
         if (done === false) break;
+        // Back in the pool after the provider's transient error: seen when it is taken again.
+        if ("again" in done) continue;
         // Counted before its release, so a database lost there leaves the counts adding up (review pass 1); past the
         // hard stop the claim is the stop's release's, not this worker's to finish (review pass 2: counted in its
         // bucket and not seen). A trip the finish wrote with its claim is said all the same.
@@ -1852,6 +1851,7 @@ async function sweep(
     // (said there); any other failure is said here, the claims returning as their leases run out.
     if (!DRY_RUN) {
       await releaseHeld().catch((e) => {
+        handedBack = false;
         if (!databaseUnavailable(e)) err(`  the claims this run holds could not go back to the pool (${String((e as Error)?.message ?? e).slice(0, 200)}): each returns as its lease runs out`);
       });
     }
@@ -1876,7 +1876,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"], [n.reaped, "lost as their call waited at the admit gate, the lease run out"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";
   out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}${lost}`);
@@ -1885,7 +1885,8 @@ async function sweep(
     return endedBy.code;
   }
   if (stop.signal.aborted) {
-    err(`\n  stopped after ${n.seen} thought(s): what it held is back in the pool, and the next sweep takes up the rest`);
+    // Where the hand-back left what it held (review pass 3, run-it: back in the pool, said after it could not go back).
+    err(`\n  stopped after ${n.seen} thought(s): what it held ${handedBack ? "is back in the pool" : "goes back as each lease runs out"}, and the next sweep takes up the rest`);
     // A following run's stop is its end, as a follower's is: 0, and 130 at once on the second (PR 6a).
     return FOLLOW_S > 0 && !hardStop.signal.aborted ? 0 : 130;
   }
