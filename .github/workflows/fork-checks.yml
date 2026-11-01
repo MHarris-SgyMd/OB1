@@ -1643,21 +1643,22 @@ jobs:
       # alone, so it asks no resolver outside the stack: a public name does
       # not resolve there, where the same image on the forwarder's outward
       # network resolves it (so a missing tool cannot pass). Each lookup is
-      # given 2 s (SMD-3472; unbounded, 12 s passed before the self-check
+      # given 2 s (SMD-3472): unbounded, 12 s passed before the self-check
       # printed, most of it, inferred, the proxy's lookup waiting out its
-      # resolver): the control resolves within them, first, so the resolver
-      # upstream of Docker's has just answered for the name and a proxy that
-      # could ask it would have its answer in that time too (review pass 1).
-      # The control has three tries, since musl resends a lost query only
-      # after 2.5 s (review pass 3), and the proxy's lookup follows the one
-      # that resolved. The proxy's lookup must exit getent's "not found" (2)
-      # or a timeout's (busybox 143, coreutils 124), since a missing
-      # `timeout` (127, or 126 under some engines) is no refusal. The forwarder's self-check runs from the copy
-      # compose.yaml mounts, beside both lookups. The proxy logs a
-      # client by the PROXY line, as neither the forwarder nor itself. And with
-      # the proxy stopped, a decoy answering to the proxy's name on `edge` is
-      # what the forwarder resolves, and gets nothing: the forwarder dials only
-      # an address on `front`, refuses, and says so.
+      # resolver. The control goes first and must resolve within its 2 s, so
+      # the resolver upstream of Docker's has just answered for the name and
+      # a proxy that could ask it would have its answer in that time too
+      # (review pass 1). It has three tries, since musl resends a lost query
+      # only after 2.5 s (review pass 3), and the proxy's lookup follows the
+      # one that resolved. That lookup must exit getent's "not found" (2) or
+      # a timeout's (busybox 143, coreutils 124): a `timeout` that cannot run
+      # (127, or 126 under some engines) is no refusal. The forwarder's
+      # self-check runs from the copy compose.yaml mounts, beside both
+      # lookups. The proxy logs a client by the PROXY line, as neither the
+      # forwarder nor itself. And with the proxy stopped, a decoy answering to
+      # the proxy's name on `edge` is what the forwarder resolves, and gets
+      # nothing: the forwarder dials only an address on `front`, refuses, and
+      # says so.
       - name: The proxy asks nothing outside the stack, and the forwarder dials it alone
         working-directory: deploy
         run: |
@@ -1669,7 +1670,8 @@ jobs:
           trap 'wait; echo "the forwarder self-check, waited for:"; cat "$RUNNER_TEMP/forwarder-self-check" 2>/dev/null || true' EXIT
           # --init bounds the control: without it getent runs as PID 1, ignores
           # the timeout's TERM, and the control waits as long as it likes
-          # (traefik's image, measured on podman: `timeout 2 sleep 5` exits 0 once sleep ends; with --init, 143 after 2 s).
+          # (traefik's image, measured on podman: `timeout 2 sleep 5` exits 0
+          # once sleep ends; with --init, 143 after 2 s).
           resolved=""
           for _ in 1 2 3; do
             if docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null; then resolved=1; break; fi
@@ -1844,9 +1846,10 @@ jobs:
                   <(bun -e 'process.stdout.write(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text()).configs[process.argv.at(-1)].content)' "$(jq -r .file <<<"$row")" "$(jq -r .source <<<"$row")")
               done
             done < <(jq -c '.[]' <<<"$want")
-            # The overlay this render read is the one its mode wrote (review pass 1:
-            # a mode's renders left running read the next mode's file, and passed).
-            # Last, after every read of the file: checked earlier, a rewrite after it passes.
+            # The overlay this render read is the one its mode wrote (review
+            # pass 1: a mode's renders left running read the next mode's file,
+            # and passed). Last, after every read of the file: checked
+            # earlier, a rewrite after it passes.
             if [ -n "$release" ] && [ "$(cksum < compose.release.yaml)" != "$release_sum" ]; then
               echo "$*: compose.release.yaml was rewritten under this render — settle a mode's renders before the next mode writes it" >&2; return 1
             fi
@@ -2173,8 +2176,9 @@ jobs:
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
           carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
-          # --no-deps: the overlay changes the proxy alone (check 28's OVERLAYS); without it each up ran migrate again
-          # and waited on every dependency's health, none of which this step touches (SMD-3472).
+          # --no-deps: the overlay changes the proxy alone (check 28's
+          # OVERLAYS); without it each up ran migrate again and waited on every
+          # dependency's health, none of which this step touches (SMD-3472).
           docker compose -f compose.yaml -f compose.api-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
