@@ -2056,7 +2056,10 @@ jobs:
       # key and source, changes nothing and writes none),
       # each labelled with the GUI's source, `dashboard`, each a direct call
       # to the REST core with no carrier, as the GUI makes them, all under the
-      # smoke key's name, as Verify asks. The smoke reads its
+      # smoke key's name, as Verify asks. The planted proposal it rejects,
+      # accepts and rejects again on the proposals page (PR 4) is read here
+      # too: rejected, recording the smoke key as who decided, its pointer
+      # written and cleared under that key. The smoke reads its
       # keys from this job's environment, off its command line. Here, not after the
       # next step: that one configures the authorization server, and the GUI
       # then offers no key sign-in (review pass 1). The smoke imports only
@@ -2082,6 +2085,10 @@ jobs:
           # lease (claimed for a second), for the smoke's write arm to retry and release (SMD-3322 PR 3).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts)); SELECT release_thought(c.thought_id, 'extract:gui-smoke@ci', 'ci-gui-smoke-fails', 'failed', 'The operator GUI smoke''s failed row (SMD-3322).') FROM claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-fails', 1) c; SELECT claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-gone', 1, 1);") > /dev/null
+          # The proposal marked edited since judged — its older side's recorded fingerprint no text's — so the smoke's accept
+          # is refused as edited and taken through the page's "Accept anyway" (SMD-3322 PR 4). No thought is touched.
+          (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
+            "UPDATE supersession_proposals SET older_fingerprint = 'ci-gui-smoke: no text has this fingerprint' WHERE judge_key = 'ci-gui-smoke'")
           bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
           written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
           [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
@@ -2093,6 +2100,12 @@ jobs:
           acts=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
             "SELECT string_agg(tool || ' ' || n, ', ' ORDER BY tool) FROM (SELECT tool, count(*) AS n FROM query_log WHERE kind = 'action' AND tool IN ('retry_failed', 'release_stale_leases') AND agent_id = (SELECT canonical_agent_id FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture') GROUP BY tool) t")
           [ "$acts" = "release_stale_leases 1, retry_failed 1" ] || { echo "the worker actions' rows read \"$acts\", not one release and one retry under the smoke key"; exit 1; }
+          # The proposal decisions (SMD-3322 PR 4): the planted proposal rejected, accepted, rejected again on the page — the
+          # row left rejected and recording the smoke key as who decided (114), and its superseding side's two pointer
+          # writes (the accept's, the reject's clearing) made directly to the REST core under that key, as Verify asks.
+          decided=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT p.status || ' ' || (p.reviewed_by = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (SELECT count(*) FROM thought_audit a WHERE a.thought_id = p.newer_id AND a.action = 'update' AND a.diff ? 'supersedes' AND a.origin = 'open-brain-api' AND a.actor_name = p.reviewed_by AND a.actor_context->'act' IS NULL) FROM supersession_proposals p WHERE p.judge_key = 'ci-gui-smoke'")
+          [ "$decided" = "rejected true 2" ] || { echo "the planted proposal reads \"$decided\", not rejected, decided by the smoke key, its pointer written and cleared under that key directly to the REST core"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):

@@ -68,8 +68,13 @@
  *     id, for CI to read its audit rows. On the workers page (PR 3) the write
  *     key retries a pool's failed rows and releases its stale leases, each by
  *     its pool's own form, and a read key is offered neither and refused both:
- *     CI plants a failed row and a stale lease for it. Each run leaves five changes in the
- *     feed (its thoughts' captures, the edit and the deletes), so a second run
+ *     CI plants a failed row and a stale lease for it. On the proposals page (PR 4) the
+ *     write key rejects the proposal CI plants, accepts it — refused as edited since
+ *     judged, which CI marks it, then through "Accept anyway" — and rejects it again, so no pointer stays,
+ *     each by its row's own form, the page saying what each did and who decided;
+ *     a read key is offered no form and refused. Each run leaves seven changes in the
+ *     feed (its thoughts' captures, the edit, the deletes, the accept's pointer and
+ *     the reject's clearing of it), so a second run
  *     on one brain pushes the driven thought's capture further down: run it on
  *     a fresh brain, as CI does.
  *
@@ -723,6 +728,11 @@ function poolsIn(html: string, testid: string): string[] {
   return [...html.matchAll(new RegExp(`<form[^>]*data-testid="${testid}"[^>]*>[\\s\\S]*?<\\/form>`, "g"))].map((m) => hidden(m[0], "work_type") ?? "");
 }
 
+/** The proposals a page's decision forms name (the proposals page's `review`), as their hidden `id` fields carry them (PR 4). */
+function proposalsIn(html: string, testid: string): string[] {
+  return [...html.matchAll(new RegExp(`<form[^>]*data-testid="${testid}"[^>]*>[\\s\\S]*?<\\/form>`, "g"))].map((m) => hidden(m[0], "id") ?? "");
+}
+
 /**
  * A form post as a browser makes it, to a page's own action — url-encoded, or multipart as the edit page's form
  * posts (`multipart`) — its status, where it sends, its page, and the flash cookie it set, if any.
@@ -851,6 +861,12 @@ async function writesArm() {
     const [readRetry, readRelease] = [await post("/workers?/retry", { work_type: plantedPool }), await post("/workers?/release", { work_type: plantedPool })];
     assert(readWorkers.status === 200 && poolsIn(readWorkers.html, "retry").length === 0 && poolsIn(readWorkers.html, "release").length === 0 && readRetry.status === 403 && readRelease.status === 403,
       `…its workers page offers no Retry and no Release, and its posts to them are refused (${readWorkers.status}, ${readRetry.status}, ${readRelease.status})`);
+    // The proposals page (PR 4): read, its proposals listed, but no decision's form, and a reject the form would post refused.
+    const readProposals = await get("/proposals?status=all&limit=200");
+    const listedId = /Proposal <span class="font-mono">([0-9a-f-]{36})</.exec(readProposals.html)?.[1] ?? "00000000-0000-4000-8000-000000000000";
+    const readReject = await post("/proposals?/reject", { id: listedId });
+    assert(readProposals.status === 200 && readProposals.html.includes('data-testid="proposals"') && proposalsIn(readProposals.html, "review").length === 0 && readReject.status === 403,
+      `…its proposals page lists them but offers no decision, and its reject is refused (${readProposals.status}, ${readReject.status})`);
     const [editPage, deletePage] = [await get(`/thoughts/${id}/edit`), await get(`/thoughts/${id}/delete`)];
     assert(editPage.status === 403 && deletePage.status === 403, `…and its edit and delete pages are 403s (${editPage.status}, ${deletePage.status})`);
     // Refused either way: the actions' own gates spare the core a call it would refuse, and the load that runs after a
@@ -905,6 +921,52 @@ async function writesArm() {
     const released = await landed(await post("/workers?/release", { work_type: releasePool }));
     assert(released.redirected && released.cleared && /data-testid="worker-done"[^>]*>(?:\s|<!--[^>]*-->)*Returned [\d,]+ stale leases? of /.test(released.html) && !poolsIn(released.html, "release").includes(releasePool),
       `the write key releases a pool's stale leases: 303 back to the page, which says how many it returned, clears its cookie, and offers that pool no Release after (${released.status})`);
+  }
+
+  // The proposal decisions (PR 4), on the proposal CI plants: rejected, accepted — through "Accept anyway" when the core's
+  // checks refuse it — and rejected again, so the pointer the accept wrote does not outlive the arm. Each by its row's
+  // own form, under the page's filters, answered by a redirect back to them and a flash cookie, as the workers' are.
+  const ALL = "/proposals?status=all&limit=200";
+  const [planted] = proposalsIn((await get(ALL)).html, "review");
+  if (!planted) bad("the proposals page offers the write key a decision: --writes needs a proposal, which CI plants");
+  else {
+    const unnamed = await post("/proposals?/reject", { id: "not-a-proposal" });
+    assert(unnamed.status === 400 && /data-testid="review-error"[^>]*>[^<]*Name the proposal/.test(unnamed.html), `a decision naming no proposal is refused in words (${unnamed.status})`);
+    // Each post to the action the page's own form names, as a browser posts it — the row's button's formaction or the
+    // force form's action, the page's filters in it — so a form that drops them is caught: the page after a refusal
+    // then lists other rows than the one refused (PR 4's mutant, which a hand-made address passed).
+    const unescape = (v: string) => v.replaceAll("&amp;", "&");
+    const rowOf = (html: string) => new RegExp(`<li[^>]*id="proposal-${planted}"[\\s\\S]*?<\\/li>`).exec(html)?.[0] ?? "";
+    const actionIn = (row: string, name: "accept" | "reject") => unescape(new RegExp(`formaction="(\\?\\/${name}[^"]*)"`).exec(row)?.[1] ?? `?/${name}`);
+    const decide = (action: string, extra: Record<string, string> = {}) => post(`/proposals${action}`, { id: planted, ...extra });
+    const landed = async (posted: { status: number; location: string; setCookies: string[] }) => {
+      const flash = posted.setCookies.find((c) => c.startsWith(`${COOKIE}_proposals=`)) ?? "";
+      const r = await fetch(`${BASE}${ALL}`, { redirect: "manual", headers: { cookie: `${cookie}; ${flash}` } });
+      const cleared = (r.headers.getSetCookie?.() ?? []).some((c) => c.startsWith(`${COOKIE}_proposals=;`) && /Max-Age=0/i.test(c) && attributesHold(c));
+      const html = await r.text();
+      // The planted row's own block: its decided-by line names a key, not "not recorded".
+      const row = rowOf(html);
+      return { redirected: posted.status === 303 && posted.location === `/dashboard${ALL}` && flash !== "", status: r.status, html, cleared, row };
+    };
+    const decidedBy = (row: string) => /data-testid="decided-by"[^>]*>Decided by ([^<]+)</.exec(row)?.[1] ?? "";
+    const rejected = await landed(await decide(actionIn(rowOf((await get(ALL)).html), "reject"), { note: "the GUI smoke's reject" }));
+    assert(rejected.redirected && rejected.cleared && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Rejected proposal ${planted}`).test(rejected.html)
+        && /rejected/.test(rejected.row) && /the GUI smoke&#39;s reject|the GUI smoke's reject/.test(rejected.row) && decidedBy(rejected.row) !== "" && decidedBy(rejected.row) !== "not recorded",
+      `the write key rejects the planted proposal: 303 back to the page, which says so, clears its cookie, and shows the row rejected, its note and who decided (${rejected.status}, ${decidedBy(rejected.row) || "no decider"})`);
+    // An accept the core's checks refuse — CI marks the planted proposal edited since judged — is said beside its
+    // proposal with "Accept anyway", nothing written; that form's post is the force a reviewer who read both means.
+    const refusedAccept = await decide(actionIn(rejected.row, "accept"));
+    const block = rowOf(refusedAccept.html);
+    const forceForm = /<form[^>]*data-testid="force"[^>]*>[\s\S]*?<\/form>/.exec(block)?.[0] ?? "";
+    assert(refusedAccept.status === 409 && /data-testid="review-error"[^>]*>[^<]*edited since this pair was judged/.test(block) && hidden(forceForm, "force") === "1" && hidden(forceForm, "id") === planted && /rejected/.test(block),
+      `an accept of a proposal edited since judged is refused, said beside it with "Accept anyway", and the row stays rejected (${refusedAccept.status}) — CI marks the planted proposal so`);
+    const forceAction = unescape(/action="([^"]*)"/.exec(forceForm)?.[1] ?? "?/accept");
+    const accepted = await landed(await decide(forceAction, { force: hidden(forceForm, "force") ?? "" }));
+    assert(accepted.redirected && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Accepted proposal ${planted}`).test(accepted.html) && /accepted/.test(accepted.row) && /Reject \(undo the accept\)/.test(accepted.row),
+      `the write key accepts it: 303 back, the page saying so and offering the reject that undoes it (${accepted.status})`);
+    const undone = await landed(await decide(actionIn(accepted.row, "reject")));
+    assert(undone.redirected && new RegExp(`data-testid="review-done"[^>]*>(?:\\s|<!--[^>]*-->)*Rejected proposal ${planted}, which was accepted: the pointer its accept wrote is cleared`).test(undone.html),
+      `…and rejects it again: the page says the accept's pointer is cleared (${undone.status})`);
   }
 
   const confirm = await get(`/thoughts/${id}/delete`);
