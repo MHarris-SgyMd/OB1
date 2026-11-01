@@ -1645,11 +1645,10 @@ jobs:
       # network resolves it (so a missing tool cannot pass). Each lookup is
       # given 2 s (SMD-3472; unbounded, 12 s passed before the self-check
       # printed, most of it, inferred, the proxy's lookup waiting out its
-      # resolver): the control resolves within them, first, so the host's
-      # resolver holds the name and a proxy that could ask it would have its
-      # answer in that time too (review pass 1). `--init` puts `timeout`
-      # under an init, since as PID 1 its TERM is ignored and it bounds
-      # nothing. The proxy's lookup must exit getent's "not found" (2) or a
+      # resolver): the control resolves within them, first, so the resolver
+      # upstream of Docker's has just answered for the name and a proxy that
+      # could ask it would have its answer in that time too (review pass 1).
+      # The proxy's lookup must exit getent's "not found" (2) or a
       # timeout's (busybox 143, coreutils 124), since a missing `timeout`
       # (127) is no refusal. The forwarder's self-check runs from the copy
       # compose.yaml mounts, beside both lookups. The proxy logs a
@@ -1664,14 +1663,18 @@ jobs:
           PROXY_IMAGE="$(jq -r .services.proxy.image <<<"$cfg")"
           IMAGE="$(jq -r .services.api.image <<<"$cfg")"
           docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check > "$RUNNER_TEMP/forwarder-self-check" 2>&1 & selfcheck=$!
-          # Waited for on an early exit too; the decoy's trap below replaces this once it has been.
-          trap 'wait' EXIT
+          # Waited for and shown on an early exit too, until it is waited for below.
+          trap 'wait; cat "$RUNNER_TEMP/forwarder-self-check" 2>/dev/null || true' EXIT
+          # --init bounds the control: without it getent runs as PID 1, ignores
+          # the timeout's TERM, and the control waits as long as it likes
+          # (traefik's image, measured: `timeout 2 sleep 5` exits 0 once sleep ends; with --init, 143 after 2 s).
           docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null \
             || { echo "getent in the proxy's image resolves no outside name from open-brain_edge within 2 s, so the refusal below proves nothing" >&2; exit 1; }
           rc=0; docker compose -f compose.yaml exec -T proxy timeout 2 getent hosts example.com || rc=$?
           [ "$rc" != 0 ] || { echo "the proxy resolved an outside name" >&2; exit 1; }
           [ "$rc" = 2 ] || [ "$rc" = 143 ] || [ "$rc" = 124 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor a 2 s timeout's (143, 124), so it refused nothing" >&2; exit 1; }
           rc=0; wait "$selfcheck" || rc=$?
+          trap - EXIT
           cat "$RUNNER_TEMP/forwarder-self-check"
           [ "$rc" = 0 ] || { echo "the forwarder's self-check, in its container, exited $rc" >&2; exit 1; }
           fwd=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_front").IPAddress}}' "$(docker compose -f compose.yaml ps -q forwarder)")
@@ -1835,6 +1838,7 @@ jobs:
             done < <(jq -c '.[]' <<<"$want")
             # The overlay this render read is the one its mode wrote (review pass 1:
             # a mode's renders left running read the next mode's file, and passed).
+            # Last, after every read of the file: checked earlier, a rewrite after it passes.
             if [ -n "$release" ] && [ "$(cksum < compose.release.yaml)" != "$release_sum" ]; then
               echo "$*: compose.release.yaml was rewritten under this render — settle a mode's renders before the next mode writes it" >&2; return 1
             fi
@@ -1874,9 +1878,12 @@ jobs:
             done
             return "$failed"
           }
-          # On any exit, every call still running is waited for and its output
-          # printed, so a failure leaves no render running and hides none.
-          trap 'settle 0 "${#pids[@]}" || true; rm -f compose.release.yaml .bun-view.*.json' EXIT
+          # On any exit, every call not yet settled is waited for and its
+          # output printed, so a failure leaves no render running and hides
+          # none, and the step fails if any of them failed, wherever a later
+          # edit adds one (review pass 2: `|| true` here passed a failing call
+          # made after the last settle).
+          trap 'st=$?; settle 0 "${#pids[@]}" || st=1; rm -f compose.release.yaml .bun-view.*.json; exit "$st"' EXIT
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
@@ -1921,10 +1928,9 @@ jobs:
             left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
             [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
-          # Every call made, wherever a later edit adds one (review pass 1: one
-          # left unsettled was killed unread, and passed).
+          # Every call made above (review pass 1: one left unsettled was killed
+          # unread, and passed); one made below is settled by the trap.
           settle 0 "${#pids[@]}"
-          [ "${#settled[@]}" = "${#pids[@]}" ] || { echo "${#pids[@]} renders started, ${#settled[@]} settled" >&2; exit 1; }
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
