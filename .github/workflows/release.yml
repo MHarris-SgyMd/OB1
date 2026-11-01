@@ -19,9 +19,10 @@
 # stack comes up from them, and the notes and overlay land as a workflow
 # artifact. So the shape is exercised before a tag ever is, and a change to a
 # Dockerfile or to compose.yaml is judged the way a release would judge it. A
-# pull request's rehearsal builds arm64 too only when it changes what can
-# build differently there, or is a release cut (SMD-3473, "Whether this
-# rehearsal builds both platforms").
+# pull request's rehearsal builds arm64 too when it changes what can build
+# differently there, or a few files the ticket listed, or is a release cut,
+# and amd64 alone otherwise (SMD-3473, "Whether this rehearsal builds both
+# platforms").
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash here only
 # runs docker and gh. It refuses a tag that does not name releases.json's last
