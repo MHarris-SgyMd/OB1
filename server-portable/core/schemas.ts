@@ -506,6 +506,55 @@ export const SPECS = {
       limit: z.number().int().positive().max(SCAN_MAX).optional().describe(`How many thoughts to scan at most (newest first). Default ${SCAN_DEFAULT}, max ${SCAN_MAX}.`),
     },
   },
+  // Work claims (SMD-3598, migration 115): who holds a ticket, or one piece of it, so two agents never build one change.
+  list_claims: {
+    title: "List Work Claims",
+    description:
+      "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its key's claims with `holder` set to its key's name (claim_work's reply names it). `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      ticket: z.string().min(1).max(200).optional().describe("Only this ticket's claims, its whole and its pieces (e.g. SMD-3379; case and surrounding white space don't matter)"),
+      holder: z.string().min(1).max(200).optional().describe("Only the claims of the key with this name"),
+      include_ended: z.boolean().optional().describe("Also list lapsed and released claims (each with its `state`). Default false: live claims only"),
+      limit: z.number().int().min(1).max(1000).optional().default(100).describe("At most this many, by ticket, piece and claim time. Default 100"),
+    },
+  },
+  claim_work: {
+    title: "Claim Work",
+    description:
+      "Claim a ticket — or one piece of it, such as `PR 1b-2` — so no other agent builds the same change. Call it when you create the branch, before writing code. The reply carries a `token` (`wc_` and 64 hex digits), shown this once: keep it where only you read it (a git-ignored file in your worktree) — anyone holding it under your key acts as the holder — and pass it to renew_claim while you work and to release_claim when the work merges or is abandoned. Refused (WORK_CLAIMED) while a live claim covers the work — another key's, another session's of your key, or your own on overlapping work; the reply names each and when its lease ends. A whole ticket and any of its pieces are the same work; two different pieces are not. The lease defaults to four hours (60 seconds to a week); a lapsed claim is taken over by the next claim on exactly that work, so a lost token is recovered by claiming again after it lapses, or by an operator's forced release. Claiming again with your token renews your unreleased claim on exactly this work (and sets its label); otherwise you get a new claim and a new token — keep the new one. An ingested (importer's) key cannot claim.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      ticket: z.string().min(1).max(200).describe("The ticket key, e.g. SMD-3379 (a team key of letters and digits, a hyphen, a number; case and surrounding white space don't matter)"),
+      piece: z.string().min(1).max(100).optional().describe("The piece of the ticket, e.g. `PR 1b-2`, at most 100 characters; omit to claim the whole ticket. Compared case-folded, its white space collapsed"),
+      label: z.string().max(500).optional().describe("Free text for people, at most 500 characters: your tool, machine, session and branch, so another session of your key can tell this claim from its own. Shown to others as data"),
+      lease_seconds: z.number().int().min(60).max(604800).optional().describe("How long the claim holds without a renewal, in seconds: 60 to 604800 (a week). Default 14400 (four hours)"),
+      token: z.string().max(200).optional().describe("Your token for this exact work, to renew your claim rather than make a new one; omit for a new claim"),
+    },
+  },
+  renew_claim: {
+    title: "Renew Work Claim",
+    description:
+      "Set your claim's lease to lease_seconds from now (default four hours; a shorter one shortens it): the claim id and the token claim_work returned. Renew well before the lease runs out — about hourly on the default. Refused when another key holds the claim, or your key under another token; when it ended (released, or taken over after it lapsed: stop work on it); or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed. The label changes through claim_work with your token.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      id: z.string().describe("The claim's id, from claim_work's reply or list_claims"),
+      token: z.string().min(1).max(200).describe("The token claim_work returned for this claim"),
+      lease_seconds: z.number().int().min(60).max(604800).optional().describe("The new lease, in seconds from now: 60 to 604800. Default 14400 (four hours)"),
+    },
+  },
+  release_claim: {
+    title: "Release Work Claim",
+    description:
+      "End your claim when the work merges or is abandoned: the claim id and the token claim_work returned, and a reason — the merged PR, or why it was dropped. The claim's row stays as history, with who ended it and why. An operator key (classified operator by its agent id) may release another holder's stuck claim with `force: true` and a `reason`. Refused when the claim is not yours and no force applies. Releasing a claim that already ended answers already_released.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      id: z.string().describe("The claim's id, from claim_work's reply or list_claims"),
+      token: z.string().max(200).optional().describe("The token claim_work returned for this claim; not needed for an operator's forced release"),
+      reason: z.string().max(500).optional().describe("Why the claim ends, at most 500 characters: the merged PR, or why it was dropped (required with force)"),
+      force: z.boolean().optional().describe("Operator only: release another holder's claim. Needs a reason"),
+    },
+  },
 } satisfies Record<ToolName, ToolSpec>;
 
 /** The typed input a tool's operation takes: its schema's output, defaults applied and transforms run. */
