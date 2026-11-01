@@ -52,7 +52,7 @@ import { reviewProposal } from "../server-portable/proposal-review.ts";
 import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, readJudgeWindow, recordSubject, RELEASE_WAIT, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, namedSince, readJudgeWindow, recordSubject, RELEASE_WAIT, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -7601,11 +7601,12 @@ if (want("10h")) {
     const refusedLow = await sweep({}, { ...env, OB1_SUBJECT_REASONING: "low" }).finally(() => { judgeMode = "answer"; });
     assert(refusedLow.code === 2 && /, and OB1_SUBJECT_REASONING, which sent reasoning_effort "low"\. Nothing was recorded/.test(refusedLow.stderr) && !/OB1_SUBJECT_REASONING/.test(refusedRun.stderr),
       `…and with an effort sent it names the knob that sent it, which it does not with none sent (exit ${refusedLow.code}: ${refusedLow.stderr.trim().split("\n").slice(-1)[0]?.slice(-90)})`);
-    // The outage: each thought a server error fails goes back to the pool, behind the rest, its attempt not counted, and
-    // the run pauses holding no claim, so each call runs on a claim of its own, its lease fresh (review pass 1: four
-    // calls could outrun the one lease; PR 6a's review pass 3: held through the pause, the claim needed its lease kept),
-    // and the thought it ended at is sent to the end of the pool, so the next run starts with another (review pass 1: it
-    // came first again, and ended every run). The three pooled oldest first, the session summary oldest.
+    // The outage: the thought a server error fails goes back to the pool where it stood, its attempt not counted, and the
+    // run pauses holding no claim, so each call runs on a claim of its own, its lease fresh, the same thought taken again
+    // (review pass 1: four calls could outrun the one lease; PR 6a's review pass 3: held through the pause, the claim
+    // needed its lease kept; its review pass 4: put back at the tail, a run asked a thought behind it), and the thought
+    // it ended at is sent to the end of the pool, so the next run starts with another (review pass 1: it came first
+    // again, and ended every run). The three pooled oldest first, the session summary oldest.
     for (const [id, ago] of [[none, 3], [garbled, 2], [utf, 1]] as const) {
       await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${ago}) WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`;
     }
@@ -7621,13 +7622,15 @@ if (want("10h")) {
       const [c] = (await sql`SELECT status, extract(epoch FROM ttl_expires_at - claimed_at)::float8 - ${900 + LEASE_MARGIN_S} AS s FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`) as { status: string; s: number }[];
       if (c?.status === "claimed" && Math.abs(c.s) < 1) freshLeases++;
     };
-    const down = await sweep().finally(() => { restore(); judgeMode = "answer"; onOwn = null; });
-    const [{ last }] = (await sql`SELECT thought_id::text AS last FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'pending' ORDER BY enqueued_at DESC LIMIT 1`) as { last: string }[];
+    // Bounded, so a run that never ends fails here rather than holding the shard (review pass 4, run-it).
+    const down = await sweep({ signal: AbortSignal.timeout(60_000) }).finally(() => { restore(); judgeMode = "answer"; onOwn = null; });
+    const [lastRow] = (await sql`SELECT thought_id::text AS last FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'pending' ORDER BY enqueued_at DESC LIMIT 1`) as { last: string }[];
+    const last = lastRow?.last ?? "";
     const [{ n: downAttempts }] = (await sql`SELECT max(attempt_count)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id IN (${none}::uuid, ${garbled}::uuid, ${utf}::uuid)`) as { n: number }[];
     const downNamed = (id: string) => (id === none ? "none" : id === garbled ? "garbled" : "utf");
     assert(down.code === 1 && /The provider is not answering after 3 pauses/.test(down.stderr) && ownCalls === asked + 4 && (await poolOf()).pending === 3
-        && downAsked.map(downNamed).join(",") === "none,garbled,utf,none" && freshLeases === 4 && last === none && downAttempts === 0,
-      `a server error puts its thought back in the pool, its attempt not counted, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "the one asked" : "another"})`);
+        && downAsked.map(downNamed).join(",") === "none,none,none,none" && freshLeases === 4 && last === none && downAttempts === 0,
+      `a server error puts its thought back in the pool where it stood, its attempt not counted, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "the one asked" : "another"})`);
 
     // A brain without 113's close, or 111's door: the sweep refuses by name; without the door the pass extracts, and
     // says once that it records no subject.
@@ -8919,9 +8922,8 @@ if (want("10h")) {
       const checkedClaims = await statusOf([firstT, secondT]);
       const afterChecked = await windowOf();
       assert(checkedRun.code === 0 && ownCalls - asked === 2 && checkedClaims.join(",") === "succeeded,succeeded" && /; the garbage-judge alarm off \(--judge-checked\)$/m.test(checkedRun.stdout)
-        && beforeChecked?.held.join(",") === "stub-judge,stub-judge-b" && afterChecked?.held.join(",") === "stub-judge-b" && JSON.stringify({ ...afterChecked, held: beforeChecked.held, heldAt: beforeChecked.heldAt }) === JSON.stringify(beforeChecked)
-        && beforeChecked.heldAt["stub-judge"] === beforeChecked.tripped && typeof beforeChecked.heldAt["stub-judge-b"] === "string" && beforeChecked.heldAt["stub-judge-b"] !== beforeChecked.tripped
-        && afterChecked.heldAt["stub-judge"] === undefined && afterChecked.heldAt["stub-judge-b"] === beforeChecked.heldAt["stub-judge-b"]
+        && beforeChecked?.held.join(",") === "stub-judge,stub-judge-b" && afterChecked?.held.join(",") === "stub-judge-b" && JSON.stringify({ ...afterChecked, held: beforeChecked.held }) === JSON.stringify(beforeChecked)
+        && beforeChecked.namedAt["stub-judge"] === beforeChecked.tripped && typeof beforeChecked.namedAt["stub-judge-b"] === "string" && beforeChecked.namedAt["stub-judge-b"] !== beforeChecked.tripped
         && /^ {2}--judge-checked: the hold the garbage-judge alarm's trip at \S+ \S+ put on the pool's following runs of stub-judge is lifted; its hold on stub-judge-b stands, each that model's to check$/m.test(checkedRun.stdout)
         && !/holds the pool's following runs/.test(checkedRun.stdout) && !/gave no subject/.test(checkedRun.stderr),
         `…where --judge-checked runs with the alarm off: both asked and finished, exit 0, the hold lifted, said, the window as it was but for that (exit ${checkedRun.code}, ${ownCalls - asked} asked, claims ${checkedClaims.join(",")}, window ${JSON.stringify(afterChecked)?.slice(0, 160)}): ${checkedRun.stderr.trim().slice(0, 300)}`);
@@ -9012,14 +9014,14 @@ if (want("10h")) {
       onOwn = async (thought) => {
         if (!thought.includes("Alarm note 152")) return;
         onOwn = null;
-        await sql`UPDATE ob1_config SET value = jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00', 'by', '["stub-judge"]'::jsonb)::text WHERE key = ${JUDGE_WINDOW_KEY}`;
+        await sql`UPDATE ob1_config SET value = jsonb_build_object('pool', ${POOL}::text, 'answers', '[]'::jsonb, 'tripped', '2000-01-01 00:00:00+00', 'by', '["stub-judge"]'::jsonb, 'back', jsonb_build_array(${besideIds[2]}::text))::text WHERE key = ${JUDGE_WINDOW_KEY}`;
       };
       asked = ownCalls;
       const besideRun = await alarmRun().finally(() => { onOwn = null; });
       const besideClaims = await statusOf(besideIds);
       const besideWindow = await windowOf();
       assert(besideRun.code === 3 && ownCalls - asked === 2 && besideClaims.join(",") === "succeeded,pending,pending" && besideWindow?.answers.length === 0
-        && JSON.stringify(besideWindow.back) === JSON.stringify([besideIds[1]])
+        && JSON.stringify(besideWindow.back) === JSON.stringify([besideIds[2], besideIds[1]])
         && /\n {2}Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, on answers from stub-judge, after this run began \(db\/subject-sweep\.ts, JUDGE_ALARM\), so this run, whose judge model is likely the same, stops here too, the claim in hand, which it named nothing for, back in the pool with that run's\.\n/.test(besideRun.stderr),
         `another run's trip since this run began, its stamp older than the run, stops it at the claim in hand, exit 3, that claim back in the pool uncounted, in that trip's hand-back (review pass 3 of PR 6a, run-it) (exit ${besideRun.code}, ${ownCalls - asked} asked, claims ${besideClaims.join(",")}, window ${besideWindow?.answers.length} answer(s), back ${JSON.stringify(besideWindow?.back)}): ${besideRun.stderr.trim().slice(0, 400)}`);
 
@@ -9537,10 +9539,11 @@ if (want("10h")) {
     const orHung = <T,>(run: Promise<T>, ms = 30_000): Promise<T | null> => Promise.race([run, Bun.sleep(ms).then(() => null)]);
     /**
      * A window kept by hand: the pool's, its last trip at `tripped` on `by`'s answers, holding `held`'s following runs,
-     * each since `heldAt`'s stamp, else the trip's, with the trip's hand-back and whether answers naming nothing tripped it.
+     * each model's last trip `namedAt`'s stamp, else the trip's, with the trip's hand-back and whether answers naming
+     * nothing tripped it.
      */
-    const keepWindow = (tripped: string, by: string[], held: string[], heldAt: Record<string, string> = {}, back: string[] = [], nothing = false) => sql`
-      INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, ${JSON.stringify({ pool: POOL, answers: [], tripped, by, held, heldAt, back, nothing })})
+    const keepWindow = (tripped: string, by: string[], held: string[], namedAt: Record<string, string> = {}, back: string[] = [], nothing = false) => sql`
+      INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, ${JSON.stringify({ pool: POOL, answers: [], tripped, by, held, namedAt, back, nothing })})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     /** A following run started and polling its empty pool, with its stop, the words said before it cleared. */
     const startFollowing = async (e = env) => {
@@ -9685,6 +9688,8 @@ if (want("10h")) {
       const atGateEnds: Record<string, { code: number | null; asked: number; claim: string | undefined; err: string }> = {};
       let abortAtGate = -1, abortGateRun: SweepRun | null = null, abortGateAsked = 0;
       let mixed = { code: -1, asked: 0, claims: "", tally: "" };
+      let loop = { code: null as number | null, asked: 0 };
+      let onceGaps: number[] = [];
       const during: Record<string, string> = {};
       try {
         const [retryT] = await seedAll(["Gate note 3: flaky-judge sweep-pass-good work."]);
@@ -9798,28 +9803,54 @@ if (want("10h")) {
         const mixedRun = await sweep({ signal: backstop() });
         mixed = { code: mixedRun.code, asked: ownCalls - mixedAsked, claims: (await statusOf(mixedIds)).join(","), tally: tally(mixedRun) };
         await drop(mixedIds);
-        for (const what of ["edited", "deleted", "edited, limited"] as const) {
+        for (const what of ["edited", "deleted", "edited, limited", "taken"] as const) {
           const [duringT] = await seedAll([`Gate note 19 ${what}: flaky-judge sweep-pass-good work, ${what} as its call fails.`]);
           let hit = false;
           onOwn = async (t) => {
             if (!t.includes(`Gate note 19 ${what}`) || hit) return;
             hit = true;
-            if (what !== "deleted") await sql`SELECT update_thought(${duringT}::uuid, ${`Gate note 19 ${what}: sweep-pass-good work, edited as its call failed.`})`;
-            else await drop([duringT]);
+            if (what === "deleted") await drop([duringT]);
+            else if (what === "taken") await sql`UPDATE thought_work_claims SET worker_id = 'case-other' WHERE thought_id = ${duringT}::uuid AND work_type = ${POOL}`;
+            else await sql`SELECT update_thought(${duringT}::uuid, ${`Gate note 19 ${what}: sweep-pass-good work, edited as its call failed.`})`;
           };
           const r = await sweep({ ...(what === "edited, limited" ? { limit: 1 } : {}), signal: backstop() });
           onOwn = null;
           during[what] = `${r.code}: ${tally(r)}`;
+          if (what === "taken") await sql`SELECT release_claims_for_worker(${POOL}, 'case-other')`;
           if (what !== "deleted") await drop([duringT]);
         }
+        // The pauses: an outage whose every failing call's thought is edited still ends after four calls (review pass 4,
+        // run-it: a pause and a count kept for a put-back that landed looped, three thousand calls in eight seconds); and
+        // one error among four thoughts pauses once, the claims after it at once.
+        const [loopT] = await seedAll(["Gate note 20: sweep-pass-good work, edited at each call that fails."]);
+        let loopEdits = 0;
+        judgeMode = "503";
+        onOwn = async (t) => {
+          if (t.includes("Gate note 20")) await sql`SELECT update_thought(${loopT}::uuid, ${`Gate note 20: sweep-pass-good work, edited at each call that fails, edit ${++loopEdits}.`})`;
+        };
+        const loopAsked = ownCalls;
+        const loopRun = await orHung(sweep({ signal: backstop() }), 20_000).finally(() => { judgeMode = "answer"; onOwn = null; });
+        loop = { code: loopRun?.code ?? null, asked: ownCalls - loopAsked };
+        await drop([loopT]);
+        TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 1500, 100, 100);
+        const onceIds = await seedAll(["Gate note 21a: flaky-judge sweep-pass-good work.", "Gate note 21b: sweep-pass-good work.", "Gate note 21c: sweep-pass-good work.", "Gate note 21d: sweep-pass-good work."]);
+        for (const [i, id] of onceIds.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(secs => ${100 - i}) WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`;
+        const onceCalls: number[] = [];
+        onOwn = (t) => { if (t.includes("Gate note 21")) onceCalls.push(Date.now()); };
+        await sweep({ signal: backstop() }).finally(() => { onOwn = null; });
+        onceGaps = onceCalls.slice(1).map((at, i) => at - onceCalls[i]);
+        await drop(onceIds);
       } finally {
         onOwn = null;
         restoreRetryPauses();
       }
       assert(mixed.code === 0 && mixed.asked === 11 && mixed.claims === "succeeded,succeeded,succeeded,succeeded,succeeded,succeeded,succeeded" && /^7 subject\(s\) recorded \(7 by stub-judge\)$/.test(mixed.tally)
           && during.edited === "0: 1 subject(s) recorded (1 by stub-judge); 1 edited mid-sweep" && during.deleted === "0: 0 subject(s) recorded; 1 deleted mid-sweep"
-          && during["edited, limited"] === "0: 0 subject(s) recorded; 1 edited mid-sweep",
-        `the pauses count the provider's errors since its last answer: four thoughts each failing once, answered ones between, all answered; a thought edited or deleted during the call that fails is counted as the write would find it (mixed ${JSON.stringify(mixed)}; during ${JSON.stringify(during)})`);
+          && during["edited, limited"] === "0: 0 subject(s) recorded; 1 edited mid-sweep"
+          && /^0: 0 subject\(s\) recorded; 1 unanswered; 1 claim\(s\) no longer this run's/.test(during.taken)
+          && loop.code === 1 && loop.asked === 4
+          && onceGaps.length === 4 && onceGaps[0] >= 1400 && onceGaps.slice(1).every((g) => g < 1000),
+        `the pauses count the provider's errors since its last answer: four thoughts each failing once, answered ones between, all answered; a thought edited or deleted during the call that fails is counted as the write would find it, one another run took as unanswered and lost; an outage editing each failing thought still ends after four calls; one error pauses once (mixed ${JSON.stringify(mixed)}; during ${JSON.stringify(during)}; loop ${JSON.stringify(loop)}; gaps ${onceGaps.join(",")} ms)`);
       assert(retryHeld && heldRetry.asked === 1 && heldRetry.claim === "pending" && retryRun?.code === 0 && retryAsked === 2 && retryGateAsked === 3
           && retryClaim?.status === "succeeded" && retryClaim.attempt_count === 1 && /^ {2}1 thought\(s\) in [^:]*: 1 subject\(s\) recorded \(1 by stub-judge\)$/m.test(retryRun.stdout)
           && editHeld && editRun?.code === 0 && editAsked === 2 && editClaim === "succeeded" && editTexts.length === 2 && editTexts[1].includes("edited while it waited in the pool")
@@ -9931,16 +9962,18 @@ if (want("10h")) {
       await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 minute' WHERE thought_id = ${pauseStopT}::uuid AND work_type = ${POOL}`;
       TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 3000, 100, 100);
       const inPauseStop = new AbortController();
-      onOwn = (thought) => { if (thought.includes("Abort note 3")) setTimeout(() => inPauseStop.abort(), 500); };
+      let inPauseStopAt = 0;
+      onOwn = (thought) => { if (thought.includes("Abort note 3")) setTimeout(() => { inPauseStopAt = Date.now(); inPauseStop.abort(); }, 500); };
       const inPauseAsked = ownCalls;
       const inPauseRun = await sweep({ signal: AbortSignal.any([inPauseStop.signal, backstop()]) }).finally(() => {
         onOwn = null;
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
+      const inPauseLate = Date.now() - inPauseStopAt;
       const inPauseClaims = (await statusOf([pauseStopT, pauseNextT])).join(",");
       await drop([pauseStopT, pauseNextT]);
-      assert(inPauseRun.code === 130 && ownCalls - inPauseAsked === 1 && inPauseClaims === "pending,pending",
-        `a stop during a provider pause ends the run there, nothing more claimed or asked (exit ${inPauseRun.code}, ${ownCalls - inPauseAsked} asked, claims ${inPauseClaims}): ${inPauseRun.stderr.trim().slice(-160)}`);
+      assert(inPauseRun.code === 130 && ownCalls - inPauseAsked === 1 && inPauseClaims === "pending,pending" && inPauseStopAt > 0 && inPauseLate < 2000,
+        `a stop during a provider pause ends the run there at once, nothing more claimed or asked (review pass 4, cold read: a pause deaf to it passed) (exit ${inPauseRun.code}, ${ownCalls - inPauseAsked} asked, claims ${inPauseClaims}, ended ${inPauseLate} ms after the stop): ${inPauseRun.stderr.trim().slice(-160)}`);
 
       // The scheduler's session settings on the connections the run opens (connect.ts's `session`): its
       // application_name read off pg_stat_activity while the judge is asked.
@@ -10005,7 +10038,7 @@ if (want("10h")) {
       // replaced the list, and the first model's runs started again unchecked); a run of a model the hold does not hold
       // is told whose it is; a dry run with --judge-checked lifts nothing.
       await alarmAt(2, 1 / 5);
-      await keepWindow("2000-01-01 00:00:00+00", ["stub-judge"], ["stub-judge"]);
+      await keepWindow("2000-01-01 00:00:00+00", ["stub-judge"], ["stub-judge"], { "stub-judge-3": "1999-12-31 00:00:00+00" });
       const dryLift = await sweep({ judgeChecked: true, dryRun: true });
       const afterDryLift = (await windowOf())?.held.join(",");
       const [unionT] = await seedAll(["Trip note 2: the judge names nothing here either."]);
@@ -10015,7 +10048,8 @@ if (want("10h")) {
       assert(dryLift.code === 0 && afterDryLift === "stub-judge"
           && /^ {2}The garbage-judge alarm holds the pool's following runs, a scheduler's, of stub-judge \(tripped at 2000-01-01 00:00:00\+00\): .*; this run's judge model, stub-judge-2, is not held$/m.test(unionRun.stdout)
           && unionRun.code === 3 && [...(unionWindow?.held ?? [])].sort().join(",") === "stub-judge,stub-judge-2" && unionWindow?.by.join(",") === "stub-judge-2" && unionFollow.code === 3
-          && unionWindow.heldAt["stub-judge"] === "2000-01-01 00:00:00+00" && unionWindow.heldAt["stub-judge-2"] === unionWindow.tripped
+          && unionWindow.namedAt["stub-judge"] === "2000-01-01 00:00:00+00" && unionWindow.namedAt["stub-judge-2"] === unionWindow.tripped
+          && unionWindow.namedAt["stub-judge-3"] === "1999-12-31 00:00:00+00"
           && /The trip holds the pool's following runs, a scheduler's, of stub-judge-2 \(an earlier trip's hold on stub-judge stands\): once the model is checked/.test(unionRun.stderr),
         `a trip keeps an earlier trip's unlifted hold beside its own, a run of an unheld model is told, and a dry --judge-checked lifts nothing (dry exit ${dryLift.code}, held after ${afterDryLift}; the other model's trip exit ${unionRun.code}, held ${unionWindow?.held.join(",")}, by ${unionWindow?.by.join(",")}; the first model's follower exit ${unionFollow.code}): ${unionRun.stdout.trim().slice(0, 300)}`);
       await drop([unionT]);
@@ -10057,6 +10091,50 @@ if (want("10h")) {
           && offerEarlier === heldWords("stub-judge (tripped at 2000-01-08 00:00:00+00) and stub-judge-2 (tripped at 2000-01-09 00:00:00+00)", offerWords("stub-judge-2", 1))
           && headLift.code === 0 && headClaims.join(",") === "pending,succeeded",
         `the held line's offer goes to the last trip's models, its count what is still pending, and the lift puts the hand-back first (both: ${offerBoth.slice(-150)} | left: ${offerLeft.slice(-150)} | none: ${offerNone.slice(-80)} | earlier: ${offerEarlier.slice(-150)} | the lift ahead of an older claim: exit ${headLift.code}, claims ${headClaims.join(",")})`);
+
+      // …and a provider's transient error in that lift's run puts its thought back where it stood, first, so the run asks
+      // the hand-back alone, never a claim of the backlog behind it; a lift of a hold an earlier trip put there puts no
+      // other trip's hand-back first; and the lift passes over a hand-back claim another transaction holds, waiting on none
+      // under the window's lock (review pass 4, cold read: at the pool's tail, the run asked a backlog thought in its
+      // place, the alarm off; the guard was held by no case; waiting there, the lift could close a cycle with an edit).
+      const restoreOfferPauses = shortenPauses();
+      const [behindT] = await seedAll(["Offer note 7: sweep-pass-good work, the backlog."]);
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${behindT}::uuid AND work_type = ${POOL}`;
+      const flakyBack = await seedAll(["Offer note 8: flaky-judge sweep-pass-good work, handed back.", "Offer note 9: sweep-pass-good work, handed back."]);
+      await keepWindow("2000-01-11 00:00:00+00", ["stub-judge"], ["stub-judge"], {}, flakyBack, true);
+      const flakyAsked = ownCalls;
+      const flakyLift = await sweep({ judgeChecked: true, limit: 2 }).finally(restoreOfferPauses);
+      const flakyAskedN = ownCalls - flakyAsked;
+      const flakyClaims = (await statusOf([behindT, ...flakyBack])).join(",");
+      await drop([behindT, ...flakyBack]);
+      const [olderT] = await seedAll(["Offer note 10: sweep-pass-good work, pooled first."]);
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${olderT}::uuid AND work_type = ${POOL}`;
+      const [otherBackT] = await seedAll(["Offer note 11: sweep-pass-good work, another model's hand-back."]);
+      await keepWindow("2000-01-13 00:00:00+00", ["stub-judge-2"], ["stub-judge", "stub-judge-2"], { "stub-judge": "2000-01-12 00:00:00+00" }, [otherBackT], true);
+      const earlierLift = await sweep({ judgeChecked: true, limit: 1 });
+      const earlierClaims = (await statusOf([olderT, otherBackT])).join(",");
+      await drop([olderT, otherBackT]);
+      const lockedBack = await seedAll(["Offer note 12: sweep-pass-good work, its claim held.", "Offer note 13: sweep-pass-good work, handed back."]);
+      await keepWindow("2000-01-14 00:00:00+00", ["stub-judge"], ["stub-judge"], {}, lockedBack, true);
+      const backHolder = new SQL({ url: URL_!, max: 1 });
+      const bh = await backHolder.reserve();
+      let lockedLift: SweepRun | null = null;
+      try {
+        await bh`BEGIN`;
+        await bh`SELECT 1 FROM thought_work_claims WHERE thought_id = ${lockedBack[0]}::uuid AND work_type = ${POOL} FOR UPDATE`;
+        lockedLift = await orHung(sweep({ judgeChecked: true, limit: 1, signal: backstop() }), 10_000);
+        await bh`ROLLBACK`;
+      } finally {
+        bh.release();
+        await backHolder.close({ timeout: 5 });
+      }
+      const lockedClaims = (await statusOf(lockedBack)).join(",");
+      await drop(lockedBack);
+      await alarmAt(48, 1);
+      assert(flakyLift.code === 0 && flakyAskedN === 3 && flakyClaims === "pending,succeeded,succeeded"
+          && earlierLift.code === 0 && earlierClaims === "succeeded,pending"
+          && lockedLift?.code === 0 && /is lifted/.test(lockedLift.stdout) && lockedClaims === "pending,succeeded",
+        `a transient error in the offered lift's run asks its thought again in place, never the backlog; a lift of an earlier trip's hold puts no other hand-back first; the lift passes over a held claim (flaky: exit ${flakyLift.code}, ${flakyAskedN} asked, claims ${flakyClaims}; earlier: exit ${earlierLift.code}, claims ${earlierClaims}; held: exit ${lockedLift?.code ?? "still running at 10 s"}, claims ${lockedClaims})`);
 
       // …and none after a trip its answers naming nothing did not make alone: two of them and one unread, over a window of
       // ten whose fifth is two (review pass 3, run-it: kept as more than none, the flag offered it).
@@ -10251,6 +10329,43 @@ if (want("10h")) {
         `a trip naming the run's model since it began, then one naming another alone, is not lifted (exit ${twoLateRun.code}, held after ${twoLateWindow?.held.join(",")}): ${twoLateRun.stderr.trim().slice(0, 240)}`);
       await alarmAt(48, 1);
 
+      // …nor one another run has lifted since: a trip naming the run's model landed while it waited and another run lifted
+      // its hold, and the run ends there, nothing claimed or asked (review pass 4, cold read: the stamp gone with the hold,
+      // it went on, the alarm off).
+      await keepWindow("2000-01-15 00:00:00+00", ["stub-judge"], ["stub-judge"]);
+      const [liftedT] = await seedAll(["Hold note 7: sweep-pass-good work, pending past a lift another run made."]);
+      const liftedAsked = ownCalls;
+      const liftedRun = await runPastPoolLock(() => keepWindow("2000-01-16 00:00:00+00", ["stub-judge"], [], { "stub-judge": "2000-01-16 00:00:00+00" }), { judgeChecked: true, limit: 1 });
+      const liftedClaim = (await claimOf(liftedT))?.status;
+      await drop([liftedT]);
+      await alarmAt(48, 1);
+      assert(liftedRun.code === 3 && ownCalls === liftedAsked && liftedClaim === "pending"
+          && /^ {2}--judge-checked lifts no hold: the garbage-judge alarm tripped again at 2000-01-16 00:00:00\+00, after this run began, on answers from stub-judge, and another run with --judge-checked has lifted that hold since; nothing was claimed: /m.test(liftedRun.stderr),
+        `a trip naming the run's model since it began, lifted by another run since, ends the run, nothing claimed (exit ${liftedRun.code}, ${ownCalls - liftedAsked} asked, claim ${liftedClaim}): ${liftedRun.stderr.trim().slice(0, 240)}`);
+
+      // …while a run of a model whose hold was lifted before it began, its last trip kept, goes on: no trip named it since
+      // (review pass 4, mutant: a run's stamp read off its hold alone refused every such run).
+      await keepWindow("2000-01-17 00:00:00+00", ["stub-judge"], [], { "stub-judge": "2000-01-17 00:00:00+00" });
+      const [afterLiftT] = await seedAll(["Hold note 8: sweep-pass-good work, asked after a lift long done."]);
+      const afterLiftRun = await sweep({ judgeChecked: true, limit: 1 });
+      const afterLiftClaim = (await claimOf(afterLiftT))?.status;
+      await drop([afterLiftT]);
+      await alarmAt(48, 1);
+      assert(afterLiftRun.code === 0 && afterLiftClaim === "succeeded" && !/lifts no hold/.test(afterLiftRun.stderr),
+        `a --judge-checked run of a model whose hold was lifted before it began goes on (exit ${afterLiftRun.code}, claim ${afterLiftClaim}): ${afterLiftRun.stderr.trim().slice(0, 200)}`);
+
+      // …and one whose hold another run lifts as it waits, on the trip it read, says so and goes on (review pass 4,
+      // run-it: it said nothing, and asked with the alarm off as though it had lifted it).
+      await keepWindow("2000-01-18 00:00:00+00", ["stub-judge"], ["stub-judge"]);
+      const [elsewhereT] = await seedAll(["Hold note 9: sweep-pass-good work, asked after another run's lift."]);
+      const elsewhereRun = await runPastPoolLock(() => keepWindow("2000-01-18 00:00:00+00", ["stub-judge"], [], { "stub-judge": "2000-01-18 00:00:00+00" }), { judgeChecked: true, limit: 1 });
+      const elsewhereClaim = (await claimOf(elsewhereT))?.status;
+      await drop([elsewhereT]);
+      await alarmAt(48, 1);
+      assert(elsewhereRun.code === 0 && elsewhereClaim === "succeeded"
+          && /^ {2}--judge-checked: the hold the garbage-judge alarm's trip at 2000-01-18 00:00:00\+00 put on the pool's following runs of stub-judge was lifted by another run since this run began$/m.test(elsewhereRun.stdout),
+        `a --judge-checked run whose hold another run lifts as it waits says so and goes on (exit ${elsewhereRun.code}, claim ${elsewhereClaim}): ${elsewhereRun.stdout.trim().slice(0, 240)}`);
+
       // …and a lifting run begun with no trip standing lifts none that lands as it waits, said without an "again".
       const firstLateRun = await runPastPoolLock(() => keepWindow("2000-01-05 00:00:00+00", ["stub-judge"], ["stub-judge"]), { judgeChecked: true, limit: 1 });
       const firstLateWindow = await windowOf();
@@ -10363,19 +10478,21 @@ if (want("10h")) {
       // judgeHeld and the window's read of the hold: a model held or not; held only beside a trip's stamp, as a list of
       // names, another pool's holding nothing; each held model's stamp and the hand-back's ids beside a trip's stamp too,
       // heldSince falling back to the trip's.
-      const windowHolding = (h: string[]) => ({ pool: POOL, answers: [], tripped: "2000-01-01 00:00:00+00", by: h, held: h, heldAt: {}, back: [], nothing: false });
+      const windowHolding = (h: string[]) => ({ pool: POOL, answers: [], tripped: "2000-01-01 00:00:00+00", by: h, held: h, namedAt: {}, back: [], nothing: false });
       const kept = (w: Record<string, unknown>) => readJudgeWindow(JSON.stringify({ pool: POOL, answers: [], ...w }), POOL).held.join(",");
       const read = (w: Record<string, unknown>) => readJudgeWindow(JSON.stringify({ pool: POOL, answers: [], ...w }), POOL);
       const [u1, u2] = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"];
-      const stamped2 = read({ tripped: "t", held: ["a", "b"], heldAt: { a: "t0", b: 3, c: "t1" } });
+      const stamped2 = read({ tripped: "t", held: ["a", "b"], namedAt: { a: "t0", b: 3, c: "t1", "": "t2" } });
       assert(judgeHeld(windowHolding(["stub-judge"]), "stub-judge") && !judgeHeld(windowHolding(["stub-judge"]), "stub-judge-2") && !judgeHeld(windowHolding([]), "stub-judge")
           && kept({ tripped: "t", held: ["a", "b"] }) === "a,b" && kept({ tripped: null, held: ["a"] }) === "" && kept({ tripped: "t", held: "a" }) === ""
           && kept({ tripped: "t", held: [1, "a", "", "a"] }) === "a" && kept({ tripped: "t" }) === ""
           && readJudgeWindow(JSON.stringify({ pool: "another", answers: [], tripped: "t", held: ["a"] }), POOL).held.length === 0
-          && JSON.stringify(stamped2.heldAt) === JSON.stringify({ a: "t0" }) && heldSince(stamped2, "a") === "t0" && heldSince(stamped2, "b") === "t" && heldSince(stamped2, "c") === null
-          && Object.keys(read({ tripped: null, held: ["a"], heldAt: { a: "t0" } }).heldAt).length === 0
+          && JSON.stringify(stamped2.namedAt) === JSON.stringify({ a: "t0", c: "t1" }) && heldSince(stamped2, "a") === "t0" && heldSince(stamped2, "b") === "t" && heldSince(stamped2, "c") === null
+          && namedSince(stamped2, "c") === "t1" && namedSince(stamped2, "b") === "t" && namedSince(stamped2, "d") === null
+          && namedSince(read({ tripped: "t", held: ["toString"] }), "toString") === "t" && namedSince(read({ tripped: "t", held: [] }), "constructor") === null && heldSince(read({ tripped: "t", held: [] }), "toString") === null
+          && Object.keys(read({ tripped: null, held: ["a"], namedAt: { a: "t0" } }).namedAt).length === 0
           && JSON.stringify(["t", null].map((tripped) => { const w = read({ tripped, back: [u1, "x", 3, u1, u2], nothing: true }); return `${w.back.join("+")}/${w.nothing}`; })) === JSON.stringify([`${u1}+${u2}/true`, "/false"]),
-        "judgeHeld holds the models a trip holds alone, and the window's hold, each model's stamp and the hand-back are read beside a trip's stamp only");
+        "judgeHeld holds the models a trip holds alone, and the window's hold, each model's last trip, held or lifted, and the hand-back are read beside a trip's stamp only");
     } finally {
       Object.assign(JUDGE_ALARM, { window: alarmDefaults.window, share: 1 });
       onOwn = null;

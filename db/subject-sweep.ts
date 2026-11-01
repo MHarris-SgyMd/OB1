@@ -51,8 +51,8 @@
  * refused while a login role that can capture (it reads ob1_config, without which 016's trigger refuses it already)
  * cannot write the claims 113's trigger writes as it, which would fail its every capture.
  *
- * Each claim is one thought, leased for the limit a call and LEASE_MARGIN_S more, renewed (031's renew_claims) before a
- * call is asked again, so a worker that dies hands it back within that; a run that stops hands back what it holds, and
+ * Each claim is one thought, leased for the limit a call and LEASE_MARGIN_S more, so a worker that dies hands it back
+ * within that, and a provider's transient error puts it back where it stood for the claim after the pause to take again; a run that stops hands back what it holds, and
  * a second signal hands back the claim in hand before the CLI exits. A thought the provider stopped answering on goes
  * back to the end of the pool, so the next run starts with another (review pass 1: it came first again, and ended every
  * run). A thought the extraction pass gave a current subject after it was pooled is finished unasked, so long as the
@@ -100,7 +100,7 @@
  * onStart) and runs no start check, 6b's (review passes 1 and 2, cold read). No one is there to pass --judge-checked,
  * so a trip holds the pool's following runs of each judge model it names, beside an earlier trip's not lifted: one does
  * not start while a trip's hold on its model stands (judgeHeld), exit 3, until a run of that model with --judge-checked
- * --limit 1, once it is checked, lifts the hold it read as it began (heldSince), or with --limit the count of the last
+ * --limit 1, once it is checked, lifts the hold it read as it began (heldSince, namedSince), or with --limit the count of the last
  * trip's hand-back still pending, which the held line offers the models that trip named when its answers naming nothing
  * tripped it alone; a trip naming the model since the run began refuses the lift, exit 3, nothing claimed. A run of
  * another judge model is not held, and lifts nothing; the pool's key changing starts a window of the new pool's at its first answer, so a switch back finds no
@@ -198,17 +198,19 @@ export type WindowAnswer = { g: "n" | "u" | "k"; t: string; m: string; f: boolea
  * an earlier trip's not lifted, each held until a run of it with --judge-checked lifts its own hold, the trip's stamp
  * and models kept (review pass 1: one flag, lifted by either of a trip's two models, let the other's runs start again
  * unchecked, cold read; another model's trip replaced the list, and the first model's runs started again, run-it).
- * `heldAt`: the stamp of the last trip that named each model held (heldSince), so a run with --judge-checked lifts
- * the hold it read as it began and not one a trip naming its model put there since, whatever trips naming others came
- * after (review pass 3, cold read: read off the last trip's models alone, a trip naming it, then one naming others,
- * was lifted unseen, and the lift line named the last trip for a hold another had put there). `back` and `nothing`:
+ * `namedAt`: the stamp of the last trip that named each model, kept after its hold is lifted (namedSince, heldSince),
+ * so a run with --judge-checked lifts the hold it read as it began and not one a trip naming its model put there since,
+ * whatever trips naming others came after, nor goes on past one another run has lifted since (review pass 3, cold
+ * read: read off the last trip's models alone, a trip naming it, then one naming others, was lifted unseen, and the
+ * lift line named the last trip for a hold another had put there; review pass 4, cold read: a stamp gone with its hold
+ * let a run go on, the alarm off, past a trip on its model another run had lifted). `back` and `nothing`:
  * the thoughts the last trip handed back, and whether the answers naming nothing tripped it by themselves, so the held
  * line offers what the trip line did, --judge-checked with --limit the count of them still pending, to each model that
  * trip named (review pass 2, cold read: the held line's one thought lifted the hold, and the next run, asking the rest
  * with the alarm on, tripped again; review pass 3, cold read: a count kept as at the trip went stale as the thoughts
  * were asked, and was offered to a model an earlier trip held).
  */
-export type JudgeWindow = { pool: string; answers: WindowAnswer[]; tripped: string | null; by: string[]; held: string[]; heldAt: Record<string, string>; back: string[]; nothing: boolean };
+export type JudgeWindow = { pool: string; answers: WindowAnswer[]; tripped: string | null; by: string[]; held: string[]; namedAt: Record<string, string>; back: string[]; nothing: boolean };
 
 /**
  * Whether a trip's hold on a following run of `judgeModel` stands (PR 6a): the model is among those held, not yet
@@ -218,10 +220,15 @@ export type JudgeWindow = { pool: string; answers: WindowAnswer[]; tripped: stri
 export const judgeHeld = (w: JudgeWindow, judgeModel: string): boolean => w.held.includes(judgeModel);
 
 /**
- * The stamp of the trip whose hold on `judgeModel` stands, null when none does (PR 6a, review pass 3): the last trip
- * that named it, or the last trip's in a window that keeps no stamp for it.
+ * The stamp of the last trip that named `judgeModel`, its hold standing or lifted, null when none did (PR 6a, review
+ * passes 3 and 4): kept in `namedAt`, read as its own member alone (review pass 4, run-it: a model named toString read
+ * Object.prototype's), or the last trip's for a model held in a window that keeps no stamp for it.
  */
-export const heldSince = (w: JudgeWindow, judgeModel: string): string | null => (judgeHeld(w, judgeModel) ? (w.heldAt[judgeModel] ?? w.tripped) : null);
+export const namedSince = (w: JudgeWindow, judgeModel: string): string | null =>
+  Object.hasOwn(w.namedAt, judgeModel) ? w.namedAt[judgeModel] : judgeHeld(w, judgeModel) ? w.tripped : null;
+
+/** The stamp of the trip whose hold on `judgeModel` stands, null when none does (PR 6a, review pass 3). */
+export const heldSince = (w: JudgeWindow, judgeModel: string): string | null => (judgeHeld(w, judgeModel) ? namedSince(w, judgeModel) : null);
 
 /** A thought id as the window keeps it: the hand-back casts each to uuid. */
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -240,7 +247,7 @@ export function readJudgeWindow(value: string | null | undefined, pool: string):
     // None kept yet, or not a window.
   }
   const k = (typeof kept === "object" && kept !== null && !Array.isArray(kept) ? kept : {}) as Record<string, unknown>;
-  if (k.pool !== pool) return { pool, answers: [], tripped: null, by: [], held: [], heldAt: {}, back: [], nothing: false };
+  if (k.pool !== pool) return { pool, answers: [], tripped: null, by: [], held: [], namedAt: {}, back: [], nothing: false };
   const answers = (Array.isArray(k.answers) ? k.answers : []).flatMap((a): WindowAnswer[] => {
     const e = (typeof a === "object" && a !== null ? a : {}) as Record<string, unknown>;
     return (e.g === "n" || e.g === "u" || e.g === "k") && typeof e.t === "string" && UUID_TEXT.test(e.t)
@@ -251,11 +258,12 @@ export function readJudgeWindow(value: string | null | undefined, pool: string):
   const tripped = typeof k.tripped === "string" && k.tripped !== "" ? k.tripped : null;
   // Held only with a trip to hold by: models beside no stamp are a hand edit's.
   const held = tripped !== null && Array.isArray(k.held) ? [...new Set(k.held.filter((m): m is string => typeof m === "string" && m !== ""))] : [];
-  // Each held model's stamp, text, and the thoughts handed back, ids: beside a trip's stamp only, as `held` is.
-  const at = tripped !== null && typeof k.heldAt === "object" && k.heldAt !== null && !Array.isArray(k.heldAt) ? (k.heldAt as Record<string, unknown>) : {};
-  const heldAt = Object.fromEntries(held.flatMap((m): [string, string][] => (typeof at[m] === "string" && at[m] !== "" ? [[m, at[m] as string]] : [])));
+  // Each model's last trip, text, held or lifted, and the thoughts handed back, ids: beside a trip's stamp only, as
+  // `held` is.
+  const at = tripped !== null && typeof k.namedAt === "object" && k.namedAt !== null && !Array.isArray(k.namedAt) ? (k.namedAt as Record<string, unknown>) : {};
+  const namedAt = Object.fromEntries(Object.entries(at).flatMap(([m, v]): [string, string][] => (m !== "" && typeof v === "string" && v !== "" ? [[m, v]] : [])));
   const back = tripped !== null && Array.isArray(k.back) ? [...new Set(k.back.filter((t): t is string => typeof t === "string" && UUID_TEXT.test(t)))] : [];
-  return { pool, answers, tripped, by, held, heldAt, back, nothing: tripped !== null && k.nothing === true };
+  return { pool, answers, tripped, by, held, namedAt, back, nothing: tripped !== null && k.nothing === true };
 }
 
 /** What a watched statement answers when the caller's stop cancelled it. */
@@ -673,8 +681,12 @@ async function sweep(
       return 0;
     }
   };
-  /** The stamp of the trip that held the run's judge model as it began, null when none did: its lift is of that hold alone (review passes 2 and 3). */
-  let heldAtStart: string | null = null;
+  /**
+   * The stamps of the trip that held the run's judge model as it began, and of the last trip that named it, held or
+   * lifted, null when none did: its lift is of that hold alone, and a trip naming the model since refuses it (review
+   * passes 2 to 4).
+   */
+  let heldAtStart: string | null = null, namedAtStart: string | null = null;
   /** A stop's code, before the thoughts begin as after: a following run's stop is its end, 0 (review pass 1, cold read: 130 in the naming's waits). */
   const stoppedCode = FOLLOW_S > 0 ? 0 : 130;
   /**
@@ -692,6 +704,7 @@ async function sweep(
   if (MODEL) {
     const w = await windowNow(sql);
     heldAtStart = heldSince(w, cfg.judgeModel);
+    namedAtStart = namedSince(w, cfg.judgeModel);
     if (ALARM) tripBase = w.tripped;
     if (heldAtStart !== null) {
       const left = await leftOf(w);
@@ -1039,28 +1052,41 @@ async function sweep(
       const lift = await sql.begin(async (tx: SQL) => {
         const [row] = (await tx`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`) as { value: string }[];
         const w = readJudgeWindow(row?.value, POOL);
+        // Its own last trip moved: one naming this model since the run began, whatever trips naming others came after,
+        // its hold standing or lifted by another run since (review pass 2, cold read: any later trip refused it; review
+        // pass 3, cold read: read off the last trip's models, a trip naming it, then one naming others alone, was lifted
+        // unseen; review pass 4, cold read: lifted by another run, its stamp gone with it, the run went on).
+        const named = namedSince(w, cfg.judgeModel);
+        if (named !== namedAtStart) return { w, at: named ?? "", lifted: false, held: judgeHeld(w, cfg.judgeModel), elsewhere: false };
         const at = heldSince(w, cfg.judgeModel);
-        if (at === null) return null;
-        // Its own stamp moved: a trip naming this model since the run began, whatever trips naming others came after
-        // (review pass 2, cold read: any later trip refused it; review pass 3, cold read: read off the last trip's
-        // models, a trip naming it, then one naming others alone, was lifted unseen).
-        if (at !== heldAtStart) return { w, at, lifted: false };
+        // Lifted by another run since this one began, on the trip it read: said, the run going on (review pass 4, run-it:
+        // it said nothing, and asked with the alarm off as though it had lifted it).
+        if (at === null) return heldAtStart === null ? null : { w, at: heldAtStart, lifted: false, held: false, elsewhere: true };
         // The hand-back of the trip that held it, when its answers naming nothing tripped it alone, first in the pool
         // again, so --limit with the held line's count asks those (review pass 3, cold read: a claim pooled before them
         // and released since came first).
+        // One another transaction holds is passed over, an edit pooling it again, as the hand-back passes it (review pass
+        // 4, cold read: waiting on it under the window's lock, the lift could close a cycle with an edit of two of them,
+        // and every judgement waited meanwhile).
         if (w.nothing && at === w.tripped && w.back.length > 0) {
-          await tx`UPDATE thought_work_claims SET enqueued_at = (SELECT COALESCE(min(p.enqueued_at), now()) - interval '1 second' FROM thought_work_claims p WHERE p.work_type = ${POOL} AND p.status = 'pending')
-                    WHERE work_type = ${POOL} AND status = 'pending' AND thought_id = ANY(${sql.array(w.back, "TEXT")}::uuid[])`;
+          await tx`
+            UPDATE thought_work_claims c SET enqueued_at = (SELECT COALESCE(min(p.enqueued_at), now()) - interval '1 second' FROM thought_work_claims p WHERE p.work_type = ${POOL} AND p.status = 'pending')
+              FROM (SELECT w.thought_id FROM thought_work_claims w
+                     WHERE w.work_type = ${POOL} AND w.status = 'pending' AND w.thought_id = ANY(${sql.array(w.back, "TEXT")}::uuid[])
+                     FOR UPDATE OF w SKIP LOCKED) s
+             WHERE c.work_type = ${POOL} AND c.thought_id = s.thought_id`;
         }
-        const heldAt = Object.fromEntries(Object.entries(w.heldAt).filter(([m]) => m !== cfg.judgeModel));
-        await tx`UPDATE ob1_config SET value = ${JSON.stringify({ ...w, held: w.held.filter((m) => m !== cfg.judgeModel), heldAt })} WHERE key = ${JUDGE_WINDOW_KEY}`;
-        return { w, at, lifted: true };
+        // Its last trip's stamp kept, so a run that began before that trip and lifts after this one is refused.
+        await tx`UPDATE ob1_config SET value = ${JSON.stringify({ ...w, held: w.held.filter((m) => m !== cfg.judgeModel) })} WHERE key = ${JUDGE_WINDOW_KEY}`;
+        return { w, at, lifted: true, held: true, elsewhere: false };
       });
       if (lift?.lifted) {
         const rest = lift.w.held.filter((m) => m !== cfg.judgeModel);
         out(`  --judge-checked: the hold the garbage-judge alarm's trip at ${lift.at} put on the pool's following runs of ${cfg.judgeModel} is lifted${rest.length ? `; its hold on ${andList(rest)} stands, each that model's to check` : ""}`);
+      } else if (lift?.elsewhere) {
+        out(`  --judge-checked: the hold the garbage-judge alarm's trip at ${lift.at} put on the pool's following runs of ${cfg.judgeModel} was lifted by another run since this run began`);
       } else if (lift) {
-        err(`\n  --judge-checked lifts no hold: the garbage-judge alarm tripped${heldAtStart === null ? "" : " again"} at ${lift.at}, after this run began, on answers from ${cfg.judgeModel}, and its hold on the pool's following runs of it stands; nothing was claimed: check the judge again, then run again (db/subject-sweep.ts, JUDGE_ALARM).`);
+        err(`\n  --judge-checked lifts no hold: the garbage-judge alarm tripped${namedAtStart === null ? "" : " again"} at ${lift.at}, after this run began, on answers from ${cfg.judgeModel}, and ${lift.held ? "its hold on the pool's following runs of it stands" : "another run with --judge-checked has lifted that hold since"}; nothing was claimed: check the judge again, then run again (db/subject-sweep.ts, JUDGE_ALARM).`);
         return 3;
       }
     } catch (e) {
@@ -1263,10 +1289,11 @@ async function sweep(
     // model's runs started again unchecked, to trip again).
     const named = by.length ? by : [cfg.judgeModel];
     const heldNow = [...new Set([...w.held, ...named])];
-    // Each model the trip names held since its stamp, an earlier trip's kept for the rest (review pass 3, cold read).
-    const heldAt = Object.fromEntries(heldNow.map((m): [string, string] => [m, named.includes(m) ? stamp : (heldSince(w, m) ?? stamp)]));
+    // Each model the trip names stamped with it, an earlier trip's kept for the rest, held or lifted (review passes 3 and
+    // 4, cold read).
+    const namedAt = { ...Object.fromEntries(w.held.map((m): [string, string] => [m, heldSince(w, m) ?? stamp])), ...w.namedAt, ...Object.fromEntries(named.map((m): [string, string] => [m, stamp])) };
     const earlier = w.held.filter((m) => !named.includes(m));
-    await save({ pool: POOL, answers: [], tripped: stamp, by, held: heldNow, heldAt, back: [...back], nothing: judgeTrips(nothing) });
+    await save({ pool: POOL, answers: [], tripped: stamp, by, held: heldNow, namedAt, back: [...back], nothing: judgeTrips(nothing) });
     const gave = [unread ? `${unread} not JSON of the expected shape` : "", nothing ? `${nothing} naming nothing a key holds` : ""].filter(Boolean).join(", ");
     const models = by.length === 0 || (by.length === 1 && by[0] === cfg.judgeModel) ? cfg.judgeModel : `the answers giving no subject came from ${andList(by)}; this run's is ${cfg.judgeModel}`;
     return {
@@ -1317,6 +1344,16 @@ async function sweep(
     if (o.session !== undefined) await tx`SELECT set_config('statement_timeout', ${String(RELEASE_WAIT.ms)}, true)`;
     await tx`SELECT release_claims_for_worker(${POOL}, ${workerId})`;
   });
+  /**
+   * The claim in hand back in the pool where it stood, its attempt not counted (release_claims_for_worker's rule, for one
+   * thought): a provider's transient error's, so the claim after the pause takes it again, and --limit and the held
+   * line's offer count what was asked (review pass 4, cold read: at the pool's tail, the offered lift asked a backlog
+   * thought in its place, the alarm off, and --limit 1 sent up to four). False when the claim is no longer this worker's.
+   */
+  const putBack = async (id: string): Promise<boolean> => ((await sql`
+    UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
+     WHERE thought_id = ${id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed'
+    RETURNING 1 AS ok`) as { ok: number }[]).length > 0;
   // The stop, as the pass's (db/lease.ts's PassStop): the first after the thought in hand; the second the call in hand
   // too, returning the release of the claim in hand, which the CLI exits on (review pass 1: it returned at once, and
   // the CLI exited with the claim leased for its whole lease). A dry run writes nothing and asks nothing, and reads
@@ -1476,21 +1513,32 @@ async function sweep(
           : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
         return false;
       }
-      // The provider's transient error (ask): the thought goes back to the pool, behind those queued before it, its
-      // attempt not counted and its place under --limit given back, and the run pauses before its next claim, so the
-      // thought is claimed again through the admit gate, the pool's name, another run's trip and its own edits read as
-      // at any claim (review pass 3, cold read: held through the pause and a gate of its own, the claim needed its lease
-      // kept, read again and its losses counted apart). One edited and pooled again, or deleted, meanwhile is counted as
-      // a write would find it.
+      // The provider's transient error (ask): the thought goes back to the pool where it stood, its attempt not counted
+      // and its place under --limit given back, and the run pauses before its next claim, which takes it again through
+      // the admit gate, the pool's name, another run's trip and its own edits read as at any claim (review pass 3, cold
+      // read: held through the pause and a gate of its own, the claim needed its lease kept, read again and its losses
+      // counted apart). One no longer this worker's is the second stop's to hand back, uncounted (review pass 4, cold
+      // read: counted edited and seen); else it is counted by its claim: deleted; the pool's again, edited or requeued by
+      // hand, as edited mid-sweep; another run's, or ended by hand, as unanswered here and lost, no failure of this run's
+      // (review pass 4, run-it: each read edited).
       if ("transient" in a) {
         pauseMs = TRANSIENT_PAUSES_MS[transients++];
         try {
-          if (await setBack(sql, POOL, workerId, row.id)) {
+          if (await putBack(row.id)) {
             taken--;
             return { release: "none", again: true };
           }
-          if (((await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${row.id}::uuid) AS there`) as { there: boolean }[])[0].there) n.stale++;
-          else n.gone++;
+          if (hardStop.signal.aborted) return false;
+          const [claim] = (await sql`
+            SELECT c.status FROM thoughts t LEFT JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${POOL}
+             WHERE t.id = ${row.id}::uuid`) as { status: string | null }[];
+          if (claim === undefined) n.gone++;
+          else if (claim.status !== "claimed" && claim.status !== "succeeded" && claim.status !== "failed") n.stale++;
+          else {
+            n.unanswered++;
+            n.lost++;
+            n.lostFailed++;
+          }
         } catch (x) {
           if (!databaseUnavailable(x)) throw x;
           endedBy = { code: 1, line: databaseDown(x) };
@@ -1850,9 +1898,14 @@ async function sweep(
     // What this worker still holds goes back to the pool, its attempt not counted: a stop, an error, a database lost
     // (said there); any other failure is said here, the claims returning as their leases run out.
     if (!DRY_RUN) {
-      await releaseHeld().catch((e) => {
+      await releaseHeld().catch(async (e) => {
+        // The second stop's hand-back, landed, left this one nothing to hand back (review pass 4, cold read: this one's
+        // failure said the claims would go back as their leases ran out, though they were back).
+        if (hardRelease !== null && (await hardRelease) !== null) return;
         handedBack = false;
-        if (!databaseUnavailable(e)) err(`  the claims this run holds could not go back to the pool (${String((e as Error)?.message ?? e).slice(0, 200)}): each returns as its lease runs out`);
+        // Said, but when the run's end says the database already (review pass 4, run-it: after the provider's end, a
+        // hand-back the database cut off went unsaid, the claim leased to its end).
+        if (!databaseUnavailable(e) || !endedBy?.line.startsWith("\n  The database stopped answering")) err(`  the claims this run holds could not go back to the pool (${String((e as Error)?.message ?? e).slice(0, 200)}): each returns as its lease runs out`);
       });
     }
   }

@@ -3342,10 +3342,11 @@ another saying so. The first naming is
 refused while a login role that can capture — it reads `ob1_config`, without
 which 016's trigger refuses it already — cannot write the claims the trigger
 writes as it, which would fail its every capture. Each claim is one thought,
-leased for the limit a call and five minutes more, renewed before a call is asked
-again; a run that stops hands back what it holds, a second signal the claim in
-hand before the CLI exits, and a thought the provider stopped answering on goes to
-the end of the pool. A lease a gone worker ran out at its last attempt is failed by
+leased for the limit a call and five minutes more, a provider's transient error
+putting it back where it stood for the claim after the pause to take again; a run
+that stops hands back what it holds, a second signal the claim in hand before the
+CLI exits, and a thought the provider stopped answering on goes to the end of the
+pool. A lease a gone worker ran out at its last attempt is failed by
 the next claim, which the pool line counts and a run says, exit 1. Within one key the claims are disjoint while their leases
 hold — a naming leaves a live lease to its run, though an edit pools its thought
 again — and whatever the claims, the door's lock, its fingerprint check and its
@@ -3485,9 +3486,9 @@ outage, the provider's or the database's ends a following run as it ends any,
 exit 1, for its caller to start it again. `admit`, SMD-3379 PR 1b's gate, is
 awaited before the pool's lock and naming, with the caller's `signal`, which it
 needs, and before each claim, so a run waiting there holds no claim. A
-provider's transient error puts its thought back in the pool, its attempt not
-counted and its place under `--limit` given back, and the run pauses before its
-next claim, holding no claim, so the thought is claimed again through that gate,
+provider's transient error puts its thought back in the pool where it stood, its
+attempt not counted and its place under `--limit` given back, and the run pauses
+before its next claim, holding no claim, which takes it again through that gate,
 the pool's name, another run's trip and its own edits read as at any claim. A
 stop at the gate, or a gate answering after the stop, ends the run, nothing more
 named, pooled or claimed; a run the trip's hold keeps from starting is refused
@@ -3516,27 +3517,29 @@ budget, never marking its pool filled (6b's to exempt). `banner: false` leaves
 the start's lines out. No one is there to pass `--judge-checked` to a
 scheduler's run, so a trip holds the pool's following runs of each judge model
 its answers came from, beside an earlier trip's not lifted, kept in the window,
-each model with the stamp of the last trip that named it (`held`, `heldAt`): a
-following run whose judge model a trip holds does not start, exit 3
-(`judgeHeld`), until a run of that model with `--judge-checked --limit 1`, once
-it is checked, lifts the hold it read as it began (`heldSince`) — or with
-`--limit` the count of the last trip's hand-back still pending, which the held
-line offers, as the trip line did, to the models that trip named when its
-answers naming nothing tripped it by themselves (the window keeps the
-hand-back's ids), the lift putting those first in the pool again. The lift is
-said, under the window's lock, the trip's stamp and models kept and another
-model's hold standing; a trip naming its model since that run began refuses it,
-said, the run ending there, exit 3, nothing claimed. A run of another judge
-model is not held, and lifts nothing; the pool's key changing starts a window of
-the new pool's at its first answer, so a switch back finds no hold. A run by
-hand is told of the hold, and asks; its answers, tripping nothing, lift nothing;
-a run whose judge model the hold does not hold is told whose it is,
-`--judge-checked`'s lifting none of it, with its start's lines. Every answer
-counts in a following run as in a hand run (the maintainer's choice,
-2026-10-31): a pooling again — a rules version changed, the reasoning turned
-off, a pooling broken off or `subject_pool_filled` blanked — brings up together
-the thoughts the judge named nothing for, and 10 of them trip a judge that is
-right, a trip whose hold waits for the hand run the held line names.
+each model with the stamp of the last trip that named it, kept after its hold is
+lifted (`held`, `namedAt`): a following run whose judge model a trip holds does
+not start, exit 3 (`judgeHeld`), until a run of that model with `--judge-checked
+--limit 1`, once it is checked, lifts the hold it read as it began (`heldSince`,
+`namedSince`) — or with `--limit` the count of the last trip's hand-back still
+pending, which the held line offers, as the trip line did, to the models that
+trip named when its answers naming nothing tripped it by themselves (the window
+keeps the hand-back's ids), the lift putting those first in the pool again, one
+another transaction holds passed over. The lift is said, under the window's
+lock, the trip's stamp and models kept and another model's hold standing; a trip
+naming its model since that run began refuses it, its hold standing or lifted by
+another run since, said, the run ending there, exit 3, nothing claimed; a hold
+another run lifted since, on the trip it read, is said so, and the run goes on.
+A run of another judge model is not held, and lifts nothing; the pool's key
+changing starts a window of the new pool's at its first answer, so a switch back
+finds no hold. A run by hand is told of the hold, and asks; its answers,
+tripping nothing, lift nothing; a run whose judge model the hold does not hold
+is told whose it is, `--judge-checked`'s lifting none of it, with its start's
+lines. Every answer counts in a following run as in a hand run (the maintainer's
+choice, 2026-10-31): a pooling again — a rules version changed, the reasoning
+turned off, a pooling broken off or `subject_pool_filled` blanked — brings up
+together the thoughts the judge named nothing for, and 10 of them trip a judge
+that is right, a trip whose hold waits for the hand run the held line names.
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -6083,11 +6086,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1963 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1967 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1086 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 468 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 472 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
