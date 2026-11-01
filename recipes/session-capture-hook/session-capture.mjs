@@ -61,6 +61,8 @@
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
  *   bun session-capture.mjs --check                      # config + endpoint (warned if on a pre-v2.0.0 stack's legacy root or tier route) + key scope; writes nothing
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
+ *   bun session-capture.mjs --print-hook claude-code --claims   # the claims hook: renews a worktree's work claims while a session works (SMD-3602)
+ *   bun session-capture.mjs --renew-claims [--cwd <dir>] # renew the claims this worktree keeps tokens for, now
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
@@ -68,6 +70,9 @@
  *   { "url": "http://127.0.0.1:8010/mcp", "key": "<the raw capture key>" }
  * or several brains, each its own url and capture key (SMD-3313):
  *   { "brains": [{ "name": "stable", "url": "…/mcp", "key_file": "…" }, { "name": "canary", … }] }
+ * A brain's `claim_key` (or `claim_key_file`) is the key agents claim work
+ * with, which renews the claims whose tokens a worktree keeps in
+ * `.work-claims/` (SMD-3602).
  * State and log: ${XDG_STATE_HOME:-~/.local/state}/open-brain/session-capture/
  * (the first brain's; each brain after it under brains/<name>/, its own queue,
  * chains and log: a brain away delays no other).
@@ -415,26 +420,35 @@ export function loadBrains() {
   }
   const shared = sharedSettings(cfg);
   const keyOf = (b) => { const k = b.key || (b.key_file ? readFileSync(b.key_file, "utf8").trim() : ""); return k ? String(k) : ""; };
+  // The work claims' key (SMD-3602): the key an agent claims with, or one
+  // minted under its name, which renews the claims a worktree keeps tokens for.
+  const claimKeyOf = (b, where) => {
+    if (b.claim_key !== undefined && b.claim_key_file !== undefined) throw new Error(`${where} sets both "claim_key" and "claim_key_file" — give one`);
+    const k = b.claim_key || (b.claim_key_file ? readFileSync(b.claim_key_file, "utf8").trim() : "");
+    if ((b.claim_key !== undefined || b.claim_key_file !== undefined) && !k) throw new Error(`${where} has an empty claim key — give it the write key your agents claim with`);
+    return k ? String(k) : "";
+  };
   // One brain: the environment's url, or the file's one-brain shape. A brains
   // list beside OB1_BRAIN_URL is passed over for the variable's one brain, as the
   // variable has always won over the file's url.
   if (process.env.OB1_BRAIN_URL || cfg.brains === undefined) {
     const url = process.env.OB1_BRAIN_URL || cfg.url;
     const key = process.env.OB1_CAPTURE_KEY || keyOf(cfg);
+    const claimKey = process.env.OB1_CLAIM_KEY || claimKeyOf(cfg, CONFIG_PATH);
     // Before the missing-key error: a connector URL pasted with its ?key= and no
     // `key` is told where the key goes, not to write a url it already has.
     const endpoint = url ? endpointOf(url, urlSource()) : undefined;
     if (!endpoint || !key) {
       throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
     }
-    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...shared } }];
+    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...(claimKey ? { claimKey } : {}), ...shared } }];
   }
   // Several brains (SMD-3313). Each is named, once, as a directory may be; its
   // url and key are its own, never the file's top-level ones, which beside a
   // list would be a second answer to which brain is meant.
   const list = cfg.brains;
   if (!Array.isArray(list) || !list.length) throw new Error(`${CONFIG_PATH}'s "brains" is not a list of brains — write it as ${BRAINS_SHAPE}`);
-  for (const k of ["url", "key", "key_file"]) if (cfg[k] !== undefined) throw new Error(`${CONFIG_PATH} sets "${k}" beside "brains" — set each brain's url and key inside its own entry, as ${BRAINS_SHAPE}`);
+  for (const k of ["url", "key", "key_file", "claim_key", "claim_key_file"]) if (cfg[k] !== undefined) throw new Error(`${CONFIG_PATH} sets "${k}" beside "brains" — set each brain's url and key inside its own entry, as ${BRAINS_SHAPE}`);
   const seen = new Set();
   const seenConnectors = new Set();
   return list.map((b, i) => {
@@ -457,7 +471,8 @@ export function loadBrains() {
     if ((b.write_key !== undefined || b.write_key_file !== undefined) && !writeKey) throw new Error(`brain "${name}" in ${CONFIG_PATH} has an empty write key — mint one on that brain: bun server-portable/keygen.ts --name claude-code --scope write`);
     if (b.connector !== undefined && seenConnectors.has(b.connector)) throw new Error(`${CONFIG_PATH} names connector "${b.connector}" for two brains — a connector's writes reach one brain`);
     if (b.connector !== undefined) seenConnectors.add(b.connector);
-    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...shared } };
+    const claimKey = claimKeyOf(b, `brain "${name}" in ${CONFIG_PATH}`);
+    return { name, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...(claimKey ? { claimKey } : {}), ...shared } };
   });
 }
 
@@ -2796,6 +2811,185 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
   }
 }
 
+// ── Work claims (SMD-3602) ───────────────────────────────────────────────────
+//
+// An agent claims its ticket on the brain when it makes the branch
+// (claim_work, SMD-3598) and keeps the token in `.work-claims/<claim id>.json`
+// at its worktree's root, git-ignored, mode 600. The hook renews each claim
+// whose token the session's worktree holds, through the config's `claim_key`:
+// at a compaction and a session's end, and, with the `--claims` hook pasted,
+// every quarter lease while tools run and prompts arrive. It never claims (a
+// branch for a ticket and a scratch branch look alike) and never releases (a
+// session can end with its PR open): a claim ends at its release, or lapses
+// when nothing renews it.
+
+export const CLAIMS_DIRNAME = ".work-claims";
+const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
+const UUID_ONLY_RE = new RegExp(`^${UUID}$`, "i");
+/** The server's default lease (migration 115), which a renewal without lease_seconds sets. */
+const DEFAULT_LEASE_S = 14_400;
+/** How often a working session renews a claim: a quarter of its lease, between one minute and an hour. */
+export const renewEveryMs = (leaseS) => Math.min(60, Math.max(1, leaseS / 240)) * 60_000;
+/** A checkpoint renews whatever was not renewed in the last minute. */
+const CHECKPOINT_RENEW_MS = 60_000;
+const CLAIM_STATE_DIR = () => join(STATE_DIR, "claims");
+const claimStatePath = (id) => join(CLAIM_STATE_DIR(), `${id}.json`);
+function readClaimState(id) { try { return JSON.parse(readFileSync(claimStatePath(id), "utf8")); } catch { return {}; } }
+function writeClaimState(id, st) {
+  try { mkdirSync(CLAIM_STATE_DIR(), { recursive: true, mode: 0o700 }); writeFileSync(claimStatePath(id), JSON.stringify(st), { mode: 0o600 }); } catch { /* a stamp failure only means an earlier renewal */ }
+}
+
+/** The worktree holding `dir`: the nearest directory up with a `.git` (a checkout's directory, a worktree's file); null outside one. */
+export function worktreeRoot(dir) {
+  if (typeof dir !== "string" || !isAbsolute(dir)) return null;
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return d;
+    if (dirname(d) === d) return null;
+  }
+}
+
+/** The token files a worktree holds, by name: `{ path, claim }`, or `{ path, bad }` naming what is wrong — never the token. */
+export function claimFiles(root) {
+  const dir = join(root, CLAIMS_DIRNAME);
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  return names.filter((n) => n.endsWith(".json") && !n.endsWith(".ended.json")).sort().map((n) => {
+    const path = join(dir, n);
+    let c;
+    try { c = JSON.parse(readFileSync(path, "utf8")); } catch { return { path, bad: "not JSON" }; }
+    if (!c || typeof c !== "object" || Array.isArray(c)) return { path, bad: "not a JSON object" };
+    if (typeof c.id !== "string" || !UUID_ONLY_RE.test(c.id)) return { path, bad: `no claim id (a uuid) in "id"` };
+    if (typeof c.token !== "string" || !CLAIM_TOKEN_RE.test(c.token)) return { path, bad: `no token (wc_ and 64 hex digits) in "token"` };
+    if (c.lease_seconds != null && !(Number.isInteger(c.lease_seconds) && c.lease_seconds >= 60 && c.lease_seconds <= 604_800)) return { path, bad: `a "lease_seconds" that is not 60 to 604800` };
+    if (c.server != null && !(typeof c.server === "string" && CONNECTOR_RE.test(c.server))) return { path, bad: `a "server" that is no MCP server's name` };
+    const text = (v) => (typeof v === "string" && v.trim() ? oneLine(v).slice(0, 100) : undefined);
+    return { path, claim: { id: c.id.toLowerCase(), token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server ?? undefined } };
+  });
+}
+
+/** A claim as the log names it: its work and its id, never its token. */
+const claimLabel = (c) => `${c.ticket ? `${c.ticket}${c.piece ? ` ${c.piece}` : ""} ` : ""}(claim ${c.id})`;
+
+/**
+ * The brain a claim is renewed on: the one whose `connector` is the claim's
+ * `server`, or, with no server named, the one brain with a `claim_key`.
+ * `{ brain }` or `{ skip }` saying why none.
+ */
+function brainForClaim(claim, brains) {
+  const keyed = brains.filter((b) => b.cfg.claimKey);
+  if (claim.server) {
+    const b = keyed.find((x) => x.cfg.connector === claim.server);
+    return b ? { brain: b } : { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" and a claim_key` };
+  }
+  if (keyed.length === 1) return { brain: keyed[0] };
+  return { skip: keyed.length ? `several brains have a claim_key (${keyed.map((b) => b.name).join(", ")}) — name the brain's MCP server as "server" in the token file` : `no brain in ${CONFIG_PATH} has a claim_key` };
+}
+
+/**
+ * One renewal through the brain's claim key. `ok` with the new expiry; `ended`
+ * — the claim was released, or lapsed and another claim took its work (stop
+ * work on it); `keep` — anything else: the brain away, the registry away, a
+ * key that is not the holder's, a claim this brain does not have. Each with a
+ * line for the log, which names the claim and never its token.
+ */
+export async function renewClaim(cfg, claim) {
+  const what = claimLabel(claim);
+  let result;
+  try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "renew_claim", arguments: { id: claim.id, token: claim.token, ...(claim.lease ? { lease_seconds: claim.lease } : {}) } }, 15_000); }
+  catch (e) { return { keep: true, line: `kept: ${what} — ${oneLine(String(e?.message ?? e)).slice(0, 200)}` }; }
+  const text = textOfResult(result);
+  if (!result?.isError) {
+    const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
+    return { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
+  }
+  const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
+  const said = oneLine(text).slice(0, 300);
+  if (SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) return { keep: true, line: `kept: ${what} — the claim key cannot call renew_claim: a key without write scope, or a brain from before SMD-3598` };
+  if (code === "CLAIM_RELEASED" || code === "WORK_CLAIMED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
+  if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the key the agent claimed with, or one minted under its name)"}` };
+  if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (claimed on another brain? name its MCP server as "server" in the token file)` };
+  return { keep: true, line: `kept: ${what} — ${said}` };
+}
+
+/**
+ * An ended claim's token file becomes `<name>.ended.json`: the work, the code
+ * and the brain's words, the token dropped — it proves nothing now. Only when
+ * the file still holds the token renewed: one the agent rewrote meanwhile is
+ * left alone.
+ */
+function endClaimFile(path, claim, ended) {
+  try {
+    const now = JSON.parse(readFileSync(path, "utf8"));
+    if (String(now?.token ?? "").toLowerCase() !== claim.token) return;
+    writeFileSync(path.replace(/\.json$/, ".ended.json"), `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, ended: { ...ended, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600 });
+    unlinkSync(path);
+  } catch { /* gone or unreadable: the next run reads it again */ }
+}
+
+async function renewOne(b, path, claim) {
+  useStateRoot(b.root);
+  const o = await renewClaim(b.cfg, claim);
+  if (o.ended) { endClaimFile(path, claim, o.ended); try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
+  else writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
+  let open = "";
+  try { if (process.platform !== "win32" && existsSync(path) && statSync(path).mode & 0o077) open = ` (its token file is readable by others — chmod 600 ${path})`; } catch { /* gone */ }
+  o.line += open;
+  log(`claims: ${o.line}`);
+  return o;
+}
+
+/**
+ * Renew the claims whose tokens the worktree holding `cwd` keeps: those due —
+ * a quarter lease since the last attempt, or, with `force` (a checkpoint), a
+ * minute — or, with `now` (a run by hand, the hook's child), every claim, or
+ * the files `only` names. Each is stamped before its call, so a second event
+ * at the same moment finds it not due. A file that cannot be renewed
+ * (unreadable, no brain for it) is logged under `force` or `now` alone: a
+ * quiet hook on every tool would log it every time. With `detach` the calls go
+ * to a child, as the capture's do. Returns the outcomes.
+ */
+export async function renewClaims(cwd, brains, { force = false, now: atOnce = false, detach = false, only } = {}) {
+  const root = worktreeRoot(cwd);
+  if (!root) return [];
+  const now = Date.now();
+  const work = [], outcomes = [];
+  const skip = (line) => { outcomes.push({ skipped: true, line }); if (force || atOnce) { useStateRoot(brains[0].root); log(`claims: ${line}`); } };
+  for (const f of claimFiles(root)) {
+    if (only && !only.includes(f.path)) continue;
+    if (f.bad) { skip(`skipped ${f.path}: ${f.bad}`); continue; }
+    const { brain, skip: why } = brainForClaim(f.claim, brains);
+    if (!brain) { skip(`skipped ${claimLabel(f.claim)}: ${why}`); continue; }
+    useStateRoot(brain.root);
+    const st = readClaimState(f.claim.id);
+    if (!atOnce && now - (st.at ?? 0) < (force ? CHECKPOINT_RENEW_MS : renewEveryMs(f.claim.lease ?? DEFAULT_LEASE_S))) continue;
+    writeClaimState(f.claim.id, { ...st, at: now });
+    work.push({ brain, f });
+  }
+  if (!work.length) return outcomes;
+  if (detach) {
+    useStateRoot(work[0].brain.root);
+    ensureDirs();
+    const fd = openSync(LOG_PATH(), "a", 0o600);
+    const child = spawn(process.execPath, [SELF, "--renew-claims", "--cwd", root, ...work.flatMap((w) => ["--file", w.f.path])], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
+    child.unref();
+    closeSync(fd);
+    return [...outcomes, { detached: child.pid }];
+  }
+  for (const { brain, f } of work) outcomes.push(await renewOne(brain, f.path, f.claim));
+  return outcomes;
+}
+
+/** --check's line for a brain with a claim key: that it can renew. Returns the exit code. */
+async function checkClaims(brain, tag) {
+  const cfg = brain.cfg;
+  if (!cfg.claimKey) return 0;
+  let names;
+  try { names = ((await rpc({ ...cfg, key: cfg.claimKey }, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name); } catch (e) { console.error(`session-capture: ${tag}the claim key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
+  if (!names.includes("renew_claim")) { console.error(`session-capture: ${tag}the claim key cannot call renew_claim — ${names.includes("list_claims") || names.includes("capture_thought") ? "give claim_key the write key your agents claim with" : "this brain's server is from before SMD-3598: upgrade it"}`); return 1; }
+  console.log(`${tag}claim key: ok — it can renew claims. The claims renewed are those whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/; the key must be the one the agent claimed with, or one minted under its name`);
+  return 0;
+}
+
 // ── Hook JSON to paste ───────────────────────────────────────────────────────
 
 /** A path as a shell word: quoted when it carries anything the shell would split or expand. */
@@ -2845,6 +3039,17 @@ export function fanOutHookJson({ connector = "open-brain", runtime } = {}) {
   if (!CONNECTOR_RE.test(connector)) throw new Error(`fanOutHookJson: "${connector}" is no MCP server's name`);
   const cmd = [shellWord(runtime || process.execPath), shellWord(SELF)].join(" ");
   return { hooks: { PostToolUse: [{ matcher: `^mcp__${connector}__(${FANOUT_TOOLS.join("|")})$`, hooks: [{ type: "command", command: cmd, async: true }] }] } };
+}
+
+/**
+ * The claims hook's settings JSON (SMD-3602): `--claims` on every tool's
+ * PostToolUse and on each prompt, async, so a renewal never holds the session.
+ * The flag keeps it apart from the fan-out's PostToolUse, which would
+ * otherwise copy a write twice, and from the capture.
+ */
+export function claimsHookJson({ runtime } = {}) {
+  const hook = { type: "command", command: [shellWord(runtime || process.execPath), shellWord(SELF), "--claims"].join(" "), async: true };
+  return { hooks: { PostToolUse: [{ matcher: "*", hooks: [hook] }], UserPromptSubmit: [{ hooks: [hook] }] } };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -2928,6 +3133,15 @@ export async function main(argv) {
     if (modeError) { console.error(modeError); return 2; } // a by-hand form, exit 2 as on a bad flag (first review pass: the one path that let a typo by)
     const h = flag(args, "--print-hook") || "claude-code";
     if (!HARNESSES.includes(h)) { console.error(`--print-hook takes ${HARNESSES.join(" or ")}, not "${h}"`); return 2; }
+    // The claims hook (SMD-3602): Claude Code's async PostToolUse and
+    // UserPromptSubmit, renewing the claims a session's worktree holds tokens for.
+    if (has(args, "--claims")) {
+      if (h !== "claude-code") { console.error(`--claims is Claude Code's: ${HARNESS[h].label} has no async hook. Its agent renews with renew_claim itself, and its session hook renews at each event it fires`); return 2; }
+      for (const f of ["--event", "--min-interval", "--trigger", "--fan-out", "--connector"]) if (has(args, f)) { console.error(`${f} is not --claims's; --claims prints the claims hook alone`); return 2; }
+      console.error(`# Paste into ${HARNESS[h].settings} — this prints the hook, it installs nothing. It renews the claims whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/, through the config's claim_key.`);
+      console.log(JSON.stringify(claimsHookJson(), null, 2));
+      return 0;
+    }
     // The write fan-out's hook (SMD-3314): Claude Code's async PostToolUse, for
     // the connector the config names on a brain (or --connector, or open-brain).
     if (has(args, "--fan-out")) {
@@ -2973,9 +3187,25 @@ export async function main(argv) {
       useStateRoot(b.root);
       const tag = brains.length > 1 ? `[${b.name}] ` : "";
       const c = await checkBrain(b.cfg, tag, onSecret);
-      code = Math.max(code, c, await checkWrites(b, brains, tag));
+      code = Math.max(code, c, await checkWrites(b, brains, tag), await checkClaims(b, tag));
     }
     return code;
+  }
+  if (has(args, "--renew-claims")) {
+    // The claims a worktree keeps tokens for, renewed now: by hand (the
+    // current directory's worktree, or --cwd's), or as the hook's child, told
+    // which files it stamped (SMD-3602).
+    let brains;
+    try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
+    const files = flagAll(args, "--file").filter(Boolean);
+    const cwd = flag(args, "--cwd") || process.cwd();
+    const dir = isAbsolute(cwd) ? cwd : join(process.cwd(), cwd);
+    const outcomes = await renewClaims(dir, brains, { now: true, ...(files.length ? { only: files } : {}) });
+    if (process.stdout.isTTY || !files.length) {
+      if (!outcomes.length) console.log(`no claims to renew: ${worktreeRoot(dir) ? `no token files in ${join(worktreeRoot(dir), CLAIMS_DIRNAME)}/` : "not inside a git worktree"}`);
+      for (const o of outcomes) console.log(o.line);
+    }
+    return outcomes.some((o) => !o.ok && !o.ended) ? 1 : 0;
   }
   if (has(args, "--drain-writes")) {
     // A brain's queue of copied writes, by hand or as the hook's child (SMD-3314).
@@ -3077,7 +3307,7 @@ export async function main(argv) {
   // misspelt `--min-intervall` that would capture every turn — would change
   // nothing and say nothing (fourth and fifth review passes). Exit 1, never 2:
   // a Stop hook's 2 blocks the turn.
-  const HOOK_FLAGS = ["--harness", "--min-interval"];
+  const HOOK_FLAGS = ["--harness", "--min-interval", "--claims"];
   for (const a of args) {
     if (!a.startsWith("--") || HOOK_FLAGS.includes(a.split("=")[0])) continue;
     const name = a.split("=")[0];
@@ -3096,8 +3326,16 @@ export async function main(argv) {
   // appears (fifth review pass).
   let brains;
   try { brains = loadBrains(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  const event = String(hook.hook_event_name ?? "");
+  const sync = process.env.OB1_SESSION_CAPTURE_SYNC === "1";
+  // The claims hook (SMD-3602): renew what is due, nothing captured or copied.
+  // Exit 0 whatever happens: a renewal's fate is the log's.
+  if (has(args, "--claims")) {
+    try { await renewClaims(hook.cwd, brains, { detach: !sync }); } catch (e) { useStateRoot(brains[0].root); log(`claims: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
+    return 0;
+  }
   // A write tool's result (SMD-3314): copied to the other brains, nothing captured.
-  if (String(hook.hook_event_name ?? "") === "PostToolUse") return fanOutHook(hook, brains);
+  if (event === "PostToolUse") return fanOutHook(hook, brains);
   // Each brain prepares from its own state and posts in a child of its own
   // (SMD-3313): its chains supersede its own ids, its queue waits for it alone,
   // and one away delays no other. One brain says what it always said; several
@@ -3109,7 +3347,13 @@ export async function main(argv) {
     code = Math.max(code, await hookForBrain(hook, b, several, { minIntervalMin, harness, onSecret }));
   }
   // Copies a drain left behind (their brain away) get another drain at every session event.
-  await kickWriteDrains(brains, { atEnd: String(hook.hook_event_name ?? "") === "SessionEnd" });
+  await kickWriteDrains(brains, { atEnd: event === "SessionEnd" });
+  // The session's claims (SMD-3602): renewed at a compaction and at its end —
+  // never released there, as its PR may still be open — and, on a Stop hook's
+  // turn, when due. Not on an event this hook does not capture on.
+  if (!event || eventSpec(event)) {
+    try { await renewClaims(hook.cwd, brains, { force: !eventSpec(event)?.interval, detach: !sync }); } catch (e) { useStateRoot(brains[0].root); log(`claims: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
+  }
   return code;
 }
 

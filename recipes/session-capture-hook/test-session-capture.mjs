@@ -23,7 +23,7 @@
  * quoting it (SMD-2743).
  */
 
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync, chmodSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -3075,6 +3075,249 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   await runHook({ session_id: "s-fan-end", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, env);
   assert(calls.some((c) => c.name === "capture_thought" && c.args.client_key === S(10)) && !queueIn().length && !existsSync(join(CANARY_ROOT, "writes", "held")), "…a session's end drains it at once, and the stamp goes");
   canary.stop(true);
+}
+
+console.log("\n[13] Work claims: the hook renews each claim whose token the session's worktree keeps in .work-claims/, through the config's claim_key — when due, at a checkpoint, never releasing; an ended claim's file loses its token (SMD-3602)");
+{
+  // A brain with claims as migration 115 answers them through renew_claim:
+  // "claim-key" is the holder's key, "other-claim-key" another agent's,
+  // "cap-key" sees capture_thought alone. A claim is live, released or taken over.
+  const calls = [];
+  const claims = new Map(); // id → { token, state }
+  let away = false;
+  const claimsBrain = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+    if (away) return new Response("Bad Gateway", { status: 502 });
+    const body = await req.json();
+    const envelope = (payload) => ({ jsonrpc: "2.0", id: body.id, ...payload });
+    const key = req.headers.get("x-brain-key");
+    const surface = key === "claim-key" || key === "other-claim-key" ? ["capture_thought", "claim_work", "renew_claim", "release_claim", "list_claims"] : key === "cap-key" ? ["capture_thought"] : null;
+    if (!surface) return Response.json(envelope({ error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } }));
+    if (body.method === "tools/list") return Response.json(envelope({ result: { tools: surface.map((name) => ({ name, inputSchema: { type: "object" } })) } }));
+    const { name, arguments: args } = body.params;
+    calls.push({ name, key, args: structuredClone(args) });
+    if (!surface.includes(name)) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } }));
+    const err = (text, sc) => Response.json(envelope({ result: { isError: true, content: [{ type: "text", text }], structuredContent: { retryable: false, ...sc, text } } }));
+    if (name === "capture_thought") return Response.json(envelope({ result: { content: [{ type: "text", text: `Captured as idea — id ${uuid(8800)}` }], structuredContent: { id: uuid(8800) } } }));
+    const c = claims.get(args.id);
+    if (!c) return err(`Refused: no claim ${args.id}.`, { code: "CLAIM_NOT_FOUND", id: args.id });
+    if (key !== "claim-key") return err(`Refused: claim ${args.id} is held by claude-code, not by this key with this token.`, { code: "CLAIM_NOT_YOURS", id: args.id, holder: "claude-code", forced: false, ownKey: false });
+    if (args.token !== c.token) return err(`Refused: claim ${args.id} is held by your own key (claude-code) under a token this call did not give.`, { code: "CLAIM_NOT_YOURS", id: args.id, holder: "claude-code", forced: false, ownKey: true });
+    if (c.state === "released") return err(`Refused: claim ${args.id} was released by claude-code at 2026-11-01T00:00:00Z ("OB1 PR 600"); if the work is still yours to do, claim it again.`, { code: "CLAIM_RELEASED", id: args.id, takenOver: false });
+    if (c.state === "taken") return err(`Refused: claim ${args.id} lapsed and was taken over by codex at 2026-11-01T00:00:00Z: stop work on it; list_claims shows the claim that holds the work now.`, { code: "CLAIM_RELEASED", id: args.id, takenOver: true });
+    const expiresAt = new Date(Date.now() + (args.lease_seconds ?? 14_400) * 1000).toISOString();
+    return Response.json(envelope({ result: { content: [{ type: "text", text: `Renewed your claim on SMD-9001 until ${expiresAt} (claim ${args.id}).` }], structuredContent: { claim: { id: args.id, issue: "SMD-9001", piece: null, expiresAt } } } }));
+  } });
+  const CLAIMS_URL = `http://127.0.0.1:${claimsBrain.port}/`;
+  const tok = (n) => `wc_${String(n).repeat(64).slice(0, 64)}`;
+  const C = (n) => uuid(8000 + n);
+  // A worktree: a .git file at its root, as a linked worktree has, and a subdirectory the session works in.
+  const WT = join(TMP, "wt");
+  const SUB = join(WT, "server-portable");
+  const CLAIMS = join(WT, ".work-claims");
+  mkdirSync(SUB, { recursive: true });
+  mkdirSync(CLAIMS, { recursive: true });
+  writeFileSync(join(WT, ".git"), "gitdir: /elsewhere/.git/worktrees/wt\n");
+  const putClaim = (n, extra = {}, state = "live") => {
+    claims.set(C(n), { token: tok(n), state });
+    const p = join(CLAIMS, `${C(n)}.json`);
+    writeFileSync(p, JSON.stringify({ id: C(n), token: tok(n), ticket: "SMD-9001", ...extra }), { mode: 0o600 });
+    return p;
+  };
+  const clearClaims = () => { for (const f of readdirSync(CLAIMS)) rmSync(join(CLAIMS, f)); };
+  const CLAIM_CFG = join(TMP, "claims.json");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  const env = { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG };
+  const claimsHook = (extra = {}, envOver = {}) => runHook({ session_id: "s-claims", hook_event_name: "PostToolUse", tool_name: "Bash", cwd: SUB, ...extra }, { ...env, ...envOver }, ["--claims"]);
+  const logText = () => (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "");
+  const stateOf = (n) => { try { return JSON.parse(readFileSync(join(STATE, "claims", `${C(n)}.json`), "utf8")); } catch { return null; } };
+  const age = (n, minutes) => writeFileSync(join(STATE, "claims", `${C(n)}.json`), JSON.stringify({ ...stateOf(n), at: Date.now() - minutes * 60_000 }));
+  const renews = () => calls.filter((c) => c.name === "renew_claim");
+  const { worktreeRoot, claimFiles, renewEveryMs, claimsHookJson } = await import(SCRIPT);
+
+  assert(worktreeRoot(SUB) === WT && worktreeRoot(WT) === WT && worktreeRoot(TMP) === null && worktreeRoot("relative/path") === null,
+    "the worktree is the nearest directory up with a .git — file or directory; none outside one, nor for a relative path");
+  assert(renewEveryMs(14_400) === 3_600_000 && renewEveryMs(600) === 150_000 && renewEveryMs(60) === 60_000 && renewEveryMs(604_800) === 3_600_000,
+    "a claim is renewed every quarter lease: hourly on the default four hours, never under a minute or over an hour");
+
+  // The token files: good ones read, an ended one passed over, a bad one named without its token.
+  putClaim(1);
+  writeFileSync(join(CLAIMS, "junk.json"), "{ not json");
+  writeFileSync(join(CLAIMS, "short.json"), JSON.stringify({ id: C(2), token: "wc_abc" }));
+  writeFileSync(join(CLAIMS, "lease.json"), JSON.stringify({ id: C(3), token: tok(3), lease_seconds: 30 }));
+  writeFileSync(join(CLAIMS, `${C(4)}.ended.json`), JSON.stringify({ id: C(4), ended: {} }));
+  const read = claimFiles(WT);
+  assert(read.length === 4 && read.filter((f) => f.claim).length === 1 && read.find((f) => f.claim)?.claim.token === tok(1) && /not JSON/.test(read.find((f) => f.path.endsWith("junk.json")).bad)
+    && /no token/.test(read.find((f) => f.path.endsWith("short.json")).bad) && /lease_seconds/.test(read.find((f) => f.path.endsWith("lease.json")).bad) && !read.some((f) => f.path.endsWith(".ended.json")),
+    "claimFiles reads a token file, passes an .ended.json over, and names what is wrong with a bad one");
+  clearClaims();
+
+  // The --claims hook renews a due claim once, stamps it, and a second event at once finds it not due.
+  const p1 = putClaim(1);
+  calls.length = 0;
+  const r1 = await claimsHook();
+  assert(r1.code === 0 && renews().length === 1 && renews()[0].key === "claim-key" && renews()[0].args.id === C(1) && renews()[0].args.token === tok(1) && renews()[0].args.lease_seconds === undefined,
+    "the --claims hook renews the worktree's claim through the claim key, with its id and token, the lease the server's default");
+  assert(Number.isFinite(stateOf(1)?.ok) && typeof stateOf(1)?.expiresAt === "string" && existsSync(p1), "…records when it renewed and the new expiry, the token file left as it was");
+  assert(!calls.some((c) => c.name === "capture_thought"), "…and captures nothing");
+  await claimsHook();
+  assert(renews().length === 1, "a second event inside the quarter lease renews nothing");
+  age(1, 61);
+  await claimsHook({ hook_event_name: "UserPromptSubmit", tool_name: undefined });
+  assert(renews().length === 2, "past the quarter lease, the next event renews it — a prompt as well as a tool");
+  assert(!logText().includes(tok(1)) && /claims: renewed SMD-9001 \(claim [0-9a-f-]{36}\) until /.test(logText()), "the log names the work and the claim, never the token");
+
+  // A lease the file names is the one renewed, and its quarter the interval.
+  clearClaims();
+  putClaim(5, { lease_seconds: 600 });
+  calls.length = 0;
+  await claimsHook();
+  age(5, 2);
+  await claimsHook();
+  age(5, 3);
+  await claimsHook();
+  assert(renews().length === 2 && renews()[0].args.lease_seconds === 600, `a file's lease_seconds is renewed as given, every quarter of it (${renews().length} renewals)`);
+
+  // A checkpoint renews what was not renewed in the last minute; a Stop turn only what is due.
+  clearClaims();
+  putClaim(6);
+  calls.length = 0;
+  await claimsHook();
+  age(6, 2);
+  await runHook({ session_id: "s-claims-stop", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "Stop" }, env);
+  assert(renews().length === 1, "a Stop turn inside the quarter lease renews nothing");
+  await runHook({ session_id: "s-claims-cp", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "PreCompact", trigger: "auto" }, env);
+  assert(renews().length === 2 && calls.some((c) => c.name === "capture_thought"), "a compaction captures and renews the claim, two minutes after the last renewal");
+  await runHook({ session_id: "s-claims-end", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
+  assert(renews().length === 2, "…and a session's end a moment later renews nothing again — inside the minute");
+  age(6, 2);
+  await runHook({ session_id: "s-claims-end2", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
+  assert(renews().length === 3 && !calls.some((c) => c.name === "release_claim") && existsSync(join(CLAIMS, `${C(6)}.json`)), "a session's end renews the claim and never releases it: the PR may still be open");
+  age(6, 61);
+  await runHook({ session_id: "s-claims-sub", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SubagentStop" }, env);
+  assert(renews().length === 3, "an event the hook does not capture on renews nothing without --claims, the claim due as it is");
+
+  // A claim released, or taken over after it lapsed: its file becomes .ended.json, the token gone.
+  clearClaims();
+  putClaim(7, { piece: "PR 2" }, "released");
+  putClaim(8, {}, "taken");
+  calls.length = 0;
+  await claimsHook();
+  const endedOf = (n) => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(n)}.ended.json`), "utf8")); } catch { return null; } };
+  const ended7 = endedOf(7), ended8 = endedOf(8);
+  assert(!existsSync(join(CLAIMS, `${C(7)}.json`)) && ended7?.ended.code === "CLAIM_RELEASED" && ended7.piece === "PR 2" && !JSON.stringify(ended7).includes("wc_") && /was released by/.test(ended7.ended.message),
+    "a released claim's token file becomes .ended.json: the work, the code and the brain's words, no token");
+  assert(/taken over by codex/.test(ended8?.ended.message) && !JSON.stringify(ended8).includes("wc_") && stateOf(8) === null, "…and so does a claim taken over, saying who took it; its renewal state goes");
+  assert(/claims: ended: SMD-9001 PR 2 \(claim [0-9a-f-]{36}\) — Refused: claim .* was released/.test(logText()), "the log says it ended and why");
+  await claimsHook({}, {});
+  assert(renews().length === 2, "an ended claim is not renewed again");
+
+  // Kept: the brain away, a token the brain does not match, another key, a claim on another brain.
+  clearClaims();
+  const kept = putClaim(9);
+  calls.length = 0;
+  away = true;
+  await claimsHook();
+  away = false;
+  assert(existsSync(kept) && /claims: kept: SMD-9001 \(claim [0-9a-f-]{36}\) — /.test(logText()) && stateOf(9)?.ok === undefined, "the brain away: the claim is kept, its token file as it was, the attempt stamped");
+  claims.get(C(9)).token = tok(0);
+  age(9, 61);
+  await claimsHook();
+  assert(existsSync(kept) && /held by your own key/.test(logText().split("\n").filter(Boolean).pop()), "a token the brain does not match is kept, with the brain's words");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "other-claim-key" }), { mode: 0o600 });
+  age(9, 61);
+  await claimsHook();
+  assert(/claim_key must be the key the agent claimed with/.test(logText().split("\n").filter(Boolean).pop()), "a claim key that is not the holder's is kept, and the log says which key it must be");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  claims.delete(C(9));
+  age(9, 61);
+  await claimsHook();
+  assert(existsSync(kept) && /claimed on another brain\?/.test(logText().split("\n").filter(Boolean).pop()), "a claim this brain does not have is kept: it may be another brain's");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
+  claims.set(C(9), { token: tok(9), state: "live" });
+  age(9, 61);
+  await claimsHook();
+  assert(/the claim key cannot call renew_claim/.test(logText().split("\n").filter(Boolean).pop()), "a claim key that cannot renew is named");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+
+  // A token file others can read is renewed, and the log says to chmod it.
+  clearClaims();
+  const open = putClaim(10);
+  chmodSync(open, 0o644);
+  await claimsHook();
+  assert(/its token file is readable by others — chmod 600/.test(logText().split("\n").filter(Boolean).pop()), "a token file readable by others is renewed, and the log says to chmod 600 it");
+  clearClaims();
+
+  // No claim key, or no worktree: nothing called, nothing said on a quiet event; a checkpoint names the file it could not renew.
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key" }), { mode: 0o600 });
+  putClaim(11);
+  calls.length = 0;
+  const before = logText().length;
+  await claimsHook();
+  assert(!renews().length && logText().length === before, "with no claim key a quiet event renews nothing and logs nothing");
+  await runHook({ session_id: "s-claims-nokey", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
+  assert(!renews().length && /claims: skipped SMD-9001 \(claim [0-9a-f-]{36}\): no brain in .* has a claim_key/.test(logText()), "…and a checkpoint logs why the claim was not renewed");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  await claimsHook({ cwd: TMP });
+  await claimsHook({ cwd: undefined });
+  assert(!renews().length, "a session outside any worktree, or with no cwd, renews nothing");
+  clearClaims();
+
+  // Several brains: the claim's "server" picks the brain whose connector it is; with none named and two claim keys, none.
+  const MULTI_CFG = join(TMP, "claims-multi.json");
+  writeFileSync(MULTI_CFG, JSON.stringify({ brains: [
+    { name: "stable", url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claim_key: "claim-key" },
+    { name: "canary", url: CLAIMS_URL, key: "cap-key", connector: "open-brain-canary", claim_key: "other-claim-key", write_key: "claim-key" },
+  ] }), { mode: 0o600 });
+  putClaim(12);
+  calls.length = 0;
+  await runHook({ session_id: "s-claims-multi", hook_event_name: "SessionEnd", cwd: SUB }, { ...env, OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG });
+  assert(!renews().length && /several brains have a claim_key \(stable, canary\)/.test(logText()), "two brains with claim keys and no server named: the claim is not renewed, and a checkpoint says to name it");
+  clearClaims();
+  putClaim(13, { server: "open-brain" });
+  await claimsHook({ tool_name: "mcp__open-brain__capture_thought", tool_input: { content: "x" }, tool_response: [{ type: "text", text: `Captured as idea — id ${uuid(8801)}` }] }, { OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG });
+  assert(renews().length === 1 && renews()[0].key === "claim-key" && !calls.some((c) => c.name === "capture_thought"),
+    "\"server\" names the brain by its connector; and a --claims run on a write tool copies nothing (the fan-out's own hook does that)");
+  clearClaims();
+
+  // Detached: as a hook without the sync switch, the renewal is a child's and the hook returns at once.
+  putClaim(14);
+  calls.length = 0;
+  const det = await claimsHook({}, { OB1_SESSION_CAPTURE_SYNC: "" });
+  for (let i = 0; i < 100 && !renews().length; i++) await sleep(50);
+  for (let i = 0; i < 100 && !Number.isFinite(stateOf(14)?.ok); i++) await sleep(50);
+  assert(det.code === 0 && det.ms < 2000 && renews().length === 1 && Number.isFinite(stateOf(14)?.ok), `as a hook, the renewal is posted by a detached child and the hook returns at once (${det.ms} ms)`);
+
+  // By hand: --renew-claims renews the worktree's claims now and prints what happened.
+  const byHand = await spawnScript(["--renew-claims", "--cwd", SUB], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(byHand.code === 0 && renews().length === 2 && /^renewed SMD-9001 \(claim [0-9a-f-]{36}\) until /m.test(byHand.out) && !byHand.out.includes("wc_"), `--renew-claims renews now, by hand, and prints it without the token (${byHand.out.trim()})`);
+  const nowhere = await spawnScript(["--renew-claims", "--cwd", TMP], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(nowhere.code === 0 && /not inside a git worktree/.test(nowhere.out), "…and outside a worktree says so");
+  clearClaims();
+
+  // The hook to paste, the check and the config.
+  const ph = await spawnScript(["--print-hook", "claude-code", "--claims"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  const printed = JSON.parse(ph.out).hooks;
+  assert(ph.code === 0 && printed.PostToolUse[0].matcher === "*" && printed.PostToolUse[0].hooks[0].async === true && / --claims$/.test(printed.PostToolUse[0].hooks[0].command)
+    && printed.UserPromptSubmit[0].hooks[0].async === true && !ph.out.includes("claim-key") && JSON.stringify(claimsHookJson({ runtime: "/b/bun" })).includes("/b/bun"),
+    "--print-hook --claims prints async PostToolUse (every tool) and UserPromptSubmit hooks running --claims, no key");
+  const phCodex = await spawnScript(["--print-hook", "codex", "--claims"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  const phMixed = await spawnScript(["--print-hook", "claude-code", "--claims", "--event", "Stop"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(phCodex.code === 2 && /renews with renew_claim itself/.test(phCodex.err) && phMixed.code === 2, "Codex, and --claims beside a session hook's flag, are refused");
+  const ck = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(ck.code === 0 && /claim key: ok — it can renew claims/.test(ck.out), "--check says the claim key can renew");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
+  const ckCap = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(ckCap.code === 1 && /the claim key cannot call renew_claim — give claim_key the write key your agents claim with/.test(ckCap.err), "…and fails a claim key that cannot");
+  const KEYFILE = join(TMP, "claim.key");
+  writeFileSync(KEYFILE, "claim-key\n", { mode: 0o600 });
+  const cfgErr = async (cfg) => { writeFileSync(CLAIM_CFG, JSON.stringify(cfg), { mode: 0o600 }); const r = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } }); return r.code === 2 ? r.err : ""; };
+  assert(/sets both "claim_key" and "claim_key_file"/.test(await cfgErr({ url: CLAIMS_URL, key: "cap-key", claim_key: "k", claim_key_file: KEYFILE })), "a config giving claim_key and claim_key_file is refused");
+  assert(/brain "stable" .* has an empty claim key/.test(await cfgErr({ brains: [{ name: "stable", url: CLAIMS_URL, key: "cap-key", claim_key: "" }] })), "…and an empty claim key");
+  assert(/sets "claim_key" beside "brains"/.test(await cfgErr({ claim_key: "k", brains: [{ name: "stable", url: CLAIMS_URL, key: "cap-key" }] })), "…and a claim key beside a brains list");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key_file: KEYFILE }), { mode: 0o600 });
+  const ckFile = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(ckFile.code === 0 && /claim key: ok/.test(ckFile.out), "a claim_key_file is read, its newline trimmed");
+  claimsBrain.stop(true);
 }
 
 assert(slowForgotten === 0, `every slow post was let through by its case, none by the gate's 10 s fallback (${slowForgotten} by the fallback) (SMD-3197)`);

@@ -18,6 +18,9 @@ __pycache__/
 .env.*.local
 credentials.json
 token.json
+# An agent's work-claim tokens, one file per claim at a worktree's root
+# (AGENTS.md, "Claim your work"; SMD-3602): each proves its claim under the key.
+/.work-claims/
 gmail-sync-log.json
 sync-log.json
 
