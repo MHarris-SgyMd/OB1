@@ -1612,6 +1612,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
+    /** When the worker took the thought up: its first pass of the gate's (SMD-3379 PR 1c-3a). */
+    const takenAt = Date.now();
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1658,6 +1660,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // by the lease arithmetic above, and a thought released succeeded with pairs
     // unjudged would be terminal with the pairs never judged (review pass 1).
     const call = inCall.get(workerId);
+    // The worker's last pass of the gate, the claim's taking the first: a
+    // closure since — one that opened again during a pair's call — reads
+    // both sides again too (SMD-3379 PR 1c-3a).
+    let lastAsk = takenAt;
     for (const [pairIndex, c] of candidates.entries()) {
       if (hardStopped) return { outcome: "abandoned" };
       // The admit gate before each pair (SMD-3379 PR 1b): the worker waits
@@ -1669,11 +1675,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // first stop that follows it (review passes 3 and 4).
         if (call?.aborted) throw new AbortedInHand();
         try {
-          through = await idleWhile(call, admitted(ADMIT, gate));
+          through = await idleWhile(call, admitted(ADMIT, gate, lastAsk));
         } catch (e) {
           throw new AdmitThrow(e);
         }
         if (!through) throw new StoppedBetweenPairs();
+        lastAsk = Date.now();
         // After the gate held it both sides are read again: the live write
         // that closed the gate may be a delete or an edit of the thought or of
         // any older side still to judge, whose text must not go to the judge

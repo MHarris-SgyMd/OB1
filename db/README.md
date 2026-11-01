@@ -6013,11 +6013,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1927 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1086 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1929 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1087 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 432 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 433 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -6187,6 +6187,16 @@ signal says, so a gate that never closes runs as none. Re-embed claims one
 thought at a time under it unless `batch` says otherwise, so a closed gate
 holds a worker after the thought in hand. A run given none runs as before. The
 sleep scheduler is to close it while its brain is live (SMD-3379 PR 1c).
+
+Since SMD-3379 PR 1c-3a, a worker mid-thought also reads its claim again after
+a closure that opened again during its call. A gate that keeps
+`closedSince(t)` says whether it closed at any time from `t` on, and the
+window and pair gates ask it from the worker's last pass of the gate (the
+thought's taking first). Before, only a closure still in force when asked was
+seen. `lease.ts`' `liveGate()` is such a gate, the one the scheduler is to
+close and open: it begins open, lets an ask through at once while open, and
+holds one while closed until `open()` or its signal aborts, its listener taken
+off either way. Nothing passes it yet.
 
 `onPass` hands the caller a second function beside the pass's stop:
 `abortInHand(olderThanMs)` (`lease.ts`'s `InHandAbort`, SMD-3379 PR 1b-2)

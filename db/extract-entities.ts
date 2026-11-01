@@ -360,7 +360,7 @@ export interface ExtractOptions {
  * extraction on the stable brain (32 s, 2026-10-13), so a stop that long with
  * nothing saved is a slow window, not a short sleep.
  */
-const STALL_FLOOR_MS = 60_000;
+export const STALL_FLOOR_MS = 60_000;
 /** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 093's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
@@ -1310,6 +1310,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // the thought there as a first stop does, its windows kept.
     let paused = 0;
     const call = inCall.get(workerId);
+    // The worker's last pass of the gate, the claim's taking the first: a
+    // closure since — one that opened again during a window's call — reads
+    // its claim again too (SMD-3379 PR 1c-3a).
+    let lastAsk = t0;
     const admitWindow = ADMIT ? async (): Promise<void> => {
       const at = Date.now();
       const held = inHand.get(workerId);
@@ -1320,7 +1324,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (held) held.pausedAt = at;
       let through: false | "open" | "waited" = false;
       try {
-        through = await idleWhile(call, admitted(ADMIT, gate));
+        through = await idleWhile(call, admitted(ADMIT, gate, lastAsk));
       } catch (e) {
         throw new AdmitThrow(e);
       } finally {
@@ -1332,6 +1336,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
       }
       if (!through) throw new StoppedBetweenWindows();
+      lastAsk = Date.now();
       // After the gate held it the claim is read again: the live write that
       // closed the gate may be a delete or an edit of this thought, whose text
       // must not go to the provider after it (review passes 3 and 4). A read

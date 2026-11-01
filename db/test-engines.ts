@@ -923,6 +923,74 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   ok(grew < 2_000_000, `20,000 sleeps on a signal that never aborts keep nothing (${(grew / 1e6).toFixed(2)} MB of heap after, under 2)`);
 }
 
+// The live gate (SMD-3379 PR 1c-3a): db/lease.ts' liveGate, the admit gate
+// the sleep scheduler closes while its brain is live, as Admit's contract
+// asks — an open ask settled at once, a closed one waiting until open() or
+// its signal aborts, its listener taken off either way — and closedSince,
+// which admitted's lastAsk reads a closure that opened again by.
+{
+  const { admitted, liveGate } = await import("./lease.ts");
+  const gate = liveGate();
+  const run = new AbortController();
+  const began = Date.now();
+  ok(!gate.closed && (await admitted(gate.admit, run.signal)) === "open" && gate.admit.closedSince?.(began) === false,
+    "a live gate begins open: an ask goes through at once, and it has not closed since");
+  /** A signal that counts the listeners on it, to see each taken off. */
+  const counted = () => {
+    const ac = new AbortController();
+    let live = 0;
+    const add = ac.signal.addEventListener.bind(ac.signal);
+    const remove = ac.signal.removeEventListener.bind(ac.signal);
+    ac.signal.addEventListener = ((...a: Parameters<typeof add>) => { live++; add(...a); }) as typeof add;
+    ac.signal.removeEventListener = ((...a: Parameters<typeof remove>) => { live--; remove(...a); }) as typeof remove;
+    return { ac, get live() { return live; } };
+  };
+  const waiter = counted();
+  gate.close();
+  const asked = admitted(gate.admit, waiter.ac.signal);
+  const early = await Promise.race([asked, Bun.sleep(50).then(() => "pending" as const)]);
+  const listening = waiter.live;
+  gate.open();
+  ok(early === "pending" && listening === 1 && (await asked) === "waited" && waiter.live === 0 && !gate.closed,
+    `closed, an ask waits until the gate opens and reads waited, its listener taken off (${early}, ${listening} → ${waiter.live})`);
+  await Bun.sleep(2);
+  const since = Date.now();
+  ok((await admitted(gate.admit, run.signal, began)) === "waited" && (await admitted(gate.admit, run.signal, since)) === "open"
+      && gate.admit.closedSince?.(began) === true && gate.admit.closedSince?.(since) === false,
+    "open again, an ask whose worker last passed before the closure reads waited — the closure opened again during its call — and one after it open");
+  const stopping = counted();
+  gate.close();
+  const stoppedAsk = admitted(gate.admit, stopping.ac.signal);
+  stopping.ac.abort();
+  // Its listener goes with the abort it heard (`once`), which the count does not see.
+  ok((await stoppedAsk) === false && (await admitted(gate.admit, stopping.ac.signal)) === false && gate.admit.closedSince?.(Date.now()) === true,
+    "a stop turns a waiting ask away, and an ask whose signal has already aborted at once, while closed");
+  gate.open();
+  gate.open();
+  ok(!gate.closed && (await admitted(gate.admit, stopping.ac.signal)) === "open", "opened twice, it stays open; an open gate lets an aborted signal's ask through, as Admit's contract has it");
+}
+
+// The scheduler's pause on its heartbeat (SMD-3379 PR 1c-3a): db/pass-stamp.ts'
+// paused(), `paused { since }` while set, left out once cleared or ended.
+{
+  const { passStamper } = await import("./pass-stamp.ts");
+  const writes: string[] = [];
+  const fake = ((_s: TemplateStringsArray, ...v: unknown[]) => { writes.push(String(v[1])); return Promise.resolve([]); }) as never;
+  const st = passStamper({ sql: fake, worker: "sleep", intervalS: 60 });
+  const since = "2026-10-31T12:00:00.000Z";
+  st.paused?.(since);
+  await st.alive();
+  const pausedValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.paused?.(null);
+  await st.alive();
+  const clearedValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.paused?.(since);
+  await st.end("stopped");
+  const endedValue = JSON.parse(writes.at(-1) ?? "{}");
+  ok(pausedValue.paused?.since === since && !("paused" in clearedValue) && !("paused" in endedValue) && endedValue.ended === true,
+    `the stamper writes paused { since } while set, and leaves it out once cleared or the row ends (${JSON.stringify([pausedValue.paused, clearedValue.paused, endedValue.paused])})`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
