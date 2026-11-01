@@ -62,6 +62,10 @@
       "scope": "read"
     },
     {
+      "name": "list_claims",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
       "scope": "capture"
     },
@@ -91,6 +95,18 @@
     },
     {
       "name": "run_worker",
+      "scope": "write"
+    },
+    {
+      "name": "claim_work",
+      "scope": "write"
+    },
+    {
+      "name": "renew_claim",
+      "scope": "write"
+    },
+    {
+      "name": "release_claim",
       "scope": "write"
     }
   ]
