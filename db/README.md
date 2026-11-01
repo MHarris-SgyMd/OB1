@@ -2294,8 +2294,8 @@ an ingested key, and a role missing the grant (naming `work_claims`); 0A000 the
 isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for the
 rest of the transaction (029's shape). `list_work_claims` matches nothing for a
 malformed key rather than raising, and a refused forced release shares the code
-`CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
-row is 015's worker claims, not these. The partial unique index
+`CLAIM_NOT_YOURS`, told apart by its message. Preflight's `ticket claims` row
+checks these (SMD-3598); its `worker claims` row is 015's. The partial unique index
 `work_claims_one_unreleased` holds the exact-work rule for a write made without
 the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The
@@ -2304,8 +2304,9 @@ soft: a role without it gets a permission error (42501) naming `work_claims` on
 the calls, and nothing else; the rules hold for
 callers of the functions, while a role with the group can write the table
 directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
-The REST and MCP operations are SMD-3598, the `claimed` label on results
-SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
+The REST and MCP operations are `claim_work`, `renew_claim`, `release_claim` and
+`list_claims` (SMD-3598; server-portable/README.md, Work claims); the `claimed`
+label on results is SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
 the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
 (onto a populated brain at 114).
 

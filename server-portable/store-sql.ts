@@ -25,10 +25,12 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ListCursorRefused, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
+import { ClaimRefused, claimProblemOf, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
+  ClaimAnswer,
+  WorkClaim,
   AuditChange,
   CaptureResult,
   ChangeFilters,
@@ -68,6 +70,25 @@ import type {
 } from "./store.ts";
 
 /** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
+/**
+ * One of 115's writers, run and read (SMD-3598): its jsonb answer as a ClaimAnswer, a malformed argument (22023) or
+ * an ingested key (42501, by its words) as ClaimRefused, any other raise rethrown as the store's fault. The SQLSTATE
+ * is Bun's PostgresError's errno.
+ */
+async function claimCall(what: string, run: () => Promise<Record<string, unknown>[]>): Promise<ClaimAnswer> {
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await run();
+  } catch (e) {
+    const state = String((e as { errno?: unknown }).errno ?? "");
+    const message = String((e as Error)?.message ?? "");
+    if (state === "22023") throw new ClaimRefused("argument", claimProblemOf(message), message);
+    if (state === "42501" && /is an ingested key/.test(message)) throw new ClaimRefused("ingested", "ingested", message);
+    throw e;
+  }
+  return normaliseClaimAnswer(rows[0]?.r, what);
+}
+
 function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
@@ -900,6 +921,41 @@ export class SqlStore implements ThoughtStore {
     // decides who may, and names the actor in the event it appends.
     const rows = await this.sql`SELECT ob1_reset_capture_stamp(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseResetStamp(rows[0]?.r);
+  }
+
+  // Work claims (migration 115, SMD-3598): one statement each, so each call is its own READ COMMITTED transaction
+  // and takes one ticket's lock (115's rule: one writer call per transaction). Every value is a bind parameter: the
+  // token above all, which a statement's text would show in pg_stat_activity and error lines.
+  async claimWork(opts: { issue: string; piece?: string; label?: string; leaseSeconds?: number; token?: string; actor?: Actor }): Promise<ClaimAnswer> {
+    return claimCall("claim_work", () => this.sql`
+      SELECT claim_work(${opts.issue}::text, ${opts.piece ?? null}::text, ${opts.label ?? null}::text, ${opts.leaseSeconds ?? 14400}::int,
+                        ${opts.token ?? null}::text, ${actorPayload(opts.actor)}::jsonb) AS r`);
+  }
+
+  async renewClaim(opts: { id: string; token: string; leaseSeconds?: number; actor?: Actor }): Promise<ClaimAnswer> {
+    return claimCall("renew_work_claim", () => this.sql`
+      SELECT renew_work_claim(${opts.id}::uuid, ${opts.token}::text, ${opts.leaseSeconds ?? 14400}::int, ${actorPayload(opts.actor)}::jsonb) AS r`);
+  }
+
+  async releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer> {
+    return claimCall("release_work_claim", () => this.sql`
+      SELECT release_work_claim(${opts.id}::uuid, ${opts.token ?? null}::text, ${opts.reason ?? null}::text, ${opts.force === true}::boolean,
+                                ${actorPayload(opts.actor)}::jsonb) AS r`);
+  }
+
+  async claimTokenIs(id: string, token: string): Promise<boolean> {
+    const rows = await this.sql`
+      SELECT EXISTS (SELECT 1 FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)) AS mine` as { mine: boolean }[];
+    return rows[0]?.mine === true;
+  }
+
+  async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]> {
+    const rows = await this.sql`
+      SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,
+             released_at, released_by, released_by_kind, release_reason, state
+        FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
+                              ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int)` as Record<string, unknown>[];
+    return rows.map((r) => normaliseWorkClaim(r, "list_work_claims"));
   }
 
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {

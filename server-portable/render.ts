@@ -20,14 +20,15 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, WorkClaim, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
-import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import { TAKEN_OVER, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
@@ -60,6 +61,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** A key's name, as a claim's holder: printable, no space, bounded. */
+const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Id$/;
@@ -80,6 +83,8 @@ function guard(v: unknown, key = ""): unknown {
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
+  // A claim's holder (SMD-3598): a key's name — an OAuth principal's `oauth:<sub>+<client>` too — held to no space, so no sentence.
+  if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -1736,3 +1741,66 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
   REFUSED_EMPTY_WORK_TYPE: "Refused: work_type is required — pass the exact `workType` worker_status reports for the pool to drain.",
   RUN_WORKER_DRAIN_NOT_AVAILABLE: "Refused: the executing drain is not yet available — the server does not run the bulk LLM passes, and the drain will land on a callable worker core (SMD-2304). Call with dry_run: true to preview what a pass would claim.",
 });
+
+// ── Work claims (SMD-3598, migration 115) ────────────────────────────────────
+// Each reply's value is its JSON (AS_JSON): claim_work's carries the token, which the guard would null as a
+// non-token string, and the caller who claimed must get it. The token is in claim_work's `claimed` text alone; no
+// refusal carries one. Another key's piece and holder are its own words: bounded to one line here, never a sentence
+// of ours.
+
+const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
+const holderText = (holder: string, ownKey: boolean) => ownKey ? `your own key (${oneLine(snipText(holder, 80))})` : oneLine(snipText(holder, 80));
+/** What a session of the caller's own key does about a claim its key holds under a token it does not have. */
+const OWN_KEY = "A claim by your own key is another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.";
+const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? OWN_KEY : "Leave it to its holder, or claim other work."}`;
+/** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
+const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
+  ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
+  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, claim it again.`;
+// 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
+// in the wrong one is masked, a cut one too.
+const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{8,}/gi, "[a work-claim token]"), 300))}`;
+/** A claim id the caller gave that is no uuid names no claim, and is not echoed: an agent that swapped id and token would see its token. */
+const noClaim = (r: Extract<Refusal, { code: "CLAIM_NOT_FOUND" }>) =>
+  UUID.test(r.id) ? `Refused: no claim ${r.id}.` : "Refused: no claim has that id — a claim id is a uuid, from claim_work's reply or list_claims.";
+const unattributedText = (r: Extract<Refusal, { code: "CLAIM_UNATTRIBUTED" }>) => {
+  const why = r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)";
+  return r.forced
+    ? `Refused: a forced release of claim ${r.id} needs this key's agent id, which classifies an operator, and which ${why}.`
+    : `Refused: claim ${r.id} was made under this key's agent id, which ${why}. The token given is this claim's: keep it.`;
+};
+const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
+  r.forced
+    ? `Refused: only an operator key, classified operator by its agent id, may release another holder's claim; claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}.`
+    : r.ownKey
+      ? `Refused: claim ${r.id} is held by your own key (${oneLine(snipText(r.holder, 80))}) under a token this call did not give — another session of yours, or this one having lost its token. If this session lost it, claim the work again once the claim lapses${r.expiresAt ? ` at ${r.expiresAt}` : ""}, or ask an operator to release it with force and a reason.`
+      : `Refused: claim ${r.id} is held by ${oneLine(snipText(r.holder, 80))}, not by this key with this token.`;
+
+export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
+  v.outcome === "claimed"
+    ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+(r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+  : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
+
+export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+  (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
+    : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
+    : r.code === "CLAIM_RELEASED" ? endedText(r)
+    : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
+    : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
+
+export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
+  (v) => v.outcome === "released"
+    ? `Released claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)}${v.claim.releaseReason ? ` (${oneLine(snipText(v.claim.releaseReason, 200))})` : ""}.`
+    : `Claim ${v.claim.id} on ${workText(v.claim.issue, v.claim.piece)} had already ended${v.claim.releasedAt ? ` at ${v.claim.releasedAt}` : ""}${v.claim.releaseReason === TAKEN_OVER ? `: it lapsed and was taken over${v.claim.releasedBy ? ` by ${oneLine(snipText(v.claim.releasedBy, 80))}` : ""}` : ""}.`,
+  (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
+    : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
+    : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
+    : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
+
+export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
