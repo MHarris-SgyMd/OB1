@@ -385,7 +385,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
@@ -2935,19 +2935,93 @@ if (configFailed) {
         const strays = wc.filter((f) => !KNOWN_CLAIM_SIGS.has(f.sig)).map((f) => f.sig);
         const andStrays = strays.length ? `; ${strays.length} overload(s) no migration defines: ${strays.join(", ")} — a vendored schema's (upstream's thought-work-claims takes an id list where 015's claim_thoughts takes a pool)` : "";
         if (wc.length === 0) {
-          add("work claims", "skip", "not checked — the claim functions do not exist (migration 015 not applied)");
+          add("worker claims", "skip", "not checked — the claim functions do not exist (migration 015 not applied)");
         } else if (!release || !forWorker) {
-          add("work claims", "fail", `015's release_thought or release_claims_for_worker is missing under 015's signature; the three workers call both${andStrays}`,
+          add("worker claims", "fail", `015's release_thought or release_claims_for_worker is missing under 015's signature; the three workers call both${andStrays}`,
               ledgerRemedy("015", "Apply db/migrations/015_thought_work_claims.sql, then 028 (its comment on release_thought) and 031 (renew_claims) again."));
         } else if (!RELEASE_SHIPPED_RE.test(release.src) || !RELEASE_SHIPPED_RE.test(forWorker.src)) {
-          add("work claims", "fail",
+          add("worker claims", "fail",
               `release_thought's or release_claims_for_worker's body is not 015's — it does not clear the lease as 015's CHECK requires — so a CREATE OR REPLACE from outside the migrations put another there (upstream's thought-work-claims schema shares both signatures): every worker release fails the constraint, and a clean shutdown deletes the worker's rows instead of returning them to the pool${andStrays}`,
               ledgerRemedy("015", "Apply db/migrations/015_thought_work_claims.sql, then 028 again — the same paste overwrites 028's comment on release_thought."));
         } else if (strays.length) {
-          add("work claims", "warn", `claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies${andStrays}`,
+          add("worker claims", "warn", `claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies${andStrays}`,
               strays.map((s) => `DROP FUNCTION ${s};`).join(" "));
         } else {
-          add("work claims", "ok", "claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies");
+          add("worker claims", "ok", "claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies");
+        }
+
+        /**
+         * Migration 115's work claims (SMD-3598): who holds a ticket, or one piece of it, which claim_work,
+         * renew_claim, release_claim and list_claims call. Named "ticket claims" beside 015's "worker claims", which
+         * keep two workers off one thought. Its four functions under 115's signatures; the server role's `claims`
+         * grant, soft (a role without it is refused the claim calls alone, naming work_claims); and statement logging,
+         * which prints a bind value whole unless log_parameter_max_length is 0 — so a renewal's or a release's token
+         * in a log — and the other settings that print one: a failed statement's parameters
+         * (log_parameter_max_length_on_error), sampled statements, a verbose or parameter-printing auto_explain,
+         * debug_print_plan and pgaudit. Each read with current_setting(name, true), so an extension not loaded reads
+         * as null, not a fault. Nothing to read before 115: a skip, the ledger row says a brain is behind.
+         */
+        {
+          // Constants of this file, spelled into the statement: Bun's unsafe binds a JS array as no text[].
+          const CLAIM_FNS = ["claim_work(text,text,text,integer,text,jsonb)", "renew_work_claim(uuid,text,integer,jsonb)", "release_work_claim(uuid,text,text,boolean,jsonb)", "list_work_claims(text[],text,boolean,integer)"];
+          // Its own read, caught here: a role with no USAGE on public is refused even to_regclass, and that must
+          // warn this row alone, never end the block before the rows after it (the qualified reads' rule).
+          const tcRows = await sql.unsafe(`
+            SELECT to_regclass('public.work_claims') IS NOT NULL AS has_table,
+                   ARRAY(SELECT f FROM unnest(ARRAY[${CLAIM_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
+                   CASE WHEN to_regclass('public.work_claims') IS NULL THEN NULL
+                        ELSE ARRAY(SELECT x FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE']) x WHERE NOT has_table_privilege('public.work_claims', x)) END AS ungranted`)
+            .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const tc = Array.isArray(tcRows) ? tcRows[0] : null;
+          // The log settings, read apart: a role that may not read one says nothing here rather than failing the row.
+          const LOG_SETTINGS = ["log_statement", "log_min_duration_statement", "log_min_duration_sample", "log_statement_sample_rate", "log_transaction_sample_rate",
+            "log_parameter_max_length", "log_parameter_max_length_on_error", "log_min_messages", "debug_print_plan",
+            "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length", "auto_explain.log_verbose", "pgaudit.log_parameter", "pgaudit.log", "pgaudit.role"];
+          const logs = await sql.unsafe(`SELECT ${LOG_SETTINGS.map((s, i) => `current_setting('${s}', true) AS s${i}`).join(", ")}`)
+            .then((r) => Object.fromEntries(LOG_SETTINGS.map((s, i) => [s, ((r as Record<string, string | null>[])[0] ?? {})[`s${i}`] ?? null])), () => null);
+          // Which settings print a claim call's bind values — its token among them. A claim call is a SELECT, so
+          // log_statement=mod logs none; a value 0 cuts a parameter to nothing, -1 prints it whole.
+          const printing = (len: string | null) => len !== null && len !== "0";
+          // Which statement logging is on, each setting named as it reads.
+          const statementLogs = !logs ? [] : [
+            ...(logs.log_statement === "all" ? ["log_statement=all"] : []),
+            ...((logs.log_min_duration_statement ?? "-1") !== "-1" ? [`log_min_duration_statement=${logs.log_min_duration_statement}`] : []),
+            ...((logs.log_min_duration_sample ?? "-1") !== "-1" && (logs.log_statement_sample_rate ?? "0") !== "0"
+              ? [`log_min_duration_sample=${logs.log_min_duration_sample} at log_statement_sample_rate=${logs.log_statement_sample_rate}`] : []),
+            ...((logs.log_transaction_sample_rate ?? "0") !== "0" ? [`log_transaction_sample_rate=${logs.log_transaction_sample_rate}`] : []),
+          ];
+          const logging = !logs ? [] : [
+            ...(statementLogs.length && printing(logs.log_parameter_max_length)
+              ? [`statement logging is on (${statementLogs.join(", ")}) and log_parameter_max_length is ${logs.log_parameter_max_length}`] : []),
+            // The parameters ride the ERROR report itself (its CONTEXT), logged by log_min_messages — not the STATEMENT
+            // line log_min_error_statement governs — so only a log that keeps no ERROR (log, fatal, panic rank above it) is spared.
+            ...(printing(logs.log_parameter_max_length_on_error) && !["log", "fatal", "panic"].includes(logs.log_min_messages ?? "")
+              ? [`log_parameter_max_length_on_error is ${logs.log_parameter_max_length_on_error}, so a failed statement's parameters are logged`] : []),
+            // A verbose plan prints a custom plan's constants — the bound token among them — whatever the parameter cap.
+            ...((logs["auto_explain.log_min_duration"] ?? "-1") !== "-1" && (printing(logs["auto_explain.log_parameter_max_length"]) || logs["auto_explain.log_verbose"] === "on")
+              ? [`auto_explain logs plans with parameters (auto_explain.log_parameter_max_length is ${logs["auto_explain.log_parameter_max_length"]}, auto_explain.log_verbose is ${logs["auto_explain.log_verbose"]})`] : []),
+            ...(logs.debug_print_plan === "on" ? ["debug_print_plan is on, so each plan's constants are logged"] : []),
+            ...(logs["pgaudit.log_parameter"] === "on" && ((logs["pgaudit.log"] ?? "none").trim().toLowerCase() !== "none" || (logs["pgaudit.role"] ?? "") !== "") ? ["pgaudit.log_parameter is on"] : []),
+          ];
+          if (!tc) {
+            add("ticket claims", "warn", `could not verify: ${(tcRows as Error).message}`, "The check reads work_claims and 115's functions in public; the message says why it failed.");
+          } else if (!tc.has_table) {
+            add("ticket claims", "skip", "not checked — work_claims does not exist (migration 115 not applied)");
+          } else if (tc.missing.length) {
+            add("ticket claims", "fail", `migration 115's ${tc.missing.join(", ")} missing under 115's signature; claim_work, renew_claim, release_claim and list_claims call them`,
+                ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
+          } else if (tc.ungranted?.length) {
+            // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
+            const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
+              : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
+            add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table, and nothing else does`,
+                "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
+          } else if (logging.length) {
+            add("ticket claims", "warn", `${logging.join("; ")}: a renewal's or a release's token, a bind value, is logged`,
+                "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; ALTER SYSTEM SET log_parameter_max_length_on_error = 0; (and auto_explain.log_parameter_max_length = 0, auto_explain.log_verbose = off, pgaudit.log_parameter = off where loaded; debug_print_plan = off) SELECT pg_reload_conf(); — or turn that logging off (SMD-3598).");
+          } else {
+            add("ticket claims", "ok", `claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; ${logs ? "the logging settings read print no bind value" : "the logging settings could not be read"}`);
+          }
         }
 
         /**

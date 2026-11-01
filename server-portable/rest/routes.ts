@@ -18,7 +18,9 @@ export type { CallOptions } from "../core/index.ts";
  * does not compile until it has one. 400 a shape the caller can fix, 403 a
  * rule the caller may not pass, 404 nothing there, 409 the state changed or
  * conflicts, 422 a reference to nothing or a refusal the store named that
- * this server does not know (REFUSED), 501 a mode not built, 503 retry.
+ * this server does not know (REFUSED), 501 a mode not built, 503 retry —
+ * with Retry-After when the refusal is retryable, without it when the server waits
+ * on an operator (CLAIM_UNATTRIBUTED's set-up causes).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,
@@ -43,6 +45,13 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED: 422,
   REFUSED_NOT_OPERATOR: 403,
   REFUSED_NOT_CAPTURE_STAMP: 409,
+  WORK_CLAIMED: 409,
+  CLAIM_NOT_FOUND: 404,
+  CLAIM_NOT_YOURS: 403,
+  CLAIM_RELEASED: 409,
+  REFUSED_CLAIM_INPUT: 400,
+  REFUSED_CLAIM_KEY: 403,
+  CLAIM_UNATTRIBUTED: 503,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -100,6 +109,11 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   retry_failed: { method: "POST", path: "/v1/workers/retry", ok: 200, call: CALLS.retry_failed },
   release_stale_leases: { method: "POST", path: "/v1/workers/release-leases", ok: 200, call: CALLS.release_stale_leases },
   run_worker: { method: "POST", path: "/v1/workers/run", ok: 200, call: CALLS.run_worker },
+  // Work claims (SMD-3598, migration 115): the token rides a JSON body, never a URL a log or a proxy may keep.
+  list_claims: { method: "GET", path: "/v1/claims", ok: 200, call: CALLS.list_claims },
+  claim_work: { method: "POST", path: "/v1/claims", ok: 200, call: CALLS.claim_work },
+  renew_claim: { method: "POST", path: "/v1/claims/{id}/renew", ok: 200, call: CALLS.renew_claim },
+  release_claim: { method: "POST", path: "/v1/claims/{id}/release", ok: 200, call: CALLS.release_claim },
 };
 
 /** The `{field}` names a route's path fills, in order — core/calls.ts's, which a plugin's manifest is checked by too. */
