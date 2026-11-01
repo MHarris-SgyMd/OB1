@@ -132,7 +132,8 @@ function refusedWords(code: string | undefined, facts: Record<string, unknown>, 
 	switch (code) {
 		case 'NOT_FOUND': return 'No such proposal: it may have gone with one of its thoughts. The list below is current.';
 		case 'REFUSED_EDITED_SINCE': return 'A thought was edited since this pair was judged (a stale proposal’s was), so the verdict is about a text that is gone. Read both; accept anyway if it still holds, or reject it.';
-		case 'REFUSED_LINEAGE_PAIR': return `One side derives from the other (a lineage pair): accepting writes the pointer while the derivation still names its input, which search then treats as superseded. ${stays}; accept anyway only if that is what you mean.`;
+		// What its force also waives (review pass 2): a WRITER flag the row carries, as the CLI's refusal says.
+		case 'REFUSED_LINEAGE_PAIR': return `One side derives from the other (a lineage pair): accepting writes the pointer while the derivation still names its input, which search then treats as superseded. ${stays}; accept anyway only if that is what you mean${Array.isArray(facts.flags) && facts.flags.length ? ' — it also accepts over the proposal’s WRITER flag (a capture-only or lower-trust side standing)' : ''}.`;
 		case 'REFUSED_WRITER': {
 			// What accepting anyway also does (review pass 1): the capture-only pointers onto the side that stands it clears,
 			// a second write past force that a reject does not restore, and the edit force also accepts over.
@@ -162,8 +163,8 @@ function refusedWords(code: string | undefined, facts: Record<string, unknown>, 
  * either. Done, the page again under the filters the form carried, its flash cookie saying what the decision did.
  */
 /** What a decision that did not land hands the page: the proposal it named (null for none), what it posted, whether force would waive it, and its words — one shape, so the page reads each. */
-type Refused = { id: string | null; direction: 'newer' | 'older' | null; note: string; forceable: boolean; error: string };
-const refused = (status: number, r: Partial<Refused> & { error: string }) => fail(status, { id: null, direction: null, note: '', forceable: false, ...r } satisfies Refused);
+type Refused = { id: string | null; direction: 'newer' | 'older' | null; note: string; forceable: boolean; gone: boolean; error: string };
+const refused = (status: number, r: Partial<Refused> & { error: string }) => fail(status, { id: null, direction: null, note: '', forceable: false, gone: false, ...r } satisfies Refused);
 
 async function decide(event: RequestEvent, decision: 'accept' | 'reject') {
 	const session = event.locals.session!;
@@ -202,6 +203,8 @@ async function decide(event: RequestEvent, decision: 'accept' | 'reject') {
 		note,
 		// The page offers "Accept anyway" after a refusal force waives, on an accept not already forced.
 		forceable: decision === 'accept' && !force && FORCEABLE.has(code ?? ''),
+		// No such proposal: no filter lists it, so the page says nothing of where to find it (review pass 2).
+		gone: code === 'NOT_FOUND',
 		error: notAnswered(code, decision) ?? refusedWords(code, facts, decision) ?? (answer.status === 403 ? notYours(decision) : answer.status >= 500 ? `The brain could not ${decision} the proposal${code ? ` (${code})` : ''}.` : `The brain refused the ${decision}${code ? ` (${code})` : ''}.`),
 	});
 }

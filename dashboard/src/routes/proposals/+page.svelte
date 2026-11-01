@@ -26,6 +26,8 @@
 		return `an agent with no name (${kind})`;
 	};
 	const decided = (p: Proposal) => p.status === 'accepted' || p.status === 'rejected';
+	/** A row's reject in its state's words: an accepted row's undoes the accept, a rejected row's replaces the reject. */
+	const rejectWords = (p: Proposal) => (p.status === 'accepted' ? 'Reject (undo the accept)' : p.status === 'rejected' ? 'Reject again' : 'Reject');
 	/** A decision's action with the page's filters, so the page after it — a refusal's, or the redirect's — lists the same rows. */
 	const actionOf = (name: 'accept' | 'reject') => {
 		const q = new URLSearchParams();
@@ -50,19 +52,23 @@
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Supersession proposals</h1>
 
+	<!-- A decision's flash beside a refusal said at the top, not hidden by it: a double submit's second post is refused
+	     while its first landed, and the load has spent the cookie (review pass 2). -->
+	{#if data.done}
+		<p class="text-sm" role="status" data-testid="review-done">{data.done}</p>
+	{/if}
 	{#if unplaced}
-		<p class="text-sm text-amber-300 [overflow-wrap:anywhere]" role="alert" data-testid="review-error">{unplaced.error}{#if unplaced.id} (proposal <span class="font-mono">{unplaced.id}</span>, not in this list: Status “all” and a larger How many show it){/if}</p>
+		<!-- Where to look, but for a proposal gone: no filter lists that one (review pass 2); and only up to the page's 200. -->
+		<p class="text-sm text-amber-300 [overflow-wrap:anywhere]" role="alert" data-testid="review-error">{unplaced.error}{#if unplaced.id && !unplaced.gone}{' '}(proposal <span class="font-mono">{unplaced.id}</span> is not in this list; Status “all”, with How many up to 200, may show it){/if}</p>
 		{#if unplaced.id && unplaced.forceable}
 			<form method="POST" action={actionOf('accept')} data-testid="force">
 				<input type="hidden" name="id" value={unplaced.id} />
 				{#if unplaced.direction}<input type="hidden" name="direction" value={unplaced.direction} />{/if}
 				<input type="hidden" name="note" value={unplaced.note ?? ''} />
 				<input type="hidden" name="force" value="1" />
-				<button type="submit" class="button text-xs" aria-label="Accept proposal {unplaced.id} anyway">Accept anyway</button>
+				<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {unplaced.id}">Accept anyway</button>
 			</form>
 		{/if}
-	{:else if data.done}
-		<p class="text-sm" role="status" data-testid="review-done">{data.done}</p>
 	{/if}
 
 	<form method="GET" action="{base}/proposals" onformdata={tidyForm} class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-4 text-sm items-end" data-testid="filters" data-sveltekit-keepfocus data-sveltekit-noscroll>
@@ -125,13 +131,13 @@
 								<input type="hidden" name="id" value={p.id} />
 								{#if p.status !== 'accepted'}
 									{#if p.undirected}
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs" aria-label="Accept proposal {p.id}: the newer stands">Accept: newer stands</button>
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs" aria-label="Accept proposal {p.id}: the older stands">Accept: older stands</button>
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs" aria-label="Accept: newer stands, proposal {p.id}">Accept: newer stands</button>
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs" aria-label="Accept: older stands, proposal {p.id}">Accept: older stands</button>
 									{:else}
-										<button type="submit" formaction={actionOf('accept')} class="button text-xs" aria-label="Accept proposal {p.id}">Accept</button>
+										<button type="submit" formaction={actionOf('accept')} class="button text-xs" aria-label="Accept, proposal {p.id}">Accept</button>
 									{/if}
 								{/if}
-								<button type="submit" formaction={actionOf('reject')} class="button text-xs" aria-label="Reject proposal {p.id}">{p.status === 'accepted' ? 'Reject (undo the accept)' : p.status === 'rejected' ? 'Reject again' : 'Reject'}</button>
+								<button type="submit" formaction={actionOf('reject')} class="button text-xs" aria-label="{rejectWords(p)}, proposal {p.id}">{rejectWords(p)}</button>
 								<label class="flex flex-col gap-1 text-xs grow">Note (optional)
 									<input name="note" maxlength="2000" class="field" value={refused?.note ?? ''} />
 								</label>
@@ -145,7 +151,7 @@
 									{#if refused.direction}<input type="hidden" name="direction" value={refused.direction} />{/if}
 									<input type="hidden" name="note" value={refused.note ?? ''} />
 									<input type="hidden" name="force" value="1" />
-									<button type="submit" class="button text-xs" aria-label="Accept proposal {p.id} anyway">Accept anyway</button>
+									<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {p.id}">Accept anyway</button>
 								</form>
 							{/if}
 						{/if}

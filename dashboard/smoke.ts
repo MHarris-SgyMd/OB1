@@ -944,7 +944,7 @@ async function writesArm() {
     // its first, is a disabled one, where it was Accept (review pass 1).
     const firstPage = await get(ALL);
     const ghost = await post("/proposals?/reject&status=all&limit=200", { id: "00000000-0000-4000-8000-0000000033ff" });
-    assert(ghost.status === 404 && /data-testid="review-error"[^>]*>[^<]*No such proposal/.test(ghost.html), `a decision on a proposal the page does not list is refused, said at the top (${ghost.status})`);
+    assert(ghost.status === 404 && /data-testid="review-error"[^>]*>[^<]*No such proposal/.test(ghost.html) && !/is not in this list/.test(ghost.html), `a decision on a proposal the page does not list is refused, said at the top, a gone one with nowhere to look (${ghost.status})`);
     const reviewForm = /<form[^>]*data-testid="review"[^>]*>[\s\S]*?<\/form>/.exec(rowOf(firstPage.html))?.[0] ?? "";
     assert(/^<form[^>]*>\s*(?:<!--[^>]*-->\s*)*<button[^>]*\bdisabled\b/.test(reviewForm), "…and a row's form has a disabled default button first, so Enter in its note decides nothing");
     const landed = async (posted: { status: number; location: string; setCookies: string[] }) => {
