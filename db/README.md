@@ -2196,7 +2196,7 @@ is a no-op. No grant is issued, but the
 trigger runs as the caller, as 016's does: a ticket edit reads `ob1_config`
 (above), and once a pool is named a capturing role needs `SELECT, INSERT,
 UPDATE` on `thought_work_claims`, which preflight checks (below). The sweep's
-place in sleep is SMD-3306 PR 6. test-schema [101] (the trigger, a blank key,
+place in sleep is SMD-3306 PR 6b. test-schema [101] (the trigger, a blank key,
 the ticket filed later, each action of the close and its refusals, the door's
 refusals by the ticket a thought is filed under, `ob1_filed_ticket`'s values),
 test-upgrade [20be] (refused without each prerequisite and on a SQL_ASCII
@@ -3325,9 +3325,9 @@ pooled; and the pooling waits for whatever holds a lock it needs, a claim an
 edit's trigger wrote among them. No wait has an end of its own: each names the
 pids it waits on (for a statement, those the server's `pg_blocking_pids` says
 hold it up, a request queued ahead of it among them), again every 30 s, until
-they end, and a caller's stop ends it, 130, a statement cancelled from the run's
-own second connection, opened on its url (without one, said, heard once the
-statement ends), the pooling left to the next run (a bound past which the pooling was left unfinished had
+they end, and a caller's stop ends it, 130 (0 for a following run), a statement
+cancelled from the run's own second connection, opened on its url (without one,
+said, heard once the statement ends), the pooling left to the next run (a bound past which the pooling was left unfinished had
 every run after it pool again, and ask again what the model had named nothing
 for, while the writer stayed open). A capture in a transaction a client opened
 at REPEATABLE READ or SERIALIZABLE can read the pool from before the naming and
@@ -3439,7 +3439,8 @@ switch of key and back, `OB1_SUBJECT_REASONING` turned off), which asks again
 every thought the model named nothing for. Once the judge is checked,
 `--judge-checked` runs with the alarm off, reading none of that run's answers
 nor another run's stamp, so beside a run that trips it asks what that run hands
-back. The line offers it as the way past a false alarm only when the answers
+back, unless that trip names its model before its lift, which then refuses it,
+exit 3, nothing claimed (PR 6a). The line offers it as the way past a false alarm only when the answers
 naming nothing trip the alarm by themselves, since an unread answer is the
 judge's failure, and with `--limit` the count handed back, which, first in the
 pool, are all it then asks; without a limit it asks the whole pool unguarded.
@@ -3489,37 +3490,41 @@ needs, and before each claim, so a run waiting there holds no claim. A
 provider's transient error puts its thought back in the pool where it stood, its
 attempt not counted and its place under `--limit` given back, and the run pauses
 before its next claim, holding no claim, which takes it again through that gate,
-the pool's name, another run's trip and its own edits read as at any claim. A
-stop at the gate, or a gate answering after the stop, ends the run, nothing more
-named, pooled or claimed; a run the trip's hold keeps from starting is refused
-before any gate. Beside the stop, `onPass` hands its caller the call's own abort
-(`abortInHand`, PR 1b-2's): the judge's call in hand, once it has run that long,
-each call's age from its own start, goes back behind the pool, unanswered and so
-unjudged, its attempt not counted and, when it went back, its place under
-`--limit` given back, and the run goes on; a thought the rules key, a provider
-pause and the writes after an answer hold no call to abort. A caller's `stamper`
-hears a following run's word, `ok` at each poll of the pool and, as it ends,
-`failed` for an end of its own (a refusal, its own options' among them, the
-provider or the database, the alarm, a throw) or `stopped`; it beats no row
-while it works through a pool, a scheduler's row being the scheduler's to keep.
-`session` opens the run's own client and its watching connection with the
-scheduler's per-pass settings (refused beside a caller's client; the worker
-key's lookup opens its one connection without them, as the claim passes' does),
-and a statement past its statement_timeout is thrown, as a claim pass's is, the
-naming's write and its pooling among them, whose waits have no other end, while
-the run's hand-back of what it holds, at its end or a second stop, waits up to
-30 s whatever the budget, so a row held past a short budget leaves no claim
-leased to its end and one held longer does not hold the scheduler's stop; an
-answer judged after its claim's release (unread, or keyed) whose window write
-passes it is not in the window, the claim as released; a pooling, a scan of
-every thought, can outlast it on a large brain, and would end each period on its
-budget, never marking its pool filled (6b's to exempt). `banner: false` leaves
-the start's lines out. No one is there to pass `--judge-checked` to a
-scheduler's run, so a trip holds the pool's following runs of each judge model
-its answers came from, beside an earlier trip's not lifted, kept in the window,
-each model with the stamp of the last trip that named it, kept after its hold is
-lifted (`held`, `namedAt`): a following run whose judge model a trip holds does
-not start, exit 3 (`judgeHeld`), until a run of that model with `--judge-checked
+the pauses counting the provider's errors since its last answer, across thoughts
+(a timeout or an egress refusal is no answer), the pool's name, another run's
+trip and its own edits read as at any claim. A stop at the gate, or a gate
+answering after the stop, ends the run, nothing more named, pooled or claimed; a
+run the trip's hold keeps from starting is refused before any gate. Beside the
+stop, `onPass` hands its caller the call's own abort (`abortInHand`, PR 1b-2's):
+the judge's call in hand, once it has run that long, each call's age from its
+own start, goes back behind the pool, unanswered and so unjudged, its attempt
+not counted and, when it went back, its place under `--limit` given back, and
+the run goes on; a thought the rules key, a provider pause and the writes after
+an answer hold no call to abort. A caller's `stamper` hears a following run's
+word, `ok` at each poll of the pool and, as it ends, `failed` for an end of its
+own (a refusal, its own options' among them, the provider or the database, the
+alarm, a throw) or `stopped`; it beats no row while it works through a pool, a
+scheduler's row being the scheduler's to keep. `session` opens the run's own
+client and its watching connection with the scheduler's per-pass settings
+(refused beside a caller's client; the worker key's lookup opens its one
+connection without them, as the claim passes' does), and a statement past its
+statement_timeout is thrown, as a claim pass's is, the naming's write and its
+pooling among them, whose waits have no other end, while the run's hand-back of
+what it holds, at its end or a second stop, waits up to 30 s whatever the
+budget, so a row held past a short budget leaves no claim leased to its end and
+one held longer does not hold the scheduler's stop (whatever the run, a
+hand-back that fails is said, unless the run's end says the database already,
+and its stop line says the claims go back as their leases run out); an answer
+judged after its claim's release (unread, or keyed) whose window write passes it
+is not in the window, the claim as released; a pooling, a scan of every thought,
+can outlast it on a large brain, and would end each period on its budget, never
+marking its pool filled (6b's to exempt). `banner: false` leaves the start's
+lines out. No one is there to pass `--judge-checked` to a scheduler's run, so a
+trip holds the pool's following runs of each judge model whose answers gave no
+subject, beside an earlier trip's not lifted, kept in the window, each model
+with the stamp of the last trip that named it, kept after its hold is lifted
+(`held`, `namedAt`): a following run whose judge model a trip holds does not
+start, exit 3 (`judgeHeld`), until a run of that model with `--judge-checked
 --limit 1`, once it is checked, lifts the hold it read as it began (`heldSince`,
 `namedSince`) — or with `--limit` the count of the last trip's hand-back still
 pending, which the held line offers, as the trip line did, to the models that
@@ -6086,11 +6091,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1967 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1969 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1086 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 472 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 474 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
