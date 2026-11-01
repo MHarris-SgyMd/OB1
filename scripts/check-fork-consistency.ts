@@ -9922,10 +9922,11 @@ function pipesIntoGrepQ(text: string): number[] {
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const first = i;
-    if (/^\s*#/.test(lines[i])) continue;
+    // A comment line reads as blank (shellCode): it holds no pipe, and a join runs on past it.
     let l = shellCode(lines[i]);
-    // A comment line reads as blank (shellCode), so the join runs on past it.
-    while (/(?:\\|\|)\s*$/.test(l) && !YAML_BLOCK_START.test(l) && i + 1 < lines.length) l = `${l.replace(/\\\s*$/, " ")} ${shellCode(lines[++i])}`;
+    while (/(?:\\|\|)\s*$/.test(l) && !YAML_BLOCK_START.test(l) && i + 1 < lines.length) {
+      l = `${l.replace(/\\\s*$/, " ")} ${shellCode(lines[++i])}`;
+    }
     for (const m of l.matchAll(PIPE_INTO_GREP)) {
       if (grepIsQuiet(m[1].trim().split(/\s+/).filter(Boolean))) { out.push(first + 1); break; }
     }
@@ -9997,7 +9998,7 @@ function checkNoPipeIntoGrepQ() {
     console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 reads the workflows alone)`);
   }
   for (const known of ["db/with-postgres.sh", ".github/ci/held-cases.sh"]) {
-    if (!scripts.includes(known)) fail(SELF, `check 45 does not read ${known}, which runs under pipefail — the reading is broken, not the tree clean`);
+    if (!scripts.includes(known)) fail(SELF, `check 45 does not list ${known}, which runs under pipefail — the reading is broken, not the tree clean`);
   }
   for (const f of [...workflows, ...scripts.sort()]) {
     for (const line of pipesIntoGrepQ(readFileSync(join(ROOT, f), "utf8"))) {
