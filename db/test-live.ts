@@ -10413,10 +10413,14 @@ if (want("16")) {
   await sql`ALTER TABLE supersession_proposals DROP COLUMN reviewed_by CASCADE, DROP COLUMN reviewed_by_agent_id CASCADE, DROP COLUMN reviewed_by_kind CASCADE`;
   let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
   let shortStatus: string, shortPointer: string | null;
+  let shortPage: Awaited<ReturnType<SqlStore["listSupersessionProposals"]>> | undefined;
   try {
     shortReject = await consolidateKeyless("--reject", undirected.id, "--note", "short of 114");
     shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
     shortList = await consolidateKeyless("--list", "rejected");
+    // SMD-3338 PR 2: the store's listing (the tool's, REST's) lists the rows as before and says it read no reviewer.
+    const shortStore = new SqlStore(URL_!, { max: 1 });
+    try { shortPage = await shortStore.listSupersessionProposals({ status: "rejected" }); } finally { await shortStore.close(); }
     shortAccept = await consolidateKeyless("--accept", undirected.id, "--direction", "newer");
     shortPointer = await supersedesOf(green);
   } finally {
@@ -10427,6 +10431,8 @@ if (want("16")) {
     `on a brain short of 114 a reject and an accept each land and say the row records no reviewer (${shortReject.out.split("\n").filter((l) => /reviewer/.test(l)).map((l) => l.trim()).join(" | ")}; ${shortStatus}, pointer ${shortPointer === blue ? "back" : shortPointer})`);
   assert(shortList.code === 0 && shortList.out.split("Who decided each row is not shown: this brain is short of migration 114").length === 2 && !/decided by:/.test(shortList.out),
     `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
+  assert(shortPage !== undefined && shortPage.reviewersRead === false && shortPage.proposals.some((p) => p.id === undirected.id) && shortPage.proposals.every((p) => p.reviewer === null),
+    `…and the tool's listing lists the rejected row as before, its page saying it read no reviewer (${shortPage?.reviewersRead}, ${shortPage?.proposals.length} row(s))`);
   assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
     "…and 114 put back, its backfill names the keyless accept from its audit row");
 
