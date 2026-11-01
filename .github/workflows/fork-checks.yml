@@ -1642,14 +1642,17 @@ jobs:
       # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
       # alone, so it asks no resolver outside the stack: a public name does
       # not resolve there, where the same image on the forwarder's outward
-      # network resolves it (so a missing tool cannot pass). The proxy's
-      # lookup is given 2 s, where one an outside resolver answers takes a
-      # fraction of that: unbounded, 12 s passed before the self-check printed,
-      # most of it, inferred, the lookup waiting out its resolver (SMD-3472).
-      # Its exit code is getent's "not found" (2) or the timeout's
-      # (143) and nothing else, since a missing `timeout` (127) is no refusal.
-      # The forwarder's self-check runs from the copy compose.yaml mounts. The
-      # control, the lookup and the self-check run side by side. The proxy logs a
+      # network resolves it (so a missing tool cannot pass). Each lookup is
+      # given 2 s (SMD-3472; unbounded, 12 s passed before the self-check
+      # printed, most of it, inferred, the proxy's lookup waiting out its
+      # resolver): the control resolves within them, first, so the host's
+      # resolver holds the name and a proxy that could ask it would have its
+      # answer in that time too (review pass 1). `--init` puts `timeout`
+      # under an init, since as PID 1 its TERM is ignored and it bounds
+      # nothing. The proxy's lookup must exit getent's "not found" (2) or a
+      # timeout's (busybox 143, coreutils 124), since a missing `timeout`
+      # (127) is no refusal. The forwarder's self-check runs from the copy
+      # compose.yaml mounts, beside both lookups. The proxy logs a
       # client by the PROXY line, as neither the forwarder nor itself. And with
       # the proxy stopped, a decoy answering to the proxy's name on `edge` is
       # what the forwarder resolves, and gets nothing: the forwarder dials only
@@ -1660,12 +1663,14 @@ jobs:
           cfg="$(docker compose -f compose.yaml config --format json)"
           PROXY_IMAGE="$(jq -r .services.proxy.image <<<"$cfg")"
           IMAGE="$(jq -r .services.api.image <<<"$cfg")"
-          docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null & control=$!
           docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check > "$RUNNER_TEMP/forwarder-self-check" 2>&1 & selfcheck=$!
+          # Waited for on an early exit too; the decoy's trap below replaces this once it has been.
+          trap 'wait' EXIT
+          docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null \
+            || { echo "getent in the proxy's image resolves no outside name from open-brain_edge within 2 s, so the refusal below proves nothing" >&2; exit 1; }
           rc=0; docker compose -f compose.yaml exec -T proxy timeout 2 getent hosts example.com || rc=$?
-          wait "$control" || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
           [ "$rc" != 0 ] || { echo "the proxy resolved an outside name" >&2; exit 1; }
-          [ "$rc" = 2 ] || [ "$rc" = 143 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor the 2 s timeout (143), so it refused nothing" >&2; exit 1; }
+          [ "$rc" = 2 ] || [ "$rc" = 143 ] || [ "$rc" = 124 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor a 2 s timeout's (143, 124), so it refused nothing" >&2; exit 1; }
           rc=0; wait "$selfcheck" || rc=$?
           cat "$RUNNER_TEMP/forwarder-self-check"
           [ "$rc" = 0 ] || { echo "the forwarder's self-check, in its container, exited $rc" >&2; exit 1; }
@@ -1762,7 +1767,6 @@ jobs:
           # proxy_loads WANT ARGS...: WANT is [{source, target, label, file}].
           # Each runs in the background by loads(), below.
           dir="$RUNNER_TEMP/proxy-loads"; mkdir -p "$dir"
-          trap 'kill $(jobs -p) 2>/dev/null || true; rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
           # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
@@ -1788,7 +1792,7 @@ jobs:
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
           proxy_loads() {
-            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=() alone
+            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=() alone release=""
             shift
             alone="$(mktemp "$dir/alone.XXXXXX")"
             paths=""
@@ -1796,7 +1800,7 @@ jobs:
               if [ "$prev" = -f ]; then
                 paths+="$(declared "$a")"$'\n'
                 if [ -z "$first" ]; then first="$a"; fi
-                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else twins+=(".bun-view.$a.json"); fi
+                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); release=1; else twins+=(".bun-view.$a.json"); fi
               else twins+=("$a"); fi
               if [ "$prev" = -p ]; then project=(-p "$a"); fi
               case "$a" in --profile=*) only+=("$a") ;; esac
@@ -1829,21 +1833,27 @@ jobs:
                   <(bun -e 'process.stdout.write(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text()).configs[process.argv.at(-1)].content)' "$(jq -r .file <<<"$row")" "$(jq -r .source <<<"$row")")
               done
             done < <(jq -c '.[]' <<<"$want")
+            # The overlay this render read is the one its mode wrote (review pass 1:
+            # a mode's renders left running read the next mode's file, and passed).
+            if [ -n "$release" ] && [ "$(cksum < compose.release.yaml)" != "$release_sum" ]; then
+              echo "$*: compose.release.yaml was rewritten under this render — settle a mode's renders before the next mode writes it" >&2; return 1
+            fi
           }
           # loads WANT ARGS...: proxy_loads in the background, its output in a
           # file of its own, so the renders run side by side (in series, until
           # SMD-3472, about 30 s). Each file named with -f is kept in
           # `rendered`, held to the directory's compose files at the end, and
-          # read by Bun.YAML here, once for every render naming it (check 28
-          # holds that reading; the release's overlay is read by none).
-          rendered=() pids=() calls=()
+          # read by Bun.YAML here, once in this run for every render naming it
+          # (check 28 holds that reading; the release's overlay is read by none).
+          rendered=() pids=() calls=() settled=() viewed=" "
           loads() {
             local a prev=""
             for a in "${@:2}"; do
               if [ "$prev" = -f ]; then
                 rendered+=("$a")
-                if [ "$a" != compose.release.yaml ] && [ ! -e ".bun-view.$a.json" ]; then
+                if [ "$a" != compose.release.yaml ] && [[ "$viewed" != *" $a "* ]]; then
                   bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
+                  viewed+="$a "
                 fi
               fi
               prev="$a"
@@ -1851,17 +1861,22 @@ jobs:
             proxy_loads "$@" > "$dir/${#pids[@]}.log" 2>&1 &
             pids+=("$!"); calls+=("${*:2}")
           }
-          # settle FROM TO: wait for calls FROM to TO-1, printing each one's
-          # output in the order it was made, and fail if any failed.
+          # settle FROM TO: wait for each call FROM to TO-1 not yet settled,
+          # printing its output in the order it was made, and fail if any failed.
           settle() {
             local i rc failed=0
             for ((i = $1; i < $2; i++)); do
+              if [ -n "${settled[$i]:-}" ]; then continue; fi
               rc=0; wait "${pids[$i]}" || rc=$?
+              settled[i]=1
               cat "$dir/$i.log"
               if [ "$rc" != 0 ]; then failed=1; echo "proxy_loads ${calls[$i]}: exit $rc" >&2; fi
             done
             return "$failed"
           }
+          # On any exit, every call still running is waited for and its output
+          # printed, so a failure leaves no render running and hides none.
+          trap 'settle 0 "${#pids[@]}" || true; rm -f compose.release.yaml .bun-view.*.json' EXIT
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
@@ -1878,13 +1893,13 @@ jobs:
           loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
           loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
-          unreleased=${#pids[@]}
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
           # cut). release.yml holds the overlay a release actually ships. Each
-          # mode's renders end before the next mode rewrites the file; the
-          # renders above read no release overlay, and run on beside both.
+          # mode's renders end before the next mode rewrites the file, and each
+          # render checks it read its own mode's (release_sum); the renders
+          # above read no release overlay, and run on beside both.
           for mode in rehearsal tag; do
             from=${#pids[@]}
             if [ "$mode" = rehearsal ]; then
@@ -1892,6 +1907,7 @@ jobs:
             else
               bun -e 'import { renderComposeOverlay } from "../scripts/release-artifacts.ts"; const z = "sha256:" + "0".repeat(64); process.stdout.write(renderComposeOverlay({ version: "9.9.9", tag: "v9.9.9", rendered: "ci", images: { server: { ref: "ghcr.io/example/ob1-server:v9.9.9", digest: z }, migrate: { ref: "ghcr.io/example/ob1-migrate:v9.9.9", digest: z } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: z }))' > compose.release.yaml
             fi
+            release_sum="$(cksum < compose.release.yaml)"
             loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
             loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
             loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
@@ -1905,7 +1921,10 @@ jobs:
             left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
             [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
-          settle 0 "$unreleased"
+          # Every call made, wherever a later edit adds one (review pass 1: one
+          # left unsettled was killed unread, and passed).
+          settle 0 "${#pids[@]}"
+          [ "${#settled[@]}" = "${#pids[@]}" ] || { echo "${#pids[@]} renders started, ${#settled[@]} settled" >&2; exit 1; }
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
