@@ -331,6 +331,11 @@ const WORDS: Record<ToolName, Words> = {
   retry_failed: { render: (o) => say.renderRetryFailed(o), fault: writeFault("retry_failed failed: ") },
   release_stale_leases: { render: (o) => say.renderReleaseStaleLeases(o), fault: writeFault("release_stale_leases failed: ") },
   run_worker: { render: (o) => say.renderRunWorker(o), fault: writeFault("run_worker failed: ") },
+  // Work claims (SMD-3598): claim_work's reply carries the token, said to the caller who claimed and nowhere else.
+  claim_work: { render: (o) => say.renderClaimWork(o), fault: writeFault("claim_work failed: ") },
+  renew_claim: { render: (o) => say.renderRenewClaim(o), fault: writeFault("renew_claim failed: ") },
+  release_claim: { render: (o) => say.renderReleaseClaim(o), fault: writeFault("release_claim failed: ") },
+  list_claims: { render: (o) => say.renderListClaims(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };

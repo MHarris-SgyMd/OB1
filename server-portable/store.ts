@@ -1172,6 +1172,114 @@ export function normaliseResetStamp(r: unknown): ResetStampResult {
 }
 
 /**
+ * A work claim as migration 115's functions answer it (SMD-3597): who holds a
+ * ticket, or one piece of it, under a lease. Never its token or the token's
+ * hash: neither leaves the database but in claim_work's one answer.
+ */
+export type WorkClaim = {
+  id: string;
+  issue: string;
+  piece: string | null;
+  holder: string;
+  holderAgentId: string | null;
+  holderKind: string | null;
+  label: string | null;
+  claimedAt: string;
+  renewedAt: string | null;
+  expiresAt: string;
+  releasedAt: string | null;
+  releasedBy: string | null;
+  releasedByKind: string | null;
+  releaseReason: string | null;
+  state: "live" | "lapsed" | "released";
+};
+/** The refusal codes 115's writers answer with (SMD-3597). */
+export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_YOURS" | "CLAIM_RELEASED";
+/**
+ * One of 115's writers' jsonb answers, read: its outcome, its refusal code, the
+ * claim, the claims in the way, and the token — set on claim_work's `claimed`
+ * alone, and passed through untouched to the caller who claimed.
+ */
+export type ClaimAnswer = {
+  outcome: "claimed" | "renewed" | "released" | "already_released" | "refused";
+  code: ClaimRefusalCode | null;
+  claim: WorkClaim | null;
+  heldBy: WorkClaim[];
+  token: string | null;
+};
+
+/**
+ * A call 115 refused by raising rather than answering (SMD-3598): a malformed
+ * argument (SQLSTATE 22023), told by which (`problem`), or a key the registry
+ * calls ingested (42501). Its message is the database's, which names the
+ * argument's rule and never a token (115 words its token refusal without the
+ * value). Any other raise stays the store's fault.
+ */
+export class ClaimRefused extends Error {
+  constructor(readonly kind: "argument" | "ingested", readonly problem: ClaimProblem, message: string) {
+    super(message);
+    this.name = "ClaimRefused";
+  }
+}
+export type ClaimProblem = "ticket" | "piece" | "label" | "reason" | "token" | "lease" | "key_name" | "ingested" | "other";
+
+/** Which argument a 22023 from 115 names, by its message's opening words (115's own wording, one rule each). */
+export function claimProblemOf(message: string): ClaimProblem {
+  if (/^not a ticket key\b/.test(message)) return "ticket";
+  if (/^a piece (?:is at most|was given but is blank)/.test(message)) return "piece";
+  if (/^a label is at most/.test(message)) return "label";
+  if (/^a reason is at most|needs a reason$/.test(message)) return "reason";
+  if (/^not a claim token|needs the claim's token/.test(message)) return "token";
+  if (/^a lease is /.test(message)) return "lease";
+  if (/a holder's key name is at most/.test(message)) return "key_name";
+  return "other";
+}
+
+const CLAIM_STATES = new Set(["live", "lapsed", "released"]);
+const CLAIM_OUTCOMES = new Set(["claimed", "renewed", "released", "already_released", "refused"]);
+const CLAIM_CODES = new Set(["WORK_CLAIMED", "CLAIM_NOT_FOUND", "CLAIM_NOT_YOURS", "CLAIM_RELEASED"]);
+const TOKEN_SHAPE = /^wc_[0-9a-f]{64}$/;
+
+/** One claim from 115's ob1_work_claim_json, or list_work_claims' row (the same names); a row that is neither throws, unprinted. */
+export function normaliseWorkClaim(r: unknown, what: string): WorkClaim {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const text = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const time = (v: unknown): string | null => (v === null || v === undefined ? null : isoTimestamp(v as string | Date));
+  if (!o || typeof o.id !== "string" || typeof o.issue !== "string" || typeof o.holder !== "string" || !CLAIM_STATES.has(o.state as string)) {
+    // Never the row itself: a writer's answer carries the token beside its claim.
+    throw new Error(`${what} answered a claim this server cannot read`);
+  }
+  return {
+    id: o.id, issue: o.issue, piece: text(o.piece), holder: o.holder,
+    holderAgentId: text(o.holder_agent_id), holderKind: text(o.holder_kind), label: text(o.label),
+    claimedAt: time(o.claimed_at) as string, renewedAt: time(o.renewed_at), expiresAt: time(o.expires_at) as string,
+    releasedAt: time(o.released_at), releasedBy: text(o.released_by), releasedByKind: text(o.released_by_kind),
+    releaseReason: text(o.release_reason), state: o.state as WorkClaim["state"],
+  };
+}
+
+/**
+ * One of 115's writers' jsonb answers as the store's ClaimAnswer. An outcome or
+ * code the functions do not name, or a token not in its shape, throws — and
+ * the throw never prints the answer, which may carry the token (SMD-3598).
+ */
+export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  if (!o || !CLAIM_OUTCOMES.has(o.outcome as string) || (o.code !== null && o.code !== undefined && !CLAIM_CODES.has(o.code as string))) {
+    throw new Error(`${what} answered no envelope this server reads`);
+  }
+  const token = o.token === null || o.token === undefined ? null : typeof o.token === "string" && TOKEN_SHAPE.test(o.token) ? o.token : undefined;
+  if (token === undefined) throw new Error(`${what} answered a token not in its shape`);
+  return {
+    outcome: o.outcome as ClaimAnswer["outcome"],
+    code: (o.code ?? null) as ClaimRefusalCode | null,
+    claim: o.claim === null || o.claim === undefined ? null : normaliseWorkClaim(o.claim, what),
+    heldBy: Array.isArray(o.held_by) ? (o.held_by as unknown[]).map((c) => normaliseWorkClaim(c, what)) : [],
+    token,
+  };
+}
+
+/**
  * What a re-capture did to a capture-only key's label (migration 090,
  * SMD-2898). `moved`: the label moved to the caller — `stamp` the caller's,
  * `before` the capture-only key's. `kept`: weighed now and not higher, the row
@@ -1805,6 +1913,21 @@ export interface ThoughtStore {
   }): Promise<ResetStampResult>;
 
   /**
+   * Work claims (migration 115, SMD-3598): claim_work, renew_work_claim and
+   * release_work_claim, each one statement in its own transaction (the
+   * functions refuse above READ COMMITTED and lock their ticket), the actor
+   * as the holder's envelope, every value — the token above all — a bind
+   * parameter. A malformed argument or an ingested key throws ClaimRefused;
+   * any other raise is the store's fault. A database before 115 throws.
+   */
+  claimWork(opts: { issue: string; piece?: string; label?: string; leaseSeconds?: number; token?: string; actor?: Actor }): Promise<ClaimAnswer>;
+  renewClaim(opts: { id: string; token: string; leaseSeconds?: number; actor?: Actor }): Promise<ClaimAnswer>;
+  releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer>;
+  /** Whether a token is this claim's, by 115's hash (a token in its shape: the writer that refused it read it so); never the hash itself. */
+  claimTokenIs(id: string, token: string): Promise<boolean>;
+  /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
+  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
+  /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
    * lapse cleared (082) and the reviewer the row records (114), in one
@@ -2076,7 +2199,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

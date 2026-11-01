@@ -9,6 +9,7 @@ import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
+import * as claims from "./claims.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
@@ -52,6 +53,10 @@ export function createCore(deps: CoreDeps) {
     retryFailed: bind(ctx, workers.retryFailed),
     releaseStaleLeases: bind(ctx, workers.releaseStaleLeases),
     runWorker: bind(ctx, workers.runWorker),
+    claimWork: bind(ctx, claims.claimWork),
+    renewClaim: bind(ctx, claims.renewClaim),
+    releaseClaim: bind(ctx, claims.releaseClaim),
+    listClaims: bind(ctx, claims.listClaims),
     /**
      * A plugin's own tables (SMD-2310): a transaction as its role, in its
      * schema (store-sql.ts's pluginTx). A store without one (a suite's fake)
