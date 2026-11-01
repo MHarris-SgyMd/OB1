@@ -142,6 +142,11 @@ jobs:
         run: bun scripts/ci-step-times.ts --self-check
       - name: The suite-sections script's reading of a suite's output
         run: bun scripts/suite-sections.ts --self-check
+      # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
+      # fixtures — the rows, their order, the jobs that did not succeed or
+      # reported nothing. publish-test-counts writes it on a push to main.
+      - name: The Test-counts page from the jobs' count lines
+        run: bun .github/ci/test-counts-page.ts --self-check
       # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
       # side's password per half, the target's settings by name, the source
       # container gone before the target starts, each refusal it tries
@@ -153,6 +158,10 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -569,9 +578,25 @@ jobs:
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-portable-server
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -675,9 +700,25 @@ jobs:
         working-directory: db
         run: bun bench-live.ts --self-check
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-db-schema
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -760,9 +801,25 @@ jobs:
         working-directory: db
         run: bun test-coordinator.ts
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-replay-gate
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     # The live suite in four shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
@@ -854,9 +911,25 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-db-live-${{ matrix.shard }}
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     services:
       postgres:
@@ -1255,6 +1328,18 @@ jobs:
           done
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
+
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-data-layer
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
 
   deploy-stack:
     name: Full stack, no Supabase
@@ -4584,6 +4669,10 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     services:
       postgres:
@@ -4663,9 +4752,83 @@ jobs:
           fi
           echo "round-trip clean"
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-compat-shim
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── The suites' counts, published (SMD-3614) ────────────────────────────────
+  # A suite's assertion total is a fact about a commit's run, so it is written
+  # where the run is: the wiki's Test-counts page, not a doc that every PR
+  # adding an assertion edits, and two such PRs conflict on. report() in
+  # db/test-support.ts appends one line a run to OB1_TEST_COUNTS, which each
+  # job that runs suites sets; each uploads its file on a push to main, and
+  # this job gathers them, writes the page (.github/ci/test-counts-page.ts)
+  # and commits it to the wiki. It runs on a push to main alone, when a job it
+  # needs failed too (the page names the jobs that did not succeed), so it is
+  # the second job MAY_SKIP lets skip. A pull request, the merge queue and a
+  # push to another branch publish nothing. contents: write, on this job
+  # alone, is what pushes to the wiki's repository; the token stays out of the
+  # clone's config (an extraheader on each git call) and out of the checkout.
+  publish-test-counts:
+    name: Publish the suites' counts to the wiki
+    runs-on: ubuntu-24.04
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [portable-server, db-schema, replay-gate, db-live, data-layer, compat-shim]
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: test-counts-*
+          path: ${{ runner.temp }}/test-counts
+
+      - name: Write the page and commit it to the wiki
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-counts"
+          COUNTS_DIR="$RUNNER_TEMP/test-counts" bun .github/ci/test-counts-page.ts > "$RUNNER_TEMP/Test-counts.md"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth#AUTHORIZATION: basic }"
+          wiki="$RUNNER_TEMP/wiki"
+          # The wiki's repository exists once its first page does (SMD-3614).
+          git -c http.extraheader="$auth" clone --depth 1 "https://github.com/$REPO.wiki.git" "$wiki"
+          cp "$RUNNER_TEMP/Test-counts.md" "$wiki/Test-counts.md"
+          cd "$wiki"
+          git add Test-counts.md
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Test counts at ${SHA:0:12}" -m "$RUN_URL"
+          # A page edited meanwhile: once more on top of it.
+          git -c http.extraheader="$auth" push -q origin HEAD \
+            || { git -c http.extraheader="$auth" pull -q --rebase origin HEAD && git -c http.extraheader="$auth" push -q origin HEAD; }
+          echo "Published $(grep -c '^| `' Test-counts.md) rows at ${SHA:0:12}: $(git rev-parse --short HEAD) on the wiki"
+          cat Test-counts.md >> "$GITHUB_STEP_SUMMARY"
+
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
   # Both are required, as every job is, through "Fork Checks passed"
-  # (SMD-3168); commit-lint is the one job MAY_SKIP lets skip.
+  # (SMD-3168); commit-lint is the one lint job MAY_SKIP lets skip, beside
+  # publish-test-counts.
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
@@ -4726,8 +4889,9 @@ jobs:
   # `if: always()` because a job whose needs failed is otherwise skipped, and
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
-  # own `if:` runs it on pull requests and the merge queue alone. The step is
-  # held verbatim by check 20, which runs it against its own cases.
+  # own `if:` runs it on pull requests and the merge queue alone, and
+  # publish-test-counts, whose own runs it on a push to main alone. The step
+  # is held verbatim by check 20, which runs it against its own cases.
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
@@ -4747,11 +4911,12 @@ jobs:
       - compat-shim
       - commit-lint
       - workflow-lint
+      - publish-test-counts
     steps:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: commit-lint
+          MAY_SKIP: commit-lint publish-test-counts
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '

@@ -5260,8 +5260,9 @@ if (want("10")) {
                           RETURNS TABLE (thought_id uuid, attempt int) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'a lock not available, for the suite' USING ERRCODE = '55P03'; END $$`);
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await Bun.sleep(3000);
-      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int)");
-      await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      // One query, so one transaction: as two, a poll between them found no
+      // claim_thoughts at all and the follower ended on it (SMD-3614's ci-parity run).
+      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int); ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
       swapped = false;
       const ended = await pollUntil(async () => code !== -1, 15_000);
       ac.abort();
@@ -21481,4 +21482,4 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   }
 }
 
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);
