@@ -140,13 +140,17 @@ jobs:
 
       # SMD-3473: a pull request's rehearsal builds both platforms only when it
       # changes what can build differently on arm64 — the two Dockerfiles (the
-      # base image, every RUN), .dockerignore, this file, dashboard/, and each
-      # package.json and bun.lock a Dockerfile copies, whose `bun install` runs
-      # under QEMU for arm64. A change elsewhere is source the image copies,
-      # which builds the same on both, so its rehearsal builds amd64 alone and
-      # still brings the stack up from it. A dispatched rehearsal builds both;
-      # a tag always does. The pull request's checkout is its merge commit, so
-      # HEAD^1..HEAD is what it changes; any other HEAD builds both.
+      # base image, every RUN), this file, and each package.json and bun.lock a
+      # Dockerfile copies, whose `bun install` runs under QEMU for arm64 — or
+      # .dockerignore and dashboard/, which build the same on both (dashboard
+      # builds on the build platform) but are kept from the ticket's list. A
+      # change elsewhere is source the image copies, which builds the same on
+      # both, so its rehearsal builds amd64 alone and still brings the stack up
+      # from it. A dispatched rehearsal builds both; a tag always does. The
+      # pull request's checkout is its merge commit, so HEAD^1..HEAD is what it
+      # changes, each path as it is: unquoted, and a rename as its two sides.
+      # Whatever the step cannot read builds both, and says so, rather than
+      # failing the rehearsal (review pass 1).
       - name: Whether this rehearsal builds both platforms
         id: platforms
         if: env.PUBLISH != 'true'
@@ -158,17 +162,24 @@ jobs:
           both() { echo "both platforms: $1"; echo "both=true" >> "$GITHUB_OUTPUT"; exit 0; }
           [ "$EVENT" = pull_request ] || both "a $EVENT rehearsal"
           git rev-parse -q --verify HEAD^2 > /dev/null || both "HEAD is not the pull request's merge commit"
-          changed="$(git diff --name-only HEAD^1 HEAD)"
-          [ -n "$changed" ] || both "no change read from HEAD^1..HEAD"
-          # Each package.json and bun.lock the two Dockerfiles copy, read from them so a new stage's are gated too.
-          locks="$(sed '/^[[:space:]]*#/d' "$SERVER_DOCKERFILE" "$MIGRATE_DOCKERFILE" | grep -oE '[A-Za-z0-9_./-]+/(package\.json|bun\.lock)' | sort -u)"
-          [ -n "$locks" ] || both "no package.json or bun.lock read from $SERVER_DOCKERFILE"
-          while read -r f; do
+          # NUL-separated, so no path is quoted; --no-renames lists a rename's old path too.
+          changed="$RUNNER_TEMP/rehearsal-changed"
+          git diff -z --no-renames --name-only HEAD^1 HEAD > "$changed" || both "git could not list HEAD^1..HEAD"
+          [ -s "$changed" ] || both "no change read from HEAD^1..HEAD"
+          while IFS= read -r -d '' f; do
             case "$f" in
               "$SERVER_DOCKERFILE" | "$MIGRATE_DOCKERFILE" | .dockerignore | .github/workflows/release.yml | dashboard/*) both "$f changed" ;;
             esac
+          done < "$changed"
+          # Each package.json and bun.lock the two Dockerfiles copy, read from
+          # their non-comment lines so a new stage's are gated too. A Dockerfile
+          # that changed was decided above; one that names none builds both.
+          if [ ! -f "$SERVER_DOCKERFILE" ] || [ ! -f "$MIGRATE_DOCKERFILE" ]; then both "the facts name no Dockerfile here ('$SERVER_DOCKERFILE', '$MIGRATE_DOCKERFILE')"; fi
+          locks="$(sed '/^[[:space:]]*#/d' "$SERVER_DOCKERFILE" "$MIGRATE_DOCKERFILE" | grep -oE '[A-Za-z0-9_./-]+/(package\.json|bun\.lock)' | sort -u)" || true
+          [ -n "$locks" ] || both "no package.json or bun.lock read from $SERVER_DOCKERFILE or $MIGRATE_DOCKERFILE"
+          while IFS= read -r -d '' f; do
             if grep -qxF -- "$f" <<<"$locks"; then both "$f changed"; fi
-          done <<<"$changed"
+          done < "$changed"
           echo "amd64 alone: nothing changed that builds differently on arm64"
           echo "both=false" >> "$GITHUB_OUTPUT"
 
