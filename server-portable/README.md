@@ -319,7 +319,7 @@ empties a double-encoded payload silently — or, from before 033, takes no
 lock either; each is a warning naming 035, the last definer of both forms. `provenance` reads
 `trace_provenance`'s body the same way and warns, naming 026, when the
 bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
-body is not 024's; and `work claims` fails when `release_thought`'s or
+body is not 024's; and `worker claims` fails when `release_thought`'s or
 `release_claims_for_worker`'s body is not 015's — every worker release would
 fail 015's CHECK — and names any overload of the claim names no migration
 defines. `write privileges`: a role missing any privilege the capture path's
@@ -923,6 +923,56 @@ on both brains, and a key equal to it names that thought.
   never matches; and it keeps the first brain's order (a capture before the edit or
   delete of it), or a late capture after a delete would bring the thought back.
 
+## Work claims (SMD-3598)
+
+Every brain records who holds a ticket, or one piece of it, so two agents never
+build the same change (migration 115, SMD-3597). Four tools reach it, each over REST
+and MCP alike:
+
+- **`claim_work`** (`POST /v1/claims`, write scope): a ticket (`SMD-3379`) and,
+  optionally, a piece (`PR 1b-2`), a label, a lease (60 seconds to a week, four
+  hours by default) and the caller's token to renew. On success the value carries
+  a **token**, `wc_` and 64 hex digits, shown this once.
+- **`renew_claim`** (`POST /v1/claims/{id}/renew`) and **`release_claim`**
+  (`POST /v1/claims/{id}/release`), write scope: the caller's own claim, by its key
+  and its token. `release_claim` takes `force` with a `reason` for an operator key,
+  classified `operator` by its agent id.
+- **`list_claims`** (`GET /v1/claims`, read scope): the live claims, of one ticket or
+  one holder's key, or every claim with `include_ended`, and `truncated` when the
+  limit cut the list. Never a token.
+
+**The token** is a bearer secret to its key: anyone holding it under that key acts as
+the holder. It travels in a JSON body, never a URL, and as a bind parameter, never
+in a statement's text. It is in `claim_work`'s `claimed` reply alone: no refusal,
+error message, request line or span carries it. A statement log prints bind values
+whole unless `log_parameter_max_length` is 0; preflight's `ticket claims` row warns
+when it, a failed statement's parameters (`log_parameter_max_length_on_error`),
+sampled statements, a verbose or parameter-printing auto_explain, `debug_print_plan` or
+pgaudit would. An agent keeps its token where only it reads it (a git-ignored file in
+its worktree), and never writes it into a thought, commit, PR, ticket or log. The
+session-capture hook blanks one (`[redacted:work-claim token]`) before a summary
+leaves (SMD-3615). A plugin's `ctx.call` claims as its caller, as every write it
+calls does.
+
+**A refusal is an answer**, not an error:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `WORK_CLAIMED` | 409 | A live claim covers the work. `heldBy` names each claim: id, holder, kind, times and `ownKey` (the caller's own key holds it: another session of it, or this one without its token), never its label. |
+| `CLAIM_NOT_YOURS` | 403 | Not this key with this token. `forced: true` means a force refused: the key is no operator by agent id. `ownKey: true`: the caller's own key holds it under a token this call did not give. |
+| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). |
+| `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
+| `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
+| `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
+| `CLAIM_UNATTRIBUTED` | 503 | The registry cannot give the caller's agent id: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (no Retry-After: an operator acts). `forced: false`: a renew or release of the caller's own claim, made under that id, with that claim's token (checked against its hash), which still holds. `forced: true`: a forced release, which needs the id to classify an operator. |
+
+A whole ticket and any of its pieces are the same work; two different pieces are not.
+Each call is one statement, so its own READ COMMITTED transaction holding one ticket's
+lock (115's rule). A role without the `claims` grant group has the claim calls fail,
+naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks the
+functions, the grant and the log setting. The `worker claims` row, named `work
+claims` before this ticket, is migration 015's: it keeps two workers off one thought.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
@@ -937,7 +987,9 @@ MCP tools do rather than a copy of it:
   `reset_capture_stamp`: the shapes, a capture-only key's trimmed provenance and owned
   pointers, the egress gate, the model calls, the write and its cites. `core/workers.ts` holds the worker actions
   (`retry_failed`, `release_stale_leases`, `run_worker`'s dry run), which the keyed REST
-  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too. Each
+  POSTs (`/worker-retry-failed`, `/worker-release-leases`, `/worker-run`) call too.
+  `core/claims.ts` holds the work-claim tools (`claim_work`, `renew_claim`,
+  `release_claim`, `list_claims`, SMD-3598) over migration 115's functions. Each
   returns its typed value or a typed refusal (`core/refusal.ts`: a `code`, whether it is
   `retryable`, and the facts to say it with), and throws a fault. `core/context.ts` is what they run against: the store,
   the provider settings and the one embedder, the query log, the door a write records.
@@ -1190,20 +1242,20 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1265 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
-bun test-auth.ts          # 193 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 522 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
+bun test-server.ts        # 1329 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), the address OB1_LISTEN_HOST names, every stub and child on 127.0.0.1 (SMD-3323), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-auth.ts          # 195 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
+bun test-rest.ts          # 552 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, `bun api.ts` stopped mid-request, and where it listens (OB1_LISTEN_HOST, SMD-3323)
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 845 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts and decide mode, chunking, the entity gate and genre, the provider's state and the vector mender, and a thought's own subject: its rules, its key and the question pinned by hash (SMD-3306)
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 226 — fully local provider, no credential
 bun run test:sql          # 297 — store conformance, real Postgres in a container
 bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 301 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 319 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 116 — a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
-../db/with-postgres.sh bun test-preflight.ts  # 1007 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
-OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # 445 — one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
-OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 562 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
+../db/with-postgres.sh bun test-preflight.ts  # 1014 — the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer with no DATABASE_URL, which skips the database sections)
+OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # 451 — one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
+OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # 563 — every section SHARDS does not list; the two add up to the full run's, which [doc] checks on every run
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`

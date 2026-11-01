@@ -2294,8 +2294,8 @@ an ingested key, and a role missing the grant (naming `work_claims`); 0A000 the
 isolation level; 25006 a read-only transaction. `p_actor` sets `ob1.actor` for the
 rest of the transaction (029's shape). `list_work_claims` matches nothing for a
 malformed key rather than raising, and a refused forced release shares the code
-`CLAIM_NOT_YOURS`, told apart by its message. Preflight's existing `work claims`
-row is 015's worker claims, not these. The partial unique index
+`CLAIM_NOT_YOURS`, told apart by its message. Preflight's `ticket claims` row
+checks these (SMD-3598); its `worker claims` row is 015's. The partial unique index
 `work_claims_one_unreleased` holds the exact-work rule for a write made without
 the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The
@@ -2304,8 +2304,9 @@ soft: a role without it gets a permission error (42501) naming `work_claims` on
 the calls, and nothing else; the rules hold for
 callers of the functions, while a role with the group can write the table
 directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
-The REST and MCP operations are SMD-3598, the `claimed` label on results
-SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
+The REST and MCP operations are `claim_work`, `renew_claim`, `release_claim` and
+`list_claims` (SMD-3598; server-portable/README.md, Work claims); the `claimed`
+label on results is SMD-3599. test-schema [103] (the rules, the cleaning, the refusals, the group,
 the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
 (onto a populated brain at 114).
 
@@ -6083,10 +6084,10 @@ third covers the one thing the test image cannot reproduce.
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1963 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1048 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 121 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1086 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 514 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 468 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
