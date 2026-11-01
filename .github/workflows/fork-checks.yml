@@ -24,7 +24,10 @@ permissions:
 # Every run: step under bash --noprofile --norc -eo pipefail {0} (GitHub's
 # documented `shell: bash`), so a `cmd | grep`/`cmd | jq` whose left side fails
 # fails the step instead of being masked. Before this the default was `bash -e`
-# with no pipefail (SMD-1808).
+# with no pipefail (SMD-1808). So no step pipes into `grep -q`: it exits at its
+# first match, and a producer still writing then dies of SIGPIPE, which
+# pipefail makes a 141 (`grep … > /dev/null` reads to the end; check 45,
+# SMD-3652).
 defaults:
   run:
     shell: bash
@@ -1386,7 +1389,7 @@ jobs:
           held_also unknown 'extract: OB1_WORKER_KEY is not set in deploy/.env'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
-            printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
+            printf '%s\n' "$before" | grep -xF -- "$k" > /dev/null || q "DELETE FROM ob1_config WHERE key = '$k'"
           done
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
@@ -1707,8 +1710,8 @@ jobs:
           # (SMD-3194, 5 s before) it counted as a connection here.
           docker run -d --name ob1-ci-decoy --no-healthcheck --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
           decoy=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_edge").IPAddress}}' ob1-ci-decoy)
-          for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" && break; sleep 0.5; done
-          docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }
+          for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -F "$decoy" > /dev/null && break; sleep 0.5; done
+          docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -F "$decoy" > /dev/null || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }
           if [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ]; then echo "/health answered ok with the proxy stopped" >&2; exit 1; fi
           sleep 1
           [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
@@ -2992,7 +2995,7 @@ jobs:
           coord() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator | head -n 1; }
           board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(coord)"; }
           [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "the canary's up left no coordinator running" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=' || { echo "the canary's coordinator runs passes its env file does not name: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=' > /dev/null || { echo "the canary's coordinator runs passes its env file does not name: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
@@ -3010,7 +3013,7 @@ jobs:
           # operator GUI holds an empty one, and a key sign-in at its loopback
           # port is taken — with stable's origin it was refused as cross-site.
           if grep -q '^OB1_PUBLIC_ORIGIN=' .env.canary.local; then echo "the canary's env file carries OB1_PUBLIC_ORIGIN" >&2; exit 1; fi
-          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -qx 'OB1_PUBLIC_ORIGIN=' \
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -x 'OB1_PUBLIC_ORIGIN=' > /dev/null \
             || { echo "the canary's operator GUI holds a public origin" >&2; exit 1; }
           gui=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' \
             -H 'origin: http://127.0.0.1:8011' --data-urlencode "key=$CANARY_KEY" http://127.0.0.1:8011/dashboard/signin)
@@ -3130,9 +3133,9 @@ jobs:
           if grep -qE '^(LINEAR_COMMENT_API_KEY|linear_other_key)=.' .env.canary.local || grep -qF ci-pasted- .env.canary.local; then echo "the canary's env file still holds a pasted Linear key" >&2; exit 1; fi
           grep -qxF 'LINEAR_API_KEY=ci-canary-own-linear-key' .env.canary.local || { echo "the canary's env file lost its own read key" >&2; exit 1; }
           grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
-          board_env | grep -qx 'OB1_PASSES=board-sync' || { echo "the canary's coordinator does not run its file's passes alone (the shell's beat the file's?): $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=board-sync' > /dev/null || { echo "the canary's coordinator does not run its file's passes alone (the shell's beat the file's?): $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_API_KEY=ci-canary-own-linear-key' > /dev/null || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_COMMENT_API_KEY=' > /dev/null || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run up --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
@@ -3283,7 +3286,7 @@ jobs:
           done
           grep -qF "wrote to the canary's env file, $PWD/.env.canary.local: OB1_PASSES=\"sleep,board-sync\"" /tmp/canary-nokey.out || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh did not carry the retired containers' passes to OB1_PASSES" >&2; exit 1; }
           [ "$(grep -c '^OB1_PASSES=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds other than one OB1_PASSES line" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=sleep' || { echo "the canary's coordinator runs other than sleep with no key of its own for board-sync: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=sleep' > /dev/null || { echo "the canary's coordinator runs other than sleep with no key of its own for board-sync: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           { [ "$rc" = 1 ] && grep -qF 'canary sleep held by the coordinator, running nothing' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with sleep named and no OB1_WORKER_KEY exited $rc, not 1 with sleep held" >&2; exit 1; }
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
           # SMD-3312: the canary's own read key back, so board-sync comes back.
@@ -3322,11 +3325,11 @@ jobs:
           grep -F 'canary coordinator, on the new build (OB1_PASSES: sleep,board-sync;' /tmp/canary-norefresh.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
           [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "up --no-refresh did not bring the coordinator back running" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=sleep,board-sync' || { echo "up --no-refresh did not bring the coordinator back on the file's passes" >&2; exit 1; }
-          for _ in $(seq 1 15); do docker logs "$(coord)" 2>&1 | grep -qF 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' && break; sleep 1; done
+          board_env | grep -x 'OB1_PASSES=sleep,board-sync' > /dev/null || { echo "up --no-refresh did not bring the coordinator back on the file's passes" >&2; exit 1; }
+          for _ in $(seq 1 15); do docker logs "$(coord)" 2>&1 | grep -F 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' > /dev/null && break; sleep 1; done
           docker logs "$(coord)" 2>&1 | grep -F 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' || { docker logs "$(coord)" >&2; echo "the canary's coordinator does not run board-sync and sleep, each as its own user" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_API_KEY=ci-canary-own-linear-key' > /dev/null || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_COMMENT_API_KEY=' > /dev/null || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
@@ -3646,9 +3649,9 @@ jobs:
           OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
         run: |
           docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
-          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done
+          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep "runner: listening" > /dev/null && break; sleep 1; done
           docker logs ob1-runner-egress 2>&1
-          docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"
+          docker logs ob1-runner-egress 2>&1 | grep "runner: listening" > /dev/null
           pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ] && basename "$p"; done' | head -1)
           eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
           echo "runner pid $pid CapEff $eff"
@@ -3712,7 +3715,7 @@ jobs:
           # Read once, and it must name a resolver, so an empty read cannot pass.
           resolv=$(docker compose -f compose.yaml exec -T proxy cat /etc/resolv.conf)
           grep -q '^nameserver ' <<<"$resolv" || { echo "the proxy's resolv.conf names no resolver: \"$resolv\""; exit 1; }
-          if grep -E '^search' <<<"$resolv" | grep -qv -E '^search[[:space:]]+\.?[[:space:]]*$'; then
+          if grep -E '^search' <<<"$resolv" | grep -v -E '^search[[:space:]]+\.?[[:space:]]*$' > /dev/null; then
             echo "the proxy resolves under search domains:"; echo "$resolv"; exit 1
           fi
           # The settings and secrets (.github/ci/auth-settings.sh, which the

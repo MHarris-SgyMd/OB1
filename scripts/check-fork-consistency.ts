@@ -538,6 +538,12 @@
  *      working directory's file alone (SMD-2978: db-live ran
  *      server-portable/preflight.ts on a zod fetched at run time). Its probes
  *      pin which files turn it off
+ *  45. no workflow, and no tracked .sh under .github/, db/, deploy/ or
+ *      scripts/ that sets pipefail, pipes into `grep -q` (or --quiet,
+ *      --silent): grep exits at its first match, a writer still writing dies
+ *      of SIGPIPE, and pipefail reads 141 — a fatal step or a false "no
+ *      match" (SMD-3652: the import runner's egress step failed at random);
+ *      `grep … > /dev/null` reads to the end. Its probe pins what it refuses
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
@@ -9849,6 +9855,60 @@ function checkNoAutoInstall() {
   }
 }
 checkNoAutoInstall();
+
+// ── 45: no workflow step or pipefail script pipes into `grep -q` (SMD-3652) ──
+/**
+ * 45: `grep -q` exits at its first match. Whatever still writes into its pipe after that dies of SIGPIPE, and under
+ * pipefail (every fork-checks.yml step, and each script that sets it) the pipeline's status is then 141: a fatal one
+ * under `-e`, or a false "no match" in an `if`, `&&` or `||`. So "The import runner starts with its egress rules"
+ * failed at random once the runner printed a stderr line after its listening line (SMD-3652, SMD-3334). `grep …
+ * > /dev/null` reads to the end and keeps the status; a here-string or a file has no writer to kill. It reads every
+ * workflow and each tracked .sh under .github/, db/, deploy/ and scripts/ that sets pipefail, comment lines aside,
+ * for a `|` or `|&` (not `||`) into a grep whose flags, before its first operand, include q, `--quiet` or `--silent`.
+ */
+const PIPE_INTO_GREP_Q = /(?<!\|)\|(?!\|)&?\s*grep(?:\s+-{1,2}[A-Za-z][A-Za-z-]*)*?\s+(?:-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)(?=\s|$)/;
+const PIPEFAIL_SET = /^\s*set\s+(?:-[A-Za-z]*o\s+pipefail|-o\s+pipefail)\b/m;
+function pipesIntoGrepQ(text: string): number[] {
+  const out: number[] = [];
+  text.split("\n").forEach((l, i) => { if (!/^\s*#/.test(l) && PIPE_INTO_GREP_Q.test(l)) out.push(i + 1); });
+  return out;
+}
+function checkNoPipeIntoGrepQ() {
+  const cases: [string, number][] = [
+    ['docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"', 1],
+    ["board_env | grep -qx 'OB1_PASSES=' || { echo no >&2; exit 1; }", 1],
+    ['printf "%s\\n" "$before" | grep -xqF -- "$k" || q x', 1],
+    ["if grep -E '^search' <<<\"$r\" | grep -E -qv '^search .$'; then", 1],
+    ['cmd |& grep --quiet x', 1],
+    ['cmd | grep --silent x && break', 1],
+    ['docker logs x 2>&1 | grep "runner: listening" > /dev/null', 0],
+    ['grep -q "runner: listening" <<<"$(docker logs x 2>&1)"', 0],
+    ["grep -qx 'OB1_TIER=stable' /tmp/env || echo no", 0],
+    ['test -n "$a" || grep -q x file', 0],
+    ['up=$(curl -s x | grep -cx "pg_up 1" || true)', 0],
+    ["cmd | grep -F -- '-q' > /dev/null", 0],
+    ['          # docker logs x | grep -q y', 0],
+  ];
+  const wrong = cases.map(([t, n]) => ({ t, want: n, got: pipesIntoGrepQ(t).length })).filter((c) => c.got !== c.want);
+  if (wrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify(wrong)}): a | or |& into grep with q, --quiet or --silent among its flags fails; || into grep, a here-string, a file, grep -c and grep > /dev/null pass, as does a comment (SMD-3652)`);
+  const wdir = join(ROOT, ".github", "workflows");
+  const workflows = existsSync(wdir) ? readdirSync(wdir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => `.github/workflows/${f}`) : [];
+  if (!workflows.length) { fail(".github/workflows", "no workflow found — check 45 reads each one for a pipe into grep -q (SMD-3652)"); return; }
+  let scripts: string[] = [];
+  try {
+    scripts = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".github", "db", "deploy", "scripts"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
+      .split("\0").filter((f) => f.endsWith(".sh") && existsSync(join(ROOT, f)) && PIPEFAIL_SET.test(readFileSync(join(ROOT, f), "utf8")));
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 reads the workflows alone)`);
+  }
+  if (!scripts.includes("db/with-postgres.sh")) fail(SELF, "check 45 does not read db/with-postgres.sh as a script that sets pipefail — the reading is broken, not the tree clean");
+  for (const f of [...workflows, ...scripts.sort()]) {
+    for (const line of pipesIntoGrepQ(readFileSync(join(ROOT, f), "utf8"))) {
+      fail(`${f}:${line}`, `a pipe into grep -q under pipefail: grep exits at its first match, and a writer still writing dies of SIGPIPE, so the pipeline reads 141 — fatal under -e, a false "no match" in a condition — write \`grep … > /dev/null\`, which reads to the end, or grep a here-string or a file (check 45, SMD-3652)`);
+    }
+  }
+}
+checkNoPipeIntoGrepQ();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
