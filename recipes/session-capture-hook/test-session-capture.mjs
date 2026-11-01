@@ -3111,6 +3111,8 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (c.state === "unattributed") return err(`Error: the agent registry could not attribute this key just now; the token given is this claim's: keep it.`, { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: args.id, forced: false });
     if (c.state === "badinput") return err(`Refused: the claim's input is malformed.`, { code: "REFUSED_CLAIM_INPUT", problem: "token" });
     if (c.state === "echo") return err(`Refused: could not renew ${JSON.stringify(args)}`, { code: "SOMETHING_ODD" }); // a misbehaving server that echoes the call
+    if (c.state === "echo-escaped") return err(`Refused: could not renew ${args.token.replace("wc_", "wc\\_")}`, { code: "SOMETHING_ODD" }); // …as markdown escapes it
+    if (c.state === "rpcecho") return Response.json(envelope({ error: { code: -32000, message: `bad call with ${args.token}` } })); // a JSON-RPC error echoing it: the hook's call throws
     const expiresAt = new Date(Date.now() + (args.lease_seconds ?? 14_400) * 1000).toISOString();
     return Response.json(envelope({ result: { content: [{ type: "text", text: `Renewed your claim on SMD-9001 until ${expiresAt} (claim ${args.id}).` }], structuredContent: { claim: { id: args.id, issue: "SMD-9001", piece: null, expiresAt } } } }));
   } });
@@ -3147,14 +3149,15 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   const real = (p) => realpathSync(p); // macOS's /var is /private/var: worktreeRoot resolves symlinks
   assert(worktreeRoot(SUB) === real(WT) && worktreeRoot(WT) === real(WT) && worktreeRoot(TMP) === null && worktreeRoot("relative/path") === null,
     "the worktree is the nearest directory up with a .git — file or directory; none outside one, nor for a relative path");
-  // A nested repo (a submodule) inside the worktree: its own .git, no .work-claims — the walk goes on to the worktree's (review pass 1).
-  const NESTED = join(WT, "vendor", "lib");
+  // The nearest .git, always — a linked worktree inside a checkout that keeps its own .work-claims/ (this repo's
+  // layout) is its own worktree, never the checkout (review pass 2, undoing pass 1's walk past a nested .git).
+  const NESTED = join(WT, ".claude", "worktrees", "other");
   mkdirSync(join(NESTED, "src"), { recursive: true });
-  writeFileSync(join(NESTED, ".git"), "gitdir: /elsewhere/.git/modules/lib\n");
+  writeFileSync(join(NESTED, ".git"), "gitdir: /elsewhere/.git/worktrees/other\n");
   const LINKED = join(TMP, "linked-sub");
   symlinkSync(SUB, LINKED);
-  assert(worktreeRoot(join(NESTED, "src")) === real(WT) && worktreeRoot(LINKED) === real(WT),
-    "past a nested repo's own .git to the worktree that keeps .work-claims/, and through a symlinked cwd");
+  assert(worktreeRoot(join(NESTED, "src")) === real(NESTED) && worktreeRoot(LINKED) === real(WT),
+    "a worktree nested inside a checkout is its own — the nearest .git — and a symlinked cwd resolves to its worktree");
   assert(renewEveryMs(14_400) === 3_600_000 && renewEveryMs(600) === 150_000 && renewEveryMs(60) === 60_000 && renewEveryMs(604_800) === 3_600_000,
     "a claim is renewed every quarter lease: hourly on the default four hours, never under a minute or over an hour");
 
@@ -3289,6 +3292,36 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(!logText().includes(tok(23)) && lines.some((l) => l.includes(C(23)) && l.includes("wc_[masked]")) && !readFileSync(join(STATE, "claims", `${C(23)}.json`), "utf8").includes(tok(23)),
     "a brain's words that echo the token are masked in the log and the state");
   clearClaims();
+  // Masked too: the token as markdown escapes it, one in a JSON-RPC error the call throws on, and one an agent put in its ticket (review pass 2).
+  const hex = (n) => tok(n).slice(3);
+  putClaim(30, {}, "echo-escaped");
+  putClaim(31, {}, "rpcecho");
+  putClaim(32, { ticket: `SMD-9001 ${tok(32)}` });
+  await claimsHook();
+  assert(!logText().includes(hex(30)) && !logText().includes(hex(31)) && !logText().includes(hex(32)) && (logText().match(/wc_\[masked\]/g) ?? []).length >= 3,
+    "the token is masked as markdown escapes it, in an error the call throws on, and in a ticket the agent wrote it into");
+  clearClaims();
+  // The ended file's fresh file is created exclusively: a symlink planted at its temporary name is never written through (review pass 2).
+  putClaim(33, {}, "released");
+  const planted = join(TMP, "planted-target.txt");
+  writeFileSync(planted, "keep me\n");
+  symlinkSync(planted, `${join(CLAIMS, `${C(33)}.json`)}.${process.pid}.tmp`);
+  await renewClaims(SUB, brainsHere, { now: true });
+  assert(readFileSync(planted, "utf8") === "keep me\n" && existsSync(join(CLAIMS, `${C(33)}.json`)), "a symlink planted at the ended file's temporary name is not written through; the token file waits for the next try");
+  clearClaims();
+  // Unreadable: a token file and a directory others than root cannot read are named so, not as "not JSON" (review pass 2).
+  if (process.getuid?.() !== 0) {
+    const locked = putClaim(34);
+    chmodSync(locked, 0o000);
+    await runHook({ session_id: "s-claims-locked", hook_event_name: "SessionEnd", cwd: SUB }, env);
+    assert(/claims: skipped .*\.json: unreadable \(EACCES\)/.test(logText()), "a token file it cannot read is named unreadable");
+    chmodSync(locked, 0o600);
+    chmodSync(CLAIMS, 0o000);
+    await runHook({ session_id: "s-claims-locked2", hook_event_name: "SessionEnd", cwd: SUB }, env);
+    chmodSync(CLAIMS, 0o700);
+    assert(/claims: skipped .*\.work-claims: unreadable \(EACCES\)/.test(logText()), "…and a directory it cannot list is named at a checkpoint, not passed over in silence");
+    clearClaims();
+  }
 
   // An ended claim whose file cannot be rewritten keeps a stamp: not asked again at every event (review pass 1).
   // A directory at the ended file's name: the rename fails for any user, root included (a read-only directory stops no root, as CI's container runs).
@@ -3335,8 +3368,32 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   chmodSync(open, 0o644);
   chmodSync(CLAIMS, 0o755);
   await claimsHook();
-  assert(/now mode 600, its directory 700/.test(logText().split("\n").filter(Boolean).pop()) && (statSync(open).mode & 0o777) === 0o600 && (statSync(CLAIMS).mode & 0o777) === 0o700,
+  const lastLine = () => logText().split("\n").filter(Boolean).pop();
+  assert(/its directory was open to others: now mode 700; its token file was readable by others: now mode 600/.test(lastLine()) && (statSync(open).mode & 0o777) === 0o600 && (statSync(CLAIMS).mode & 0o777) === 0o700,
     "a token file readable by others is set to mode 600 and its directory to 700, renewed, and the log says so");
+  // Only the directory open: the line names the directory alone (review pass 2: it named the file).
+  chmodSync(CLAIMS, 0o755);
+  age(10, 61);
+  await claimsHook();
+  assert(/its directory was open to others: now mode 700\)$/.test(lastLine()), "only the directory open: the log names the directory alone");
+  // A token file swapped for a symlink after it was read, while an earlier claim's renewal is in flight: the mode
+  // change goes through a handle opened without following links, so the link's target keeps its mode (review pass 2).
+  clearClaims();
+  const { renewClaims: renewIn } = await import(SCRIPT);
+  const target = join(TMP, "exec-target.sh");
+  writeFileSync(target, "#!/bin/sh\n");
+  chmodSync(target, 0o755);
+  putClaim(28);
+  const swapped = putClaim(29); // C(29) sorts after C(28): renewed second
+  chmodSync(swapped, 0o644);
+  slowRenewMs = 600;
+  const racing = renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", claimKey: "claim-key" } }], { now: true });
+  await sleep(200); // claim 28's renewal is at the brain; 29's file was read before it
+  rmSync(swapped);
+  symlinkSync(target, swapped);
+  await racing;
+  slowRenewMs = 0;
+  assert((statSync(target).mode & 0o777) === 0o755, `a token file swapped for a symlink mid-run: its target keeps mode 755 (now ${(statSync(target).mode & 0o777).toString(8)})`);
   clearClaims();
 
   // No claim key, or no worktree: nothing called, nothing said on a quiet event; a checkpoint names the file it could not renew.
@@ -3419,6 +3476,32 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   const ckEnv = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG, OB1_CLAIM_KEY: "stray-key" } });
   assert(/warning: OB1_CLAIM_KEY is set but no brain uses it/.test(ckEnv.err) && !ckEnv.err.includes("stray-key"), "beside a brains list, --check warns that OB1_CLAIM_KEY is read by no brain, without printing it");
+  const ckOne = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG, OB1_CLAIM_KEY: "claim-key" } });
+  assert(ckOne.code === 0 && !/OB1_CLAIM_KEY is set but no brain uses it/.test(ckOne.err), "…and on the one-brain shape, which reads it, it does not");
+  clearClaims();
+
+  // The rule's own template names a server: a config of one brain — which has no connector — renews it all the same (review pass 2).
+  putClaim(35, { server: "open-brain" });
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && renews()[0].args.id === C(35), "a one-brain config renews a token file whose server it has no connector for");
+  // An upper-case id given by hand is the claim's id all the same (an id with letters: the others here are digits).
+  const LETTERED = "abcdef12-0000-4000-8000-00000000abcd";
+  claims.set(LETTERED, { token: tok(9), state: "live" });
+  writeFileSync(join(CLAIMS, `${LETTERED}.json`), JSON.stringify({ id: LETTERED, token: tok(9), ticket: "SMD-9001" }), { mode: 0o600 });
+  const upper = await spawnScript(["--renew-claims", "--cwd", SUB, "--claim", LETTERED.toUpperCase()], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(upper.code === 0 && renews().length === 2 && renews()[1].args.id === LETTERED, "--claim takes the id in either case");
+  rmSync(join(CLAIMS, `${LETTERED}.json`));
+  // A mistyped capture secret mode stops the capture, not the claims hook (review pass 2).
+  age(35, 61);
+  const typo = await claimsHook({}, { OB1_CAPTURE_ON_SECRET: "redactt" });
+  assert(typo.code === 0 && renews().length === 3, "a mistyped OB1_CAPTURE_ON_SECRET does not stop the claims hook renewing");
+  // OB1_BRAIN_URL makes the brain the variable's: the file's claim key — and the tokens — never go to it; OB1_CLAIM_KEY does (review pass 2).
+  age(35, 61);
+  await claimsHook({}, { OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key" });
+  assert(renews().length === 3, "with OB1_BRAIN_URL set, the file's claim key is not used: nothing is sent");
+  await claimsHook({}, { OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key", OB1_CLAIM_KEY: "claim-key" });
+  assert(renews().length === 4 && renews()[3].key === "claim-key", "…and OB1_CLAIM_KEY beside it is");
   clearClaims();
 
   // The hook to paste, the check and the config.
