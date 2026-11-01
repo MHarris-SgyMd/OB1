@@ -539,6 +539,11 @@
  *      working directory's file alone (SMD-2978: db-live ran
  *      server-portable/preflight.ts on a zod fetched at run time). Its probes
  *      pin which files turn it off
+ *  45. no .md file states a suite's assertion count — a suite named beside
+ *      `# N —` or `N assertions`, or a summary line with digits — since Fork
+ *      Checks publishes each to the wiki's Test-counts page on a push to main
+ *      (SMD-3614); changes/, CHANGELOG.md and two dated analyses keep theirs
+ *      as records. Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
@@ -7907,6 +7912,59 @@ function checkSecretsOnArgv() {
   }
 }
 checkSecretsOnArgv();
+
+// ── 45: no doc states a suite's assertion count, which the wiki's Test-counts page carries (SMD-3614) ──
+/**
+ * 45: a count is a fact about a commit's run, so Fork Checks publishes each
+ * suite's to the wiki's Test-counts page on a push to main, and no `.md` file
+ * states one: a count in a doc is an edit every PR that adds an assertion
+ * makes, and the line two such PRs conflict on. A line fails that names a
+ * suite (`test-*`, `eval-*` or `smoke*` .ts/.mjs/.js, or `bun run test`) beside
+ * a count (`# 1334 —`, `# 3127 assertions`, `106 assertions`, `295 passed`),
+ * or that has a summary line's shape with digits (`295 assertions: 295
+ * passed`); `N assertions: N passed` passes. A record keeps the count it
+ * measured: changes/ and CHANGELOG.md, and the dated analyses
+ * COUNT_RECORDS names. Its probe pins what it refuses and passes.
+ */
+const COUNT_SUITE = /\b(?:test|eval|smoke)[\w-]*\.(?:ts|mjs|js)\b|\bbun run test(?::[\w-]+)?\b/;
+const COUNT_NEAR = /#\s*\d+\s*(?:—|–|-\s|assertions\b)|\b\d+\s+(?:assertions|passed)\b/;
+const COUNT_SHAPE = /\b\d+ assertions: \d+ passed\b/;
+/** Dated analyses that quote a run's count as what was measured then: records, as a change file is. */
+const COUNT_RECORDS = ["docs/mcp-sdk-v2-migration.md", "docs/operator-gui-dashboards-analysis.md"];
+const countLinesIn = (text: string): number[] =>
+  text.split("\n").flatMap((l, i) => ((COUNT_SUITE.test(l) && COUNT_NEAR.test(l)) || COUNT_SHAPE.test(l) ? [i + 1] : []));
+function checkCountsInDocs() {
+  const cases: [string, boolean][] = [
+    ["bun test-server.ts        # 1334 — transport, auth, tool surface", true],
+    ["bun test-schema.ts                          # 3127 assertions, PGlite, no container", true],
+    ["OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions", true],
+    ["`bun test-jev.ts` — 106 assertions with no model", true],
+    ["`295 assertions: 295 passed, 0 failed` and `PASS`.", true],
+    ["bun run test:local        # 226 — fully local provider, no credential", true],
+    ["`smoke.ts` has 34 assertions and 8 killed mutants.", true],
+    ["`bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`.", false],
+    ["bun test-server.ts        # transport, auth, tool surface", false],
+    ["../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b        # 14 labelled captures", false],
+    ["Verified against real PostgreSQL 17 + pgvector via PGlite — 49 assertions, no daemon needed.", false],
+    ["Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied", false],
+  ];
+  const wrong = cases.filter(([t, want]) => (countLinesIn(t).length > 0) !== want);
+  if (wrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify(wrong)}): a suite beside a count, or a summary line with digits, fails; a placeholder N, a suite with no count, another tool's number and a count beside no suite pass (SMD-3614)`);
+  let names: string[];
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.md"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 is skipped)`);
+    return;
+  }
+  for (const f of names) {
+    if (f.startsWith("changes/") || f === "CHANGELOG.md" || COUNT_RECORDS.includes(f) || !existsSync(join(ROOT, f))) continue;
+    for (const line of countLinesIn(readFileSync(join(ROOT, f), "utf8"))) {
+      fail(`${f}:${line}`, `states a suite's assertion count — Fork Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614)`);
+    }
+  }
+}
+checkCountsInDocs();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
