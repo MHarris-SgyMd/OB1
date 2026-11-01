@@ -490,7 +490,11 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
  * follow this page; `pastCursor` whether this page followed a cursor, so an empty one is said as the walk's end, not
  * an empty queue (review pass 1; review pass 2: named apart from the input's `after`, the cursor itself).
  */
-export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; pastCursor: boolean };
+export type ProposalsResult = {
+  status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; pastCursor: boolean;
+  /** Whether the decided rows' reviewers were read: false when the page lists a decided row on a brain short of 114 (SMD-3338). */
+  reviewersRead: boolean;
+};
 
 export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey, after }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
   // SMD-3249: `after` is a cursor a page ended with — one of this listing's, read before the store sees it; list_thoughts'
@@ -510,7 +514,7 @@ export async function listSupersessionProposals(ctx: Ctx, _principal: Principal,
     throw e;
   }
   const cursor = page.next ? proposalCursor(selection, page.next.confidence, page.next.judgedAt, page.next.id) : null;
-  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, pastCursor: position !== undefined });
+  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, pastCursor: position !== undefined, reviewersRead: page.reviewersRead });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────
