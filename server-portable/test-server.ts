@@ -6473,6 +6473,7 @@ console.log("\n[32] review_supersession_proposal's reply, branch by branch: what
       && by({ name: "op", agentId: AG, kind: null, kindNow: null }) === "Decided by: op, a key the registry has not classified."
       && by({ name: "op", agentId: null, kind: null, kindNow: null }) === "Decided by: op, no agent id recorded (the key did not resolve in the registry)."
       && by(null) === "Decided by: not recorded — no actor named the decision."
+      && by({ name: null, agentId: AG, kind: "agent", kindNow: "agent" }) === `Decided by: agent ${AG}, agent, no name.`
       && by({ name: "op", agentId: AG, kind: "operator", kindNow: "operator" }, "op") === "Decided by: op (your key), operator.",
     `the reviewer: its kind then, else now said so, neither, no agent, none, yours (${by({ name: "op", agentId: AG, kind: null, kindNow: "operator" })})`);
   // Refusals, each condition's two sides.
@@ -6554,6 +6555,47 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && /had already ended at 2026-10-30T12:00:00\.000Z: it lapsed and was taken over by codex\.$/.test(text(overtaken))
       && JSON.parse(text(listed)).claims.length === 1 && !text(listed).includes("token"),
     `release_claim's two answers in words, and list_claims' JSON, no token field (${text(released)} | ${text(already).slice(-40)})`);
+}
+
+console.log("\n[34] list_supersession_proposals names who decided each decided row, and says once when a brain short of 114 records none (SMD-3338 PR 2)");
+{
+  const { renderSupersessionProposals, REVIEWERS_UNREAD } = await import("./render.ts");
+  const side = (id: string) => ({ id, content: "a side", created_at: "2026-10-01T00:00:00.000Z", edited: false, writer: null, supersededBy: null, takes: false, lapses: [], walkCapped: false });
+  const row = (id: string, status: string, reviewer: unknown) => ({
+    id, status, verdict: "newer_supersedes_older", confidence: 0.9, reason: null, similarity: 0.9, judgeKey: "consolidate:stub@p4", judgedAt: "2026-10-01T00:00:00.000Z",
+    reviewedAt: status === "pending" ? null : "2026-10-02T00:00:00.000Z", reviewNote: null, supersedingId: null,
+    older: side("00000000-0000-4000-8000-0000000033b1"), newer: side("00000000-0000-4000-8000-0000000033b2"), lineage: false, sameCapturer: false, reviewer,
+  });
+  const R = { name: "op", agentRecorded: true, kind: null, kindNow: "operator" };
+  const page = (reviewersRead: boolean, rows: unknown[]) => renderSupersessionProposals({ ok: true, value: { status: "all", proposals: rows, cursor: null, remaining: 0, pastCursor: false, reviewersRead } } as never);
+  const read = page(true, [row("00000000-0000-4000-8000-0000000033c1", "rejected", R), row("00000000-0000-4000-8000-0000000033c2", "pending", null), row("00000000-0000-4000-8000-0000000033c3", "accepted", null)]);
+  const t = read.content[0].text;
+  const blocks = t.split("\n\n");
+  const of = (id: string) => blocks.find((b) => b.includes(`proposal ${id}`)) ?? "";
+  assert(of("00000000-0000-4000-8000-0000000033c1").endsWith("\n   decided by: op, operator — classified after it decided")
+      && !of("00000000-0000-4000-8000-0000000033c2").includes("decided by:")
+      && of("00000000-0000-4000-8000-0000000033c3").endsWith("\n   decided by: not recorded — no actor named the decision (a raw call), or it was made before migration 114 and wrote no pointer")
+      && !t.includes(REVIEWERS_UNREAD),
+    `a decided row names who decided (the kind now, said so; none recorded, said so), a pending row none, and no short-of-114 note (${of("00000000-0000-4000-8000-0000000033c1").split("\n").pop()})`);
+  const sc = read.structuredContent as { reviewersRead: boolean; proposals: { reviewer: { agentRecorded: boolean; kind: string | null; kindNow: string | null } | null }[] };
+  assert(sc.reviewersRead === true && sc.proposals[0].reviewer?.agentRecorded === true && sc.proposals[0].reviewer?.kindNow === "operator" && sc.proposals[1].reviewer === null && !JSON.stringify(sc).includes('"op"'),
+    "…its value carries whether an agent was recorded and the kinds, not the name");
+  // The listing's words for rows the server never decided: a keyless run's, and one with an agent and no name (pass 2).
+  const keyless = page(true, [row("00000000-0000-4000-8000-0000000033c5", "rejected", { name: "consolidate", agentRecorded: false, kind: null, kindNow: null })]).content[0].text;
+  const nameless = page(true, [row("00000000-0000-4000-8000-0000000033c6", "accepted", { name: null, agentRecorded: true, kind: "operator", kindNow: "operator" })]).content[0].text;
+  assert(keyless.includes("\n   decided by: consolidate, no agent id recorded (run with no key — the CLI's or a worker's — or a key that did not resolve)")
+      && nameless.includes("\n   decided by: an agent with no name, operator"),
+    "the listing: a keyless run's decision and an agent with no name, each in the listing's words");
+  // A stale row (reopened, 067) names none though the page read them; a page from a REST core before PR 2 (no
+  // reviewersRead) says neither a line nor the short-of-114 note (review pass 1 of PR 2).
+  const stale = page(true, [row("00000000-0000-4000-8000-0000000033c4", "stale", null)]).content[0].text;
+  const older = renderSupersessionProposals({ ok: true, value: { status: "all", proposals: [row("00000000-0000-4000-8000-0000000033c1", "rejected", null)], cursor: null, remaining: 0, pastCursor: false } } as never).content[0].text;
+  assert(!stale.includes("decided by:") && !older.includes("decided by:") && !older.includes(REVIEWERS_UNREAD),
+    "a stale row names no decider; a page with no reviewersRead (an older REST core) says neither the line nor the note");
+  const unreadDecided = page(false, [row("00000000-0000-4000-8000-0000000033c1", "rejected", null)]).content[0].text;
+  const unreadPending = page(false, [row("00000000-0000-4000-8000-0000000033c2", "pending", null)]).content[0].text;
+  assert(unreadDecided.split(REVIEWERS_UNREAD).length === 2 && !unreadDecided.includes("decided by:") && !unreadPending.includes(REVIEWERS_UNREAD),
+    "a brain short of 114: said once, with no decided-by line, and only where a decided row is listed");
 }
 
 report();

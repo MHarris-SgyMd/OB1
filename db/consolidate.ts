@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { reviewersOf, reviewProposal, type Reviewer } from "../server-portable/proposal-review.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
-import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
+import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
@@ -847,7 +847,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     : "one is out of date, which not stated";
 
   const SHORT_OF_114 = "this brain is short of migration 114 (cd db && bun migrate.ts --url <url>)";
-  const REVIEWERS_UNREAD = `Who decided each row is not shown: ${SHORT_OF_114}.`;
   /**
    * SMD-2608: a decided row's reviewer — the key's name and its kind (the
    * kind it had when it decided, else the registry's now, said so), a
