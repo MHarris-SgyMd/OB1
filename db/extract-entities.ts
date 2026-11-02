@@ -23,7 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   bun db/extract-entities.ts --url … --subjects [rules]     # each pooled thought's own subject (db/subject-sweep.ts, migration 113's pool; --switch-key when another pool is named; its --timeout is 900 s with the judge model's reasoning on, 300 off; --judge-checked, its garbage-judge alarm off, for a judge model checked and found right)
+ *   bun db/extract-entities.ts --url … --subjects [rules]     # each pooled thought's own subject (db/subject-sweep.ts, migration 113's pool; --switch-key when another pool is named; its --timeout is 900 s with the judge model's reasoning on, 300 off; --judge-checked, its garbage-judge alarm off, for a judge model checked and found right, a trip's hold on a scheduler's runs of that model lifted: --limit 1 to ask one thought)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
@@ -2239,7 +2239,7 @@ if (import.meta.main) {
   }
   // The sweep's own flag, which the pass would drop: refused, as the pass's beside --subjects are.
   if (cli.has("judge-checked")) {
-    console.error(`extract-entities.ts: --judge-checked goes with --subjects alone: it turns the subject sweep's garbage-judge alarm off.\n${flagList(FLAGS, HINTS)}`);
+    console.error(`extract-entities.ts: --judge-checked goes with --subjects alone: it turns the subject sweep's garbage-judge alarm off, and lifts a trip's hold on a scheduler's runs of its judge model.\n${flagList(FLAGS, HINTS)}`);
     process.exit(2);
   }
   // The numbers by the scanner's rules, in run()'s order — the lease pair

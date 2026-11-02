@@ -137,6 +137,9 @@ bumps, so the generated files carry `snapshot` in its place.
 
 ## Test
 
+Its assertion total, as main's last run counted it, is on the wiki's
+[Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page (SMD-3614).
+
 ```bash
-bun test-client.ts   # 164 — the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query, a timeout a timer holds, a query name a URL carries; a plugin's operation by its route, its path filled, the rest in the query or the body, a forwarded refusal whole, a path field holding a line break, a route or method no plugin's rejected
+bun test-client.ts   # the generated files current, every operation's route, every operation through the client into the real REST app over a stub core, the key, forwarder and extra headers, any status an answer, an input a URL cannot carry or a key no header can answered unsent, the configuration held at the start, the timeout and the signal (a stream's until its headers), a late answer cancelled, a job's stream unread, a redirect an answer, no extra header a key, a key byte for byte or not at all, a base as written, no object in a query, a timeout a timer holds, a query name a URL carries; a plugin's operation by its route, its path filled, the rest in the query or the body, a forwarded refusal whole, a path field holding a line break, a route or method no plugin's rejected
 ```

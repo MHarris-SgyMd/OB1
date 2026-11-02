@@ -25,7 +25,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
+import { applyMigrations, createAssert, dropSchema, trackSections, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
 import { consolidateKey } from "./consolidate.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
@@ -47,7 +47,11 @@ const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MOD
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
-const { assert, skip: skipRaw, total, skipped, docCheck, report } = createAssert();
+const counted = createAssert();
+const { skip: skipRaw, docCheck, report } = counted;
+/** The assertions, each noted when made outside a section this run runs (trackSections, SMD-3614). */
+const sections = trackSections(counted.assert);
+const { assert } = sections;
 
 /**
  * The suite's shards (SMD-3468), as test-live.ts's SHARDS: the sections each
@@ -58,8 +62,9 @@ const { assert, skip: skipRaw, total, skipped, docCheck, report } = createAssert
  * their timeouts, and the rest the others, [5b] and [12] the long ones among
  * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
  * whole; [10] went to the rest to even them).
- * server-portable/README.md states each shard's assertion count beside the
- * full run's, and [doc] checks, on every run, that they add up.
+ * Each shard's count is published to the wiki's Test-counts page on a push to
+ * main (SMD-3614). An assertion outside every section would count in each
+ * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   first: ["5", "9"],
@@ -82,11 +87,12 @@ if (LISTED.size !== LISTED_ALL.length) {
 const begun = new Set<string>();
 /** Every id a header has asked about, in order: [doc] checks no two headers share one. */
 const headed: string[] = [];
-/** Whether section `id` runs here, noting it begun: every section with no shard named, else the shard's. Each section's header reads it. */
+/** Whether section `id` runs here, noting it begun and the section the code after it is in: every section with no shard named, else the shard's. Each section's header reads it. */
 function want(id: string): boolean {
   headed.push(id);
   const runs = SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
   if (runs) begun.add(id);
+  sections.at(id, runs);
   return runs;
 }
 // An age preflight reads back is a subprocess's reading a moment after the row
@@ -6298,22 +6304,13 @@ else {
 
 // In every shard: its doc checks count apart from the assertions, so they move no shard's count.
 {
-  console.log("\n[doc] server-portable/README.md states this suite's assertion total, and each shard's");
-  const readme = readFileSync(join(HERE, "README.md"), "utf8");
-  const n = total();
-  // Its lines that run this suite with a count: `… bun test-preflight.ts  # 994 — …`, a shard's with its variable before.
-  const lines = [...readme.matchAll(/^.*\btest-preflight\.ts\s+#\s*\d+.*$/gm)].map((m) => m[0]);
-  const counts = (ls: string[]) => ls.map((l) => Number(/test-preflight\.ts\s+#\s*(\d+)/.exec(l)![1]));
-  const shardOf = (l: string) => /\bOB1_PREFLIGHT_SHARD=(\S+)/.exec(l)?.[1];
-  const full = counts(lines.filter((l) => shardOf(l) === undefined));
-  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
-  // On every run, the README's own sum: one count a shard, adding up to the
-  // full run's. An assertion outside a want() section counts in every shard,
-  // and shows here as the shards adding up to more than the full run.
-  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0);
-  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
-  docCheck(sumHolds,
-    `server-portable/README.md quotes one count for each of test-preflight.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for an assertion outside a want() section, which runs in every shard"}`);
+  console.log("\n[doc] The sections: each header an id of its own, each section a shard lists run, no assertion outside a section");
+  // An assertion outside every section runs, and counts, in every shard
+  // (trackSections). A shard sees one made after a section it skips; CI runs
+  // both shards, so one made after any section fails a leg.
+  const strays = sections.outside();
+  docCheck(strays.length === 0,
+    `no assertion was made outside a section this run runs (${strays.length ? `${strays.length}: ${strays.slice(0, 3).join("; ")} — put it inside its section's want() block` : "none"})`);
   // No two headers share an id: a copied header would take its section to the other's shard unseen.
   const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
   docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
@@ -6323,15 +6320,7 @@ else {
     const absent = listed.filter((id) => !begun.has(id));
     docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
   }
-  const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
-  const which = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
-  if (skipped() === 0) {
-    docCheck(claims.length > 0 && claims.every((c) => c === n),
-      `server-portable/README.md quotes test-preflight.ts's ${n} assertions for ${which} (found ${[...new Set(claims)].join(", ") || "none"})`);
-  } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), so this ${n}-assertion run is not the count the README states for ${which}`);
-  }
 }
 
 localStub.stop(true);
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);
