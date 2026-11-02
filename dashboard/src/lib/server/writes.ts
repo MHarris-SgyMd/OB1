@@ -69,6 +69,12 @@ export const capturedCookie = (sessionCookie: string) => `${sessionCookie}_captu
  */
 export const workersCookie = (sessionCookie: string) => `${sessionCookie}_workers`;
 
+/**
+ * The flash cookie the proposals page's actions set for the page to say what a decision did, after their redirect
+ * (SMD-3322 PR 4): `<accept|reject>.<proposal id>.<facts>`, read and cleared by the page, as the workers' is.
+ */
+export const proposalsCookie = (sessionCookie: string) => `${sessionCookie}_proposals`;
+
 /** Each write's words for one that may have been made, and for one that was not (notAnswered). */
 const UNANSWERED = {
 	edit: { maybe: 'the edit may still have been saved. Open the thought to see before editing again', not: 'the edit was not saved' },
@@ -76,6 +82,8 @@ const UNANSWERED = {
 	capture: { maybe: 'the thought may still have been captured. Look for it under Browse before capturing it again', not: 'the thought was not captured' },
 	retry: { maybe: 'the failed rows may already be requeued. The pool’s counts below say', not: 'nothing was requeued' },
 	release: { maybe: 'the stale leases may already be released. The pool’s counts below say', not: 'nothing was released' },
+	accept: { maybe: 'the proposal may already be accepted. Its status below says, under All', not: 'the proposal was not accepted' },
+	reject: { maybe: 'the proposal may already be rejected. Its status below says, under All', not: 'the proposal was not rejected' },
 } as const;
 
 /**
@@ -98,6 +106,8 @@ const VERBS = {
 	capture: 'capture thoughts: capturing',
 	retry: 'retry a pool’s failed work: retrying',
 	release: 'release a pool’s stale leases: releasing them',
+	accept: 'decide a proposal: deciding',
+	reject: 'decide a proposal: deciding',
 } as const;
 
 /** What a session that may not write is told: by key or by the operator's sign-in, it is the session that may not. */
