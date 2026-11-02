@@ -11,8 +11,11 @@
 # through is done when it starts. It fails when it cannot read what it needs:
 # the runs' list, the run it reads through, or one of the window's newest 26
 # runs, not read or being re-run, whose gap could move a shift off the run
-# that makes it (an older one is a warning). A read gh fails three times is
-# tried once more 30 s later (SMD-3690): GitHub's 502s have outlasted the three.
+# that makes it (an older one is a warning). The list, and those runs, get a
+# late try, three more tries 60 s on, when gh fails all three (SMD-3690):
+# GitHub's 502s have come ~12 s apiece and outlasted the three. A wide outage of
+# such 502s reads 40 runs for ~5 min and its late tries ~4 more, so the limit is
+# 15 min, not 10: a run cut off there would say nothing of why.
 #
 # workflow_run reads this file from the default branch, so it runs from main's
 # copy, never a pull request's, and it is asked of main's push runs alone (a
@@ -48,7 +51,7 @@ jobs:
     name: A job or step on main that got slower
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
