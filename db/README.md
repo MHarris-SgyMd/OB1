@@ -1781,8 +1781,9 @@ pick the three thoughts named. `extraction_progress.cuts` counts them,
 written by `note_extraction_cut` under 093's holder rule: cuts + 1 and
 nothing else moved, since a cut is no wake — it neither stalls the thought
 nor ends its gaining. `stops` now counts the wakes, a paused sleep's aborts
-(SMD-3379 PR 1c-3b) and the operator's second signal. 093's `note_extraction_stop` and `save_extraction_window` are
-redefined to set `cuts` back to 0 where either replaces a row of other text
+(SMD-3379 PR 1c-3b) and the operator's second signal. 093's
+`note_extraction_stop` and `save_extraction_window` are redefined to set
+`cuts` back to 0 where either replaces a row of other text
 or windowing, as they do the stops. The scheduler's hard stop says it is its
 own (`PassStop`'s `cut`), extraction counts it so, and a brain before 101
 counts it not at all — never as a stop — and each extraction run says so
@@ -4551,14 +4552,15 @@ read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
-its stops (a hard stop counted on them, 093: a wake's, a paused sleep's abort): how many, and the three most
-stalled, then most stopped, with their stops and windows kept — stalled as
-the scheduler reads it, 0 once a window is saved since the last stop — and
-since SMD-3060 the scheduler's own cuts of each, said apart from the stops
-and ordering nothing ("…, and 41 cut(s) of the scheduler's own"; none before
-101) — read at its first stamp awake
-or poll asleep, after each wake, at least every minute and before the row
-ends (but on a second signal, whose exit it would delay, or a failure), so a thought finished in
+its stops (a hard stop counted on them, 093: a wake's, a paused sleep's
+abort): how many, and the three most stalled, then most stopped, with their
+stops and windows kept — stalled as the scheduler reads it, 0 once a window
+is saved since the last stop — and since SMD-3060 the scheduler's own cuts
+of each, said apart from the stops and ordering nothing ("…, and 41 cut(s)
+of the scheduler's own"; none before 101) — read at its first stamp awake or
+poll asleep, after each wake or resume, at least every minute and before the
+row ends (but on a second signal, whose exit it would delay, or a failure),
+so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
 names them — "1 thought(s) held back across its stops — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a

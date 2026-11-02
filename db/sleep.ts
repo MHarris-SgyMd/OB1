@@ -138,12 +138,13 @@
  * set-aside (SMD-2694), the restart, the let-out's — and its hard stop of the
  * passes when one ends by itself, a follower is found outside or the sleep
  * throws, is counted on the thought in hand as a cut, apart from its stops,
- * which say the wakes, a paused sleep's aborts and the operator's second signal (migration 101's
- * `cuts`, SMD-3060): a cut stalls nothing, and a long outage's cuts no
- * longer read as wakes nor decide which held thoughts are named; read on
- * the row once the scheduler is restarted after 101. A stalled thought is
- * tried in every sleep once consolidation's pool drains, and finished by
- * the first sleep long enough for both — one its clock allows (Budget). A brain before 093, or a role that cannot read it,
+ * which say the wakes, a paused sleep's aborts and the operator's second
+ * signal (migration 101's `cuts`, SMD-3060): a cut stalls nothing, and a long
+ * outage's cuts no longer read as wakes nor decide which held thoughts are
+ * named; read on the row once the scheduler is restarted after 101. A stalled
+ * thought is tried in every sleep once consolidation's pool drains, and
+ * finished by the first sleep long enough for both — one its clock allows
+ * (Budget). A brain before 093, or a role that cannot read it,
  * joins once extraction is drained alone, and the start says so; granted
  * later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
@@ -292,8 +293,9 @@
  * refusal that ended it, so preflight's `sleep` row says each — not "its
  * passes running", nor "start it again", which would only refuse again
  * (SMD-2752); `paused { since }`, the sleep paused by a live call since then
- * (SMD-3379 PR 1c-3b; brain-info and preflight read it, 1c-2); `aside`, re-embed set aside on a model switch, with the model
- * the brain records and this stack's, or down for the sleep, with what set it
+ * (SMD-3379 PR 1c-3b; brain-info and preflight read it, 1c-2); `aside`,
+ * re-embed set aside on a model switch, with the model the brain records and
+ * this stack's, or down for the sleep, with what set it
  * down (SMD-2679 PR 4b); `held`, the thoughts
  * extraction holds back across its stops (a wake's, a paused sleep's abort) —
  * how many, and the three most stalled with their stops, windows kept and
@@ -1796,6 +1798,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let saidAbortCap = false;
     /** The rest after a budget stop waits for a live write newer than `w`, the newest this sleep acted on: one that only paused it is no wake (review passes 1 and 2). */
     const restFrom = (w: number | null) => (w === null ? from : new Date(Math.max(from.getTime(), w + 1)));
+    /** The row written now, its outcome only from a pass that stamped one: else it keeps its last word (SMD-2752 PR 3's rule). */
+    const sayOutcome = async (): Promise<void> => {
+      if (Object.keys(words).length) await stamper.alive(sleepOutcome(), malformed ?? undefined);
+      else await stamper.alive();
+    };
     /** Whether the stopped thoughts can be moved behind newer work: a restart for it is no use otherwise. */
     let reorders = await stoppedLast();
     let consolidating = false;
@@ -2075,9 +2082,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       }
       // A live write in the clock's grace ends the sleep as before; one that
       // finds nothing left to do (--follow) ends it too; any other pauses it.
-      // The write acted on from here: it landed now, or — one committed late,
-      // dated before the last read's now — at that read, and on the sleep's
-      // first read at this one, whose last was the sweep's: the capture counts from there.
+      // The write acted on from here: it landed at its own date, or — one
+      // committed late, dated before the last read's now — at that read, and
+      // on the sleep's first read at this one, whose last was the sweep's: the
+      // capture counts from there.
       if (wrote) {
         lastWrite = live.write!.getTime();
         landedAt = Math.max(lastWrite, lastNowBefore ?? nowMs);
@@ -2089,8 +2097,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // claim queued before, or in hand, is the sleep's own (review pass 2).
       // The gate closes first, so no pass claims while the pools are read (review pass 5).
       const meets = wrote && !gate.closed;
-      if (meets && FOLLOW && !spentAt) gate.close();
-      const idle = meets && FOLLOW && !spentAt
+      const readsIdle = meets && FOLLOW && !spentAt;
+      if (readsIdle) gate.close();
+      const idle = readsIdle
         ? await reading(async () => {
           const touched = await liveTouched(sql, seenBefore === null ? readAt : new Date(Math.max(readAt.getTime(), seenBefore + 1)));
           return (!reembedRuns() || drained(await reembedPool())) && drained(await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt, touched))
@@ -2123,9 +2132,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         abortedNow = 0;
         out(`  paused: a live write at ${live.write!.toISOString()} — the passes wait between thoughts, windows and pairs until no live write for ${CAPTURE} s`);
         stamper.paused?.(live.now.toISOString());
-        // Its outcome only from a pass that stamped one: else the row keeps its last word (SMD-2752 PR 3's rule).
-        if (Object.keys(words).length) await stamper.alive(sleepOutcome(), malformed ?? undefined);
-        else await stamper.alive();
+        await sayOutcome();
       }
       if (gate.closed) {
         if (nowMs - landedAt >= CAPTURE * 1000) {
@@ -2143,8 +2150,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           out(`  resumed: no live write for ${CAPTURE} s — the passes go on (paused ${Math.round(pausedFor / 1000)} s${abortedNow ? `, ${abortedNow} call(s) in hand aborted` : ""})`);
           stamper.paused?.(null);
           await sayHeld();
-          if (Object.keys(words).length) await stamper.alive(sleepOutcome(), malformed ?? undefined);
-          else await stamper.alive();
+          await sayOutcome();
           gate.open();
         } else {
           // N12: a call in hand past the bound aborted, the thought set back

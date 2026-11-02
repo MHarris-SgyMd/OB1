@@ -17323,8 +17323,8 @@ async function sleepScaffold(sql: SQL) {
     onExtract: null as (() => Promise<void>) | null,
     /** Judge calls slowJudge holds now, a call's hold ending with its client's abort: the case reads its claim once one is (SMD-3048). */
     judgesHeld: 0,
-    /** Each call slowJudge held: when it began, and whether its client aborted it or it answered (SMD-3379 PR 1c-3b). */
-    judgeHolds: [] as { at: number; aborted?: boolean }[],
+    /** Each call slowJudge held: whether its client aborted it or it answered (SMD-3379 PR 1c-3b). */
+    judgeHolds: [] as { aborted?: boolean }[],
     /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
     missing: false,
     /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
@@ -17382,7 +17382,7 @@ async function sleepScaffold(sql: SQL) {
       if (!judging && sw.slowExtract) await Bun.sleep(sw.slowExtract);
       if (judging && sw.slowJudge) {
         sw.judgesHeld++;
-        const hold: { at: number; aborted?: boolean } = { at: Date.now() };
+        const hold: { aborted?: boolean } = {};
         sw.judgeHolds.push(hold);
         hold.aborted = await Promise.race([Bun.sleep(sw.slowJudge).then(() => false), new Promise<boolean>((r) => req.signal.addEventListener("abort", () => r(true), { once: true }))]);
         sw.judgesHeld--;
@@ -18603,7 +18603,6 @@ if (want("38")) {
     // A 4 s capture in a 5 s quiet, and N12's bound and the stall floor at 1 s, so the judgement in hand is
     // aborted while the brain is live, and set back; consolidation's cap at one, so the next pause's runs on (SMD-3379 PR 1c-3b).
     const retrying = sleepRun({ follow: true, quiet: 5, captureMs: 4000, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
-
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
     // under load that was a thought with no pair (finished at once), or one
@@ -19133,8 +19132,9 @@ if (want("38")) {
 
       // A sleep whose pass only waited at its start, then a live write: no pass
       // stamped, so the row keeps its last word — none yet here — rather than
-      // read ok, paused (SMD-3379 PR 1c-3b) (review pass 3 of PR 3). A sync's note
-      // waits in extraction's pool, so the write pauses it, not ends it (review pass 1).
+      // read ok (review pass 3 of PR 3), and reads paused (SMD-3379 PR 1c-3b).
+      // A sync's note waits in extraction's pool, so the write pauses it, not
+      // ends it (review pass 1).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       await capture("A note the waiting pass has not reached.", "sync-sleep", 0, 14);
       sw.unavailable = true;
