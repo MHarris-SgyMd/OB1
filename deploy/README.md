@@ -2536,7 +2536,7 @@ by name, and the source half gets its URL alone:
 - the knobs `migrate.ts` and `db/config.mjs` read on a refresh:
   `OB1_EMBEDDING_MODEL`, `OB1_EMBEDDING_DIM`, `OB1_EMBEDDING_DIMENSIONS`,
   `OB1_TRGM_INDEX`, `OB1_BACKFILL_LIMIT`, `OB1_CHUNK_CONTEXT`, `OB1_PLUGINS`
-  and the plugin role's `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
+  and the plugin logins' secret `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
 - `POSTGRES_PASSWORD`.
 
 Every other `OB1_*` setting stays behind: the provider and worker keys,
@@ -2722,11 +2722,11 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
-  their role's database password `OB1_PLUGIN_DB_PASSWORD`. In their place the
+  their login roles' secret `OB1_PLUGIN_DB_PASSWORD`. In their place the
   canary gets keys of its own (below) and, where stable sets one, a plugin
-  role password of its own, which every `up` sets the plugins' login role
-  to, where the canary's Postgres has one (migrate.ts makes that role once
-  and never changes its password);
+  secret of its own, from which every `up` derives each plugin login role's
+  password and sets it, where the canary's Postgres has one (migrate.ts
+  makes each role once and never changes its password, SMD-2756);
 - **stable's `COMPOSE_PROJECT_NAME`**: the file names the canary's own
   project instead, `COMPOSE_PROJECT_NAME="<canary>"`, so compose given that file
   alone acts on the canary, never on stable (SMD-2873);
