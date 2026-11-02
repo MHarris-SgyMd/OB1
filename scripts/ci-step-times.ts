@@ -67,8 +67,8 @@
  * be read, --through's run is not among them, or no run read has the job (the job names the runs do have are
  * listed), and with --shift when fewer than 20 runs are left to read, the run reported on could not be read after its
  * late try, or one of the newest 26 could not be read after its late try or was being re-run (the report still
- * printed); 2 for a refused option. The per-job report reads a re-run's latest attempt, and marks it. Needs `gh` signed in. Reads only; writes
- * nothing but the step summary.
+ * printed); 2 for a refused option. The per-job report reads a re-run's latest attempt, and marks it. Needs `gh`
+ * signed in. Reads only; writes nothing but the step summary.
  */
 
 import { appendFileSync } from "node:fs";
@@ -444,6 +444,12 @@ type Got = Awaited<ReturnType<typeof gh>>;
  */
 export const LATE_MS = 60_000;
 
+/** The late try's annotation: a run that recovered shows on its page, and in its annotations through the API. */
+const LATE_NOTICE = "::notice title=CI shift late try::";
+
+/** A run's read, and whether it came on the late try. */
+type Viewed = { id: string; got: Got; late?: true };
+
 /** A read that gave no run: gh failed, or the run came back with no status, so whether it is done is unknown. */
 const unreadable = (got: Got) => !got.ok || (got.json as { status?: unknown } | null)?.status === undefined;
 
@@ -452,8 +458,8 @@ const unreadable = (got: Got) => !got.ok || (got.json as { status?: unknown } | 
  * again after `pause` (given how many), one pause for them all, keeping the late read's answer; `late` when it gave
  * a run, completed or not.
  */
-export async function readRuns(ids: string[], view: (id: string) => Promise<Got>, tried: Set<string>, pause: (n: number) => Promise<unknown>): Promise<{ id: string; got: Got; late?: true }[]> {
-  const viewed: { id: string; got: Got; late?: true }[] = await pooled(ids, 6, async (id) => ({ id, got: await view(id) }));
+export async function readRuns(ids: string[], view: (id: string) => Promise<Got>, tried: Set<string>, pause: (n: number) => Promise<unknown>): Promise<Viewed[]> {
+  const viewed: Viewed[] = await pooled(ids, 6, async (id) => ({ id, got: await view(id) }));
   const again = viewed.filter((v) => unreadable(v.got) && tried.has(v.id));
   if (again.length === 0) return viewed;
   await pause(again.length);
@@ -531,8 +537,7 @@ async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | 
   const gapCount = [unread ? `${unread} not read` : "", rerun ? `${rerun} being re-run` : ""].filter(Boolean).join(", ");
   console.log(`\n${series.size} series over ${ordered.length} runs${gapCount ? ` (${gapCount})` : ""}; a line is the median of a series' ${SHIFT.before} runs before its last ${SHIFT.after}, plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%).`);
   const lateNote = late.length ? `${late.length} run${late.length === 1 ? "" : "s"} read on the late try, ${LATE_MS / 1000} s after the rest, the first read having failed or given no status: ${late.join(", ")}` : "";
-  // A notice too, so a run that recovered shows on its page, and in its annotations through the API.
-  if (lateNote) console.log(`::notice title=CI shift late try::${escapeCommand(lateNote)}.`);
+  if (lateNote) console.log(`${LATE_NOTICE}${escapeCommand(lateNote)}.`);
   console.log(`Shifts in the window, as it reads them: ${found.length}`);
   for (const f of found) console.log(`  ${created.get(f.run)!.slice(0, 16)} run ${f.run}  ${text(f)}`);
   const now = found.filter((f) => f.run === at);
@@ -820,7 +825,7 @@ if (import.meta.main) {
     fail(msg);
   };
   // With --shift the list has a late try (LATE_MS), as the runs a gap among fails it do.
-  const listRuns = (args: string[]) => (shift ? ghLate(args, gh, undefined, (line) => console.log(`::notice title=CI shift late try::${escapeCommand(line)}`)) : gh(args));
+  const listRuns = (args: string[]) => (shift ? ghLate(args, gh, undefined, (line) => console.log(`${LATE_NOTICE}${escapeCommand(line)}`)) : gh(args));
   let ids: string[] = [];
   let running: string[] = [];
   // Runs listed oldest first whatever their state, for shiftWindow: a run being re-run is in the window, as a gap.
