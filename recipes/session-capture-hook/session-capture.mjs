@@ -427,7 +427,8 @@ export function loadBrains() {
   // brain, says so at --check and at a checkpoint, and leaves the capture
   // running (review pass 4). Where the key came from is kept for --check.
   const claimSettings = (b, where, envKey) => {
-    if (b.claim_key !== undefined && b.claim_key_file !== undefined) throw new Error(`${where} sets both "claim_key" and "claim_key_file" — give one`);
+    // Turned off, not thrown: a claim mistake never stops the capture (review pass 5).
+    if (b.claim_key !== undefined && b.claim_key_file !== undefined) return { claimKeyError: `${where} sets both "claim_key" and "claim_key_file" — give one` };
     if (envKey) return { claimKey: String(envKey), claimKeySource: "OB1_CLAIM_KEY" };
     if (b.claim_key !== undefined) return b.claim_key ? { claimKey: String(b.claim_key), claimKeySource: "claim_key" } : { claimKeyError: `the claim_key in ${where} is empty — give it the write key your agents claim with` };
     if (b.claim_key_file === undefined) return {};
@@ -448,10 +449,16 @@ export function loadBrains() {
     // so it renews no claims — no token goes to a brain it may not have come
     // from (review passes 2 and 3).
     const fromEnv = Boolean(process.env.OB1_BRAIN_URL);
-    if (!fromEnv && cfg.connector !== undefined && !(typeof cfg.connector === "string" && CONNECTOR_RE.test(cfg.connector))) throw new Error(`${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)`);
-    // Beside OB1_BRAIN_URL a claim key in the file goes unused: --check says so (review pass 4).
-    const claim = fromEnv ? (cfg.claim_key !== undefined || cfg.claim_key_file !== undefined ? { claimKeyIgnored: true } : {}) : claimSettings(cfg, CONFIG_PATH, process.env.OB1_CLAIM_KEY);
-    const connector = fromEnv ? undefined : cfg.connector;
+    // Beside OB1_BRAIN_URL a claim key in the file goes unused — at the top or in
+    // a brains list's entries — and --check says so (review passes 4 and 5).
+    const fileHasClaimKey = (b) => Boolean(b) && (b.claim_key !== undefined || b.claim_key_file !== undefined);
+    let claim = fromEnv ? (fileHasClaimKey(cfg) || (Array.isArray(cfg.brains) && cfg.brains.some(fileHasClaimKey)) ? { claimKeyIgnored: true } : {}) : claimSettings(cfg, CONFIG_PATH, process.env.OB1_CLAIM_KEY);
+    let connector = fromEnv ? undefined : cfg.connector;
+    // The one-brain shape's connector serves the claims alone: a bad one turns claims off, never the capture (review pass 5).
+    if (connector !== undefined && !(typeof connector === "string" && CONNECTOR_RE.test(connector))) {
+      claim = { claimKeyError: `${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)` };
+      connector = undefined;
+    }
     // Before the missing-key error: a connector URL pasted with its ?key= and no
     // `key` is told where the key goes, not to write a url it already has.
     const endpoint = url ? endpointOf(url, urlSource()) : undefined;
@@ -2941,7 +2948,9 @@ function brainForClaim(claim, brains) {
   if (b?.cfg.claimKey) return { brain: b };
   if (b) return { skip: b.cfg.claimKeyError ? `claims are off on brain "${b.name}": ${b.cfg.claimKeyError}` : `brain "${b.name}" (connector "${claim.server}") has no claim_key` };
   if (process.env.OB1_BRAIN_URL) return { skip: `OB1_BRAIN_URL is set, and its brain renews no claims (it has no connector to match "${claim.server}")` };
-  return { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" — give the brain your agents claim through that connector and a claim_key` };
+  // Both said at once: fixing the connector should not be what reveals the claim key's own fault (review pass 5).
+  const off = brains.find((x) => x.cfg.claimKeyError);
+  return { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" — give the brain your agents claim through that connector and a claim_key${off ? `; claims are also off on brain "${off.name}": ${off.cfg.claimKeyError}` : ""}` };
 }
 
 /** A call the key may not make, as the server answers it: a JSON-RPC -32602 envelope (what the real server sends, review pass 4) or an isError result in the SDK's words. */
@@ -2977,19 +2986,20 @@ export async function renewClaim(cfg, claim) {
   const said = `${code ? `${code}: ` : ""}${scrubTokens(oneLine(text)).slice(0, 600)}`;
   if (toolRefused(text)) return cannot;
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
-  if (code === "WORK_CLAIMED") return { blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work while that claim holds; ${claim.id}.blocked.json says so, and renewals wait until it is deleted)` };
+  if (code === "WORK_CLAIMED") return { blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work and tell the user; a .blocked.json beside its token file says so, and renewals wait until it is deleted)` };
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
 }
 
-/**
- * The same file the claim was read from: a regular file of one link with the
- * device and inode the read recorded. Anything swapped in since is not it.
- */
-function sameFile(path, claim) {
-  const st = lstatOf(path);
-  return Boolean(st?.isFile() && st.nlink === 1 && st.dev === claim.dev && st.ino === claim.ino);
+/** The token a token file holds now, read through a handle that follows no link and opens only a regular file; "" when it can't be read. */
+function tokenNow(path) {
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return "";
+    return String(JSON.parse(readFileSync(fd, "utf8"))?.token ?? "").toLowerCase();
+  } catch { return ""; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
 }
 
 /**
@@ -2997,13 +3007,15 @@ function sameFile(path, claim) {
  * the brain's words and when, never the token — written to a fresh file,
  * created exclusively, and renamed into place, so a symlink planted at either
  * name is refused or replaced, never followed (review pass 1). Only while the
- * token file is still the one the claim was read from, holding its token.
+ * token file still holds the token the call was made with, read through a
+ * no-follow handle. Not tied to the inode read: an agent rewriting the file
+ * mid-call (step 5's lease, `jq … > tmp && mv`) gives it a new one, and a lost
+ * blocked marker let the claim be revived silently (review pass 5).
  */
 function writeMarker(path, claim, kind, body) {
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    if (!sameFile(path, claim)) return false;
-    if (String(JSON.parse(readFileSync(path, "utf8"))?.token ?? "").toLowerCase() !== claim.token) return false;
+    if (tokenNow(path) !== claim.token) return false;
     writeFileSync(tmp, `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, [kind]: { ...body, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     renameSync(tmp, markerPath(path, kind));
     return true;
@@ -3054,6 +3066,7 @@ async function renewOne(b, path, claim) {
   // ended keeps a stamp, or every event would ask again (review pass 1).
   if (o.ended && endClaimFile(path, claim, o.ended)) { try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
   else {
+    if (o.ended) o.line += " (its token file could not be ended now; the next run tries again)"; // the line said "ended" while the file stayed (review pass 5)
     if (o.blocked && !writeMarker(path, claim, "blocked", o.blocked)) o.line += " (the marker could not be written)";
     writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
   }
@@ -3086,7 +3099,7 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
   for (const f of files) {
     if (only && !only.includes(f.claim?.id ?? f.id)) continue;
     if (f.bad) { skip(`skipped ${f.path}: ${f.bad}`); continue; }
-    if (existsSync(markerPath(f.path, "blocked"))) { skip(`blocked: ${claimLabel(f.claim)} — another claim covered its work; delete ${f.claim.id}.blocked.json once the user has decided, and renewals resume`); continue; }
+    if (existsSync(markerPath(f.path, "blocked"))) { skip(`blocked: ${claimLabel(f.claim)} — another claim covered its work; delete ${basename(markerPath(f.path, "blocked"))} once the user has decided, and renewals resume`); continue; }
     const { brain, skip: why } = brainForClaim(f.claim, brains);
     if (!brain) { skip(`skipped ${claimLabel(f.claim)}: ${why}`); continue; }
     useStateRoot(brain.root);
@@ -3340,7 +3353,10 @@ export async function main(argv) {
     // The claims a worktree keeps tokens for, renewed now: by hand (the
     // current directory's worktree, or --cwd's), or as the hook's child, told
     // by id which claims it stamped (SMD-3602).
-    const ids = flagAll(args, "--claim").map((s) => s.toLowerCase()).filter(Boolean);
+    const given = flagAll(args, "--claim");
+    // An empty --claim (`--claim --cwd X`, `--claim=`) is refused, not read as "every claim" (review pass 5).
+    if (given.some((v) => !v)) { console.error("session-capture: --claim takes a claim id (a uuid); none was given"); return 2; }
+    const ids = given.map((s) => s.toLowerCase());
     // A --claim that is no claim id is refused unechoed: a token given there by mistake is not printed or logged (review pass 4).
     if (ids.some((id) => !UUID_ONLY_RE.test(id))) { console.error("session-capture: --claim takes a claim id (a uuid) — the value given is not one, and is not shown"); return 2; }
     let brains;

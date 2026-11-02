@@ -3115,6 +3115,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (c.state === "badinput") return err(`Refused: the claim's input is malformed.`, { code: "REFUSED_CLAIM_INPUT", problem: "token" });
     if (c.state === "echo") return err(`Refused: could not renew ${JSON.stringify(args)}`, { code: "SOMETHING_ODD" }); // a misbehaving server that echoes the call
     if (c.state === "echo-escaped") return err(`Refused: could not renew ${args.token.replace("wc_", "wc\\_")}`, { code: "SOMETHING_ODD" }); // …as markdown escapes it
+    if (c.state === "invalid") return Response.json(envelope({ error: { code: -32602, message: "Invalid arguments for tool renew_claim: lease_seconds must be at most 604800" } })); // a -32602 that is no missing tool
     if (c.state === "rpcecho") return Response.json(envelope({ error: { code: -32000, message: `bad call with ${args.token}` } })); // a JSON-RPC error echoing it: the hook's call throws
     const expiresAt = new Date(Date.now() + (args.lease_seconds ?? 14_400) * 1000).toISOString();
     return Response.json(envelope({ result: { content: [{ type: "text", text: `Renewed your claim on SMD-9001 until ${expiresAt} (claim ${args.id}).` }], structuredContent: { claim: { id: args.id, issue: "SMD-9001", piece: null, expiresAt } } } }));
@@ -3172,12 +3173,13 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   writeFileSync(join(CLAIMS, `${C(16)}.json`), JSON.stringify({ id: C(17), token: tok(7) }));
   writeFileSync(join(CLAIMS, `${tok(5)}.json`), JSON.stringify({ id: C(5), token: tok(5) }));
   writeFileSync(join(CLAIMS, `${C(4)}.ended.json`), JSON.stringify({ id: C(4), ended: {} }));
+  writeFileSync(join(CLAIMS, `${C(50)}.blocked.json`), JSON.stringify({ id: C(50), blocked: {} }));
   writeFileSync(join(CLAIMS, ".gitignore"), "*\n");
   const read = claimFiles(WT);
   const badOf = (n) => read.find((f) => f.path.endsWith(`${C(n)}.json`))?.bad ?? "";
   assert(read.length === 6 && read.filter((f) => f.claim).length === 1 && read.find((f) => f.claim)?.claim.token === tok(1) && /not JSON/.test(badOf(15))
-    && /no token/.test(badOf(2)) && /lease_seconds/.test(badOf(3)) && /not the claim its name says/.test(badOf(16)) && !read.some((f) => f.path.endsWith(".ended.json") || f.path.endsWith(".gitignore")),
-    "claimFiles reads <claim id>.json alone, passes an .ended.json and the directory's .gitignore over, and names what is wrong with a bad one — an id its name does not match included");
+    && /no token/.test(badOf(2)) && /lease_seconds/.test(badOf(3)) && /not the claim its name says/.test(badOf(16)) && !read.some((f) => f.path.endsWith(".ended.json") || f.path.endsWith(".blocked.json") || f.path.endsWith(".gitignore")),
+    "claimFiles reads <claim id>.json alone, passes the hook's markers and the directory's .gitignore over, and names what is wrong with a bad one — an id its name does not match included");
   const byTokenName = read.find((f) => /not named <claim id>\.json/.test(f.bad ?? ""));
   assert(byTokenName && !byTokenName.path.includes(tok(5)) && byTokenName.path.includes("wc_[masked]"), "a file named by its token is refused, and named with the token masked");
   clearClaims();
@@ -3291,7 +3293,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   const lines = logText().split("\n");
   assert(renews().length === 4 && [20, 21, 22, 23].every((n) => existsSync(join(CLAIMS, `${C(n)}.json`)) && !existsSync(join(CLAIMS, `${C(n)}.ended.json`))),
     "a claim refused WORK_CLAIMED, CLAIM_UNATTRIBUTED or REFUSED_CLAIM_INPUT keeps its token file: none of them has ended");
-  assert(lines.some((l) => new RegExp(`blocked: SMD-9001 \\(claim ${C(20)}\\) — WORK_CLAIMED: .*Your claim lapsed before another covered its work\\. \\(stop work while that claim holds`).test(l)),
+  assert(lines.some((l) => new RegExp(`blocked: SMD-9001 \\(claim ${C(20)}\\) — WORK_CLAIMED: .*Your claim lapsed before another covered its work\\. \\(stop work and tell the user`).test(l)),
     "WORK_CLAIMED says to stop work while the other claim holds, the server's whole last sentence kept");
   // …and leaves a marker the agent sees, without the token; renewals wait until it is deleted (review pass 4: the claim was revived silently).
   const blocked = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(20)}.blocked.json`), "utf8")); } catch { return null; } })();
@@ -3317,6 +3319,37 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await claimsHook();
   assert(!logText().includes(hex(30)) && !logText().includes(hex(31)) && !logText().includes(hex(32)) && (logText().match(/wc_\[masked\]/g) ?? []).length >= 3,
     "the token is masked as markdown escapes it, in an error the call throws on, and in a ticket the agent wrote it into");
+  clearClaims();
+  // A -32602 that is no missing tool stays an error kept, not "the key cannot call renew_claim" (review pass 5).
+  putClaim(52, {}, "invalid");
+  await claimsHook();
+  assert(/claims: kept: .* — JSON-RPC -32602: Invalid arguments for tool renew_claim/.test(logText().split("\n").filter(Boolean).pop()) && !/cannot call renew_claim/.test(logText().split("\n").filter(Boolean).pop()),
+    "a JSON-RPC -32602 that isn't a missing tool is kept with the server's words");
+  clearClaims();
+  // The token file rewritten mid-call (step 5's lease change: a new inode, the same token): the blocked marker is still written (review pass 5: it was lost, and the claim later revived silently).
+  putClaim(53);
+  const rewritten = putClaim(54, {}, "covered");
+  slowRenewMs = 600;
+  const racingRewrite = renewClaims(SUB, brainsHere, { now: true });
+  await sleep(200);
+  writeFileSync(`${rewritten}.new`, JSON.stringify({ id: C(54), token: tok(54), ticket: "SMD-9001", server: "open-brain", lease_seconds: 604800 }), { mode: 0o600 });
+  renameSync(`${rewritten}.new`, rewritten);
+  await racingRewrite;
+  slowRenewMs = 0;
+  assert(existsSync(join(CLAIMS, `${C(54)}.blocked.json`)), "a token file rewritten mid-call, its token the same, still gets its blocked marker");
+  clearClaims();
+  // …but a file swapped for one holding another token is not ended in its place (review pass 5: the token compare is the guard now).
+  putClaim(55);
+  const swappedTok = putClaim(56, {}, "released");
+  slowRenewMs = 600;
+  const racingTok = renewClaims(SUB, brainsHere, { now: true });
+  await sleep(200);
+  writeFileSync(`${swappedTok}.new`, JSON.stringify({ id: C(56), token: tok(7), ticket: "SMD-9001", server: "open-brain" }), { mode: 0o600 });
+  renameSync(`${swappedTok}.new`, swappedTok);
+  await racingTok;
+  slowRenewMs = 0;
+  assert(existsSync(swappedTok) && !existsSync(join(CLAIMS, `${C(56)}.ended.json`)) && JSON.parse(readFileSync(swappedTok, "utf8")).token === tok(7) && /could not be ended now/.test(logText()),
+    "a token file swapped mid-call for one with another token is left, not ended, and the line says the file could not be ended");
   clearClaims();
   // The ended file's fresh file is created exclusively: a symlink planted at its temporary name is never written through (review pass 2).
   putClaim(33, {}, "released");
@@ -3524,6 +3557,9 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   for (let i = 0; i < 100 && !renews().length; i++) await sleep(50);
   for (let i = 0; i < 100 && !Number.isFinite(stateOf(14)?.ok); i++) await sleep(50);
   assert(det.code === 0 && det.ms < 2000 && renews().length === 1 && Number.isFinite(stateOf(14)?.ok), `as a hook, the renewal is posted by a detached child and the hook returns at once (${det.ms} ms)`);
+  await sleep(200); // the child's last write
+  const renewedLines = (logText().match(new RegExp(`renewed SMD-9001 \\(claim ${C(14)}\\)`, "g")) ?? []).length;
+  assert(renewedLines === 1, `the child, told --from-hook, prints nothing to its stdout (the log): its line is there once (${renewedLines})`);
   // …and at a checkpoint too: a session's end does not wait on the brain (Codex allows it 3 s) (review pass 1).
   age(14, 2);
   slowRenewMs = 2500; // a brain slow to answer: the hook must not wait on it
@@ -3610,7 +3646,14 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   const KEYFILE = join(TMP, "claim.key");
   writeFileSync(KEYFILE, "claim-key\n", { mode: 0o600 });
   const cfgErr = async (cfg) => { writeFileSync(CLAIM_CFG, JSON.stringify(cfg), { mode: 0o600 }); const r = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } }); return r.code === 2 ? r.err : ""; };
-  assert(/sets both "claim_key" and "claim_key_file"/.test(await cfgErr({ url: CLAIMS_URL, key: "cap-key", claim_key: "k", claim_key_file: KEYFILE })), "a config giving claim_key and claim_key_file is refused");
+  // Both claim key forms, or a bad one-brain connector: claims off, the capture still runs (review pass 5: they stopped it).
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "k", claim_key_file: KEYFILE }), { mode: 0o600 });
+  const ckBoth = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(ckBoth.code === 1 && /claims are off: .*sets both "claim_key" and "claim_key_file"/.test(ckBoth.err) && /ok: .* answers/.test(ckBoth.out), "a config giving claim_key and claim_key_file turns claims off, the capture key still checked ok");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open brain!", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  calls.length = 0;
+  const badConn = await runHook({ session_id: "s-claims-badconn", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
+  assert(badConn.code === 0 && calls.some((c) => c.name === "capture_thought"), "a bad one-brain connector turns claims off, and the session's end still captures");
   assert(/sets "claim_key" beside "brains"/.test(await cfgErr({ claim_key: "k", brains: [{ name: "stable", url: CLAIMS_URL, key: "cap-key" }] })), "…and a claim key beside a brains list");
   writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key_file: KEYFILE }), { mode: 0o600 });
   const ckFile = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
@@ -3631,6 +3674,18 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   offCfg({ claim_key: "" });
   const ckEmpty = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(ckEmpty.code === 1 && /claims are off: the claim_key in .* is empty/.test(ckEmpty.err), "an empty claim key turns claims off, not the hook");
+  const EMPTY_KEYFILE = join(TMP, "empty-claim.key");
+  writeFileSync(EMPTY_KEYFILE, "\n", { mode: 0o600 });
+  offCfg({ claim_key_file: EMPTY_KEYFILE });
+  const ckEmptyFile = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(ckEmptyFile.code === 1 && /claims are off: the claim_key_file in .*empty-claim\.key, is empty/.test(ckEmptyFile.err) && /ok: .* answers/.test(ckEmptyFile.out), "an empty claim_key_file turns claims off too, the capture key still checked ok (review pass 5)");
+  // Claims off and no connector at once: the skip names both (review pass 5: fixing one revealed the other).
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key_file: EMPTY_KEYFILE }), { mode: 0o600 });
+  putClaim(57);
+  const both = await spawnScript(["--renew-claims", "--cwd", SUB], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(both.code === 1 && /no brain in .* has connector "open-brain" — .*; claims are also off on brain "brain": the claim_key_file in .* is empty/.test(both.out), "a skip names a missing connector and claims off together");
+  clearClaims();
+  offCfg({ claim_key: "" }); // back to the empty inline key the next case reads
   putClaim(44);
   calls.length = 0;
   const offRun = await runHook({ session_id: "s-claims-off", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
@@ -3645,6 +3700,12 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   const ckIgnored = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG, OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key" } });
   assert(/warning: OB1_BRAIN_URL is set, so the claim key in .* is not used/.test(ckIgnored.err), "a file's claim key OB1_BRAIN_URL leaves unused is named");
+  const ckIgnoredList = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG, OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key" } });
+  assert(/warning: OB1_BRAIN_URL is set, so the claim key in .* is not used/.test(ckIgnoredList.err), "…and so is a brains list entry's claim key (review pass 5)");
+  // An empty --claim is refused, not read as "every claim" (review pass 5).
+  const emptyClaim = await spawnScript(["--renew-claims", "--claim", "--cwd", SUB], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  const emptyEq = await spawnScript(["--renew-claims", "--claim=", "--cwd", SUB], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(emptyClaim.code === 2 && emptyEq.code === 2 && /--claim takes a claim id \(a uuid\); none was given/.test(emptyClaim.err), "an empty --claim exits 2");
   // OB1_CLAIM_KEY beside a list, OB1_BRAIN_URL unset: the warning doesn't speak of OB1_BRAIN_URL.
   const ckListOnly = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG, OB1_CLAIM_KEY: "stray-key" } });
   assert(/no brain uses it — .*with a brains list give the brain its own claim_key/.test(ckListOnly.err) && !/OB1_BRAIN_URL's brain/.test(ckListOnly.err), "beside a list alone, the OB1_CLAIM_KEY warning doesn't mention OB1_BRAIN_URL");
