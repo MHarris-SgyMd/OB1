@@ -1211,6 +1211,13 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
       && /lapsed and was taken over by rival at .*: stop work on it; list_claims shows the claim that holds the work now\.$/.test(overtakenMcp.text)
       && !lateRelease.isError && /had already ended at .*: it lapsed and was taken over by rival\.$/.test(lateRelease.text),
     `a lapsed claim taken over: the old holder's renew answers CLAIM_RELEASED takenOver, "stop work on it", and its release says who took it (${overtaken.status} ${overtaken.body.takenOver} | ${overtakenMcp.text.slice(0, 90)} | ${lateRelease.text.slice(-60)})`);
+  // claim_work with that token says the same, and makes no new claim (review pass 3: 115 made one without a word).
+  const writersBefore = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9308' AND holder_name = 'writer'`;
+  const overtakenClaim = await mcp("claim_work", { ticket: "SMD-9308", token: shortToken });
+  const writersAfter = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9308' AND holder_name = 'writer'`;
+  assert(overtakenClaim.isError && overtakenClaim.sc.code === "CLAIM_RELEASED" && overtakenClaim.sc.takenOver === true && overtakenClaim.text.includes(`claim ${shortId} `)
+      && /lapsed and was taken over by rival at .*: stop work on it;/.test(overtakenClaim.text) && !overtakenClaim.text.includes("wc_") && writersAfter[0].n === writersBefore[0].n,
+    `claim_work with a taken-over claim's token is refused as renew_claim is, and makes no claim (${overtakenClaim.text.slice(0, 120)} | ${writersBefore[0].n} → ${writersAfter[0].n})`);
   // A renewal that revives a lapsed claim says so (SMD-3654): when it lapsed, and the claims made on its work meanwhile.
   // A claim on the work made and released before the writer's (so before its lapse) is never one of them.
   const before = await rest("POST", "/v1/claims", { ticket: "SMD-9309" }, KEYS.rival);
@@ -1267,6 +1274,15 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const releasedRenew = await mcp("renew_claim", { id: lapsesId, token: lapsesToken });
   assert(releasedRenew.isError && /was released by writer at \S+ \("done"\); if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose\.$/.test(releasedRenew.text),
     `a renewal of a released claim says to ask the user before claiming it again (${releasedRenew.text.slice(-120)})`);
+  const releasedClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken }, KEYS.writer);
+  const releasedClaimMcp = await mcp("claim_work", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken });
+  const liveMine = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9309' AND piece_key = 'pr 1' AND released_at IS NULL`;
+  // Another key's ended token is left to the writer: no claim of the rival's is named ended to it.
+  const rivalWithIt = await rest("POST", "/v1/claims", { ticket: "SMD-9312", token: lapsesToken }, KEYS.rival);
+  assert(releasedClaim.status === 409 && releasedClaim.body.code === "CLAIM_RELEASED" && releasedClaim.body.takenOver === false && !("token" in releasedClaim.body)
+      && releasedClaimMcp.isError && /was released by writer at \S+ \("done"\); if the work is still yours to do, ask the user before claiming it again/.test(releasedClaimMcp.text)
+      && liveMine[0].n === 0 && rivalWithIt.status === 200 && rivalWithIt.body.outcome === "claimed",
+    `claim_work with its own released claim's token is refused, asking the user, and claims nothing; another key's call with it is the writer's as before (${releasedClaim.status} ${releasedClaim.body.code} | ${liveMine[0].n} | ${rivalWithIt.status} ${rivalWithIt.body.outcome})`);
 
   // The two swaps an agent makes, each with a hint; list_claims says when its limit cut the list.
   const idForToken = await mcp("renew_claim", { id: firstId, token: firstId });

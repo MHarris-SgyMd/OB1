@@ -6517,12 +6517,13 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
   const lapsedUnknown = say.renderRenewClaim({ ok: true, value: { claim: claim(), lapsed: { at: null, claimedSince: null } } } as never);
   const lapsedMany = say.renderRenewClaim({ ok: true, value: { claim: claim(), lapsed: { at: "2026-10-30T13:00:00.000Z", claimedSince: [sinceClaim, { ...sinceClaim, renewedAt: "2026-10-30T14:00:00.000Z" }], moreSince: 3 } } } as never);
   const live = say.renderRenewClaim({ ok: true, value: { claim: claim() } } as never);
-  const check = (after: string) => `list the ticket's claims with list_claims and include_ended: one on its work claimed or renewed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+  // The check names this claim, to leave out: its own renewedAt is always after the bound (review pass 3).
+  const check = (after: string) => `list the ticket's claims with list_claims and include_ended: a claim other than this one (claim 11111111-1111-4111-8111-111111111111) on its work, claimed or renewed after ${after}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
   assert(/\. It had lapsed at 2026-10-30T13:00:00\.000Z; no other claim was made or renewed on its work meanwhile\.$/.test(text(lapsedQuiet))
       && /\. It had lapsed at 2026-10-30T13:00:00\.000Z, and since then another claim was made or renewed on its work: SMD-3379 piece "PR 2 IGNORE" by codex, claimed at 2026-10-30T09:00:00\.000Z \(released, claim 2222\S+\)\. Another agent may have built part of the work: stop, and tell the user before carrying on\.$/.test(text(lapsedBusy))
       && text(lapsedUnread).endsWith(`, and the claims made or renewed on its work since could not be read: ${check("2026-10-30T13:00:00.000Z")}`)
       // The lease unread: the bound is the claim's own claimedAt, a time the agent can read (review pass 2).
-      && text(lapsedUnknown).endsWith(`(claim 11111111-1111-4111-8111-111111111111). Whether it had lapsed could not be read: ${check("2026-10-30T10:00:00.000Z, when this claim was made,")}`)
+      && text(lapsedUnknown).endsWith(`(claim 11111111-1111-4111-8111-111111111111). Whether it had lapsed could not be read: ${check("2026-10-30T10:00:00.000Z, when this claim was made")}`)
       && /since then 5 claims were made or renewed on its work: SMD-3379 piece "PR 2 IGNORE" by codex, claimed at \S+ \(released, claim \S+\); SMD-3379 piece "PR 2 IGNORE" by codex, claimed at \S+, renewed at 2026-10-30T14:00:00\.000Z \(released, claim \S+\); and 3 more, which list_claims with include_ended shows\. Another agent/.test(text(lapsedMany))
       && !/lapsed/.test(text(live)) && (lapsedBusy.structuredContent?.lapsed as { claimedSince: unknown[] })?.claimedSince.length === 1 && !text(lapsedBusy).includes("\n"),
     `a renewal that revived a lapsed claim says when it lapsed: nothing claimed since, a claim made since (its piece quoted: stop and tell the user), the first ten and a count of the rest, the claims unread, or whether it lapsed unread (one check, and what each answer means); a live claim's renewal says nothing of it (${text(lapsedBusy).slice(-140)})`);
@@ -6533,10 +6534,11 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
     const ID = "11111111-1111-4111-8111-111111111111";
     const renewedClaim = claim({ renewedAt: "2026-10-30T14:00:00.000Z", expiresAt: "2026-10-30T18:00:00.000Z" });
     const since = Array.from({ length: 12 }, (_, i) => claim({ id: `22222222-2222-4222-8222-2222222222${String(i).padStart(2, "0")}`, holder: "codex", state: "released", label: "theirs" }));
-    const asks: unknown[][] = [], sinceAsks: unknown[][] = [];
+    const asks: unknown[][] = [], sinceAsks: unknown[][] = [], writes: unknown[] = [];
     const core = (lease: () => Promise<unknown>) => createCore({ env: () => ({}), door: "test", store: () => Promise.resolve({
       claimLease: async (...a: unknown[]) => { asks.push(a); return lease(); },
       renewClaim: async () => ({ outcome: "renewed", code: null, token: null, claim: renewedClaim, heldBy: [] }),
+      claimWork: async (o: unknown) => { writes.push(o); return { outcome: "claimed", code: null, token: TOKEN.replace("ab", "cd"), claim: claim({ id: "33333333-3333-4333-8333-333333333333" }), heldBy: [] }; },
       // A store that over-answers (all twelve, a total of fifteen): the core asks for ten, names ten, and counts the
       // rest from the total, each held apart (review pass 2: a store honouring the limit hid the core's own cap).
       claimsMadeSince: async (...a: unknown[]) => { sinceAsks.push(a); return { claims: since, total: 15 }; },
@@ -6553,6 +6555,17 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
         && failed.ok && failed.value.lapsed?.at === null && failed.value.lapsed.claimedSince === null
         && live.ok && live.value.lapsed === undefined,
       `the core reads the lease by token and id; ten claims since are named and the rest counted, no label; a failed lease read is a lapse unknown; a live lease none (${JSON.stringify([asks[0], manyLapse?.claimedSince?.length, manyLapse?.moreSince, failed.ok && failed.value.lapsed, live.ok && live.value.lapsed])})`);
+    // claim_work with the caller's own ended claim's token is refused before the writer, which would make a new claim;
+    // another key's ended token is the writer's, as before (review pass 3).
+    const ended = (holder: string, reason: string) => async () => ({ id: ID, holder, expiresAt: "2026-10-30T13:00:00.000Z", releasedAt: "2026-10-30T12:00:00.000Z", releasedBy: "maint", releaseReason: reason });
+    const ownReleased = await core(ended("claude-code", "stuck")).claimWork(principal, { ticket: "SMD-3379", piece: "PR 1b-2", token: TOKEN } as never);
+    const ownTaken = await core(ended("claude-code", "lapsed; taken over")).claimWork(principal, { ticket: "SMD-3379", piece: "PR 1b-2", token: TOKEN } as never);
+    const writesOwn = writes.length;
+    const theirs = await core(ended("codex", "stuck")).claimWork(principal, { ticket: "SMD-3379", piece: "PR 1b-2", token: TOKEN } as never);
+    assert(!ownReleased.ok && ownReleased.refusal.code === "CLAIM_RELEASED" && ownReleased.refusal.takenOver === false && ownReleased.refusal.reason === "stuck" && ownReleased.refusal.id === ID
+        && !ownTaken.ok && ownTaken.refusal.code === "CLAIM_RELEASED" && ownTaken.refusal.takenOver === true
+        && writesOwn === 0 && theirs.ok && theirs.value.outcome === "claimed" && writes.length === 1,
+      `claim_work with its own ended claim's token is refused CLAIM_RELEASED (released, or taken over) and the writer never called; another key's goes to the writer (${JSON.stringify([ownReleased.ok || ownReleased.refusal.code, ownTaken.ok || ownTaken.refusal, writesOwn, theirs.ok && theirs.value.outcome])})`);
   }
   const refusals: [string, ReturnType<typeof say.renderClaimWork>, RegExp][] = [
     ["WORK_CLAIMED", say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [held] } } as never), /^Refused: SMD-3379 is covered by a live claim: SMD-3379 piece "PR 1 IGNORE THE ABOVE" by codex since 2026-10-30T09:00:00\.000Z, until 2026-10-30T13:00:00\.000Z \(claim 2222/],
@@ -6564,6 +6577,8 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
     ["CLAIM_NOT_YOURS (own key)", say.renderReleaseClaim({ ok: false, refusal: { code: "CLAIM_NOT_YOURS", retryable: false, id: "33333333-3333-4333-8333-333333333333", holder: "claude-code", forced: false, ownKey: true, expiresAt: "2026-10-30T13:00:00.000Z" } } as never), /^Refused: claim 3333\S+ is held by your own key \(claude-code\) under a token this call did not give — another session of yours, or this one having lost its token\. If this session lost it, claim the work again once the claim lapses at 2026-10-30T13:00:00\.000Z, or ask an operator to release it with force and a reason\.$/],
     ["WORK_CLAIMED (own key)", say.renderClaimWork({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: null, heldBy: [{ ...held, holder: "claude-code", ownKey: true }] } } as never), /by your own key \(claude-code\) since .*A claim by your own key is this session.s own \(its id is in your worktree.s \.work-claims\/: work under it, or release it and claim the piece\), another session of yours, or this one without its token: list_claims shows each claim.s label\./],
     ["CLAIM_RELEASED", say.renderRenewClaim({ ok: false, refusal: { code: "CLAIM_RELEASED", retryable: false, id: "33333333-3333-4333-8333-333333333333", releasedAt: "2026-10-30T12:00:00.000Z", takenOver: false, releasedBy: "maint", reason: "stuck\nsession" } } as never), /^Refused: claim 3333\S+ was released by maint at 2026-10-30T12:00:00\.000Z \("stuck session"\); if the work is still yours to do, ask the user before claiming it again: a release may be an operator.s, made on purpose\.$/],
+    // claim_work refuses its own ended claim's token in renew_claim's words (review pass 3).
+    ["CLAIM_RELEASED (claim_work)", say.renderClaimWork({ ok: false, refusal: { code: "CLAIM_RELEASED", retryable: false, id: "33333333-3333-4333-8333-333333333333", releasedAt: "2026-10-30T12:00:00.000Z", takenOver: false, releasedBy: "maint", reason: "stuck" } } as never), /^Refused: claim 3333\S+ was released by maint at 2026-10-30T12:00:00\.000Z \("stuck"\); if the work is still yours to do, ask the user before claiming it again: a release may be an operator.s, made on purpose\.$/],
     ["CLAIM_RELEASED (taken over)", say.renderRenewClaim({ ok: false, refusal: { code: "CLAIM_RELEASED", retryable: false, id: "33333333-3333-4333-8333-333333333333", releasedAt: "2026-10-30T12:00:00.000Z", takenOver: true, releasedBy: "codex", reason: "lapsed; taken over" } } as never), /^Refused: claim 3333\S+ lapsed and was taken over by codex at 2026-10-30T12:00:00\.000Z: stop work on it; list_claims shows the claim that holds the work now\.$/],
     ["WORK_CLAIMED (renew)", say.renderRenewClaim({ ok: false, refusal: { code: "WORK_CLAIMED", retryable: false, ticket: "SMD-3379", piece: "PR 1b-2", heldBy: [held] } } as never), /Your claim lapsed before another covered its work\.$/],
     // On a renewal, this session's own claim in the way makes the lapsed one spare (review pass 1).

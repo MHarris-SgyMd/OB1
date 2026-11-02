@@ -1795,12 +1795,12 @@ const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOv
  */
 const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
   `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
-const lapseCheck = (after: string) =>
-  `list the ticket's claims with list_claims and include_ended: one on its work claimed or renewed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+const lapseCheck = (after: string, id: string) =>
+  `list the ticket's claims with list_claims and include_ended: a claim other than this one (claim ${id}) on its work, claimed or renewed after ${after}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
 const lapseText = (l: ClaimLapse | undefined, claim: WorkClaim) => {
   if (!l) return "";
-  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck(`${claim.claimedAt}, when this claim was made,`)}`;
-  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made or renewed on its work since could not be read: ${lapseCheck(l.at)}`;
+  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck(`${claim.claimedAt}, when this claim was made`, claim.id)}`;
+  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made or renewed on its work since could not be read: ${lapseCheck(l.at, claim.id)}`;
   if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made or renewed on its work meanwhile.`;
   const n = l.claimedSince.length + (l.moreSince ?? 0);
   return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made or renewed on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
@@ -1829,6 +1829,8 @@ export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Rep
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
     : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+  // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
+  : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,

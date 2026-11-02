@@ -960,14 +960,17 @@ export class SqlStore implements ThoughtStore {
 
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
   // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
-  async claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null> {
+  async claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; holder: string } | null> {
     // Two statements, not `$id IS NULL OR id = $id`: a generic plan would lose the primary key.
     const rows = (id === undefined
-      ? await this.sql`SELECT id, expires_at, released_at FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
-      : await this.sql`SELECT id, expires_at, released_at FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
+      ? await this.sql`SELECT id, holder_name, expires_at, released_at, released_by, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
+      : await this.sql`SELECT id, holder_name, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
     const r = rows[0];
-    if (!r || typeof r.id !== "string" || r.expires_at == null) return null;
-    return { id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null) };
+    if (!r || typeof r.id !== "string" || typeof r.holder_name !== "string" || r.expires_at == null) return null;
+    return {
+      id: r.id, holder: r.holder_name, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
+      releasedBy: typeof r.released_by === "string" ? r.released_by : null, releaseReason: typeof r.release_reason === "string" ? r.release_reason : null,
+    };
   }
 
   async claimsMadeSince(id: string, since: string, limit: number): Promise<{ claims: WorkClaim[]; total: number }> {
