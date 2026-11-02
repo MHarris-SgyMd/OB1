@@ -66,8 +66,8 @@ import type { SQL } from "bun";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-// How many ranked thoughts are serialized into the synthesis prompt. The pool
-// is ranked above this cap, then trimmed. Bigger = more context, more tokens.
+// How many thoughts are serialized into the synthesis prompt: pickForDigest's
+// share of the window. Bigger = more context, more tokens.
 const SYNTHESIZE_INPUT_CAP = 80;
 
 // Hard ceiling on rows read per run — protects a huge window + heavy capture
@@ -110,6 +110,11 @@ export type DigestThought = {
   content: string;
   created_at: string | Date;
   metadata: Record<string, unknown> | null;
+  /**
+   * The row's place in its day and writer's queue, 1 for the newest: readThoughts
+   * numbers each (day, `metadata.actor_name`) group newest first.
+   */
+  turn?: number;
 };
 
 type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
@@ -117,16 +122,29 @@ type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
 // ── Ranking (pure) ────────────────────────────────────────────────────────
 
 /**
- * The pool, newest first, capped at 200. Recency alone ranks it. `importance`
- * is retired (SMD-3661, `docs/priority.md` decision 8): any key could set it on
- * its own rows, so ten captures carrying a high value ranked every other key's
- * thought out of the digest (SMD-2653). The sort compares instants: a row from
- * the database carries a Date, and the string of one leads with its weekday.
- * Once the effective priority exists (SMD-3667) the digest ranks by that.
+ * The thoughts the digest reads: the window spread over its days and writers,
+ * at most `cap`, newest first. Rows are taken a turn at a time: the newest of
+ * every (day, writer) group, then the second of each, and so on, newest first
+ * within a turn. So a quiet day keeps its share beside a busy one, and a key
+ * that floods the window gets one row per day per turn, as every other writer
+ * does. Stable takes about 60 thoughts a day (2026-11-02): the newest 80 alone
+ * would be a day and a half of a "weekly" digest.
+ *
+ * `importance` takes no part. It is retired (SMD-3661, `docs/priority.md`
+ * decision 8): any key could set it on its own rows, so ten captures carrying a
+ * high value ranked every other key's thought out (SMD-2653). Once the
+ * effective priority exists (SMD-3667) the digest ranks by that. Times compare
+ * as instants: a row from the database carries a Date, whose string leads with
+ * its weekday. An unreadable time sorts last.
  */
-export function rankByRecency(thoughts: DigestThought[]): DigestThought[] {
-  const at = (t: DigestThought) => new Date(t.created_at).getTime();
-  return [...thoughts].sort((a, b) => at(b) - at(a)).slice(0, 200);
+export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_CAP): DigestThought[] {
+  const at = (t: DigestThought) => {
+    const ms = new Date(t.created_at).getTime();
+    return Number.isFinite(ms) ? ms : -Infinity;
+  };
+  const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
+  const turn = (t: DigestThought) => t.turn ?? 1;
+  return [...thoughts].sort((a, b) => turn(a) - turn(b) || newestFirst(a, b)).slice(0, cap).sort(newestFirst);
 }
 
 // ── The digest's egress subject (pure) ──────────────────────────────────────
@@ -163,7 +181,7 @@ export function buildUserPrompt(thoughts: DigestThought[], startDate: Date, endD
   }));
   return (
     `Weekly digest for ${fmt(startDate)} – ${fmt(endDate)}.\n` +
-    `Source: the ${rows.length} most recent thoughts.\n\n` +
+    `Source: ${rows.length} thoughts, a share of each day and writer in the window.\n\n` +
     `INPUT:\n${JSON.stringify(rows)}\n\n` +
     `Produce the digest now.`
   );
@@ -200,7 +218,9 @@ const FAIL_CLOSED =
   "  --no-sensitivity-filter to accept sending ALL rows in the window.";
 
 /**
- * The week's rows, ordered newest first and capped. `restricted` (always) and
+ * The window's rows, each numbered by its turn (pickForDigest), in turn order and
+ * capped, so a cap reached on a busy window drops later turns, not whole
+ * days or writers. `restricted` (always) and
  * `personal` (unless includePersonal) are excluded when the column exists, by
  * the column or the row's `metadata.sensitivity_tier`. Returns the rows, or
  * `{ failClosed: true }` when the sensitivity column is missing and the filter
@@ -235,7 +255,11 @@ export async function readThoughts(
   }
 
   const rows = (await sql.unsafe(
-    `SELECT ${selectCols.join(", ")} FROM thoughts WHERE ${where} ORDER BY created_at DESC LIMIT ${FETCH_HARD_CAP}`,
+    `SELECT ${selectCols.join(", ")}, turn FROM (
+       SELECT ${selectCols.join(", ")},
+              (row_number() OVER (PARTITION BY created_at::date, metadata->>'actor_name' ORDER BY created_at DESC, id))::int AS turn
+         FROM thoughts WHERE ${where}) w
+      ORDER BY turn, created_at DESC LIMIT ${FETCH_HARD_CAP}`,
     params,
   )) as DigestThought[];
   return { failClosed: false, rows };
@@ -386,8 +410,8 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
     return 0;
   }
 
-  const pool = rankByRecency(read.rows);
-  console.log(`  ranked pool: ${pool.length} thought(s)`);
+  const pool = pickForDigest(read.rows);
+  console.log(`  picked ${pool.length} thought(s) across the window's days and writers`);
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - args.windowDays * 86_400_000);
@@ -415,8 +439,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
   if (args.output === "stdout") return 0;
   if (args.output === "file") {
-    const used = Math.min(pool.length, SYNTHESIZE_INPUT_CAP);
-    console.log(`  wrote ${deliverFile(digest, startDate, endDate, model, { used, poolSize: pool.length })}`);
+    console.log(`  wrote ${deliverFile(digest, startDate, endDate, model, { used: pool.length, poolSize: read.rows.length })}`);
     return 0;
   }
 

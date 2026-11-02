@@ -40,8 +40,8 @@ The verb keeps the recipe's behaviour — a `--window` of days, the
 and adds the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest
 in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`).
-It ranks the window by recency alone. The recipe's importance ranking and its
-`--min-importance` are gone: any key could set `importance` on its own rows, so
+It takes a share of each day and writer in the window, newest first within
+each. The recipe's importance ranking and its `--min-importance` are gone: any key could set `importance` on its own rows, so
 ten captures carrying a high value could rank every other thought out of the
 digest. The fork retired the key (SMD-2653, `docs/priority.md` decision 8). See
 the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and

@@ -2,8 +2,9 @@
 /**
  * test-weekly-digest.ts — db/weekly-digest.ts's pure core (SMD-2239), hermetic.
  *
- * No Postgres, no model, no network. Covers the ranking (recency alone: no
- * key's `importance` steers it, SMD-2653), the prompt, the Telegram chunking, and the digest's egress subject — including the gate
+ * No Postgres, no model, no network. Covers the pick (a share of each day and
+ * writer, newest first; no key's `importance` steers it, SMD-2653), the prompt,
+ * the Telegram chunking, and the digest's egress subject — including the gate
  * itself: a digest carries no row's source/type/topic, so it declares its own
  * (type:digest, source:weekly-digest) and the worker key is the actor. Under the
  * default deny the send is refused; a matching OB1_EGRESS_ALLOW term lets it
@@ -14,7 +15,7 @@
 
 import { resolveEgressPolicy, mayLeaveBox, type EgressSubject } from "../server-portable/egress.ts";
 import {
-  rankByRecency,
+  pickForDigest,
   buildUserPrompt,
   chunkForTelegram,
   digestUnits,
@@ -34,43 +35,53 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   content: o.content ?? "",
   created_at: o.created_at ?? "2026-09-01T00:00:00Z",
   metadata: o.metadata ?? null,
+  ...(o.turn === undefined ? {} : { turn: o.turn }),
 });
 
 // ---------------------------------------------------------------------------
-// rankByRecency — newest first by the instant, whatever importance says; cap 200.
+// pickForDigest — turn by turn, newest first within a turn and in the result.
 // ---------------------------------------------------------------------------
 {
+  const ids = (ts: DigestThought[]) => ts.map((t) => t.id).join();
+
   // Dates, as the database returns them, across weekdays: Mon Nov 2, Sat Oct 31,
   // Wed Oct 28. Compared as strings they would sort by weekday name.
-  const dated = rankByRecency([
+  const dated = pickForDigest([
     thought({ id: "wed", created_at: new Date("2026-10-28T12:00:00Z") }),
     thought({ id: "mon", created_at: new Date("2026-11-02T12:00:00Z") }),
     thought({ id: "sat", created_at: new Date("2026-10-31T12:00:00Z") }),
   ]);
-  ok(dated.map((t) => t.id).join() === "mon,sat,wed", "Dates rank newest first by the instant, not by the weekday their string leads with");
-
-  const iso = rankByRecency([
+  ok(ids(dated) === "mon,sat,wed", "Dates order newest first by the instant, not by the weekday their string leads with");
+  ok(ids(pickForDigest([
     thought({ id: "a", created_at: "2026-09-01T00:00:00Z" }),
     thought({ id: "c", created_at: "2026-09-03T00:00:00Z" }),
     thought({ id: "b", created_at: "2026-09-02T00:00:00Z" }),
-  ]);
-  ok(iso.map((t) => t.id).join() === "c,b,a", "ISO strings rank newest first");
+  ])) === "c,b,a", "ISO strings order newest first");
+  ok(ids(pickForDigest([
+    thought({ id: "bad", created_at: "not a date" }),
+    thought({ id: "new", created_at: "2026-09-03T00:00:00Z" }),
+    thought({ id: "old", created_at: "2026-09-01T00:00:00Z" }),
+  ])) === "new,old,bad", "an unreadable time sorts last, and the rest still order");
 
-  // SMD-2653's repro: a writer's 15 thoughts, then a capture key's 10, each older
-  // than every writer row, carrying importance 9 in metadata and as a column.
-  // The digest reads neither, so the writer's rows lead and the pool is the order
-  // the instants give.
+  // The cap is filled turn by turn: a busy day's later turns give way to a
+  // quiet day's first. Day 2 holds turns 1..5, day 1 holds turn 1 alone.
+  const at = (d: number, h: number) => new Date(Date.UTC(2026, 9, d, h)).toISOString();
+  const busy = Array.from({ length: 5 }, (_, i) => thought({ id: `busy${i + 1}`, created_at: at(2, 20 - i), turn: i + 1 }));
+  const quiet = thought({ id: "quiet", created_at: at(1, 9), turn: 1 });
+  ok(ids(pickForDigest([...busy, quiet], 3)) === "busy1,busy2,quiet", "a quiet day's first row comes before a busy day's third, and the pick is newest first");
+
+  // SMD-2653's repro, past the cap: a writer's 80 thoughts, then a capture key's
+  // 10, each older than every writer row, carrying importance 9 in metadata and
+  // as a column. Neither is read, so the writer's 80 fill the pick.
   const day = (d: number) => new Date(Date.UTC(2026, 9, d, 12)).toISOString();
-  const writer = Array.from({ length: 15 }, (_, i) => thought({ id: `w${i}`, created_at: day(20 + (i % 10)) }));
+  const writer = Array.from({ length: 80 }, (_, i) => thought({ id: `w${i}`, created_at: day(20 + (i % 10)) }));
   const capture = Array.from({ length: 10 }, (_, i) =>
     Object.assign(thought({ id: `c${i}`, created_at: day(10 + i), metadata: { importance: 9 } }), { importance: 9 }));
-  const pool = rankByRecency([...capture, ...writer]);
-  const byTime = [...writer, ...capture].sort((a, b) => Date.parse(String(b.created_at)) - Date.parse(String(a.created_at)));
-  ok(pool.length === 25 && pool.slice(0, 15).every((t) => t.id.startsWith("w")), "a capture key's importance 9 ranks none of a writer's newer thoughts out of the pool");
-  ok(pool.map((t) => t.id).join() === byTime.map((t) => t.id).join(), "the pool is the instants' order, importance aside");
+  const pool = pickForDigest([...capture, ...writer]);
+  ok(pool.length === 80 && pool.every((t) => t.id.startsWith("w")), "a capture key's importance 9 ranks none of a writer's newer thoughts out");
 
   const many = Array.from({ length: 250 }, (_, i) => thought({ id: `x${i}`, created_at: day((i % 28) + 1) }));
-  ok(rankByRecency(many).length === 200, "the pool is capped at 200");
+  ok(pickForDigest(many).length === 80, "the pick is capped at the prompt's 80");
 }
 
 // ---------------------------------------------------------------------------
