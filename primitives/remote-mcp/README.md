@@ -18,7 +18,7 @@ A guide to connecting your Open Brain extensions to any AI client. Run the serve
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
-3. Name: the extension name (e.g., `Household Knowledge`, `Family Calendar`)
+3. Name: the extension name (e.g., `Household Knowledge`, `Home Maintenance`)
 4. Remote MCP server URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Click **Add**
 
@@ -61,7 +61,7 @@ claude mcp add --transport http extension-name \
   --header "x-access-key: your-access-key"
 ```
 
-Replace `extension-name` with a short name (e.g., `household-knowledge`, `family-calendar`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
+Replace `extension-name` with a short name (e.g., `household-knowledge`, `home-maintenance`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
 
 ## Cursor
 

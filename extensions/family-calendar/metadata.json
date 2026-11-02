@@ -1,6 +1,6 @@
 {
   "name": "Kid Logistics / Family Calendar",
-  "description": "Multi-person family scheduling — activities, important dates, and conflict detection across the whole household. On this fork it is the family-calendar plugin, turned on in the brain itself (SMD-2311).",
+  "description": "Multi-person family scheduling — activities and important dates across the whole household, so an agent can read the week and spot what clashes. On this fork it is the family-calendar plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",

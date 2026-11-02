@@ -19,10 +19,10 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
 | Add a date to remember | `family_calendar_add_important_date` | `POST /v1/plugins/family-calendar/dates` | `write` | `title`, `date_value`; `family_member_id`, `recurring_yearly` (default false), `reminder_days_before` (0 to 365, default 7), `notes` optional | `{ important_date }` |
 | Upcoming dates | `family_calendar_get_upcoming_dates` | `GET /v1/plugins/family-calendar/dates` | `read` | `days_ahead`, 0 to 366, default 30 | `{ today, dates }` |
 
-- **Formats.** Dates are `YYYY-MM-DD` and times `HH:MM` on the 24-hour clock, both in and out. `day_of_week` is a lower-case day name (`monday`).
+- **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and times `HH:MM` on the 24-hour clock, both in and out. `day_of_week` is a lower-case day name (`monday`). An activity is weekly (a `day_of_week`) or dated (a `start_date`), or both: a weekly one whose dates bound it.
 - **Members on answers.** Every activity and date answers `family_member` as `{ id, name, relationship }`, or `null` for the whole family's.
 - **The week.** `get_week_schedule` covers the seven days from `week_start`. It returns:
-  - each weekly activity whose own dates, where it has them, reach the week;
+  - each weekly activity whose day in that week falls within its own dates, where it has them (a Monday class starting on a Wednesday first appears the week after);
   - each dated activity whose `start_date` to `end_date` overlaps the week (no `end_date` means it runs on).
 
   They are ordered by start time.
@@ -32,6 +32,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
   - Each date carries `next_date`, `days_until`, and `remind`: whether it is within its `reminder_days_before`.
   - "Today" is the database's date.
 - **Refusals.**
+  - An activity with neither a `day_of_week` nor a `start_date`, which no week would list: `422 NO_WHEN`.
   - A `family_member_id` that names no member: `404 NO_SUCH_MEMBER`.
   - An `end_date` before the `start_date`: `422 BAD_DATES`.
   - A date, time or day that is malformed: `400`, before anything is stored.
@@ -55,7 +56,7 @@ It reaches nothing of the core's: no thought is read or written.
    ```
 
    Names are comma-separated: `OB1_PLUGINS=example,family-calendar` runs both.
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`, naming the stack's other `-f` files too. The migrator makes the plugin's role, its schema and its login role `ob1_plugins_family_calendar`, and applies `001_family_calendar.sql`.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`, then `docker compose up -d --force-recreate --no-deps app`, so the operator GUI reaches the recreated REST core at once. Name the stack's other `-f` files in both. Recreating `app` signs everyone out of the GUI. The migrator makes the plugin's role, its schema and its login role `ob1_plugins_family_calendar`, and applies `001_family_calendar.sql`.
 3. Check it:
    - preflight's `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists the three reads for a read key, and all six tools for a write key;
@@ -87,4 +88,4 @@ The standalone server kept its rows in `public.family_members`, `public.activiti
 - **The server refuses to start: "OB1_PLUGINS names … which is no plugin in this build".** The running image predates the plugin. Pull or rebuild it.
 - **Preflight's `plugin tables` row says the server "cannot log in as ob1_plugins_family_calendar".** `OB1_PLUGIN_DB_PASSWORD` is not the secret the role was made with. [The example plugin's troubleshooting](../example/README.md#troubleshooting) says how to set it back or change both.
 - **`403 FORBIDDEN` with `needs: "write"`.** A read key cannot add. Over MCP, a read key's tool list has no write tools at all.
-- **An activity is missing from the week.** Check its `start_date` and `end_date`. A weekly activity whose dates ended before the week, or start after it, is left out, as is an activity with neither a day nor a start date.
+- **An activity is missing from the week.** Check its `start_date` and `end_date`. A weekly activity is listed only where its day in that week falls within them: one starting midweek after its day first appears the week after.

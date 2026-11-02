@@ -207,7 +207,8 @@ console.log("\n[family-calendar] its members, activities and dates");
   const stored = await one<{ user_id: string | null }>(sql`SELECT user_id::text FROM plugin_family_calendar.family_members WHERE id = ${adaId}`);
   assert(stored.user_id === null, "the row's user_id is left null: kept, and ignored (decided 2026-11-02)");
   const badDay = await c("add_family_member", { name: "Cy", birth_date: "2018-02-30" });
-  assert(badDay.status === 400, `a birth date that is no date is refused before the database (${badDay.status} ${JSON.stringify(badDay.body).slice(0, 100)})`);
+  const yearZero = await c("add_family_member", { name: "Cy", birth_date: "0000-01-01" });
+  assert(badDay.status === 400 && yearZero.status === 400, `a birth date that is no date, or in the year 0000 Postgres has not, is refused before the database (${badDay.status}, ${yearZero.status} ${JSON.stringify(yearZero.body).slice(0, 100)})`);
 
   // Six activities around the week of 2026-09-21 (Monday) to 2026-09-27: one weekly, four dated — across the week, ended
   // before it, running on since before it, ahead of it — and one weekly whose dates ended before the week.
@@ -245,6 +246,17 @@ console.log("\n[family-calendar] its members, activities and dates");
   const every = await c("search_activities", {});
   const order = ((every.body.activities ?? []) as { title: string }[]).map((a) => a.title);
   assert(every.status === 200 && order.join() === "Ski trip,Autumn camp,Piano,Spring term,Summer tennis,Swimming", `…none lists all six, latest start date first, then those with none, newest first (${order.join()})`);
+  // A weekly activity is listed only where its day in the week is within its own dates: a Monday class starting on the
+  // Wednesday of the week of 2026-09-21 first falls on the 28th, and a Monday club ending Sunday the 20th last fell on the 14th.
+  const late = await c("add_activity", { title: "Late Monday class", activity_type: "music", day_of_week: "monday", start_date: "2026-09-23" });
+  const club = await c("add_activity", { title: "Monday club", activity_type: "music", day_of_week: "monday", start_date: "2026-09-01", end_date: "2026-09-20" });
+  assert(late.status === 200 && club.status === 200, "two more weekly activities");
+  const weekAgain = await c("get_week_schedule", { week_start: "2026-09-21" });
+  const fromTuesday = await c("get_week_schedule", { week_start: "2026-09-15" });
+  const next = await c("get_week_schedule", { week_start: "2026-09-28" });
+  const before = await c("get_week_schedule", { week_start: "2026-09-14" });
+  assert(titles(weekAgain) === "Autumn camp,Piano,Swimming" && !titles(fromTuesday).includes("Monday club") && titles(next).includes("Late Monday class") && titles(before).includes("Monday club") && !titles(before).includes("Late Monday class"),
+    `…a weekly one in a week its dates overlap but where its day falls outside them is left out, and listed in the week its day falls inside (${titles(weekAgain)} / ${titles(fromTuesday)} / ${titles(next)} / ${titles(before)})`);
   const capped = await c("search_activities", { limit: 2 });
   assert(((capped.body.activities ?? []) as unknown[]).length === 2, "…limit applies");
   await c("add_activity", { title: "Bake sale 50% off", start_date: "2026-10-01" });
@@ -252,11 +264,15 @@ console.log("\n[family-calendar] its members, activities and dates");
   const underscore = await c("search_activities", { query: "_" });
   assert(titles(percent) === "Bake sale 50% off" && titles(underscore) === "", `…a % or an _ in the query matches itself, not any text (${titles(percent)} / ${titles(underscore)})`);
 
-  const noMember = await c("add_activity", { title: "x", family_member_id: NO_ROW });
-  const noMemberMcp = await c("add_activity", { title: "x", family_member_id: NO_ROW }, { door: "mcp" });
+  const noMember = await c("add_activity", { title: "x", start_date: "2026-09-01", family_member_id: NO_ROW });
+  const noMemberMcp = await c("add_activity", { title: "x", start_date: "2026-09-01", family_member_id: NO_ROW }, { door: "mcp" });
   assert(noMember.status === 404 && noMember.body.code === "NO_SUCH_MEMBER" && noMemberMcp.viaMcp.result?.isError === true && JSON.stringify(noMemberMcp.viaMcp).includes("NO_SUCH_MEMBER"), `a member that is not there: 404 NO_SUCH_MEMBER over both doors (${JSON.stringify(noMember.body)})`);
   const backwards = await c("add_activity", { title: "x", start_date: "2026-09-10", end_date: "2026-09-01" });
   assert(backwards.status === 422 && backwards.body.code === "BAD_DATES", `an end before the start: 422 BAD_DATES (${JSON.stringify(backwards.body)})`);
+  const noWhen = await c("add_activity", { title: "x", activity_type: "sports" });
+  assert(noWhen.status === 422 && noWhen.body.code === "NO_WHEN", `an activity with neither a day nor a start date, which no week would list: 422 NO_WHEN (${JSON.stringify(noWhen.body)})`);
+  const zeroWeek = await c("get_week_schedule", { week_start: "0000-06-01" });
+  assert(zeroWeek.status === 400, `a week in the year 0000: 400, not the database's 500 (${zeroWeek.status})`);
   const badDow = await c("add_activity", { title: "x", day_of_week: "Monday" });
   const badTime = await c("add_activity", { title: "x", start_time: "25:00" });
   assert(badDow.status === 400 && badTime.status === 400, `a day not lower-case, a time past 23:59: refused before the database (${badDow.status}, ${badTime.status})`);
@@ -286,9 +302,30 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(((defaulted.body.dates ?? []) as unknown[]).length === 2, "…thirty days unless given");
   const noMemberDate = await c("add_important_date", { title: "x", date_value: today, family_member_id: NO_ROW });
   assert(noMemberDate.status === 404 && noMemberDate.body.code === "NO_SUCH_MEMBER", "a date for a member that is not there: 404 NO_SUCH_MEMBER");
-  // 29 February in a year without one: the next anniversary is the 28th.
-  const leap = await one<{ next: string }>(sql`SELECT ('2024-02-29'::date + make_interval(years => 1))::date::text AS next`);
-  assert(leap.next === "2025-02-28", `Postgres moves a 29 February anniversary to the 28th, as the operation's description says (${leap.next})`);
+  const zeroDate = await c("add_important_date", { title: "x", date_value: "0000-02-29" });
+  assert(zeroDate.status === 400, `a date in the year 0000: 400 (${zeroDate.status})`);
+
+  // Dates added after the windows above were read: a yearly one whose anniversary is today, a 29 February, and two
+  // dated thirty and thirty-one days on, either side of the default.
+  await c("add_important_date", { title: "Anniversary today", date_value: await yearsBefore(0, 5), recurring_yearly: true });
+  await c("add_important_date", { title: "Leap day", date_value: "2020-02-29", recurring_yearly: true });
+  await c("add_important_date", { title: "Day thirty", date_value: await fromToday(30) });
+  await c("add_important_date", { title: "Day thirty-one", date_value: await fromToday(31) });
+  const zero = await c("get_upcoming_dates", { days_ahead: 0 });
+  const zeroDates = (zero.body.dates ?? []) as { title: string; next_date: string; days_until: number }[];
+  assert(zeroDates.map((d) => d.title).join() === "Anniversary today,Today's deadline" && zeroDates.every((d) => d.next_date === today && d.days_until === 0),
+    `days_ahead 0: today alone, a yearly date whose anniversary is today among it (${zeroDates.map((d) => d.title).join()})`);
+  const thirty = ((await c("get_upcoming_dates", {})).body.dates ?? []) as { title: string }[];
+  assert(thirty.some((d) => d.title === "Day thirty") && !thirty.some((d) => d.title === "Day thirty-one"), `…unless given, thirty days: the thirtieth day in, the thirty-first out (${thirty.map((d) => d.title).join()})`);
+  // 29 February's next anniversary, as the description says: that day in a leap year, the 28th in another. Reckoned
+  // here from the database's today, and found in a year's window wherever today falls.
+  const [ty, tm, td] = today.split("-").map(Number);
+  const leapYear = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const feb = (y: number) => `${y}-02-${leapYear(y) ? "29" : "28"}`;
+  const expected = (tm < 2 || (tm === 2 && td <= (leapYear(ty) ? 29 : 28))) ? feb(ty) : feb(ty + 1);
+  const year = ((await c("get_upcoming_dates", { days_ahead: 366 })).body.dates ?? []) as { title: string; next_date: string }[];
+  const leap = year.find((d) => d.title === "Leap day");
+  assert(leap?.next_date === expected, `a yearly 29 February comes round on ${expected} (${JSON.stringify(leap)})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

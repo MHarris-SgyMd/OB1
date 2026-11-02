@@ -8,8 +8,8 @@ import { definePlugin, ok, operation, refuse, z } from "../../server-portable/pl
 import type { PluginSql } from "../../server-portable/plugin-sdk.ts";
 
 const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const;
-/** A calendar date as the tables hold it, YYYY-MM-DD. */
-const Day = z.iso.date();
+/** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
+const Day = z.iso.date().refine((d) => !d.startsWith("0000-"), "a date from the year 0001");
 /** A time of day, HH:MM on the 24-hour clock. */
 const Time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "a time of day, HH:MM");
 /** Free text a person types: trimmed, and at most `max` characters. */
@@ -72,7 +72,7 @@ export default definePlugin({
     }),
     add_activity: operation({
       title: "Schedule an activity",
-      description: "Schedules an activity: weekly on day_of_week, or dated alone, from start_date to end_date (no end_date: it runs on). family_member_id names whose it is; without one it is the whole family's. A member that is not there is refused (NO_SUCH_MEMBER), as is an end_date before the start_date (BAD_DATES).",
+      description: "Schedules an activity: weekly on day_of_week, or dated alone, from start_date to end_date (no end_date: it runs on). family_member_id names whose it is; without one it is the whole family's. One with neither a day nor a start date is refused (NO_WHEN), as is a member that is not there (NO_SUCH_MEMBER) and an end_date before the start_date (BAD_DATES).",
       scope: "write",
       method: "POST",
       path: "/activities",
@@ -90,6 +90,7 @@ export default definePlugin({
       },
       output: { activity: Activity },
       async handler(ctx, a) {
+        if (!a.day_of_week && !a.start_date) return refuse(422, "NO_WHEN", { message: "give day_of_week for a weekly activity or start_date for a dated one: one with neither is in no week" });
         if (a.start_date && a.end_date && a.end_date < a.start_date) return refuse(422, "BAD_DATES", { message: `end_date ${a.end_date} is before start_date ${a.start_date}` });
         const memberId = a.family_member_id ?? null;
         const row = await ctx.db.tx(async (sql) => {
@@ -108,7 +109,7 @@ export default definePlugin({
     }),
     get_week_schedule: operation({
       title: "The week's schedule",
-      description: "The activities of the seven days from week_start (a Monday, say): each weekly activity whose dates, where it has them, reach the week, and each dated one whose start_date to end_date (no end_date: running on) overlaps it. Ordered by start time; each carries its member, or null for the whole family's.",
+      description: "The activities of the seven days from week_start (a Monday, say): each weekly activity whose day in that week falls within its own start_date and end_date, where it has them, and each dated one whose start_date to end_date (no end_date: running on) overlaps the week. Ordered by start time; each carries its member, or null for the whole family's.",
       scope: "read",
       method: "GET",
       path: "/week",
@@ -121,13 +122,19 @@ export default definePlugin({
         const member = family_member_id ?? null;
         const { weekEnd, rows } = await ctx.db.tx(async (sql) => {
           const [{ weekEnd }] = await sql<{ weekEnd: string }>`SELECT (${week_start}::date + 6)::text AS "weekEnd"`;
+          // A weekly activity falls once in any seven days: on `on`, its
+          // day's offset from week_start's. It is listed when that day is
+          // within its own dates; a dated one when its span meets the week.
           const rows = await sql<Answer<z.input<typeof Activity>>>`
-            SELECT answer FROM activity_rows
-             WHERE (day_of_week IS NOT NULL OR starts IS NOT NULL)
-               AND (starts IS NULL OR starts <= ${weekEnd}::date)
-               AND (ends IS NULL OR ends >= ${week_start}::date)
-               AND (${member}::uuid IS NULL OR family_member_id = ${member}::uuid)
-             ORDER BY starts_at NULLS LAST, title, id`;
+            SELECT a.answer FROM activity_rows a
+              CROSS JOIN LATERAL (
+                SELECT ${week_start}::date + ((array_position(ARRAY['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'], a.day_of_week)
+                                               - extract(isodow FROM ${week_start}::date)::int + 7) % 7) AS on_day) w
+             WHERE CASE WHEN a.day_of_week IS NOT NULL
+                        THEN (a.starts IS NULL OR a.starts <= w.on_day) AND (a.ends IS NULL OR a.ends >= w.on_day)
+                        ELSE a.starts IS NOT NULL AND a.starts <= ${weekEnd}::date AND (a.ends IS NULL OR a.ends >= ${week_start}::date) END
+               AND (${member}::uuid IS NULL OR a.family_member_id = ${member}::uuid)
+             ORDER BY a.starts_at NULLS LAST, a.title, a.id`;
           return { weekEnd, rows };
         });
         return ok({ week_start, week_end: weekEnd, activities: rows.map((r) => r.answer) });

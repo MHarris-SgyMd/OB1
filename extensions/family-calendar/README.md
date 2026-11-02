@@ -64,6 +64,7 @@ Then recreate the migrator and the servers from `deploy/`, naming the stack's ot
 
 ```bash
 docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
 The migrator makes the plugin's tables, and the servers start with its six tools.
@@ -90,7 +91,7 @@ What important dates are coming up in the next 30 days?
 
 ## Cross-Extension Integration
 
-The family calendar sets up the `family_members` table that Meal Planning (Extension 4) depends on — knowing who's home this week determines how many meals to plan. Each plugin's tables are its own, so your agent connects the two: it reads the week here, then plans meals there.
+The family calendar sets up the `family_members` table that Meal Planning (Extension 4) depends on — knowing who's home this week determines how many meals to plan. The calendar's tables are the plugin's own, so your agent connects the two: it reads the week through the calendar's tools, then plans meals with Extension 4's.
 
 The multi-entity pattern (family_member → activities) is the same pattern you'll use for contacts → interactions in the Professional CRM (Extension 5).
 
@@ -117,7 +118,7 @@ For common issues (connection errors, 401s), see [Common Troubleshooting](../../
 - Refresh your client's tool list
 
 **Activities not showing up in get_week_schedule**
-- Check that `start_date` and `end_date` are set correctly: a weekly activity whose dates ended before the week is left out
+- Check that `start_date` and `end_date` are set correctly: a weekly activity is listed only where its day in that week falls within them
 - `day_of_week` is a lower-case day name ('monday', not 'Monday'); a capitalised one is refused when the activity is added
 - The week runs seven days from `week_start`, in YYYY-MM-DD format
 
