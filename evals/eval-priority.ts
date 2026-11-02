@@ -15,8 +15,9 @@
  *       database holding thoughts unless OB1_FIXTURE_RESET=1, and resetSchema
  *       a non-loopback one unless OB1_ALLOW_REMOTE_DB=1), plants the seeded
  *       corpus (priority.ts's plantRows), and runs every prompt through each
- *       baseline read — the server's own SqlStore.hybridThoughts, as its tool
- *       calls it — and each measured read. Prints the per-prompt hits, the
+ *       baseline read — a search tool called through the server's own core,
+ *       the query embedded by its embedder through a stub provider on
+ *       loopback — and each measured read. Prints the per-prompt hits, the
  *       table, the shuffled-gold mutant beside chance, the bar a priority read
  *       must clear against this baseline, and each measured read's verdict.
  *       Exits 1 when a baseline read errors, when a baseline read's scores
@@ -39,14 +40,15 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, refuseHeldDatabase, resetSchema } from "../db/test-support.ts";
+import { createAssert, heldRefusal, refuseHeldDatabase, resetSchema } from "../db/test-support.ts";
 import { SEARCH_COMPAT_LIMIT } from "../server-portable/core/reads.ts";
-import { SPECS } from "../server-portable/core/schemas.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
+import { createCore } from "../server-portable/core/index.ts";
+import type { Principal } from "../server-portable/auth.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, MUTANT_SEED, READS, baselineCall, itemId, measuredIds, plantRows, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
-  type DogfoodRow, type Item, type MeasuredRead, type PromptScore,
+  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, seedRow, toolInput, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  type DogfoodRow, type Item, type MeasureInput, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +62,7 @@ const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
  */
 const CEILING: MeasuredRead = {
   name: "gold (ceiling)", ticket: "SMD-3662",
-  run: async ({ prompt }) => PROMPTS.find((q) => q.key === prompt.key)!.gold.map((k) => itemId(ITEMS.findIndex((it) => it.key === k))),
+  run: async ({ query }) => PROMPTS.find((q) => q.query === query)!.gold.map((k) => itemId(ITEMS.findIndex((it) => it.key === k))),
 };
 
 /** The fixture's rows as written, unchecked: dogfoodProblems says what is wrong with them. */
@@ -154,10 +156,15 @@ async function selfCheck(): Promise<void> {
   const junk = shuffledScore(["x", "y", "z"], gold);
   assert(junk.top1 === 0 && junk.top3 === 0, "a read that retrieves no gold item scores 0 shuffled or not");
 
+  const twin = mutantTriples([gold, gold], [gold, gold]);
+  assert(JSON.stringify(twin[0]) !== JSON.stringify(twin[1]), "two prompts with one gold and one read are shuffled apart (a seed each), so their errors don't add up");
+
   console.log("[4b] The answer moved, and put back");
   const before = JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) });
-  const inside = await withAnswerMoved(async () => ({ all: JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }), first: PROMPTS[0].gold[0], facts0: ITEMS[0].facts, facts1: ITEMS[1].facts }));
-  assert(inside.all !== before && inside.first === "zq-low" && inside.facts0 === ITEMS[1].facts && inside.facts1 === ITEMS[2].facts, "inside withAnswerMoved every gold is reversed and each item holds the next item's facts");
+  const registered = PROMPTS.map((p) => [...p.gold]);
+  const inside = await withAnswerMoved(async () => ({ golds: PROMPTS.map((p) => [...p.gold]), facts0: ITEMS[0].facts, facts1: ITEMS[1].facts }));
+  assert(inside.golds.every((g, i) => g.length > 0 && g.every((k) => !registered[i].includes(k))) && inside.facts0 === ITEMS[1].facts && inside.facts1 === ITEMS[2].facts,
+    "inside withAnswerMoved every gold, one-item golds included, shares no item with the registered one, and each item holds the next item's facts");
   assert(JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }) === before, "after it, every gold and fact is back as registered");
   await withAnswerMoved(async () => { throw new Error("x"); }).catch(() => undefined);
   assert(JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }) === before && corpusHash() === REGISTERED_CORPUS, "a read that throws inside it still leaves the answer put back");
@@ -178,14 +185,29 @@ async function selfCheck(): Promise<void> {
   assert(verdict(regress, [baseKeeps], golds).failed.some((f) => f.startsWith("(d) prompt 7")), "a prompt a baseline kept in the top 3 and the read lost fails (d)");
   assert(verdict(all, [none, all], golds).failed.some((f) => f.startsWith("(b)")), "the bar reads the BEST baseline: one strong baseline read is enough to fail (b)");
 
-  console.log("[6] The baseline reads call the store as their tools do");
-  const plain = baselineCall(READS.find((r) => r.name === "plain")!, "q");
-  const filter = baselineCall(READS.find((r) => r.name === "filter")!, "q");
-  const current = baselineCall(READS.find((r) => r.name === "current")!, "q");
-  assert(plain.limit === SEARCH_COMPAT_LIMIT && Object.keys(plain.filter).length === 0, "plain is the search tool's call: its own limit, no filter");
-  assert(filter.limit === SPECS.search_thoughts.inputSchema.limit.parse(undefined) && filter.preferCurrent === false && (filter.filter as Record<string, unknown>).priority === "High", "filter is search_thoughts' call: its schema's defaults, the workaround's filter");
-  assert(current.preferCurrent === true && Object.keys(current.filter).length === 0, "current is search_thoughts' call with prefer_current on and no filter");
-  assert(READ_K === SEARCH_COMPAT_LIMIT && READ_K === SPECS.search_thoughts.inputSchema.limit.parse(undefined), `the score reads ${READ_K} hits, what both tools return by default`);
+  const recorded = BASELINE.plain;
+  const asRecorded: PromptScore[] = PROMPTS.map((p) => ({ top1: recorded.top1.includes(p.key), top3: recorded.top3.includes(p.key), tau: null }));
+  assert(driftOf("plain", asRecorded).length === 1 && driftOf("plain", asRecorded)[0].startsWith("plain tau"), "the drift check reads tau: prompts as recorded, a tau that differs is drift");
+  const swapped = asRecorded.map((x, i) => (PROMPTS[i].key === "due-soon" ? { ...x, top3: false } : PROMPTS[i].key === "this-week" ? { ...x, top3: true } : x));
+  assert(swapped.filter((x) => x.top3).length === recorded.top3.length && driftOf("plain", swapped).some((d) => d.startsWith("plain top3 on")), "a top-3 count that holds while its prompts change is drift: the bar's (d) reads which prompts");
+  assert(driftOf("nobody", asRecorded).length === 1, "a read with no record is drift");
+
+  console.log("[5c] The held-database guard");
+  assert(heldRefusal(18, undefined, "--seeded") !== null && heldRefusal(18, "0", "--seeded") !== null, "a database holding thoughts is refused without OB1_FIXTURE_RESET=1");
+  assert(heldRefusal(18, "1", "--seeded") === null && heldRefusal(0, undefined, "--seeded") === null, "it is let through with OB1_FIXTURE_RESET=1, or when it holds none");
+
+  console.log("[6] The baseline reads are the tools, called as a door calls them");
+  const st = toolInput("search_thoughts", { query: "q" });
+  assert(st.limit === 10 && st.threshold === 0 && st.recency_weight === 0 && st.prefer_current === false, "search_thoughts' defaults come from its own schema (limit 10, threshold 0, recency 0, prefer_current off)");
+  const cur = toolInput("search_thoughts", { ...READS.find((r) => r.name === "current")!.args, query: "q" });
+  const fil = toolInput("search_thoughts", { ...READS.find((r) => r.name === "filter")!.args, query: "q" });
+  assert(cur.prefer_current === true && fil.prefer_current === false && (fil.filter as Record<string, unknown>).priority === "High", "current sends prefer_current; filter sends the workaround's filter");
+  assert(JSON.stringify(toolInput("search", { query: "q" })) === JSON.stringify({ query: "q" }), "the search tool takes the query alone");
+  let refused = false;
+  try { toolInput("search", { query: "q", limit: 5 }); } catch { refused = true; }
+  assert(refused, "an argument the tool doesn't take is refused, not dropped");
+  assert(READ_K === SEARCH_COMPAT_LIMIT && READ_K === st.limit, `the score reads ${READ_K} hits, what both tools return`);
+  assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
 
   console.log("[7] The dogfood rows");
@@ -194,6 +216,8 @@ async function selfCheck(): Promise<void> {
   assert(sound.length === 0, `the committed rows are sound${sound.length ? `: ${sound.join("; ")}` : ""}`);
   const rows = raw as DogfoodRow[];
   assert(dogfoodProblems(undefined).some((p) => p.includes("not an array")) && dogfoodProblems({ 0: rows[0] }).some((p) => p.includes("not an array")), "a fixture with no rows array is reported, not thrown on");
+  const noPick = dogfoodProblems([{ ...rows[0], pick: undefined as unknown as number, picked_instead: undefined as unknown as number }]);
+  assert(noPick.some((p) => p.includes("pick is not")) && !noPick.some((p) => p.includes("pick itself")), "a row missing its pick says so, and not that its alternative is the pick itself");
   assert(dogfoodProblems([null, rows[0]]).some((p) => p.includes("not an object")), "a row that is not an object, before another, is reported, not thrown on");
   assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
@@ -233,7 +257,46 @@ async function seeded(): Promise<void> {
   }
   if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
 
+  // The provider the server's own embedder calls: the stub's query vector for each input (the model is one
+  // db/config.mjs has no prompt for, so the server sends the query bare), on loopback.
+  const provider = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const body = (await req.json()) as { input: string | string[]; model: string };
+      const inputs = Array.isArray(body.input) ? body.input : [body.input];
+      return Response.json({ data: inputs.map((text, index) => ({ index, embedding: stubVector(text, STUB_DIM, "query") })), model: body.model });
+    },
+  });
+  const env: Record<string, string | undefined> = {
+    DATABASE_URL: url, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_LOCAL: "1",
+    OB1_EMBEDDING_MODEL: STUB_MODEL, OB1_EMBEDDING_DIM: String(STUB_DIM), OB1_LLM_TIMEOUT: "10",
+  };
   const store = new SqlStore(url, { max: 1 });
+  const core = createCore({ env: () => env as never, store: async () => store, door: "priority-eval" });
+  const principal: Principal = { name: "priority-eval", scope: "read", keyHash: "0".repeat(64) };
+  const callTool = async (tool: SearchTool, args: Record<string, unknown>): Promise<string[]> => {
+    const input = toolInput(tool, args) as never;
+    const out = tool === "search" ? await core.search(principal, input) : await core.searchThoughts(principal, input);
+    if (!out.ok) throw new Error(`${tool} refused: ${JSON.stringify(out.refusal)}`);
+    return idsOfAnswer(tool, out.value);
+  };
+  const vectorOf = new Map(PROMPTS.map((p) => [p.query, stubVector(p.query, STUB_DIM, "query")] as const));
+  const toKeys = (ids: readonly string[]) => ids.map((id) => keyOf.get(id) ?? `?${id}`);
+  /** One pass of a measured read over every prompt: its hits as item keys, and the errors it raised, by prompt. */
+  const runMeasured = async (r: MeasuredRead, pass: string): Promise<{ hits: string[][]; errors: string[] }> => {
+    const out = { hits: [] as string[][], errors: [] as string[] };
+    for (const p of PROMPTS) {
+      const input: MeasureInput = { query: p.query, embedding: vectorOf.get(p.query)!, store, callTool };
+      try {
+        // Each id once, the top READ_K: what the score reads, and all the table shows.
+        out.hits.push(toKeys(measuredIds(await r.run(input))));
+      } catch (e) {
+        out.errors.push(`measured read ${r.name}${pass} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
+        out.hits.push([]);
+      }
+    }
+    return out;
+  };
   const results = new Map<string, { hits: string[][]; scores: PromptScore[] }>();
   const errors: string[] = [];
   const answerReaders: string[] = [];
@@ -244,8 +307,7 @@ async function seeded(): Promise<void> {
         // A baseline read that errors fails the run, below: a baseline that never ran would set the bar.
         // Its prompt is scored as no hits meanwhile, so the table still prints.
         try {
-          const rows = await store.hybridThoughts(baselineCall(r, p.query));
-          hits.push(rows.map((row) => keyOf.get(row.id) ?? `?${row.id}`));
+          hits.push(toKeys(await callTool(r.tool, { ...r.args, query: p.query })));
         } catch (e) {
           errors.push(`baseline read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
           hits.push([]);
@@ -255,36 +317,20 @@ async function seeded(): Promise<void> {
     }
     // The reads measured against the bar, the gold ceiling last: one that errors on a prompt scores it false, false, 0.
     for (const r of [...MEASURED, CEILING]) {
-      const hits: string[][] = [];
-      for (const p of PROMPTS) {
-        try {
-          const ids = await r.run({ store, prompt: { key: p.key, query: p.query }, embedding: stubVector(p.query, STUB_DIM, "query") });
-          // Each id once, the top READ_K: what the score reads, and all the table shows.
-          hits.push(measuredIds(ids).map((id) => keyOf.get(id) ?? `?${id}`));
-        } catch (e) {
-          errors.push(`measured read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
-          hits.push([]);
-        }
-      }
-      results.set(r.name, { hits, scores: hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
+      const first = await runMeasured(r, "");
+      errors.push(...first.errors);
+      results.set(r.name, { hits: first.hits, scores: first.hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
     }
     // Each measured read again with the answer moved: one whose ids move with it reads the answer. The ceiling is the control.
+    // A pass that errors is reported as an error, not compared: an error is not a sign of reading the answer.
     for (const r of [...MEASURED, CEILING]) {
-      const again = await withAnswerMoved(async () => {
-        const out: string[][] = [];
-        for (const p of PROMPTS) {
-          try {
-            out.push(measuredIds(await r.run({ store, prompt: { key: p.key, query: p.query }, embedding: stubVector(p.query, STUB_DIM, "query") })).map((id) => keyOf.get(id) ?? `?${id}`));
-          } catch {
-            out.push([]);
-          }
-        }
-        return out;
-      });
-      if (JSON.stringify(again) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
+      const again = await withAnswerMoved(() => runMeasured(r, " (answer moved)"));
+      if (again.errors.length) { errors.push(...again.errors); continue; }
+      if (JSON.stringify(again.hits) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
     }
   } finally {
     await store.close();
+    provider.stop(true);
   }
 
   const golds = PROMPTS.map((p) => p.gold);
@@ -301,7 +347,7 @@ async function seeded(): Promise<void> {
   const table = [...READS, ...MEASURED, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
     read: r.name,
     score: meanScore(r.scores, golds),
-    mutant: meanTriple(r.hits.map((h, i) => shuffledScore(h, golds[i], scorePrompt, MUTANT_SEED + i)), golds),
+    mutant: meanTriple(mutantTriples(r.hits, golds), golds),
     chance: meanTriple(r.hits.map((h, i) => chanceOf(h, golds[i])), golds),
   }));
   console.log(`\n${renderTable(table)}\n`);
@@ -319,7 +365,7 @@ async function seeded(): Promise<void> {
   }
   const ceiling = verdict(results.get(CEILING.name)!.scores, bases, golds);
   console.log(`The gold ceiling against the baselines: ${ceiling.helped ? "helps (the bar is reachable)" : `fails: ${ceiling.failed.join("; ")}`}.`);
-  if (errors.length) console.error(`\n${errors.length} read(s) errored, each scored false, false, 0 on its prompt:\n  ${errors.join("\n  ")}`);
+  if (errors.length) console.error(`\n${errors.length} error(s): a read that errors scores that prompt false, false, 0; an answer-moved pass that errors is not compared or scored:\n  ${errors.join("\n  ")}`);
   const raw = loadDogfood();
   const dogfood = dogfoodProblems(raw);
   console.log(`\nThe dogfood rows (fixtures/priority-dogfood.json, recorded by hand at the time):\n\n${dogfood.length ? `(not shown: ${dogfood.join("; ")})` : renderDogfood(raw as DogfoodRow[])}\n`);
@@ -327,13 +373,14 @@ async function seeded(): Promise<void> {
   const failures: string[] = [];
   const baselineErrors = errors.filter((e) => e.startsWith("baseline "));
   if (baselineErrors.length) failures.push(`${baselineErrors.length} baseline read(s) errored, and a baseline that never ran would set the bar`);
-  const drift = READS.flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores, golds));
+  const drift = READS.flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores));
   if (drift.length) failures.push(`the baseline moved from priority.ts's BASELINE (${drift.join("; ")}): re-record it with the main it was measured on, since the bar moves with it`);
   if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
   if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} `))) failures.push("the gold ceiling errored, so the measured reads' path is broken");
   const cheats = answerReaders.filter((n) => n !== CEILING.name);
   if (cheats.length) failures.push(`measured read(s) ${cheats.join(", ")} answer differently when the gold and facts move: a read must read the database, not the answer`);
-  if (!answerReaders.includes(CEILING.name)) failures.push("the answer-moved check did not see the ceiling, which reads the gold: the check is broken");
+  if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} (answer moved)`))) failures.push("the gold ceiling errored with the answer moved, so the answer-moved check is broken");
+  else if (!answerReaders.includes(CEILING.name)) failures.push("the answer-moved check did not see the ceiling, which reads the gold: the check is broken");
   if (off.length) failures.push(`the shuffled-gold mutant is not at chance for ${off.map((t) => t.read).join(", ")}: the score reads something other than the gold's order`);
   if (dogfood.length) failures.push(`the dogfood rows are not sound: ${dogfood.join("; ")}`);
   if (failures.length) {

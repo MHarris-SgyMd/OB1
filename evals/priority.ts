@@ -43,7 +43,6 @@ import { fileURLToPath } from "node:url";
 import { issueFacets, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
-import { SEARCH_COMPAT_LIMIT, SEARCH_COMPAT_PREFER_CURRENT, SEARCH_COMPAT_RECENCY_WEIGHT, SEARCH_COMPAT_THRESHOLD } from "../server-portable/core/reads.ts";
 import { SPECS } from "../server-portable/core/schemas.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
@@ -188,7 +187,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "5be922c31e975404";
+export const REGISTERED_CORPUS = "98e95ec8350599c7";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -203,8 +202,10 @@ export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Pro
  * the source rather than from String(fn), which is Bun's transpiled output
  * and would move with a Bun upgrade, not with the eval.
  */
+let registeredCache: string | null = null;
 export function registeredSource(): string {
-  return registeredSection(readFileSync(fileURLToPath(import.meta.url), "utf8"));
+  registeredCache ??= registeredSection(readFileSync(fileURLToPath(import.meta.url), "utf8"));
+  return registeredCache;
 }
 
 /** The registered section of a copy of this file's text, CRLF read as LF. */
@@ -266,7 +267,12 @@ export function wordsOf(text: string): string[] {
   return (text.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => w.length > 1 && !STOP.has(w));
 }
 
-/** FNV-1a over UTF-16 code units: a stable 32-bit hash. */
+/**
+ * FNV-1a over UTF-16 code units: a stable 32-bit hash. The same function as
+ * evals/write-path.ts's, kept here rather than imported so the registration
+ * hashes the stub's whole code: a change to a shared copy would move these
+ * vectors without moving the hash.
+ */
 export function fnv1a(text: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
@@ -329,25 +335,29 @@ export async function plantRows(sql: SQL, rows: readonly SeedRow[]): Promise<num
   return Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
 }
 
+/** The two search tools a baseline read, or a measured read's callTool, calls. */
+export type SearchTool = "search" | "search_thoughts";
+
 /**
- * The store call a baseline read makes for a prompt, as its tool makes it:
- * `search` with core/reads.ts's own knobs; `search_thoughts` with its input
- * schema's defaults (core/schemas.ts), parsed, for every knob the read does
- * not set. On the query's stub vector. A change to either tool's knobs
- * reaches this call, and BASELINE's drift check says when it moved the
- * numbers.
+ * A tool's arguments as its door hands them to the core: each field through
+ * the tool's own input schema (core/schemas.ts), defaults filled, as the MCP
+ * and REST doors parse a call. An argument the tool doesn't take is refused.
  */
-export function baselineCall(r: Read, query: string) {
-  const embedding = stubVector(query, STUB_DIM, "query");
-  if (r.tool === "search") {
-    return { query, embedding, limit: SEARCH_COMPAT_LIMIT, threshold: SEARCH_COMPAT_THRESHOLD, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} };
+export function toolInput(tool: SearchTool, args: Record<string, unknown>): Record<string, unknown> {
+  const schema = SPECS[tool].inputSchema as Record<string, { parse(v: unknown): unknown }>;
+  for (const k of Object.keys(args)) if (!(k in schema)) throw new Error(`${tool} takes no argument ${k}`);
+  const out: Record<string, unknown> = {};
+  for (const [k, field] of Object.entries(schema)) {
+    const v = field.parse(args[k]);
+    if (v !== undefined) out[k] = v;
   }
-  const st = SPECS.search_thoughts.inputSchema;
-  return {
-    query, embedding,
-    limit: st.limit.parse(undefined), threshold: st.threshold.parse(undefined), recencyWeight: st.recency_weight.parse(undefined),
-    preferCurrent: st.prefer_current.parse(r.preferCurrent), filter: r.filter ?? {},
-  };
+  return out;
+}
+
+/** The thought ids a tool's answer names, best first: `search`'s results, `search_thoughts`' hits. */
+export function idsOfAnswer(tool: SearchTool, value: unknown): string[] {
+  const v = value as { results?: { id: string }[]; hits?: { id: string }[] };
+  return (tool === "search" ? v.results : v.hits)?.map((r) => r.id) ?? [];
 }
 
 // ── The score ───────────────────────────────────────────────────────────────
@@ -458,6 +468,11 @@ export function shuffledScore(hits: readonly string[], gold: readonly string[], 
   return { top1: top1 / shuffles, top3: top3 / shuffles, tau: tauN ? tau / tauN : 0 };
 }
 
+/** A read's mutant, prompt by prompt: each prompt seeded apart (MUTANT_SEED + its index), so golds of one length don't share their shuffles. */
+export function mutantTriples(hits: readonly (readonly string[])[], golds: readonly (readonly string[])[]): { top1: number; top3: number; tau: number }[] {
+  return hits.map((h, i) => shuffledScore(h, golds[i], scorePrompt, MUTANT_SEED + i));
+}
+
 /** How far the mutant may sit from chance and still read as chance: about four standard errors at SHUFFLES for a share near a half. */
 export const CHANCE_TOLERANCE = 0.05;
 
@@ -534,30 +549,37 @@ export function verdict(read: readonly PromptScore[], baselines: readonly (reado
 // ── The reads ───────────────────────────────────────────────────────────────
 
 /**
- * A baseline read: the store's hybrid search at a tool's knobs, today's
- * main. The bar is measured against them, so one that errors fails the run:
- * a baseline that never ran would set the bar.
+ * A baseline read: a search tool called through the server's own core
+ * (createCore, as api.ts builds it), with the arguments a client would send
+ * beside the prompt's query — today's main. The bar is measured against them,
+ * so one that errors fails the run: a baseline that never ran would set the
+ * bar.
  */
-export type Read = { name: string; tool: "search" | "search_thoughts"; filter?: Record<string, unknown>; preferCurrent?: boolean };
+export type Read = { name: string; tool: SearchTool; args: Record<string, unknown> };
 
 /**
  * The baseline (Work 4):
- *   plain   — the `search` tool as it calls the store (core/reads.ts's search);
+ *   plain   — the `search` tool;
  *   current — search_thoughts with prefer_current on (059's lifecycle
- *             demotion), its other knobs at their defaults;
+ *             demotion), its other arguments at their defaults;
  *   filter  — search_thoughts with the workaround SMD-3660 measured on
  *             2026-11-02, {"status_type":"backlog","priority":"High"}.
  */
 export const READS: readonly Read[] = [
-  { name: "plain", tool: "search" },
-  { name: "current", tool: "search_thoughts", preferCurrent: true },
-  { name: "filter", tool: "search_thoughts", filter: { status_type: "backlog", priority: "High" } },
+  { name: "plain", tool: "search", args: {} },
+  { name: "current", tool: "search_thoughts", args: { prefer_current: true } },
+  { name: "filter", tool: "search_thoughts", args: { filter: { status_type: "backlog", priority: "High" } } },
 ];
 
 // ── The reads measured against the bar ──────────────────────────────────────
 
-/** What a measured read is handed for one prompt: the store, the prompt's key and words (never its gold), and its stub vector. */
-export type MeasureInput = { store: SqlStore; prompt: Pick<Prompt, "key" | "query">; embedding: number[] };
+/**
+ * What a measured read is handed for one prompt: what a deployed read would
+ * have — the query's words and its stub vector, the store, and callTool, a
+ * search tool called through the server's core as a baseline read is (its
+ * thought ids, best first). Never the prompt's key or its gold.
+ */
+export type MeasureInput = { query: string; embedding: number[]; store: SqlStore; callTool: (tool: SearchTool, args: Record<string, unknown>) => Promise<string[]> };
 
 /**
  * A read measured against the bar: any function from a prompt to thought ids,
@@ -568,10 +590,12 @@ export type MeasureInput = { store: SqlStore; prompt: Pick<Prompt, "key" | "quer
  * section: adding the read under test is not a change to what it is judged by.
  * It reads what a deployed read could: the database. Never PROMPTS' gold or
  * ITEMS' facts, which are the answer's side: `--seeded` runs every measured
- * read again with each gold reversed and the facts moved between items, and
- * fails when its answer moves (the ceiling, which reads the gold, is the
- * check's control). Its ids are deduplicated, first occurrence kept, before
- * the top READ_K are scored.
+ * read again with each gold replaced by the items outside it and the facts
+ * moved between items, and fails when its answer moves (the ceiling, which
+ * reads the gold, is the check's control). That catches a read consulting
+ * either when it runs; a read that copied them when its module loaded is the
+ * reviewer's to catch. Its ids are deduplicated, first occurrence kept,
+ * before the top READ_K are scored.
  */
 export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureInput) => Promise<readonly string[]> };
 
@@ -584,15 +608,17 @@ export function measuredIds(ids: readonly string[]): string[] {
 }
 
 /**
- * Run `run` with the answer's side moved — every prompt's gold reversed and
- * each item's facts handed to the next item — and put it back, whatever `run`
- * does. A read that answers differently under it reads the answer.
+ * Run `run` with the answer's side moved — every prompt's gold replaced by
+ * the items outside it, in reverse listing order (a set and an order that
+ * share nothing with the gold, one-item golds included), and each item's
+ * facts handed to the next item — and put it back, whatever `run` does. A
+ * read that answers differently under it reads the answer.
  */
 export async function withAnswerMoved<T>(run: () => Promise<T>, prompts: readonly Prompt[] = PROMPTS, items: readonly Item[] = ITEMS): Promise<T> {
   const golds = prompts.map((p) => [...p.gold]);
   const facts = items.map((it) => it.facts);
   try {
-    prompts.forEach((p) => (p.gold as string[]).reverse());
+    prompts.forEach((p, i) => (p.gold as string[]).splice(0, p.gold.length, ...items.map((it) => it.key).filter((k) => !golds[i].includes(k)).reverse()));
     items.forEach((it, i) => ((it as { facts: Facts }).facts = facts[(i + 1) % facts.length]));
     return await run();
   } finally {
@@ -656,7 +682,7 @@ export function dogfoodProblems(raw: unknown): string[] {
     if (prev && typeof prev === "object" && typeof prev.date === "number" && r.date < prev.date) out.push(`${at}: rows are not in date order`);
     if (!ticketNumber(r.pick)) out.push(`${at}: pick is not a ticket number`);
     if (r.picked_instead !== null && !ticketNumber(r.picked_instead)) out.push(`${at}: picked_instead is not a ticket number`);
-    if (r.picked_instead === r.pick) out.push(`${at}: picked_instead is the pick itself`);
+    if (ticketNumber(r.pick) && r.picked_instead === r.pick) out.push(`${at}: picked_instead is the pick itself`);
     if (!UUID_RE.test(r.thought ?? "")) out.push(`${at}: thought is not an id`);
     for (const f of ["query", "note"] as const) if (typeof r[f] !== "string" || r[f].trim().length === 0) out.push(`${at}: ${f} is empty`);
     if (!r.reads || typeof r.reads !== "object" || Object.keys(r.reads).length === 0) out.push(`${at}: no read recorded`);
@@ -685,19 +711,29 @@ export function dogfoodProblems(raw: unknown): string[] {
  * baseline section, naming the main and the change that moved it; the rows
  * before stay as they were measured.
  */
-export const BASELINE: Readonly<Record<string, { top1: number; top3: number; tau: number }>> = {
-  plain: { top1: 1, top3: 2, tau: 0.252 },
-  current: { top1: 1, top3: 2, tau: 0.212 },
-  filter: { top1: 0, top3: 0, tau: 0.055 },
+export type Recorded = { top1: readonly string[]; top3: readonly string[]; tau: number };
+
+export const BASELINE: Readonly<Record<string, Recorded>> = {
+  plain: { top1: ["highest-value"], top3: ["highest-value", "due-soon"], tau: 0.252 },
+  current: { top1: ["highest-value"], top3: ["highest-value", "due-soon"], tau: 0.212 },
+  filter: { top1: [], top3: [], tau: 0.055 },
 };
 
-/** How a read's scores differ from its recorded baseline; empty when they match. */
-export function baselineDrift(name: string, scores: readonly PromptScore[], golds: readonly (readonly string[])[]): string[] {
-  const want = BASELINE[name];
+/**
+ * How a read's scores differ from its recorded baseline; empty when they
+ * match. Which prompts it puts first and in the top 3, by key, not how many:
+ * the bar's (b) reads the count, but its (d) reads which prompts a baseline
+ * kept, and a move that keeps the count can change them.
+ */
+export function baselineDrift(name: string, scores: readonly PromptScore[], prompts: readonly Prompt[] = PROMPTS, recorded: Readonly<Record<string, Recorded>> = BASELINE): string[] {
+  const want = recorded[name];
   if (!want) return [`${name} has no recorded baseline`];
-  const m = meanScore(scores, golds);
-  const got = { top1: scores.filter((s) => s.top1).length, top3: scores.filter((s) => s.top3).length, tau: Math.round(m.tau * 1000) / 1000 };
-  return (["top1", "top3", "tau"] as const).filter((k) => got[k] !== want[k]).map((k) => `${name} ${k} ${got[k]}, recorded ${want[k]}`);
+  const keys = (pick: (s: PromptScore) => boolean) => prompts.filter((_, i) => pick(scores[i])).map((p) => p.key);
+  const got = { top1: keys((s) => s.top1), top3: keys((s) => s.top3), tau: Math.round(meanScore(scores, prompts.map((p) => p.gold)).tau * 1000) / 1000 };
+  const out: string[] = [];
+  for (const k of ["top1", "top3"] as const) if (got[k].join(",") !== [...want[k]].join(",")) out.push(`${name} ${k} on [${got[k].join(", ")}], recorded [${want[k].join(", ")}]`);
+  if (got.tau !== want.tau) out.push(`${name} tau ${got.tau}, recorded ${want.tau}`);
+  return out;
 }
 
 // ── The table ───────────────────────────────────────────────────────────────

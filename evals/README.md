@@ -4406,8 +4406,8 @@ facts its own store reads (SMD-3663's assertions, a claim in `work_claims`, Line
 board-sync's links) by extending the seeding. A read never takes them from `ITEMS`, which is the answer's side.
 
 A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
-line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself), the baseline call,
-the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
+line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself), how a tool's
+arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
 registration with its baseline re-run, never an edit. A board item is registered by its issue's fields, not by
 `renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the baseline's
 numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them is a
@@ -4420,21 +4420,25 @@ instead of the listing order. Plain search therefore ranks by word overlap. The 
 orders results on a fixed similarity, which is the part a priority read changes. The dogfood rows carry the real
 model's.
 
-**The baseline reads** go through the server's own `SqlStore.hybridThoughts`, as their tools call it:
-* `plain`: the `search` tool, with the knobs `core/reads.ts` exports and its own call uses;
+**The baseline reads are the tools themselves.** Each is a search tool and the arguments a client would send, called
+through the server's own core (`createCore`, as `api.ts` builds it). The arguments are parsed field by field through
+the tool's input schema, as a door parses them. The server's own embedder embeds the query through a stub provider
+on loopback that answers with the stub's vectors.
+* `plain`: the `search` tool;
 * `current`: `search_thoughts` with `prefer_current` on;
 * `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
 
-`search_thoughts`' other knobs are its input schema's defaults, parsed from `core/schemas.ts`. A change to either
-tool's knobs reaches the baseline call itself, and the drift check says when it moved the numbers.
+So any change to how either tool searches reaches the baseline, and the drift check says when it moved the numbers.
 
 **A priority read joins `MEASURED`** in `priority.ts`, outside the hashed section, so adding the read under test is
-not a new registration. It is any function from a prompt's key and words, plus the store and the query's vector, to
-thought ids best first. A search knob fits (SMD-3668's `priority_weight`), and so does a read that isn't a search
-(SMD-3669's agenda). It is handed the prompt's key and words, never its gold. `--seeded` also runs every measured
-read a second time with each gold reversed and each item's facts moved to the next item. A read whose answer moves
-reads the answer, wherever it is defined, and fails the run. The ceiling, which reads the gold, is that check's
-control. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
+not a new registration. It is any function to thought ids, best first. It is handed what a deployed read has: the
+query's words and vector, the store, and `callTool`, a search tool called through the core as the baseline reads
+are. It never gets the prompt's key or its gold. A search argument fits (SMD-3668's `priority_weight`, through
+`callTool`), and so does a read that isn't a search (SMD-3669's agenda). `--seeded` runs every measured read a second
+time with each gold replaced by the items outside it and each item's facts moved to the next item. A read whose answer
+moves consults the answer, and fails the run. The ceiling, which reads the gold, is that check's control. A second
+pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
+loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
 verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
 the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
 read exists.
@@ -4481,12 +4485,13 @@ These mutants are each refused:
 * a `search_thoughts` default changed for `limit` or `prefer_current`;
 * a recorded baseline that differs from the run, a baseline read that throws, an unreachable bar, and a fixture
   with no `rows` array (each fails the seeded run);
-* a measured read that looks up the gold, defined outside `MEASURED`, and one that ranks by the items' facts (each
-  fails the seeded run); a broken answer-moving check (the ceiling isn't seen); an edited gold (an unregistered
-  corpus);
+* a measured read that looks up the gold, defined outside `MEASURED`; one that ranks by the items' facts; one that
+  uses the gold as a set and keeps search's order (each fails the seeded run); a broken answer-moving check (the
+  ceiling isn't seen); an edited gold (an unregistered corpus);
+* a drift check comparing counts, not which prompts;
 * a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2).
 
-An honest measured read returning duplicate ids leaves the run green.
+An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
 **The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`). On the
 seeded set, against the best baseline read on each measure, a read helps only if all four hold:
@@ -4501,7 +4506,7 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `5be922c31e975404`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, registration `98e95ec8350599c7`; deterministic, two runs identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
@@ -4522,7 +4527,8 @@ What the baseline gets wrong:
   of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
 * **The filter** returns the two High backlog tickets for every prompt, one of them blocked, and nothing personal.
 
-`priority.ts`'s `BASELINE` records these numbers, and the run fails when one moves. That is a record of today's main,
+`priority.ts`'s `BASELINE` records, per baseline read, which prompts it puts first and in the top 3, and its mean tau.
+The run fails when one moves, including when a count holds but its prompts change, since the bar's (d) reads which. That is a record of today's main,
 not part of the registration: the verdict always compares a measured read with the baselines of the same run. A
 re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
 before it stay as they were measured.

@@ -634,8 +634,15 @@ export async function updatedAtTriggerState(sql: SQL): Promise<string> {
  * live brain on a published loopback port, which resetSchema's own guard
  * (loopback, or OB1_ALLOW_REMOTE_DB=1) lets through. `command` names the
  * caller in the refusal. evals/eval-projection-replay.ts's --fixture-check and
- * evals/eval-priority.ts's --seeded call it before resetSchema.
+ * evals/eval-priority.ts's --seeded call it before resetSchema. heldRefusal is
+ * the decision alone, for a check with no database.
  */
+export function heldRefusal(held: number, flag: string | undefined, command: string): string | null {
+  return held > 0 && flag !== "1"
+    ? `the database at DATABASE_URL holds ${held} thought(s) and ${command} DROPS the schema. Point it at a throwaway (../db/with-postgres.sh), or set OB1_FIXTURE_RESET=1 if you mean it.`
+    : null;
+}
+
 export async function refuseHeldDatabase(url: string, command: string): Promise<void> {
   const probe = new SQL({ url, max: 1 });
   let held = 0;
@@ -646,8 +653,9 @@ export async function refuseHeldDatabase(url: string, command: string): Promise<
   } finally {
     await probe.end();
   }
-  if (held > 0 && process.env.OB1_FIXTURE_RESET !== "1") {
-    console.error(`the database at DATABASE_URL holds ${held} thought(s) and ${command} DROPS the schema. Point it at a throwaway (../db/with-postgres.sh), or set OB1_FIXTURE_RESET=1 if you mean it.`);
+  const refusal = heldRefusal(held, process.env.OB1_FIXTURE_RESET, command);
+  if (refusal) {
+    console.error(refusal);
     process.exit(2);
   }
 }
