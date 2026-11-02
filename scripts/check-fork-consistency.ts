@@ -8986,9 +8986,10 @@ checkHostIpTemplates();
 // ── Check 31: a plugin's code stays in its schema, its role and the SDK (SMD-2310) ──
 //
 // A plugin runs in the brain's servers. Its SQL runs on a connection logged
-// in as ob1_plugins, then under SET LOCAL ROLE to its own role with its schema
-// first on the path (db/migrate.ts, store-sql.ts's pluginTx), and Postgres
-// refuses both roles the core's tables: that is the boundary. This check is
+// in as its own login role, ob1_plugins_<name> (SMD-2756), then under SET
+// LOCAL ROLE to its own role with its schema first on the path
+// (db/migrate.ts, store-sql.ts's pluginTx), and Postgres refuses both roles
+// the core's tables and every other plugin's: that is the boundary. This check is
 // the accident guard in front of it — code that would read like an attempt
 // to leave it fails a push, so it is seen in review — not a sandbox: a
 // plugin's TypeScript runs in the server's process, and curation is what
