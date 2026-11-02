@@ -26,7 +26,7 @@ permissions:
 # fails the step instead of being masked. Before this the default was `bash -e`
 # with no pipefail (SMD-1808). So no step pipes into `grep -q`: it exits at its
 # first match, and a producer still writing then dies of SIGPIPE, which
-# pipefail makes a 141 (`grep … > /dev/null` reads to the end; check 45,
+# pipefail makes a 141 (`grep … > /dev/null` reads to the end; check 46,
 # SMD-3652).
 defaults:
   run:

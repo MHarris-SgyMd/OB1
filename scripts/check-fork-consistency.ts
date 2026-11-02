@@ -539,7 +539,12 @@
  *      working directory's file alone (SMD-2978: db-live ran
  *      server-portable/preflight.ts on a zod fetched at run time). Its probes
  *      pin which files turn it off
- *  45. no workflow, no .sh under .github/ci/ and no other .sh git tracks
+ *  45. no .md file states a suite's assertion count — a suite named beside
+ *      `# N —` or `N assertions`, or a summary line with digits — since Fork
+ *      Checks publishes each to the wiki's Test-counts page on a push to main
+ *      (SMD-3614); changes/, CHANGELOG.md and two dated analyses keep theirs
+ *      as records. Its probe pins what it refuses and passes
+ *  46. no workflow, no .sh under .github/ci/ and no other .sh git tracks
  *      or would track under .github/, db/, deploy/ or scripts/ that sets
  *      pipefail pipes into a quiet grep (-q, --quiet, --silent, before or
  *      after its pattern): grep exits at its first match, a writer still
@@ -7917,6 +7922,59 @@ function checkSecretsOnArgv() {
 }
 checkSecretsOnArgv();
 
+// ── 45: no doc states a suite's assertion count, which the wiki's Test-counts page carries (SMD-3614) ──
+/**
+ * 45: a count is a fact about a commit's run, so Fork Checks publishes each
+ * suite's to the wiki's Test-counts page on a push to main, and no `.md` file
+ * states one: a count in a doc is an edit every PR that adds an assertion
+ * makes, and the line two such PRs conflict on. A line fails that names a
+ * suite (`test-*`, `eval-*` or `smoke*` .ts/.mjs/.js, or `bun run test`) beside
+ * a count (`# 1334 —`, `# 3127 assertions`, `106 assertions`, `295 passed`),
+ * or that has a summary line's shape with digits (`295 assertions: 295
+ * passed`); `N assertions: N passed` passes. A record keeps the count it
+ * measured: changes/ and CHANGELOG.md, and the dated analyses
+ * COUNT_RECORDS names. Its probe pins what it refuses and passes.
+ */
+const COUNT_SUITE = /\b(?:test|eval|smoke)[\w-]*\.(?:ts|mjs|js)\b|\bbun run test(?::[\w-]+)?\b/;
+const COUNT_NEAR = /#\s*\d+\s*(?:—|–|-\s|assertions\b)|\b\d+\s+(?:assertions|passed)\b/;
+const COUNT_SHAPE = /\b\d+ assertions: \d+ passed\b/;
+/** Dated analyses that quote a run's count as what was measured then: records, as a change file is. */
+const COUNT_RECORDS = ["docs/mcp-sdk-v2-migration.md", "docs/operator-gui-dashboards-analysis.md"];
+const countLinesIn = (text: string): number[] =>
+  text.split("\n").flatMap((l, i) => ((COUNT_SUITE.test(l) && COUNT_NEAR.test(l)) || COUNT_SHAPE.test(l) ? [i + 1] : []));
+function checkCountsInDocs() {
+  const cases: [string, boolean][] = [
+    ["bun test-server.ts        # 1334 — transport, auth, tool surface", true],
+    ["bun test-schema.ts                          # 3127 assertions, PGlite, no container", true],
+    ["OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions", true],
+    ["`bun test-jev.ts` — 106 assertions with no model", true],
+    ["`295 assertions: 295 passed, 0 failed` and `PASS`.", true],
+    ["bun run test:local        # 226 — fully local provider, no credential", true],
+    ["`smoke.ts` has 34 assertions and 8 killed mutants.", true],
+    ["`bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`.", false],
+    ["bun test-server.ts        # transport, auth, tool surface", false],
+    ["../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b        # 14 labelled captures", false],
+    ["Verified against real PostgreSQL 17 + pgvector via PGlite — 49 assertions, no daemon needed.", false],
+    ["Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied", false],
+  ];
+  const wrong = cases.filter(([t, want]) => (countLinesIn(t).length > 0) !== want);
+  if (wrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify(wrong)}): a suite beside a count, or a summary line with digits, fails; a placeholder N, a suite with no count, another tool's number and a count beside no suite pass (SMD-3614)`);
+  let names: string[];
+  try {
+    names = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.md"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity }).split("\0").filter(Boolean);
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 is skipped)`);
+    return;
+  }
+  for (const f of names) {
+    if (f.startsWith("changes/") || f === "CHANGELOG.md" || COUNT_RECORDS.includes(f) || !existsSync(join(ROOT, f))) continue;
+    for (const line of countLinesIn(readFileSync(join(ROOT, f), "utf8"))) {
+      fail(`${f}:${line}`, `states a suite's assertion count — Fork Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614)`);
+    }
+  }
+}
+checkCountsInDocs();
+
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
 // Traefik's file provider renders a route file as a Go template (sprig
@@ -9863,9 +9921,9 @@ function checkNoAutoInstall() {
 }
 checkNoAutoInstall();
 
-// ── 45: no workflow step or pipefail script pipes into a quiet grep (SMD-3652) ──
+// ── 46: no workflow step or pipefail script pipes into a quiet grep (SMD-3652) ──
 /**
- * 45: `grep -q` exits at its first match. Whatever still writes into its pipe after that dies of SIGPIPE, and under
+ * 46: `grep -q` exits at its first match. Whatever still writes into its pipe after that dies of SIGPIPE, and under
  * pipefail the pipeline's status is then 141: fatal under `-e`, and a "no match" in an `if`, `&&` or `||`, where it
  * takes the wrong branch. So "The import runner starts with its egress rules" failed at random once the runner
  * printed a stderr line after its listening line (SMD-3652, SMD-3334). `grep … > /dev/null` reads to the end and
@@ -9886,7 +9944,7 @@ const GREP_LONG_WITH_ARGUMENT = /^--(?:regexp|file|max-count|after-context|befor
 const PIPE_INTO_GREP = /(?<!\|)\|(?!\|)&?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|env|sudo|command)\s+)*(?:\S*\/)?[ef]?grep(?=\s|$)([^|;&<>()]*)/g;
 const PIPEFAIL_SET = /(?:^|[;&])[ \t]*set\b[^\n#;]*?[ \t]-[A-Za-z]*o[A-Za-z]*[ \t]+pipefail\b/m;
 const YAML_BLOCK_START = /:\s*[|>][-+0-9]*\s*$/;
-/** A line as check 45 reads it: single-quoted text, double-quoted text with no `$(` or backtick in it, and a comment out. */
+/** A line as check 46 reads it: single-quoted text, double-quoted text with no `$(` or backtick in it, and a comment out. */
 function shellCode(line: string): string {
   let out = "";
   for (let i = 0; i < line.length; ) {
@@ -9990,23 +10048,23 @@ function checkNoPipeIntoGrepQ() {
   ];
   const wrong = cases.map(([t, n]) => ({ t, want: n, got: pipesIntoGrepQ(t).length })).filter((c) => c.got !== c.want);
   const setsWrong = sets.filter(([t, want]) => PIPEFAIL_SET.test(t) !== want).map(([t]) => t);
-  if (wrong.length || setsWrong.length) fail(SELF, `check 45 no longer reads its probe as written (${JSON.stringify({ wrong, setsWrong })}): a | or |& into grep, egrep or fgrep made quiet by its words fails — before or after its pattern, past VAR=value, env, sudo, command or a path, across a line ending in \\ or | and a comment line after it, in a command substitution, and with an apostrophe in a double-quoted string before it; || into grep, a here-string, a file, grep -c, grep > /dev/null, a q that is an option's argument or follows --, a YAML run: | above a first-line grep -q, xargs grep, quoted text and a comment pass; set -…o pipefail is read in each form, set +o and a comment are not (SMD-3652)`);
+  if (wrong.length || setsWrong.length) fail(SELF, `check 46 no longer reads its probe as written (${JSON.stringify({ wrong, setsWrong })}): a | or |& into grep, egrep or fgrep made quiet by its words fails — before or after its pattern, past VAR=value, env, sudo, command or a path, across a line ending in \\ or | and a comment line after it, in a command substitution, and with an apostrophe in a double-quoted string before it; || into grep, a here-string, a file, grep -c, grep > /dev/null, a q that is an option's argument or follows --, a YAML run: | above a first-line grep -q, xargs grep, quoted text and a comment pass; set -…o pipefail is read in each form, set +o and a comment are not (SMD-3652)`);
   const wdir = join(ROOT, ".github", "workflows");
   const workflows = existsSync(wdir) ? readdirSync(wdir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => `.github/workflows/${f}`) : [];
-  if (!workflows.length) { fail(".github/workflows", "no workflow found — check 45 reads each one for a pipe into grep -q (SMD-3652)"); return; }
+  if (!workflows.length) { fail(".github/workflows", "no workflow found — check 46 reads each one for a pipe into grep -q (SMD-3652)"); return; }
   let scripts: string[] = [];
   try {
     scripts = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".github", "db", "deploy", "scripts"], { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity })
       .split("\0").filter((f) => f.endsWith(".sh") && existsSync(join(ROOT, f)) && (f.startsWith(".github/ci/") || PIPEFAIL_SET.test(readFileSync(join(ROOT, f), "utf8"))));
   } catch (e) {
-    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 45 reads the workflows alone)`);
+    console.warn(`  (git ls-files failed — ${(e as Error).message.split("\n")[0]} — so check 46 reads the workflows alone)`);
   }
   for (const known of ["db/with-postgres.sh", ".github/ci/held-cases.sh"]) {
-    if (!scripts.includes(known)) fail(SELF, `check 45 does not list ${known}, which runs under pipefail — the reading is broken, not the tree clean`);
+    if (!scripts.includes(known)) fail(SELF, `check 46 does not list ${known}, which runs under pipefail — the reading is broken, not the tree clean`);
   }
   for (const f of [...workflows, ...scripts.sort()]) {
     for (const line of pipesIntoGrepQ(readFileSync(join(ROOT, f), "utf8"))) {
-      fail(`${f}:${line}`, `a pipe into grep -q under pipefail: grep exits at its first match, and a writer still writing dies of SIGPIPE, so pipefail makes the pipeline 141 — fatal under -e, the wrong branch in a condition — write \`grep … > /dev/null\`, which reads to the end, or grep a here-string or a file (check 45, SMD-3652)`);
+      fail(`${f}:${line}`, `a pipe into grep -q under pipefail: grep exits at its first match, and a writer still writing dies of SIGPIPE, so pipefail makes the pipeline 141 — fatal under -e, the wrong branch in a condition — write \`grep … > /dev/null\`, which reads to the end, or grep a here-string or a file (check 46, SMD-3652)`);
     }
   }
 }

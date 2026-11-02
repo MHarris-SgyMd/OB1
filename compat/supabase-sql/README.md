@@ -114,7 +114,9 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`295 assertions: 295 passed, 0 failed` and `PASS`. A migrated file behaves
+`N assertions: N passed, 0 failed` and `PASS`, N as the wiki's
+[Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page has
+it from main's last run (SMD-3614). A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the seven MCP servers with
 a schema of their own — the extensions, forty-five tools — against those
