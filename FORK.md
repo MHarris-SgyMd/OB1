@@ -851,7 +851,7 @@ another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
 CI. Two images the release job's actions start by default, QEMU's binfmt and
 the BuildKit builder that pushes to GHCR, are pinned by digest through their
 inputs in `release.yml`, and nothing moves those but a hand edit; nor does
-anything move the `services:` images (pgvector). The rehearsal still runs with
+anything move the database jobs' pgvector image. The rehearsal still runs with
 the release's write token on a PR that touches what it builds from, a
 Dependabot one included (SMD-2111).
 
@@ -1217,7 +1217,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   which this bullet used to prescribe, put an unauthenticated model API on the
   LAN for nothing).
 - **The codemod-migrated files are not individually tested.** Most need live
-  credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
+  credentials (Gmail, Slack, Readwise). The shim itself is tested against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
   before trusting them. The hand ports (`recipes/brain-backup` and
