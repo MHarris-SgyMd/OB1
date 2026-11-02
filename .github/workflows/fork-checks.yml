@@ -1054,7 +1054,21 @@ jobs:
       OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     steps:
-      # Three Postgres, started by the job's first step in the background, as
+      # The runner's CPU each second, from here to the job's end: its time
+      # counters and the runnable count, which "The runner's CPU while the
+      # legs ran" reads (SMD-3691). Builtins alone, so the sampler costs one
+      # sleep a second. The runner ends it with the job, as it does the legs.
+      - name: Sample the runner's CPU, in the background
+        run: |
+          (set +e
+           while :; do
+             read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+             read -r _ _ _ running _ < /proc/loadavg
+             echo "$EPOCHSECONDS $user $nice $system $idle $iowait $irq $softirq $steal ${running%/*}"
+             sleep 1
+           done) > "$RUNNER_TEMP/cpu.log" 2>&1 < /dev/null &
+
+      # Three Postgres, started by the job's second step in the background, as
       # db-live's is (its comment has why, SMD-3474), from one pull:
       # - postgres on 5432, the job's own;
       # - pair-postgres on 5433, the upgrade and preflight legs' own, which
@@ -1451,6 +1465,49 @@ jobs:
           done
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
+
+      # The CPU's model, then one line on the CPUs from the legs' start to the
+      # last leg's end, then every sample, folded (SMD-3691). The legs' span
+      # moves with the runner: on main to 11-02, every CPU-bound section ran
+      # 1.3-1.5 times as long in its slow runs, where waits did not, and all
+      # 9 runs in eastus and eastus2 were slow. "busy" is user, nice, system
+      # and interrupt time over all time; "runnable" is /proc/loadavg's count,
+      # less the sampler. Runnable over the CPU count most seconds, with busy
+      # near 100%, is a saturated runner, where another leg adds contention,
+      # not time off. It reads, so it never fails the job.
+      - name: The runner's CPU while the legs ran
+        if: ${{ !cancelled() }}
+        run: |
+          model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo)
+          echo "CPU: ${model:-no model name in /proc/cpuinfo}, $(nproc) of them"
+          [ -s "$RUNNER_TEMP/cpu.log" ] || { echo "no samples: the sampler did not run"; exit 0; }
+          from=0; to=$EPOCHSECONDS
+          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || echo "the legs never started: the whole job's samples"
+          if [ -s "$RUNNER_TEMP/data-layer.legs" ]; then
+            to=0
+            while IFS= read -r leg; do
+              end=$(stat -c %Y "$RUNNER_TEMP/$leg.rc" 2> /dev/null) || end=$EPOCHSECONDS
+              if [ "$end" -gt "$to" ]; then to=$end; fi
+            done < "$RUNNER_TEMP/data-layer.legs"
+          fi
+          awk -v from="$from" -v to="$to" -v cpus="$(nproc)" '
+            NF == 10 {
+              busy = $2 + $3 + $4 + $7 + $8; total = busy + $5 + $6 + $9
+              if (seen && $1 > from && $1 <= to && total > t0) {
+                d = total - t0; b = 100 * (busy - b0) / d; r = $10 - 1
+                n++; sb += b; ss += 100 * ($9 - s0) / d; sw += 100 * ($6 - w0) / d; sr += r
+                if (b >= 95) full++
+                if (r > cpus) over++
+              }
+              seen = 1; t0 = total; b0 = busy; s0 = $9; w0 = $6
+            }
+            END {
+              if (!n) { print "no samples between " from " and " to; exit }
+              printf "%d s from the legs start to their end: busy %.0f%% on average, %d s (%.0f%%) at 95%% or more; steal %.1f%%, iowait %.1f%%; runnable %.1f on average, over %d for %d s\n", n, sb / n, full, 100 * full / n, ss / n, sw / n, sr / n, cpus, over
+            }' "$RUNNER_TEMP/cpu.log"
+          echo "::group::every sample: epoch, then /proc/stat's user nice system idle iowait irq softirq steal, then the runnable count"
+          cat "$RUNNER_TEMP/cpu.log"
+          echo "::endgroup::"
 
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed
