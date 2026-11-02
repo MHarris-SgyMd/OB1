@@ -2,8 +2,8 @@
 /**
  * test-weekly-digest.ts — db/weekly-digest.ts's pure core (SMD-2239), hermetic.
  *
- * No Postgres, no model, no network. Covers the ranking, the importance read,
- * the Telegram chunking, and the digest's egress subject — including the gate
+ * No Postgres, no model, no network. Covers the ranking (recency alone: no
+ * key's `importance` steers it, SMD-2653), the prompt, the Telegram chunking, and the digest's egress subject — including the gate
  * itself: a digest carries no row's source/type/topic, so it declares its own
  * (type:digest, source:weekly-digest) and the worker key is the actor. Under the
  * default deny the send is refused; a matching OB1_EGRESS_ALLOW term lets it
@@ -14,8 +14,8 @@
 
 import { resolveEgressPolicy, mayLeaveBox, type EgressSubject } from "../server-portable/egress.ts";
 import {
-  thoughtImportance,
-  rankAndTrim,
+  rankByRecency,
+  buildUserPrompt,
   chunkForTelegram,
   digestUnits,
   digestSubject,
@@ -34,38 +34,53 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   content: o.content ?? "",
   created_at: o.created_at ?? "2026-09-01T00:00:00Z",
   metadata: o.metadata ?? null,
-  importance: o.importance,
 });
 
 // ---------------------------------------------------------------------------
-// thoughtImportance — native column, then metadata, then 0; numeric strings.
+// rankByRecency — newest first by the instant, whatever importance says; cap 200.
 // ---------------------------------------------------------------------------
 {
-  ok(thoughtImportance(thought({ importance: 5 })) === 5, "a native importance column wins");
-  ok(thoughtImportance(thought({ importance: "5" })) === 5, "a numeric string in the native column is read");
-  ok(thoughtImportance(thought({ metadata: { importance: 3 } })) === 3, "metadata.importance is read when there is no column");
-  ok(thoughtImportance(thought({ metadata: { importance: "3" } })) === 3, "a numeric string in metadata.importance is read");
-  ok(thoughtImportance(thought({ importance: 5, metadata: { importance: 1 } })) === 5, "the native column is preferred over metadata");
-  ok(thoughtImportance(thought({})) === 0, "no importance anywhere reads as 0");
+  // Dates, as the database returns them, across weekdays: Mon Nov 2, Sat Oct 31,
+  // Wed Oct 28. Compared as strings they would sort by weekday name.
+  const dated = rankByRecency([
+    thought({ id: "wed", created_at: new Date("2026-10-28T12:00:00Z") }),
+    thought({ id: "mon", created_at: new Date("2026-11-02T12:00:00Z") }),
+    thought({ id: "sat", created_at: new Date("2026-10-31T12:00:00Z") }),
+  ]);
+  ok(dated.map((t) => t.id).join() === "mon,sat,wed", "Dates rank newest first by the instant, not by the weekday their string leads with");
+
+  const iso = rankByRecency([
+    thought({ id: "a", created_at: "2026-09-01T00:00:00Z" }),
+    thought({ id: "c", created_at: "2026-09-03T00:00:00Z" }),
+    thought({ id: "b", created_at: "2026-09-02T00:00:00Z" }),
+  ]);
+  ok(iso.map((t) => t.id).join() === "c,b,a", "ISO strings rank newest first");
+
+  // SMD-2653's repro: a writer's 15 thoughts, then a capture key's 10, each older
+  // than every writer row, carrying importance 9 in metadata and as a column.
+  // The digest reads neither, so the writer's rows lead and the pool is the order
+  // the instants give.
+  const day = (d: number) => new Date(Date.UTC(2026, 9, d, 12)).toISOString();
+  const writer = Array.from({ length: 15 }, (_, i) => thought({ id: `w${i}`, created_at: day(20 + (i % 10)) }));
+  const capture = Array.from({ length: 10 }, (_, i) =>
+    Object.assign(thought({ id: `c${i}`, created_at: day(10 + i), metadata: { importance: 9 } }), { importance: 9 }));
+  const pool = rankByRecency([...capture, ...writer]);
+  const byTime = [...writer, ...capture].sort((a, b) => Date.parse(String(b.created_at)) - Date.parse(String(a.created_at)));
+  ok(pool.length === 25 && pool.slice(0, 15).every((t) => t.id.startsWith("w")), "a capture key's importance 9 ranks none of a writer's newer thoughts out of the pool");
+  ok(pool.map((t) => t.id).join() === byTime.map((t) => t.id).join(), "the pool is the instants' order, importance aside");
+
+  const many = Array.from({ length: 250 }, (_, i) => thought({ id: `x${i}`, created_at: day((i % 28) + 1) }));
+  ok(rankByRecency(many).length === 200, "the pool is capped at 200");
 }
 
 // ---------------------------------------------------------------------------
-// rankAndTrim — importance desc, recency tiebreak; widen under 10; cap 200.
+// buildUserPrompt — no importance reaches the synthesis model.
 // ---------------------------------------------------------------------------
 {
-  const rows = [
-    thought({ id: "a", importance: 1, created_at: "2026-09-01" }),
-    thought({ id: "b", importance: 9, created_at: "2026-09-02" }),
-    thought({ id: "c", importance: 9, created_at: "2026-09-03" }),
-  ];
-  const { pool, widened } = rankAndTrim(rows, 4);
-  ok(pool[0].id === "c" && pool[1].id === "b" && pool[2].id === "a", "ranked by importance, newest first on a tie");
-  ok(widened, "fewer than 10 above the threshold widens the pool");
-
-  const many = Array.from({ length: 250 }, (_, i) => thought({ id: `x${i}`, importance: 9, created_at: `2026-09-${(i % 28) + 1}` }));
-  const big = rankAndTrim(many, 4);
-  ok(big.pool.length === 200, "the pool is capped at 200");
-  ok(!big.widened, "10 or more above the threshold does not widen");
+  const prompt = buildUserPrompt(
+    [Object.assign(thought({ id: "p", content: "shipped it", metadata: { type: "task", importance: 9 } }), { importance: 9 })],
+    new Date("2026-10-26T00:00:00Z"), new Date("2026-11-02T00:00:00Z"));
+  ok(prompt.includes('"type":"task"') && prompt.includes("shipped it") && !/importance/.test(prompt), "the prompt carries the row's type and text, and no importance");
 }
 
 // ---------------------------------------------------------------------------

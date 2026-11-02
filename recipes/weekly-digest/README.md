@@ -15,7 +15,7 @@
 ![Community Contribution](https://img.shields.io/badge/OB1_COMMUNITY-Approved_Contribution-2ea44f?style=for-the-badge&logo=github)
 
 **Original recipe by [@alanshurafa](https://github.com/alanshurafa)** — the
-importance-ranked weekly synthesis it introduced is preserved in the `db/` verb.
+weekly synthesis it introduced is preserved in the `db/` verb.
 
 ## Where it went
 
@@ -33,13 +33,16 @@ TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… \
   bun db/weekly-digest.ts --url "$DATABASE_URL"
 ```
 
-The verb keeps the recipe's behaviour — a `--window` of days, importance ranking
-(from `metadata.importance`, widening when a quiet week clears too few), the
+The verb keeps the recipe's behaviour — a `--window` of days, the
 `restricted`/`personal` sensitivity exclusion, by the column or by a row's
 `metadata.sensitivity_tier` (fail-closed when the column is absent, unless
 `--no-sensitivity-filter`), and `--output telegram|stdout|file` —
 and adds the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest
 in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`).
-See the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and
+It ranks the window by recency alone. The recipe's importance ranking and its
+`--min-importance` are gone: any key could set `importance` on its own rows, so
+ten captures carrying a high value could rank every other thought out of the
+digest. The fork retired the key (SMD-2653, `docs/priority.md` decision 8). See
+the header of [`db/weekly-digest.ts`](../../db/weekly-digest.ts) and
 `db/README.md` for the flags and the egress model.

@@ -6281,7 +6281,7 @@ no `db/` file outside the module reaches `refusesEverything`, `describeEgress`,
 `resolve_agent(` or `parseKeyRecords`.
 
 `weekly-digest.ts` (SMD-2239) is the first **sink** on this harness — it pages
-the week's `thoughts`, has the chat model synthesize an importance-ranked digest,
+the week's `thoughts`, has the chat model synthesize a digest of the newest,
 and delivers it to Telegram, a file, or stdout. Two hops leave the box and both
 pass the gate: the synthesis (the thoughts → the chat provider) through the gated
 dialler `providerCall`, and the Telegram send (the digest → `api.telegram.org`)
@@ -6298,14 +6298,16 @@ no `sensitivity_tier` column the run refuses rather than page every row, unless
 `--no-sensitivity-filter` says so. A row is left out by the column or by its
 `metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
 `--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). `test-weekly-digest.ts` holds the ranking, the
+at its default (SMD-2493). The window ranks by recency alone: `importance`,
+which any key could set on its own rows, is retired (SMD-2653, `docs/priority.md`
+decision 8). `test-weekly-digest.ts` holds the ranking, the
 chunking and the gate over a digest subject (the drop-the-gate mutant and each
 allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
 Telegram sends under deny and one when allowed.
 
 ```bash
 bun weekly-digest.ts --url … --output stdout                 # synthesize + print; no send hop
-bun weekly-digest.ts --url … --window 14 --min-importance 3  # a wider window, a lower bar
+bun weekly-digest.ts --url … --window 14                     # a wider window
 OB1_EGRESS_ALLOW=type:digest bun weekly-digest.ts --url …    # post to Telegram (TELEGRAM_BOT_TOKEN/CHAT_ID)
 ```
 

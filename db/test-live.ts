@@ -16638,9 +16638,10 @@ if (want("36")) {
   // the long prior section and its single pooled connection is closed by now.
   const wsql = new SQL({ url: URL_!, max: 1 });
   // No table wipe: the prior section leaves ~20k rows whose per-row delete
-  // triggers would outrun the connection, and the digest needs no clean table —
-  // --min-importance 0 reads whatever is in the window and the stub ignores the
-  // content. These three recent rows are simply the newest in the window.
+  // triggers would outrun the connection, and the digest needs no clean table:
+  // it ranks the window by recency alone (SMD-2653), and these three rows are
+  // the newest in it. Each carries an importance, which the digest no longer
+  // reads, so none of it may reach the prompt.
   const rows = [
     { id: recordId("fork", "digest-a"), content: "zqdigest alpha — shipped the egress gate for the weekly digest sink", imp: 8 },
     { id: recordId("fork", "digest-b"), content: "zqdigest beta — decided the db/ verb home over an n8n template", imp: 7 },
@@ -16653,16 +16654,21 @@ if (want("36")) {
 
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
   // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
-  // last one's Authorization (tgAuth).
+  // last one's Authorization (tgAuth). The last synthesis prompt is chatPrompt.
   let tgReqs = 0;
   let chatReqs = 0;
   let tgAuth: string | null = null;
+  let chatPrompt = "";
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
-    fetch(req) {
+    async fetch(req) {
       const p = new URL(req.url).pathname;
-      if (p.endsWith("/chat/completions")) { chatReqs++; return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] }); }
+      if (p.endsWith("/chat/completions")) {
+        chatReqs++;
+        chatPrompt = String(((await req.json()) as { messages?: { content?: string }[] }).messages?.at(-1)?.content ?? "");
+        return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] });
+      }
       if (p.includes("/sendMessage")) { tgReqs++; tgAuth = req.headers.get("authorization"); return Response.json({ ok: true, result: { message_id: tgReqs } }); }
       return new Response("not found", { status: 404 });
     },
@@ -16693,12 +16699,14 @@ if (want("36")) {
     TELEGRAM_BOT_TOKEN: "test-token",
     TELEGRAM_CHAT_ID: "test-chat",
   };
-  const tgArgs = ["--url", URL_!, "--output", "telegram", "--min-importance", "0", "--no-sensitivity-filter"];
+  const tgArgs = ["--url", URL_!, "--output", "telegram", "--no-sensitivity-filter"];
   try {
     tgReqs = 0; chatReqs = 0;
     const denied = await weeklyCli(tgArgs, base);
     assert(tgReqs === 0 && chatReqs >= 1 && /not .*posted to Telegram/.test(denied.err) && /deny \(the default\)/.test(denied.err),
       `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
+    assert(rows.every((r) => chatPrompt.includes(r.content)) && !/importance/.test(chatPrompt),
+      `the window's three newest rows reach the synthesis prompt, and none of their importance does (SMD-2653): ${rows.filter((r) => chatPrompt.includes(r.content)).length} of 3 in ${chatPrompt.length} chars`);
 
     tgReqs = 0; chatReqs = 0;
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
@@ -16725,7 +16733,7 @@ if (want("36")) {
     // column it proceeds.
     const [{ has }] = await wsql`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has`;
     tgReqs = 0; chatReqs = 0;
-    const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram", "--min-importance", "0"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
+    const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
     if (has) {
       assert(filtered.code === 0 && tgReqs >= 1, `with a sensitivity_tier column the default filtered run proceeds and posts (exit ${filtered.code}; ${tgReqs} send(s))`);
     } else {
