@@ -125,7 +125,7 @@ function subst(sql: string, trgm = DEFAULT_TRGM_INDEX): string {
   );
 }
 
-const { assert, total, docCheck, report } = createAssert();
+const { assert, report } = createAssert();
 
 /** A unit vector of EMBEDDING_DIM width that is `1` at one position and 0 elsewhere. */
 function unit(at: number): string {
@@ -16460,19 +16460,7 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
 }
 
-// db/README.md quotes this suite's assertion total in two places ("Expected
-// outcome" and the Testing block). It used to be edited by hand and drifted;
-// this holds every count the README gives for test-schema.ts to what the suite
-// actually ran (SMD-1805). A doc check, so it does not move the number it reads.
-console.log("\n[doc] db/README.md states this suite's own assertion total");
-{
-  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
-  const n = total();
-  const claims = [...readme.matchAll(/^.*\btest-schema\.ts\b.*$/gm)]
-    .flatMap((line) => [...line[0].matchAll(/(\d+)\s+(?:assertions|passed)/g)].map((x) => Number(x[1])));
-  docCheck(claims.length > 0, "db/README.md quotes test-schema.ts's assertion total at least once");
-  docCheck(claims.every((c) => c === n),
-    `every assertion count db/README.md gives for test-schema.ts is this run's ${n} (found ${[...new Set(claims)].join(", ") || "none"})`);
-}
-
+// The suite's total is published to the wiki's Test-counts page on a push to
+// main (SMD-3614), where db/README.md quoted it and a [doc] check held it to
+// the run's (SMD-1805).
 report(`width ${EMBEDDING_DIM}`);

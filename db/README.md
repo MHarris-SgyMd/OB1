@@ -299,7 +299,9 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3127 assertions: 3127 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
+wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
+page has N as main's last run counted it (SMD-3614).
 Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -6010,15 +6012,18 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
-third covers the one thing the test image cannot reproduce.
+third covers the one thing the test image cannot reproduce. Each suite's
+assertion total, and each shard's, as main's last run counted them, is on the
+wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
+page, which Fork Checks writes on every push to main (SMD-3614).
 
 ```bash
-bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1932 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1089 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 434 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+bun test-schema.ts                          # PGlite, no container
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

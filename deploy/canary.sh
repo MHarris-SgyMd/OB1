@@ -1473,7 +1473,7 @@ if [ -z "$stable_stamp" ]; then
   say "stamped $STABLE_PG tier=stable (it had no tier stamp)"
 fi
 stable_server="$(container_of "$STABLE" api)"
-if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -qx 'OB1_TIER=stable'; then
+if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -x 'OB1_TIER=stable' > /dev/null; then
   say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the REST core (up -d api), so its query log says which tier answered"
 fi
 
