@@ -19,11 +19,16 @@ import { actorOf } from "./writes.ts";
 /**
  * A renewal that revived a lapsed claim (SMD-3654): when its lease had run out,
  * and the claims made on its work since — work another agent may have built on
- * while it was free. `claimedSince` is null when they could not be read. Absent
- * on a renewal of a live claim. 115 revives a lapsed claim nothing covers
- * without a word; this is the word.
+ * while it was free. `claimedSince` is null when they could not be read, and
+ * holds the first SINCE_MAX, `moreSince` counting the rest. `at` is null when
+ * the lease before the renewal could not be read, so whether it had lapsed is
+ * unknown (review pass 1: that was said as nothing at all). Absent on a renewal
+ * of a live claim. 115 revives a lapsed claim nothing covers without a word;
+ * this is the word.
  */
-export type ClaimLapse = { at: string; claimedSince: (HeldClaim & { state: WorkClaim["state"]; releasedAt: string | null })[] | null };
+export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { state: WorkClaim["state"]; releasedAt: string | null })[] | null; moreSince?: number };
+/** How many of the claims made since a lapse a reply names (review pass 1: a long lapse could list without end). */
+const SINCE_MAX = 10;
 /** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. */
 export type ClaimWorkResult = { outcome: "claimed" | "renewed"; claim: WorkClaim; token?: string; lapsed?: ClaimLapse };
 export type ClaimWorkCode = "WORK_CLAIMED" | "REFUSED_CLAIM_INPUT" | "REFUSED_CLAIM_KEY";
@@ -89,21 +94,27 @@ const unattributedRefusal = (principal: Principal, id: string, forced: boolean) 
 /**
  * The lease a token's claim had before a renewal (SMD-3654): 115's writers answer
  * with the new lease, so whether the renewal revived a lapsed claim is read here,
- * first. Undefined when it can't be read: the renewal goes on, unreported.
+ * first — by id and token for renew_claim, which the primary key finds (review
+ * pass 1: the token alone scanned the table), by token for claim_work. Null: no
+ * claim has the token (the writer will say so). "unread": the read failed, and a
+ * renewal that then succeeds says it could not tell whether the claim had lapsed.
  */
-async function leaseBefore(ctx: Ctx, token: string | undefined): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null | undefined> {
+type LeaseBefore = { id: string; expiresAt: string; releasedAt: string | null } | null | "unread";
+async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string): Promise<LeaseBefore | undefined> {
   if (token === undefined) return undefined;
-  try { return await (await ctx.store()).claimLease(token); } catch { return undefined; }
+  try { return await (await ctx.store()).claimLease(token, id); } catch { return "unread"; }
 }
 
-/** The lapse a renewal revived, if it did: the lease before had run out by the renewal. With the claims made on the work since, or null when they can't be read. */
-async function lapseOf(ctx: Ctx, principal: Principal, before: { id: string; expiresAt: string; releasedAt: string | null } | null | undefined, claim: WorkClaim): Promise<ClaimLapse | undefined> {
+/** The lapse a renewal revived, if it did: the lease before had run out by the renewal. With the claims made on the work since (the first SINCE_MAX, the rest counted), or null when they can't be read. */
+async function lapseOf(ctx: Ctx, principal: Principal, before: LeaseBefore | undefined, claim: WorkClaim): Promise<ClaimLapse | undefined> {
+  if (before === "unread") return { at: null, claimedSince: null };
   if (!before || before.id !== claim.id || before.releasedAt !== null) return undefined;
   const renewedAt = Date.parse(claim.renewedAt ?? "") || Date.now();
   if (!(Date.parse(before.expiresAt) <= renewedAt)) return undefined;
   try {
     const since = await (await ctx.store()).claimsMadeSince(claim.id, before.expiresAt);
-    return { at: before.expiresAt, claimedSince: since.map((c) => ({ ...held(principal)(c), state: c.state, releasedAt: c.releasedAt })) };
+    const named = since.slice(0, SINCE_MAX).map((c) => ({ ...held(principal)(c), state: c.state, releasedAt: c.releasedAt }));
+    return { at: before.expiresAt, claimedSince: named, ...(since.length > SINCE_MAX ? { moreSince: since.length - SINCE_MAX } : {}) };
   } catch {
     return { at: before.expiresAt, claimedSince: null };
   }
@@ -139,7 +150,7 @@ export async function renewClaim(ctx: Ctx, principal: Principal, input: Input<"r
   // A string that is no uuid names no claim; the function's cast would raise it as a fault.
   if (!UUID_RE.test(input.id)) return refuse({ code: "CLAIM_NOT_FOUND", retryable: false, id: input.id });
   const token = tokenOf(input.token)!;
-  const before = await leaseBefore(ctx, token);
+  const before = await leaseBefore(ctx, token, input.id);
   const a = await asked(async () => (await ctx.store()).renewClaim({ id: input.id, token, leaseSeconds: input.lease_seconds, actor: actorOf(ctx, principal) }));
   if (a instanceof ClaimRefused) return argumentRefused(a, { token: input.token });
   if (a.outcome === "renewed" && a.claim) {

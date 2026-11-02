@@ -960,9 +960,11 @@ export class SqlStore implements ThoughtStore {
 
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
   // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
-  async claimLease(token: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null> {
-    const rows = await this.sql`
-      SELECT id, expires_at, released_at FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)` as Record<string, unknown>[];
+  async claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null> {
+    // Two statements, not `$id IS NULL OR id = $id`: a generic plan would lose the primary key.
+    const rows = (id === undefined
+      ? await this.sql`SELECT id, expires_at, released_at FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
+      : await this.sql`SELECT id, expires_at, released_at FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
     const r = rows[0];
     if (!r || typeof r.id !== "string" || r.expires_at == null) return null;
     return { id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null) };

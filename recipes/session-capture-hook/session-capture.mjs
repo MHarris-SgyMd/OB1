@@ -2959,8 +2959,8 @@ function brainForClaim(claim, brains) {
 
 /** A call the key may not make, as the server answers it: a JSON-RPC -32602 envelope (what the real server sends, review pass 4) or an isError result in the SDK's words. */
 const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
-/** A renewal's words when it revived a lapsed claim after claims were made on its work, or couldn't read them (the server's since SMD-3654). */
-const REVIVED_COVERED_RE = /\bIt had lapsed at \S+, and (?:since then .* made on its work|the claims made on its work since could not be read)\b/;
+/** A renewal's words when it revived a lapsed claim after claims were made on its work, or couldn't read them, or couldn't read whether it had lapsed (the server's since SMD-3654). */
+const REVIVED_COVERED_RE = /\b(?:It had lapsed at \S+, and (?:since then .* made on its work|the claims made on its work since could not be read)|Whether it had lapsed could not be read)\b/;
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
@@ -2989,7 +2989,7 @@ export async function renewClaim(cfg, claim) {
     // Renewed, but it had lapsed and claims were made on its work meanwhile (or they couldn't be read) — the server
     // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
     const lapsed = result?.structuredContent?.lapsed;
-    if (lapsed && (lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
+    if (lapsed && (lapsed.at === null || lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
       const said = `CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
       return { ...o, blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `${o.line} — but ${said.replace(new RegExp(`^CLAIMED_WHILE_LAPSED: Renewed your claim .*?\\(claim ${UUID}\\)\\.\\s*`, "i"), "")} (renewals wait until the .blocked.json beside its token file is deleted)` };
     }
@@ -3156,7 +3156,8 @@ function noteAgentClaimCall(hook, brains) {
   const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
   useStateRoot(brain.root);
   const text = resultText(hook.tool_response);
-  const renewed = new RegExp(`^Renewed your claim on .* until (\\S+) \\(claim (${UUID})\\)`, "i").exec(text);
+  // The first `until … (claim <id>).`, not the last: a piece named later in the reply is another key's words (review pass 1).
+  const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
     // A renewal that revived a lapsed claim after claims were made on its work meanwhile (the server says so since SMD-3654): marked as a covered claim is.
@@ -3468,7 +3469,8 @@ export async function main(argv) {
       if (!outcomes.length) console.log(`no claims to renew: ${worktreeRoot(dir) ? `no token files in ${join(worktreeRoot(dir), CLAIMS_DIRNAME)}/` : "not inside a git worktree"}`);
       for (const o of outcomes) console.log(o.line);
     }
-    return outcomes.some((o) => !o.ok && !o.ended) ? 1 : 0;
+    // A renewal that revived a lapsed claim others claimed meanwhile is renewed and blocked: 1, as a blocked one is (review pass 1).
+    return outcomes.some((o) => (!o.ok || o.blocked) && !o.ended) ? 1 : 0;
   }
   if (has(args, "--drain-writes")) {
     // A brain's queue of copied writes, by hand or as the hook's child (SMD-3314).

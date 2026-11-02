@@ -1930,10 +1930,12 @@ export interface ThoughtStore {
   /**
    * The lease of the claim a token proves, read before a renewal (SMD-3654): its
    * id, its expiry and whether it was released — never the token or its hash.
-   * Null when no claim has that token. 115's writers report the new lease, not
-   * the one renewed, so a renewal that revived a lapsed claim learns it here.
+   * Null when no claim has that token (or, given `id`, when that claim hasn't).
+   * 115's writers report the new lease, not the one renewed, so a renewal that
+   * revived a lapsed claim learns it here. renew_claim gives the id, which the
+   * primary key finds; claim_work has only the token.
    */
-  claimLease(token: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null>;
+  claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null>;
   /**
    * The claims on work overlapping a claim's — its ticket's whole, its piece, or
    * any piece of a whole-ticket claim, by 115's piece key — made after `since`,

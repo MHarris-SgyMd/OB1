@@ -1774,25 +1774,34 @@ const holderText = (holder: string, ownKey: boolean) => ownKey ? `your own key (
  * work (its id in the worktree's token files — a whole-ticket claim while it claims a piece), another session of
  * the key, or this one without its token (SMD-3654: the words gave the lost-token way to a session holding both).
  */
-const OWN_KEY = "A claim by your own key is this session's own (its id is in your worktree's .work-claims/: work under it, or release it and claim the piece), another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.";
+const ownKey = (mine: string) => `A claim by your own key is this session's own (its id is in your worktree's .work-claims/: ${mine}), another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.`;
+const OWN_KEY = ownKey("work under it, or release it and claim the piece");
+/** On a renewal the caller's claim lapsed and another covers its work: one of this session's own makes the lapsed one spare (review pass 1). */
+const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were renewing and delete its token file");
 const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
-const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
-  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? OWN_KEY : "Leave it to its holder, or claim other work."}`;
+const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
 const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
   ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
   : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`;
 /**
  * A renewal that revived a lapsed claim (SMD-3654): when it lapsed, and what was claimed on its work meanwhile —
- * each claim by its work, holder, time and state, never its label (another key's words). None: said so. Unread:
- * said so, with the check to make.
+ * each claim by its work (a piece quoted, as heldLine does: another key's piece is its words, not ours), holder,
+ * time and state, never its label, the first SINCE_MAX and a count of the rest. None: said so. Unread, or whether
+ * it had lapsed unread: said so, with one check to make and what each answer means (review pass 1).
  */
+const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
+  `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} at ${c.claimedAt} (${c.state}, claim ${c.id})`;
+const lapseCheck = (after: string) =>
+  `list the ticket's claims with list_claims and include_ended: one on its work claimed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
 const lapseText = (l: ClaimLapse | undefined) => {
   if (!l) return "";
-  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made on its work since could not be read: check list_claims with include_ended before carrying on.`;
+  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck("your previous lease ran out")}`;
+  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made on its work since could not be read: ${lapseCheck(l.at)}`;
   if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made on its work meanwhile.`;
-  const n = l.claimedSince.length;
-  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made on its work: ${l.claimedSince.map((c) => `${workText(c.issue, c.piece)} by ${holderText(c.holder, c.ownKey)} at ${c.claimedAt} (${c.state}, claim ${c.id})`).join("; ")}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
+  const n = l.claimedSince.length + (l.moreSince ?? 0);
+  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
 };
 // 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
 // in the wrong one is masked, a cut one too.
@@ -1826,7 +1835,7 @@ export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): 
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "CLAIM_RELEASED" ? endedText(r)
-    : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
+    : r.code === "WORK_CLAIMED" ? `${inTheWay(r, OWN_KEY_RENEWING)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,

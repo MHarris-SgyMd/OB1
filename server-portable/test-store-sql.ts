@@ -1870,6 +1870,21 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
   }
 }
 
+console.log("\n[21] claimLease reads the lease a renewal starts from by its token, and renew_claim's form by the claim's id too: another claim's id with the token is no lease (SMD-3654)");
+{
+  const actor = { name: "smd-3654-store", via: "test" } as never;
+  const a = await store.claimWork({ issue: "SMD-9310", piece: "PR 1", actor });
+  const b = await store.claimWork({ issue: "SMD-9310", piece: "PR 2", actor });
+  const [aId, aToken, bId] = [String(a.claim?.id), String(a.token), String(b.claim?.id)];
+  const byToken = await store.claimLease(aToken);
+  const byBoth = await store.claimLease(aToken, aId);
+  const crossed = await store.claimLease(aToken, bId);
+  const unknown = await store.claimLease("wc_" + "0".repeat(64), aId);
+  assert(a.outcome === "claimed" && b.outcome === "claimed" && byToken?.id === aId && byToken.expiresAt === a.claim?.expiresAt && byToken.releasedAt === null
+      && byBoth?.id === aId && crossed === null && unknown === null,
+    `the lease by token, by token and id; another claim's id, or a token no claim has, reads none (${JSON.stringify([byToken, byBoth, crossed, unknown])})`);
+}
+
 await store.close();
 
 report();
