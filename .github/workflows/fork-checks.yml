@@ -844,10 +844,12 @@ jobs:
       # subshell holds none of the step's output, so the step ends at once.
       - name: Start Postgres in the background
         run: |
-          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
-          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
-          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
-          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          # Three tries at the pull, as the runner gave a service's (it waited a random 1-10 s between them; this
+          # waits 3 s, then 6 s), each failed one marked in the log for "Wait for Postgres" to warn of. The
+          # subshell runs under set +e: under the step's -e a failing last `docker run` ended it before its exit
+          # code was written, and the wait stalled for its whole deadline (review pass 1). The exit code is
+          # written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
           (set +e
            pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
            rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
@@ -874,8 +876,10 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
-      # The pull and the start first: the first step's exit code, within 180 s,
-      # and 0, else its output. Then the server, before the first suite, as
+      # First the start: its exit code within 180 s, which must be 0, else its
+      # output is shown; a pull that took more than one try is warned of, as
+      # the runner warned of a service's (review pass 2). Then the server,
+      # before the first suite, as
       # db/with-postgres.sh waits: over TCP inside the container, since over
       # the socket the entrypoint's initialising server, which listens on no
       # TCP address, reads as ready for a moment before the real one is up;
@@ -891,6 +895,9 @@ jobs:
               sleep 0.2
             done
             [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            if grep -q '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log"; then
+              echo "::warning::pgvector's pull took $(( $(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log") + 1 )) tries"; cat "$RUNNER_TEMP/postgres-start.log"
+            fi
           }
           ready() {
             local deadline=$((SECONDS + 60)) why
@@ -980,10 +987,12 @@ jobs:
       # default too.
       - name: Start Postgres in the background
         run: |
-          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
-          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
-          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
-          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          # Three tries at the pull, as the runner gave a service's (it waited a random 1-10 s between them; this
+          # waits 3 s, then 6 s), each failed one marked in the log for "Wait for Postgres" to warn of. The
+          # subshell runs under set +e: under the step's -e a failing last `docker run` ended it before its exit
+          # code was written, and the wait stalled for its whole deadline (review pass 1). The exit code is
+          # written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
           (set +e
            pull \
              && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE" \
@@ -1015,6 +1024,9 @@ jobs:
               sleep 0.2
             done
             [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            if grep -q '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log"; then
+              echo "::warning::pgvector's pull took $(( $(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log") + 1 )) tries"; cat "$RUNNER_TEMP/postgres-start.log"
+            fi
           }
           ready() {
             local deadline=$((SECONDS + 60)) why
@@ -4718,10 +4730,12 @@ jobs:
       # db-live's "Start Postgres in the background" has why (SMD-3474).
       - name: Start Postgres in the background
         run: |
-          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
-          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
-          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
-          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          # Three tries at the pull, as the runner gave a service's (it waited a random 1-10 s between them; this
+          # waits 3 s, then 6 s), each failed one marked in the log for "Wait for Postgres" to warn of. The
+          # subshell runs under set +e: under the step's -e a failing last `docker run` ended it before its exit
+          # code was written, and the wait stalled for its whole deadline (review pass 1). The exit code is
+          # written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
           (set +e
            pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
            rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
@@ -4754,6 +4768,9 @@ jobs:
               sleep 0.2
             done
             [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            if grep -q '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log"; then
+              echo "::warning::pgvector's pull took $(( $(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log") + 1 )) tries"; cat "$RUNNER_TEMP/postgres-start.log"
+            fi
           }
           ready() {
             local deadline=$((SECONDS + 60)) why
