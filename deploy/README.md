@@ -2235,10 +2235,13 @@ embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
 re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
-back and recreate `api` and the coordinator, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds
-(unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
-model call in hand is aborted and every lease returned, and the brain is
-quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
+back and recreate `api` and the coordinator, which read them once. On the next live call it pauses them within `OB1_SLEEP_POLL` seconds
+(unset, 5): they wait between thoughts and go on once `OB1_SLEEP_CAPTURE`
+seconds (unset, 20; held to the quiet) pass with no live call, a model call in
+hand longer than 60 s aborted meanwhile, its thought set back (SMD-3379 PR
+1c-3b). One that finds nothing left to do ends the sleep, as during the sweep
+(its call in hand given 2 s, then cancelled), and the brain is quiet again
+`OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 `OB1_SLEEP_BUDGET` minutes (unset, 60), and the next begins after a live call
 (**Settings**, below). Each pass's cost is the same as under `workers`, spent
 only while nobody is using the brain.
@@ -2299,9 +2302,10 @@ podman compose -f deploy/compose.yaml up -d coordinator
 podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -c "DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%'"
 ```
 
-**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_POLL` (1–60, the most a
-pass runs beside a live call) and `OB1_SLEEP_WORKERS` (each pass's workers,
-unset 1), digits only (`deploy/.env.example`). The budget (SMD-2679):
+**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_CAPTURE` (1–86400, held
+to the quiet: the quiet after the newest live call before paused passes go
+on, unset 20), `OB1_SLEEP_POLL` (1–60, the most a pass runs beside a live call
+before it pauses) and `OB1_SLEEP_WORKERS` (each pass's workers, unset 1), digits only (`deploy/.env.example`). The budget (SMD-2679):
 `OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes (0–10080, unset 60; 0
 for no clock) — at it the passes stop after the thought in hand and the next
 sleep waits for a live call — and each pass's session settings:

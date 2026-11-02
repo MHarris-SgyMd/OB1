@@ -4199,24 +4199,25 @@ one a raw `BEGIN` opened); a transaction's handle is refused for one.
 ## Sleep: the passes while the brain is quiet (SMD-1794)
 
 `sleep.ts` runs re-embed, extraction and consolidation while the brain is
-quiet, and stops them within `--poll` seconds of the first live call being recorded —
-"dolphin sleep": one half works while the other keeps answering. The header
+quiet, and pauses them within `--poll` seconds of the first live call being
+recorded, until it is quiet again — "dolphin sleep": one half works while the
+other keeps answering. The header
 of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain, a call wakes it or its budget stops it
+bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain or its budget stops it, pausing for live calls
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained (a live write during its sweep), or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
-(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
-and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
+(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_CAPTURE`,
+`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its four numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -4281,6 +4282,22 @@ backfill) until `SELECT set_agent_kind('<key name>', 'ingested')` says they
 are background work. The passes it runs write no audit row but re-embed's,
 for a row it gives its first vector, which is marked background as the
 mender's are (SMD-2679), so they never wake it.
+
+**What a live write does asleep** (SMD-3379 PR 1c-3b). It pauses the sleep
+rather than ending it: the passes wait between thoughts, between a long
+thought's windows and between a thought's pairs — a worker between thoughts
+holding no claim, one mid-thought keeping its claim and the windows answered —
+and go on once `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20, held to the
+quiet) have passed with no live write. The log says `paused:` and `resumed:`,
+and the row `paused { since }`. While paused, a model call in hand longer than
+60 s is aborted and its thought set back in the queue, extraction keeping its
+answered windows and counting the stop (093); consolidation's at most three a
+sleep. As the passes go on, the thoughts stopped that way are moved behind
+the newer work. A pause is not the clock's: the budget counts the passes'
+time. Under `--follow`, a live write that finds the pools drained ends the
+sleep as a wake did, so the next one reads re-embed's backlog and sweeps
+again; a live write during the sweep ends it too. A one-shot run pauses and
+drains, ending 0.
 
 **What it does asleep.** First the re-derive pass (SMD-1794's order,
 SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
@@ -4471,8 +4488,9 @@ own. Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
 running, for how long; awake, with when the last sleep ended and how long it
 lasted; "its last pass failed" while a pass's last word was a failure (into
 the next sleep, until one of its passes stamps); stopped once it ends, or
-stale, each with the service's restart; and what wakes it — a search or a
-write, or writes alone and why, each lesser case a warning with its fix. The
+stale, each with the service's restart; and what a live write does —
+pauses its passes, or ends a sleep whose pools are drained; a search does
+not. The
 `workers` row no longer reads it. Since SMD-2752 the row carries two more
 words, and the `sleep` row says each:
 - `waiting`, the passes waiting at their start for a provider that does not
@@ -6014,10 +6032,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1932 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1938 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1089 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 133 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 285 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 434 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
