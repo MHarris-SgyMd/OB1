@@ -18,7 +18,11 @@
 # are built on the runner and loaded, the overlay names them by tag alone, the
 # stack comes up from them, and the notes and overlay land as a workflow
 # artifact. So the shape is exercised before a tag ever is, and a change to a
-# Dockerfile or to compose.yaml is judged the way a release would judge it.
+# Dockerfile or to compose.yaml is judged the way a release would judge it. A
+# pull request's rehearsal builds arm64 too when it changes what can build
+# differently there, or a few files the ticket listed, or is a release cut,
+# and amd64 alone otherwise (SMD-3473, "Whether this rehearsal builds both
+# platforms").
 #
 # scripts/release-artifacts.ts is the reader and renderer; the bash here only
 # runs docker and gh. It refuses a tag that does not name releases.json's last
@@ -135,6 +139,55 @@ jobs:
           # shellcheck disable=SC2086  # MODE_ARGS is two words on a tag, one on a rehearsal
           bun scripts/release-artifacts.ts facts $MODE_ARGS --owner "$GITHUB_REPOSITORY_OWNER" --out "$GITHUB_OUTPUT" | grep -v -e '^[a-z_]*_labels<<' -e '^org\.opencontainers' -e '^__OB1_EOF__$'
 
+      # SMD-3473: a pull request's rehearsal builds both platforms when it
+      # changes:
+      # - what can build differently on arm64: the two Dockerfiles (the base
+      #   image, every RUN), this file, and each package.json and bun.lock a
+      #   Dockerfile copies, whose `bun install` runs under QEMU for arm64;
+      # - .dockerignore or dashboard/, which build the same on both (dashboard
+      #   builds on the build platform) but are kept from the ticket's list;
+      # - releases.json, which only a cut changes, so the tree a tag publishes
+      #   has built both first (review pass 2).
+      # Any other change builds the same on both, so its rehearsal builds
+      # amd64 alone and still brings the stack up from it. A dispatched
+      # rehearsal builds both; a tag always does. The pull request's checkout
+      # is its merge commit, so HEAD^1..HEAD is what it changes, each path as
+      # it is: unquoted, and a rename as its two sides. Whatever the step
+      # cannot read builds both, and says so, rather than failing the
+      # rehearsal (review pass 1).
+      - name: Whether this rehearsal builds both platforms
+        id: platforms
+        if: env.PUBLISH != 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          SERVER_DOCKERFILE: ${{ steps.facts.outputs.server_dockerfile }}
+          MIGRATE_DOCKERFILE: ${{ steps.facts.outputs.migrate_dockerfile }}
+        run: |
+          both() { echo "both platforms: $1"; echo "both=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          [ "$EVENT" = pull_request ] || both "a $EVENT rehearsal"
+          git rev-parse -q --verify HEAD^2 > /dev/null || both "HEAD is not the pull request's merge commit"
+          # NUL-separated, so no path is quoted; --no-renames lists a rename's old path too.
+          changed="$RUNNER_TEMP/rehearsal-changed"
+          git diff -z --no-renames --name-only HEAD^1 HEAD > "$changed" || both "git could not list HEAD^1..HEAD"
+          [ -s "$changed" ] || both "no change read from HEAD^1..HEAD"
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              "$SERVER_DOCKERFILE" | "$MIGRATE_DOCKERFILE" | .dockerignore | .github/workflows/release.yml | dashboard/* | releases.json) both "$f changed" ;;
+            esac
+          done < "$changed"
+          # Each package.json and bun.lock the two Dockerfiles copy, read from
+          # their non-comment lines so a new stage's are gated too. A Dockerfile
+          # that changed was decided above; one that names none builds both.
+          if [ ! -f "$SERVER_DOCKERFILE" ] || [ ! -f "$MIGRATE_DOCKERFILE" ]; then both "the facts name no Dockerfile here ('$SERVER_DOCKERFILE', '$MIGRATE_DOCKERFILE')"; fi
+          locks="$(sed '/^[[:space:]]*#/d' "$SERVER_DOCKERFILE" "$MIGRATE_DOCKERFILE" | grep -oE '[A-Za-z0-9_./-]+/(package\.json|bun\.lock)' | sort -u)" || true
+          [ -n "$locks" ] || both "no package.json or bun.lock read from $SERVER_DOCKERFILE or $MIGRATE_DOCKERFILE"
+          while IFS= read -r -d '' f; do
+            # A name holding a newline would be two patterns to grep; none is a lockfile.
+            if [[ "$f" != *$'\n'* ]] && grep -qxF -- "$f" <<<"$locks"; then both "$f changed"; fi
+          done < "$changed"
+          echo "amd64 alone: none of the paths that build both changed"
+          echo "both=false" >> "$GITHUB_OUTPUT"
+
       # The two images these actions start are pinned by digest as the actions
       # are by SHA (SMD-2093): qemu's binfmt image runs --privileged on the
       # runner, and the buildx builder is the BuildKit daemon that pushes to
@@ -143,6 +196,7 @@ jobs:
       # check 23 nor Dependabot reads an action's inputs, so these move by
       # hand: `docker buildx imagetools inspect <image>:<new tag>`.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: env.PUBLISH == 'true' || steps.platforms.outputs.both == 'true'
         with:
           platforms: arm64
           image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
@@ -159,13 +213,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # A rehearsal proves both platforms build (nothing kept) and then loads
-      # the amd64 image the stack below runs; a tag builds both and pushes.
+      # A rehearsal proves both platforms build (nothing kept), when the step
+      # above says it should, and then loads the amd64 image the stack below
+      # runs; a tag builds both and pushes.
       # Root context for both images: server-portable/Dockerfile and db/Dockerfile
       # reach db/config.mjs and releases.json, and the root .dockerignore keeps
       # the context to what they copy.
       - name: Build ob1-server for both platforms (rehearsal — kept only in the cache)
-        if: env.PUBLISH != 'true'
+        if: env.PUBLISH != 'true' && steps.platforms.outputs.both == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -181,7 +236,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build ob1-migrate for both platforms (rehearsal — kept only in the cache)
-        if: env.PUBLISH != 'true'
+        if: env.PUBLISH != 'true' && steps.platforms.outputs.both == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
