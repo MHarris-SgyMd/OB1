@@ -6336,7 +6336,8 @@ docker. The host port is picked at random in 10000–19999, below the kernels'
 default ranges for port 0, so no process binding port 0 can take it before the
 container binds it, and a start that loses it anyway is retried on another, up
 to five starts; `OB1_PG_PORT=<port>` names the port instead (SMD-3592). CI does
-not use it — GitHub Actions supplies the database as a service container.
+not use it — each job that needs the database starts its own pgvector
+container with `docker run` as its first step (SMD-3474).
 
 `OB1_PG_KEEP=<name>` keeps the database instead: the container's data
 directory is a named volume, `ob1-pg-keep-<name>`, which the removal on exit
