@@ -1311,7 +1311,7 @@ jobs:
       # The "what matters now" eval, seeded (SMD-3662): the schema reset, a
       # personal brain and a small board planted with the stub embedder's
       # vectors, and seven prompts through the search tools themselves,
-      # called through the server's core with its embedder on a stub
+      # called over MCP on the server in-process, its embedder on a stub
       # provider (plain, prefer_current, and the priority filter
       # workaround), then any priority read under measurement. Prints the
       # baseline table and each measured read's verdict, and fails when the

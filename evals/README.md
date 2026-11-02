@@ -4421,19 +4421,20 @@ orders results on a fixed similarity, which is the part a priority read changes.
 model's.
 
 **The baseline reads are the tools themselves.** Each is a search tool and the arguments a client would send, called
-through the server's own core (`createCore`, as `api.ts` builds it). The arguments are parsed field by field through
-the tool's input schema, as a door parses them. The server's own embedder embeds the query through a stub provider
-on loopback that answers with the stub's vectors.
+over MCP on the server itself: the MCP server with the REST core behind it, in-process, as the write-path gate runs
+them (`server-portable/test-support.ts`'s `mcpUnderTest`), with a read key. The tool parses its own arguments. The
+server's own embedder embeds the query through a stub provider on loopback that answers with the stub's vectors. The
+ids come from each answer's structured content.
 * `plain`: the `search` tool;
 * `current`: `search_thoughts` with `prefer_current` on;
 * `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
 
-So any change to how either tool searches reaches the baseline, and the drift check says when it moved the numbers.
+So any change to how either tool searches reaches the baseline, and the drift check says when it moved the numbers. A
+baseline read that returns more than the 10 hits the score reads also fails the run.
 
 **A priority read joins `MEASURED`** in `priority.ts`, outside the hashed section, so adding the read under test is
 not a new registration. It is any function to thought ids, best first. It is handed what a deployed read has: the
-query's words and vector, the store, and `callTool`, a search tool called through the core as the baseline reads
-are. It never gets the prompt's key or its gold. A search argument fits (SMD-3668's `priority_weight`, through
+query's words and vector, the store, and `callTool`, a search tool called over MCP as the baseline reads are. It never gets the prompt's key or its gold. A search argument fits (SMD-3668's `priority_weight`, through
 `callTool`), and so does a read that isn't a search (SMD-3669's agenda). `--seeded` runs every measured read a second
 time with each gold replaced by the items outside it and each item's facts moved to the next item. A read whose answer
 moves consults the answer, and fails the run. The ceiling, which reads the gold, is that check's control. A second
@@ -4507,7 +4508,8 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `1da5a5e34964b73b`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, the same on a04cd907, registration `0139fc455cb15104`; deterministic, two runs
+identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |

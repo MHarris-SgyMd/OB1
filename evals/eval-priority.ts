@@ -41,13 +41,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, heldRefusal, refuseHeldDatabase, resetSchema } from "../db/test-support.ts";
-import { SEARCH_COMPAT_LIMIT } from "../server-portable/core/reads.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
-import { createCore } from "../server-portable/core/index.ts";
-import type { Principal } from "../server-portable/auth.ts";
+import { hashKey } from "../server-portable/auth.ts";
+import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, seedRow, toolInput, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, MEASURED, READS, baselineDrift as driftOf, idsOfAnswer, mutantTriples, itemId, measuredIds, plantRows, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasureInput, type MeasuredRead, type PromptScore, type SearchTool,
 } from "./priority.ts";
 
@@ -196,17 +195,12 @@ async function selfCheck(): Promise<void> {
   assert(heldRefusal(18, undefined, "--seeded") !== null && heldRefusal(18, "0", "--seeded") !== null, "a database holding thoughts is refused without OB1_FIXTURE_RESET=1");
   assert(heldRefusal(18, "1", "--seeded") === null && heldRefusal(0, undefined, "--seeded") === null, "it is let through with OB1_FIXTURE_RESET=1, or when it holds none");
 
-  console.log("[6] The baseline reads are the tools, called as a door calls them");
-  const st = toolInput("search_thoughts", { query: "q" });
-  assert(st.limit === 10 && st.threshold === 0 && st.recency_weight === 0 && st.prefer_current === false, "search_thoughts' defaults come from its own schema (limit 10, threshold 0, recency 0, prefer_current off)");
-  const cur = toolInput("search_thoughts", { ...READS.find((r) => r.name === "current")!.args, query: "q" });
-  const fil = toolInput("search_thoughts", { ...READS.find((r) => r.name === "filter")!.args, query: "q" });
-  assert(cur.prefer_current === true && fil.prefer_current === false && (fil.filter as Record<string, unknown>).priority === "High", "current sends prefer_current; filter sends the workaround's filter");
-  assert(JSON.stringify(toolInput("search", { query: "q" })) === JSON.stringify({ query: "q" }), "the search tool takes the query alone");
-  let refused = false;
-  try { toolInput("search", { query: "q", limit: 5 }); } catch { refused = true; }
-  assert(refused, "an argument the tool doesn't take is refused, not dropped");
-  assert(READ_K === SEARCH_COMPAT_LIMIT && READ_K === st.limit, `the score reads ${READ_K} hits, what both tools return`);
+  console.log("[6] The baseline reads are the tools, called over MCP");
+  const argsOf = (name: string) => READS.find((r) => r.name === name)!.args;
+  assert(READS.find((r) => r.name === "plain")!.tool === "search" && Object.keys(argsOf("plain")).length === 0, "plain is the search tool, the query alone");
+  assert(argsOf("current").prefer_current === true && Object.keys(argsOf("current")).length === 1, "current is search_thoughts with prefer_current, its other arguments the tool's defaults");
+  assert((argsOf("filter").filter as Record<string, unknown>)?.priority === "High" && Object.keys(argsOf("filter")).length === 1, "filter is search_thoughts with the workaround's filter alone");
+  assert(READ_K === 10, `the score reads ${READ_K} hits; --seeded fails when a baseline read returns more, which the score would not read`);
   assert(JSON.stringify(idsOfAnswer("search", { results: [{ id: "a" }, { id: "b" }] })) === '["a","b"]' && JSON.stringify(idsOfAnswer("search_thoughts", { hits: [{ id: "c" }] })) === '["c"]', "a tool's answer is read for its ids: search's results, search_thoughts' hits");
   assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
 
@@ -267,18 +261,34 @@ async function seeded(): Promise<void> {
       return Response.json({ data: inputs.map((text, index) => ({ index, embedding: stubVector(text, STUB_DIM, "query") })), model: body.model });
     },
   });
-  const env: Record<string, string | undefined> = {
+  // The server, in-process (the write-path gate's pattern, _write-path-arm.ts): every OB1_* knob the parent set goes
+  // but the throwaway guard's, so the server boots on this eval's own; then its MCP server and REST core, a read key.
+  for (const k of Object.keys(process.env)) if (k.startsWith("OB1_") && k !== "OB1_ALLOW_REMOTE_DB" && k !== "OB1_FIXTURE_RESET") delete process.env[k];
+  for (const k of ["MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) delete process.env[k];
+  const KEY_RAW = "priority-eval-read";
+  Object.assign(process.env, {
     DATABASE_URL: url, OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`, OB1_LLM_LOCAL: "1",
     OB1_EMBEDDING_MODEL: STUB_MODEL, OB1_EMBEDDING_DIM: String(STUB_DIM), OB1_LLM_TIMEOUT: "10",
-  };
+    MCP_ACCESS_KEYS: `priority-eval:read:${hashKey(KEY_RAW)}`,
+  });
+  const worker = await mcpUnderTest();
+  if (!servedByMcpServer()) { console.error("the server under test is not the MCP server (mcp-server/stack.ts)"); process.exit(1); }
+  // The server's request lines (one per tool call, timestamped) out of the eval's output, which two runs must print
+  // alike. Loaded by a path read at run time, as mcpUnderTest loads the stack: telemetry.ts reaches OpenTelemetry,
+  // which only the stack's own install carries (test-server's rule on db/ and evals/ imports).
+  const telemetry = "../server-portable/telemetry.ts";
+  ((await import(telemetry)) as { useRequestLog: (next: (line: string) => void) => unknown }).useRequestLog(() => {});
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: worker.fetch });
+  const client = mcpClient(`http://127.0.0.1:${server.port}`, KEY_RAW);
   const store = new SqlStore(url, { max: 1 });
-  const core = createCore({ env: () => env as never, store: async () => store, door: "priority-eval" });
-  const principal: Principal = { name: "priority-eval", scope: "read", keyHash: "0".repeat(64) };
+  /** A search tool over MCP, as a client calls it; its ids from the structured answer, best first. A refusal throws. */
   const callTool = async (tool: SearchTool, args: Record<string, unknown>): Promise<string[]> => {
-    const input = toolInput(tool, args) as never;
-    const out = tool === "search" ? await core.search(principal, input) : await core.searchThoughts(principal, input);
-    if (!out.ok) throw new Error(`${tool} refused: ${JSON.stringify(out.refusal)}`);
-    return idsOfAnswer(tool, out.value);
+    const body = (await client.rpc("tools/call", { name: tool, arguments: args })) as { error?: unknown; result?: { isError?: boolean; structuredContent?: unknown; content?: { text?: string }[] } };
+    if (body.error) throw new Error(`${tool}: JSON-RPC error ${JSON.stringify(body.error)}`);
+    const text = (body.result?.content ?? []).map((c) => c.text ?? "").join("\n");
+    if (body.result?.isError) throw new Error(`${tool} refused: ${text.slice(0, 300)}`);
+    if (body.result?.structuredContent === undefined) throw new Error(`${tool} answered with no structured content`);
+    return idsOfAnswer(tool, body.result.structuredContent);
   };
   const vectorOf = new Map(PROMPTS.map((p) => [p.query, stubVector(p.query, STUB_DIM, "query")] as const));
   const toKeys = (ids: readonly string[]) => ids.map((id) => keyOf.get(id) ?? `?${id}`);
@@ -300,6 +310,7 @@ async function seeded(): Promise<void> {
   const results = new Map<string, { hits: string[][]; scores: PromptScore[] }>();
   const errors: string[] = [];
   const answerReaders: string[] = [];
+  const deeper: string[] = [];
   try {
     for (const r of READS) {
       const hits: string[][] = [];
@@ -307,7 +318,9 @@ async function seeded(): Promise<void> {
         // A baseline read that errors fails the run, below: a baseline that never ran would set the bar.
         // Its prompt is scored as no hits meanwhile, so the table still prints.
         try {
-          hits.push(toKeys(await callTool(r.tool, { ...r.args, query: p.query })));
+          const ids = await callTool(r.tool, { ...r.args, query: p.query });
+          if (ids.length > READ_K) deeper.push(`${r.name} on ${p.key}: ${ids.length}`);
+          hits.push(toKeys(ids));
         } catch (e) {
           errors.push(`baseline read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
           hits.push([]);
@@ -330,6 +343,7 @@ async function seeded(): Promise<void> {
     }
   } finally {
     await store.close();
+    server.stop(true);
     provider.stop(true);
   }
 
@@ -375,6 +389,7 @@ async function seeded(): Promise<void> {
   if (baselineErrors.length) failures.push(`${baselineErrors.length} baseline read(s) errored, and a baseline that never ran would set the bar`);
   const drift = READS.flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores));
   if (drift.length) failures.push(`the baseline moved from priority.ts's BASELINE (${drift.join("; ")}): re-record it with the main it was measured on, since the bar moves with it`);
+  if (deeper.length) failures.push(`a baseline read returned more than the ${READ_K} hits the score reads (${deeper.join("; ")}): READ_K no longer matches the tool`);
   if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
   if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} `))) failures.push("the gold ceiling errored, so the measured reads' path is broken");
   const cheats = answerReaders.filter((n) => n !== CEILING.name);
@@ -393,6 +408,7 @@ async function seeded(): Promise<void> {
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.includes("--self-check")) await selfCheck();
-  else if (args.includes("--seeded")) await seeded();
+  // The server's own pools stay open after the run; the verdict is the exit code.
+  else if (args.includes("--seeded")) { await seeded(); process.exit(0); }
   else { console.error("usage: bun eval-priority.ts --self-check | --seeded"); process.exit(2); }
 }

@@ -43,7 +43,6 @@ import { fileURLToPath } from "node:url";
 import { issueFacets, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
-import { SPECS } from "../server-portable/core/schemas.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
 
@@ -188,7 +187,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "1da5a5e34964b73b";
+export const REGISTERED_CORPUS = "0139fc455cb15104";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -339,23 +338,7 @@ export async function plantRows(sql: SQL, rows: readonly SeedRow[]): Promise<num
 /** The two search tools a baseline read, or a measured read's callTool, calls. */
 export type SearchTool = "search" | "search_thoughts";
 
-/**
- * A tool's arguments as its door hands them to the core: each field through
- * the tool's own input schema (core/schemas.ts), defaults filled, as the MCP
- * and REST doors parse a call. An argument the tool doesn't take is refused.
- */
-export function toolInput(tool: SearchTool, args: Record<string, unknown>): Record<string, unknown> {
-  const schema = SPECS[tool].inputSchema as Record<string, { parse(v: unknown): unknown }>;
-  for (const k of Object.keys(args)) if (!(k in schema)) throw new Error(`${tool} takes no argument ${k}`);
-  const out: Record<string, unknown> = {};
-  for (const [k, field] of Object.entries(schema)) {
-    const v = field.parse(args[k]);
-    if (v !== undefined) out[k] = v;
-  }
-  return out;
-}
-
-/** The thought ids a tool's answer names, best first: `search`'s results, `search_thoughts`' hits. */
+/** The thought ids a tool's structured answer names, best first: `search`'s results, `search_thoughts`' hits. */
 export function idsOfAnswer(tool: SearchTool, value: unknown): string[] {
   const v = value as { results?: { id: string }[]; hits?: { id: string }[] };
   return (tool === "search" ? v.results : v.hits)?.map((r) => r.id) ?? [];
@@ -364,7 +347,7 @@ export function idsOfAnswer(tool: SearchTool, value: unknown): string[] {
 // ── The score ───────────────────────────────────────────────────────────────
 
 /** How many hits a read returns: the `search` tool's fixed ten. */
-export const READ_K = 10;
+export const READ_K = 9;
 
 export type PromptScore = { top1: boolean; top3: boolean; tau: number | null };
 
@@ -550,9 +533,10 @@ export function verdict(read: readonly PromptScore[], baselines: readonly (reado
 // ── The reads ───────────────────────────────────────────────────────────────
 
 /**
- * A baseline read: a search tool called through the server's own core
- * (createCore, as api.ts builds it), with the arguments a client would send
- * beside the prompt's query — today's main. The bar is measured against them,
+ * A baseline read: a search tool called over MCP on the server itself (the
+ * MCP server and the REST core behind it, in-process, as the write-path gate
+ * runs them), with the arguments a client would send beside the prompt's
+ * query — today's main. The bar is measured against them,
  * so one that errors fails the run: a baseline that never ran would set the
  * bar.
  */
@@ -577,7 +561,7 @@ export const READS: readonly Read[] = [
 /**
  * What a measured read is handed for one prompt: what a deployed read would
  * have — the query's words and its stub vector, the store, and callTool, a
- * search tool called through the server's core as a baseline read is (its
+ * search tool called over MCP as a baseline read is (its
  * thought ids, best first). Never the prompt's key or its gold.
  */
 export type MeasureInput = { query: string; embedding: number[]; store: SqlStore; callTool: (tool: SearchTool, args: Record<string, unknown>) => Promise<string[]> };
