@@ -118,7 +118,7 @@ git pull
 PORT=8787 … bun extensions/extension-name/index.ts
 ```
 
-The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Most schemas use `IF NOT EXISTS` and re-run cleanly; meal-planning's does not, and every `CREATE POLICY` refuses a second run — apply the changed statements by hand there.
+The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Every extension's schema re-runs cleanly: each table and index is `IF NOT EXISTS`, and each trigger is dropped before it is made. A column changed in place is applied by hand.
 
 ---
 

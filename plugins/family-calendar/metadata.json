@@ -1,6 +1,6 @@
 {
   "name": "Family Calendar Plugin",
-  "description": "The household's members, their weekly and dated activities, and the dates to remember, in tables of the plugin's own: the week's schedule, a search over activities, and upcoming dates with yearly ones on their next anniversary. The learning path's Extension 3, ported from its standalone MCP server (SMD-2311).",
+  "description": "The household's members, their one-off, multi-day and weekly activities, and the dates to remember, in tables of the plugin's own: the members and their ids, the week's schedule day by day, a search over activities, and upcoming dates with yearly ones on their next anniversary. The learning path's Extension 3, ported from its standalone MCP server (SMD-2311).",
   "category": "plugins",
   "author": {
     "name": "Nate B. Jones",

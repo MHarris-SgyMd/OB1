@@ -36,11 +36,12 @@ On this fork the family calendar is a **plugin**: [`plugins/family-calendar`](..
 
 **Tools** (each also a REST route under `/v1/plugins/family-calendar/`):
 - `family_calendar_add_family_member` — Add a person to your household roster
-- `family_calendar_add_activity` — Schedule a one-time or recurring activity
-- `family_calendar_get_week_schedule` — See everyone's schedule for a given week
-- `family_calendar_search_activities` — Find activities by title, type, member or member's name
+- `family_calendar_list_family_members` — List the household, with each member's id
+- `family_calendar_add_activity` — Schedule a one-time appointment, a span of days, or a weekly activity
+- `family_calendar_get_week_schedule` — See everyone's schedule for a given week, day by day
+- `family_calendar_search_activities` — Find activities by title, member's name, location, notes, type or member
 - `family_calendar_add_important_date` — Track birthdays, anniversaries, deadlines
-- `family_calendar_get_upcoming_dates` — Surface dates in the next N days, yearly ones on their next anniversary
+- `family_calendar_get_upcoming_dates` — Surface dates in the next N days, yearly ones on their next anniversary, and any whose reminder has begun
 
 The plugin's [README](../../plugins/family-calendar/README.md) gives each one's input, output and refusals.
 
@@ -67,11 +68,11 @@ docker compose up -d migrate api mcp
 docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-The migrator makes the plugin's tables, and the servers start with its six tools.
+The migrator makes the plugin's tables, and the servers start with its seven tools.
 
 ### 2. Check Your AI Sees It
 
-Your MCP client lists the `family_calendar_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the three that read. A write key sees all six.
+Your MCP client lists the `family_calendar_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the four that read. A write key sees all seven.
 
 ### 3. Test It
 
@@ -118,7 +119,7 @@ For common issues (connection errors, 401s), see [Common Troubleshooting](../../
 - Refresh your client's tool list
 
 **Activities not showing up in get_week_schedule**
-- Check that `start_date` and `end_date` are set correctly: a weekly activity is listed only where its day in that week falls within them
+- Check that `start_date` and `end_date` are set correctly: a one-off (a start date alone) is in the week of its day only, and a weekly activity is listed only where its day in that week falls within its dates
 - `day_of_week` is a lower-case day name ('monday', not 'Monday'); a capitalised one is refused when the activity is added
 - The week runs seven days from `week_start`, in YYYY-MM-DD format
 

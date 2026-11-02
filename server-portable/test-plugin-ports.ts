@@ -200,11 +200,21 @@ console.log("\n[family-calendar] its members, activities and dates");
   const P = "family-calendar";
   const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
   const titles = (r: Called) => ((r.body.activities ?? []) as { title: string }[]).map((a) => a.title).sort().join();
-  const [{ today }] = (await sql`SELECT current_date::text AS today`) as { today: string }[];
-  /** A date `days` from the database's today, YYYY-MM-DD. */
+  const [{ today }] = (await sql`SELECT (now() AT TIME ZONE 'UTC')::date::text AS today`) as { today: string }[];
+  /** A date `days` from today in UTC, the plugin's today, YYYY-MM-DD. */
   const fromToday = async (days: number) => ((await sql`SELECT (${today}::date + ${days}::int)::text AS d`) as { d: string }[])[0].d;
   /** The same day and month as the date `days` from today, `yearsBack` years earlier. */
   const yearsBefore = async (days: number, yearsBack: number) => ((await sql`SELECT ((${today}::date + ${days}::int) - make_interval(years => ${yearsBack}::int))::date::text AS d`) as { d: string }[])[0].d;
+
+  // Each operation's scope, pinned here: [2] reads the scopes from the manifest it checks, so a wrong declaration there
+  // (a write declared read, an add declared capture) would pass it.
+  const scopes = Object.fromEntries(Object.entries(REGISTRY.find((p) => p.name === P)!.operations).map(([k, op]) => [k, op.scope]));
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_family_member: "write", list_family_members: "read", add_activity: "write", get_week_schedule: "read", search_activities: "read", add_important_date: "write", get_upcoming_dates: "read" }),
+    `its seven operations' scopes: the four reads read, the three adds write (${JSON.stringify(scopes)})`);
+  const hints = Object.fromEntries((await toolsFor(KEYS.writer)).filter((t) => t.name.startsWith("family_calendar_")).map((t) => [t.name.slice("family_calendar_".length), JSON.stringify(t.annotations)]));
+  const ADDS_HINT = JSON.stringify({ destructiveHint: false, openWorldHint: false }), READ_HINT = JSON.stringify({ readOnlyHint: true, openWorldHint: false });
+  assert(Object.keys(hints).length === 7 && Object.entries(hints).every(([k, h]) => h === (scopes[k] === "read" ? READ_HINT : ADDS_HINT)),
+    `its hints, all seven: an add destroys nothing, a read is read-only, and every operation is closed-world (${JSON.stringify(hints).slice(0, 240)})`);
 
   const ada = await c("add_family_member", { name: "  Ada ", relationship: "child", birth_date: "2018-03-01" });
   assert(ada.status === 200 && UUID.test(ada.body.member?.id) && ada.body.member?.name === "Ada" && ada.body.member?.relationship === "child" && ada.body.member?.birth_date === "2018-03-01" && !("user_id" in ada.body.member),
@@ -212,6 +222,10 @@ console.log("\n[family-calendar] its members, activities and dates");
   const adaId = String(ada.body.member?.id);
   const ben = await c("add_family_member", { name: "Ben" }, { door: "mcp" });
   assert(ben.status === 200 && UUID.test(ben.body.member?.id) && ben.body.member?.relationship === null && ben.body.member?.birth_date === null, `…over MCP too, the optional fields null (${JSON.stringify(ben.viaMcp).slice(0, 160)})`);
+  const listed = await c("list_family_members", {});
+  const members = (listed.body.members ?? []) as { id: string; name: string }[];
+  assert(listed.status === 200 && members.map((m) => m.name).join() === "Ada,Ben" && members[0].id === adaId && members[1].id === ben.body.member?.id,
+    `list_family_members: every member by name, with the ids the other operations take (${JSON.stringify(members).slice(0, 160)})`);
   const nul = await c("add_family_member", { name: "Cy\u0000" });
   const nulSearch = await c("search_activities", { query: "a\u0000b" });
   assert(nul.status === 400 && nulSearch.status === 400, `a NUL character, which Postgres will not store in text, is refused at 400 in a body and in a query, not the database's 500 (${nul.status}, ${nulSearch.status})`);
@@ -221,25 +235,34 @@ console.log("\n[family-calendar] its members, activities and dates");
   const yearZero = await c("add_family_member", { name: "Cy", birth_date: "0000-01-01" });
   assert(badDay.status === 400 && yearZero.status === 400, `a birth date that is no date, or in the year 0000 Postgres has not, is refused before the database (${badDay.status}, ${yearZero.status} ${JSON.stringify(yearZero.body).slice(0, 100)})`);
 
-  // Six activities around the week of 2026-09-21 (Monday) to 2026-09-27: one weekly, four dated — across the week, ended
-  // before it, running on since before it, ahead of it — and one weekly whose dates ended before the week.
+  // Activities around the week of 2026-09-21 (Monday) to 2026-09-27: one weekly; spans across the week, ended before it
+  // and reaching into it from before; one-offs inside it and on the day after it; and one weekly whose dates ended before it.
   const swim = await c("add_activity", { family_member_id: adaId, title: "Swimming", activity_type: "sports", day_of_week: "monday", start_time: "16:00", end_time: "17:00" });
-  const camp = await c("add_activity", { title: "Autumn camp", activity_type: "school", start_date: "2026-09-20", end_date: "2026-09-27", start_time: "09:00" });
+  const camp = await c("add_activity", { title: "Autumn camp", activity_type: "school", start_date: "2026-09-20", end_date: "2026-09-27", start_time: "09:00", location: "Lincoln Park" });
   const ended = await c("add_activity", { title: "Spring term", activity_type: "school", start_date: "2026-09-01", end_date: "2026-09-10", start_time: "08:00" });
-  const ongoing = await c("add_activity", { title: "Piano", activity_type: "music", start_date: "2026-09-15", start_time: "18:00" }, { door: "mcp" });
+  const ongoing = await c("add_activity", { title: "Piano", activity_type: "music", start_date: "2026-09-15", end_date: "2026-10-31", start_time: "18:00" }, { door: "mcp" });
   const ahead = await c("add_activity", { title: "Ski trip", activity_type: "sports", start_date: "2026-09-28", start_time: "07:00" });
+  // A one-off: a start_date and no end_date is that day alone (the old server ran it on for ever).
+  const dentist = await c("add_activity", { title: "Dentist", activity_type: "medical", start_date: "2026-09-24", start_time: "15:00" });
   const lapsed = await c("add_activity", { family_member_id: adaId, title: "Summer tennis", activity_type: "sports", day_of_week: "tuesday", start_date: "2026-06-01", end_date: "2026-08-31", start_time: "10:00" });
   // A weekly one with no start date, ended before every week read below: with Swimming, the two with none, newest first.
   const chess = await c("add_activity", { title: "Chess", activity_type: "games", day_of_week: "sunday", end_date: "2026-06-30" });
-  const made = [swim, camp, ended, ongoing, ahead, lapsed, chess];
-  assert(made.every((r) => r.status === 200 && UUID.test(r.body.activity?.id)), `add_activity ×7 (${made.map((r) => r.status === 200 ? "" : JSON.stringify(r.body)).join("").slice(0, 200)})`);
+  const made = [swim, camp, ended, ongoing, ahead, lapsed, chess, dentist];
+  assert(made.every((r) => r.status === 200 && UUID.test(r.body.activity?.id)), `add_activity ×8 (${made.map((r) => r.status === 200 ? "" : JSON.stringify(r.body)).join("").slice(0, 200)})`);
   assert(swim.body.activity?.family_member_id === adaId && swim.body.activity?.family_member?.name === "Ada" && swim.body.activity?.start_time === "16:00" && swim.body.activity?.day_of_week === "monday" && camp.body.activity?.family_member === null && camp.body.activity?.start_date === "2026-09-20",
     `…each answered with its member (or null for the whole family's), its times HH:MM and dates bare (${JSON.stringify(swim.body.activity).slice(0, 200)})`);
 
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  assert(swim.body.activity?.end_time === "17:00" && ISO.test(String(swim.body.activity?.created_at)) && ISO.test(String(ada.body.member?.created_at)),
+    `…the end time HH:MM too, and created_at ISO text in UTC (${swim.body.activity?.end_time}, ${swim.body.activity?.created_at})`);
+  const oneDay = await c("add_activity", { title: "Sports day", activity_type: "school", start_date: "2026-09-25", end_date: "2026-09-25" });
+  assert(oneDay.status === 200, `a span of one day, its end its start, is no BAD_DATES (${oneDay.status} ${JSON.stringify(oneDay.body).slice(0, 100)})`);
   const week = await c("get_week_schedule", { week_start: "2026-09-21" });
-  assert(week.status === 200 && titles(week) === "Autumn camp,Piano,Swimming" && week.body.week_end === "2026-09-27",
-    `get_week_schedule: the weekly activity and the two whose dates reach the week — not the one that ended before it, the one starting the day after (the old server's week ran eight days), or the weekly one whose dates ended (${week.status} ${titles(week)} to ${week.body.week_end})`);
-  assert(((week.body.activities ?? []) as { title: string }[]).map((a) => a.title).join() === "Autumn camp,Swimming,Piano", `…ordered by start time (${((week.body.activities ?? []) as { title: string }[]).map((a) => a.title).join()})`);
+  assert(week.status === 200 && titles(week) === "Autumn camp,Dentist,Piano,Sports day,Swimming" && week.body.week_end === "2026-09-27",
+    `get_week_schedule: the weekly activity, the two spans that reach the week and the one-off inside it — not the span that ended before it, the one-off the day after (the old server's week ran eight days), or the weekly one whose dates ended (${week.status} ${titles(week)} to ${week.body.week_end})`);
+  const inWeek = (week.body.activities ?? []) as { title: string; on_date: string }[];
+  assert(inWeek.map((a) => `${a.title}@${a.on_date}`).join() === "Autumn camp@2026-09-21,Swimming@2026-09-21,Piano@2026-09-21,Dentist@2026-09-24,Sports day@2026-09-25",
+    `…in date order, by start time within a day, each with the date it falls on — a span its first day in the week (${inWeek.map((a) => `${a.title}@${a.on_date}`).join()})`);
   const swimRow = (week.body.activities ?? []).find((a: { title: string }) => a.title === "Swimming");
   assert(JSON.stringify(swimRow?.family_member) === JSON.stringify({ id: adaId, name: "Ada", relationship: "child" }) && (week.body.activities ?? []).find((a: { title: string }) => a.title === "Piano")?.family_member === null,
     `…each with its member, or null for the whole family's (${JSON.stringify(swimRow?.family_member)})`);
@@ -247,18 +270,26 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(titles(summer) === "Summer tennis,Swimming", `…the weekly one in a week its dates reach (${titles(summer)})`);
   const forAda = await c("get_week_schedule", { week_start: "2026-09-21", family_member_id: adaId });
   assert(forAda.status === 200 && titles(forAda) === "Swimming", `…filtered to one member (${titles(forAda)})`);
+  const forNoOne = await c("get_week_schedule", { week_start: "2026-09-21", family_member_id: NO_ROW });
+  assert(forNoOne.status === 404 && forNoOne.body.code === "NO_SUCH_MEMBER" && /list_family_members/.test(String(forNoOne.body.message)),
+    `…a member id that names no one: 404 NO_SUCH_MEMBER saying where the ids are, not an empty week (${JSON.stringify(forNoOne.body).slice(0, 160)})`);
 
   const byQuery = await c("search_activities", { query: "CAMP" });
   assert(byQuery.status === 200 && titles(byQuery) === "Autumn camp", `search_activities by title, any case (${byQuery.status} ${titles(byQuery)})`);
   const byName = await c("search_activities", { query: "ada" });
   assert(titles(byName) === "Summer tennis,Swimming", `…by the member's name (${titles(byName)})`);
   const byType = await c("search_activities", { activity_type: "sports" });
-  assert(titles(byType) === "Ski trip,Summer tennis,Swimming", `…by type (${titles(byType)})`);
+  const byTypeUpper = await c("search_activities", { activity_type: "SPORTS" });
+  assert(titles(byType) === "Ski trip,Summer tennis,Swimming" && titles(byTypeUpper) === titles(byType), `…by type, in any case (${titles(byType)} / ${titles(byTypeUpper)})`);
+  const byPlace = await c("search_activities", { query: "lincoln" });
+  assert(titles(byPlace) === "Autumn camp", `…by location (${titles(byPlace)})`);
+  const searchNoOne = await c("search_activities", { family_member_id: NO_ROW });
+  assert(searchNoOne.status === 404 && searchNoOne.body.code === "NO_SUCH_MEMBER", `…a member id that names no one: 404 NO_SUCH_MEMBER (${searchNoOne.status})`);
   const both = await c("search_activities", { activity_type: "sports", family_member_id: adaId });
   assert(titles(both) === "Summer tennis,Swimming", `…the filters together (${titles(both)})`);
   const every = await c("search_activities", {});
   const order = ((every.body.activities ?? []) as { title: string }[]).map((a) => a.title);
-  assert(every.status === 200 && order.join() === "Ski trip,Autumn camp,Piano,Spring term,Summer tennis,Chess,Swimming", `…none lists all seven, latest start date first, then the two with none, newest first (${order.join()})`);
+  assert(every.status === 200 && order.join() === "Ski trip,Sports day,Dentist,Autumn camp,Piano,Spring term,Summer tennis,Chess,Swimming", `…none lists all nine, latest start date first, then the two with none, newest first (${order.join()})`);
   // A weekly activity is listed only where its day in the week is within its own dates: a Monday class starting on the
   // Wednesday of the week of 2026-09-21 first falls on the 28th, and a Monday club ending Sunday the 20th last fell on the 14th.
   const late = await c("add_activity", { title: "Late Monday class", activity_type: "music", day_of_week: "monday", start_date: "2026-09-23" });
@@ -268,18 +299,35 @@ console.log("\n[family-calendar] its members, activities and dates");
   const fromTuesday = await c("get_week_schedule", { week_start: "2026-09-15" });
   const next = await c("get_week_schedule", { week_start: "2026-09-28" });
   const before = await c("get_week_schedule", { week_start: "2026-09-14" });
-  assert(titles(weekAgain) === "Autumn camp,Piano,Swimming" && !titles(fromTuesday).includes("Monday club") && titles(next).includes("Late Monday class") && titles(before).includes("Monday club") && !titles(before).includes("Late Monday class"),
+  assert(titles(weekAgain) === "Autumn camp,Dentist,Piano,Sports day,Swimming" && !titles(fromTuesday).includes("Monday club") && titles(next).includes("Late Monday class") && titles(before).includes("Monday club") && !titles(before).includes("Late Monday class"),
     `…a weekly one in a week its dates overlap but where its day falls outside them is left out, and listed in the week its day falls inside (${titles(weekAgain)} / ${titles(fromTuesday)} / ${titles(next)} / ${titles(before)})`);
+  assert(titles(next).includes("Ski trip") && !titles(next).includes("Dentist") && titles(next).includes("Piano"), `…a one-off is in the week of its day alone, a span in each week it reaches (${titles(next)})`);
   const capped = await c("search_activities", { limit: 2 });
   assert(((capped.body.activities ?? []) as unknown[]).length === 2, "…limit applies");
   await c("add_activity", { title: "Bake sale 50% off", start_date: "2026-10-01" });
   const percent = await c("search_activities", { query: "50%" });
   const underscore = await c("search_activities", { query: "_" });
-  assert(titles(percent) === "Bake sale 50% off" && titles(underscore) === "", `…a % or an _ in the query matches itself, not any text (${titles(percent)} / ${titles(underscore)})`);
+  await c("add_activity", { title: "Folder C:\\temp", start_date: "2026-10-02" });
+  const backslash = await c("search_activities", { query: "C:\\t" });
+  assert(titles(percent) === "Bake sale 50% off" && titles(underscore) === "" && titles(backslash) === "Folder C:\\temp", `…a %, an _ or a backslash in the query matches itself, not any text (${titles(percent)} / ${titles(underscore)} / ${titles(backslash)})`);
+
+  // The week's edges, in the week of Monday 2027-03-01 to Sunday 03-07: each edge day in and the day past it out, for a
+  // one-off, a span and a weekly activity's own dates; and two on one day, the one with no time after the timed one.
+  const edges: [string, Body][] = [
+    ["E one-off on the Sunday", { start_date: "2027-03-07" }], ["E one-off the Monday after", { start_date: "2027-03-08" }],
+    ["E span ending the Monday", { start_date: "2027-02-20", end_date: "2027-03-01" }], ["E span ending the Sunday before", { start_date: "2027-02-20", end_date: "2027-02-28" }],
+    ["E weekly from its Wednesday", { day_of_week: "wednesday", start_date: "2027-03-03", start_time: "08:00" }], ["E weekly from the Thursday", { day_of_week: "wednesday", start_date: "2027-03-04" }],
+    ["E weekly to its Wednesday", { day_of_week: "wednesday", start_date: "2027-01-01", end_date: "2027-03-03" }], ["E weekly to the Tuesday", { day_of_week: "wednesday", start_date: "2027-01-01", end_date: "2027-03-02" }],
+  ];
+  for (const [title, when] of edges) await c("add_activity", { title, activity_type: "edge", ...when });
+  const edgeWeek = ((await c("get_week_schedule", { week_start: "2027-03-01" })).body.activities ?? []) as { title: string; on_date: string }[];
+  const edgeTitles = edgeWeek.filter((a) => a.title.startsWith("E ")).map((a) => a.title);
+  assert(edgeTitles.join() === "E span ending the Monday,E weekly from its Wednesday,E weekly to its Wednesday,E one-off on the Sunday",
+    `…each edge day in and the day past it out, in date order, the timed one before the untimed on the same day (${edgeTitles.join()})`);
 
   const noMember = await c("add_activity", { title: "x", start_date: "2026-09-01", family_member_id: NO_ROW });
   const noMemberMcp = await c("add_activity", { title: "x", start_date: "2026-09-01", family_member_id: NO_ROW }, { door: "mcp" });
-  assert(noMember.status === 404 && noMember.body.code === "NO_SUCH_MEMBER" && noMemberMcp.viaMcp.result?.isError === true && JSON.stringify(noMemberMcp.viaMcp).includes("NO_SUCH_MEMBER"), `a member that is not there: 404 NO_SUCH_MEMBER over both doors (${JSON.stringify(noMember.body)})`);
+  assert(noMember.status === 404 && noMember.body.code === "NO_SUCH_MEMBER" && /list_family_members/.test(String(noMember.body.message)) && noMemberMcp.viaMcp.result?.isError === true && JSON.stringify(noMemberMcp.viaMcp).includes("NO_SUCH_MEMBER"), `a member that is not there: 404 NO_SUCH_MEMBER over both doors (${JSON.stringify(noMember.body)})`);
   const backwards = await c("add_activity", { title: "x", start_date: "2026-09-10", end_date: "2026-09-01" });
   assert(backwards.status === 422 && backwards.body.code === "BAD_DATES", `an end before the start: 422 BAD_DATES (${JSON.stringify(backwards.body)})`);
   const noWhen = await c("add_activity", { title: "x", activity_type: "sports" });
@@ -289,12 +337,44 @@ console.log("\n[family-calendar] its members, activities and dates");
   const badDow = await c("add_activity", { title: "x", day_of_week: "Monday" });
   const badTime = await c("add_activity", { title: "x", start_time: "25:00" });
   assert(badDow.status === 400 && badTime.status === 400, `a day not lower-case, a time past 23:59: refused before the database (${badDow.status}, ${badTime.status})`);
+  const bounds: [string, string, Body][] = [
+    ["a minute of 60", "add_activity", { title: "x", start_date: "2026-09-01", start_time: "16:60" }],
+    ["a time with seconds", "add_activity", { title: "x", start_date: "2026-09-01", start_time: "16:00:30" }],
+    ["an empty title", "add_activity", { title: "  ", start_date: "2026-09-01" }],
+    ["a title of 201 characters", "add_activity", { title: "x".repeat(201), start_date: "2026-09-01" }],
+    ["a member id that is no uuid", "add_activity", { title: "x", start_date: "2026-09-01", family_member_id: "Ada" }],
+    ["an empty name", "add_family_member", { name: "" }],
+    ["an empty relationship", "add_family_member", { name: "x", relationship: " " }],
+    ["a reminder of 366 days", "add_important_date", { title: "x", date_value: "2026-09-01", reminder_days_before: 366 }],
+    ["a reminder of -1 days", "add_important_date", { title: "x", date_value: "2026-09-01", reminder_days_before: -1 }],
+    ["a week's member id that is no uuid", "get_week_schedule", { week_start: "2026-09-21", family_member_id: "Ada" }],
+    ["a limit of 0", "search_activities", { limit: 0 }],
+    ["a limit of 201", "search_activities", { limit: 201 }],
+    ["an empty query", "search_activities", { query: "" }],
+    ["days_ahead of 367", "get_upcoming_dates", { days_ahead: 367 }],
+  ];
+  const outOfBounds: string[] = [];
+  for (const [label, key, input] of bounds) {
+    const r = await c(key, input);
+    if (r.status !== 400) outOfBounds.push(`${label}: ${r.status}`);
+  }
+  assert(outOfBounds.length === 0, `each input out of its bounds is refused at 400, before the database (${bounds.length} cases; not: ${outOfBounds.join("; ") || "none"})`);
   const strays = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_family_calendar.activities WHERE title = 'x'`);
   assert(strays.n === 0, "none of the refused ones stored a row");
   // The rule NO_WHEN answers is the table's too, so a row written around the operation (a copy from the old tables) is held to it.
-  let tableSaid = "";
-  try { await sql`INSERT INTO plugin_family_calendar.activities (title) VALUES ('no when')`; } catch (e) { tableSaid = (e as Error).message; }
-  assert(/check constraint/.test(tableSaid), `…and the table refuses an activity with neither a day nor a start date itself (${tableSaid.slice(0, 100)})`);
+  const tableRefuses = async (statement: string, constraint: RegExp) => {
+    try { await sql.unsafe(statement); return `${statement.slice(0, 60)}: stored`; } catch (e) { return constraint.test((e as Error).message) ? "" : `${statement.slice(0, 60)}: ${(e as Error).message.slice(0, 80)}`; }
+  };
+  const tableMisses = (await Promise.all([
+    tableRefuses("INSERT INTO plugin_family_calendar.activities (title) VALUES ('no when')", /activities_weekly_or_dated/),
+    tableRefuses("INSERT INTO plugin_family_calendar.activities (title, start_date, end_date) VALUES ('t', '2026-09-10', '2026-09-01')", /activities_end_not_before_start/),
+    tableRefuses("INSERT INTO plugin_family_calendar.activities (title, day_of_week) VALUES ('t', 'Monday')", /day_of_week_check/),
+    tableRefuses("INSERT INTO plugin_family_calendar.activities (title, start_date) VALUES ('', '2026-09-01')", /title_check/),
+    tableRefuses("INSERT INTO plugin_family_calendar.activities (title, start_date, family_member_id) VALUES ('t', '2026-09-01', '00000000-0000-4000-8000-00000000dead')", /foreign key/),
+    tableRefuses("INSERT INTO plugin_family_calendar.family_members (name) VALUES ('')", /name_check/),
+    tableRefuses("INSERT INTO plugin_family_calendar.important_dates (title, date_value, reminder_days_before) VALUES ('t', '2026-09-01', 366)", /reminder_days_before_check/),
+  ])).filter(Boolean);
+  assert(tableMisses.length === 0, `…and the tables hold the rules themselves, so a row written around the operations (the README's copy) is refused by name (${tableMisses.join("; ") || "all seven"})`);
 
   // Dates: a birthday whose stored year is long past (the old server never listed one), a deadline, one past, one beyond.
   const bdayOn = await fromToday(10);
@@ -303,6 +383,8 @@ console.log("\n[family-calendar] its members, activities and dates");
   const past = await c("add_important_date", { title: "Old deadline", date_value: await fromToday(-3) });
   const todayOne = await c("add_important_date", { title: "Today's deadline", date_value: today, reminder_days_before: 0 });
   assert([bday, renewal, past, todayOne].every((r) => r.status === 200 && UUID.test(r.body.important_date?.id)), `add_important_date ×4 (${[bday, renewal, past, todayOne].map((r) => JSON.stringify(r.body)).join(" ").slice(0, 200)})`);
+  assert(bday.body.important_date?.next_date === bdayOn && renewal.body.important_date?.next_date === (await fromToday(60)) && past.body.important_date?.next_date === null,
+    `each added date answers when it next comes: the yearly birthday on its anniversary, the renewal on its day, and a one-time date already past null, so the agent can say it will not be listed (${past.body.important_date?.next_date})`);
   assert(bday.body.important_date?.recurring_yearly === true && bday.body.important_date?.reminder_days_before === 7 && bday.body.important_date?.family_member?.name === "Ada" && renewal.body.important_date?.reminder_days_before === 14 && renewal.body.important_date?.recurring_yearly === false,
     `…the defaults filled, the member folded in (${JSON.stringify(bday.body.important_date).slice(0, 200)})`);
   const soon = await c("get_upcoming_dates", { days_ahead: 30 });
@@ -323,24 +405,29 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(zeroDate.status === 400, `a date in the year 0000: 400 (${zeroDate.status})`);
   const strayDates = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_family_calendar.important_dates WHERE title = 'x'`);
   assert(strayDates.n === 0, "neither refused date stored a row");
-  const hints = Object.fromEntries((await toolsFor(KEYS.writer)).filter((t) => t.name.startsWith("family_calendar_")).map((t) => [t.name, t.annotations]));
-  assert(JSON.stringify(hints.family_calendar_add_activity) === JSON.stringify({ destructiveHint: false, openWorldHint: false }) && JSON.stringify(hints.family_calendar_get_upcoming_dates) === JSON.stringify({ readOnlyHint: true, openWorldHint: false }),
-    `its hints: an add destroys nothing, and every operation is closed-world (${JSON.stringify(hints).slice(0, 200)})`);
 
-  // Dates added after the windows above were read: a yearly one whose anniversary is today, a 29 February, and two
-  // dated thirty and thirty-one days on, either side of the default.
+  // Dates added after the windows above were read: a yearly one whose anniversary is today, a 29 February, two dated
+  // thirty and thirty-one days on either side of the default, a yearly one stored under next year, and a deadline
+  // forty days off whose 45 days' reminder has begun.
   await c("add_important_date", { title: "Anniversary today", date_value: await yearsBefore(0, 5), recurring_yearly: true });
   await c("add_important_date", { title: "Leap day", date_value: "2020-02-29", recurring_yearly: true });
   await c("add_important_date", { title: "Day thirty", date_value: await fromToday(30) });
   await c("add_important_date", { title: "Day thirty-one", date_value: await fromToday(31) });
+  await c("add_important_date", { title: "Next year's birthday", date_value: await yearsBefore(20, -1), recurring_yearly: true });
+  await c("add_important_date", { title: "Long reminder", date_value: await fromToday(40), reminder_days_before: 45 });
   const zero = await c("get_upcoming_dates", { days_ahead: 0 });
-  const zeroDates = (zero.body.dates ?? []) as { title: string; next_date: string; days_until: number }[];
-  assert(zeroDates.map((d) => d.title).join() === "Anniversary today,Today's deadline" && zeroDates.every((d) => d.next_date === today && d.days_until === 0),
-    `days_ahead 0: today alone, a yearly date whose anniversary is today among it (${zeroDates.map((d) => d.title).join()})`);
-  const thirty = ((await c("get_upcoming_dates", {})).body.dates ?? []) as { title: string }[];
+  const zeroDates = (zero.body.dates ?? []) as { title: string; next_date: string; days_until: number; remind: boolean }[];
+  assert(zeroDates.filter((d) => d.days_until === 0).map((d) => d.title).join() === "Anniversary today,Today's deadline" && zeroDates.every((d) => d.days_until === 0 ? d.next_date === today : d.remind)
+         && zeroDates.some((d) => d.title === "Long reminder"),
+    `days_ahead 0: today's, a yearly date whose anniversary is today among them, and beyond today only those whose reminder has begun (${zeroDates.map((d) => d.title).join()})`);
+  const thirty = ((await c("get_upcoming_dates", {})).body.dates ?? []) as { title: string; next_date: string; days_until: number; remind: boolean }[];
   assert(thirty.some((d) => d.title === "Day thirty") && !thirty.some((d) => d.title === "Day thirty-one"), `…unless given, thirty days: the thirtieth day in, the thirty-first out (${thirty.map((d) => d.title).join()})`);
+  const nextYears = thirty.find((d) => d.title === "Next year's birthday");
+  assert(nextYears?.next_date === (await fromToday(20)), `…a yearly date stored under next year comes round this year all the same, on its month and day (${JSON.stringify(nextYears)})`);
+  const longOne = thirty.find((d) => d.title === "Long reminder");
+  assert(longOne?.days_until === 40 && longOne.remind === true, `…and a date past the window whose reminder has begun is listed, reminded of (${JSON.stringify(longOne)})`);
   // 29 February's next anniversary, as the description says: that day in a leap year, the 28th in another. Reckoned
-  // here from the database's today, and found in a year's window wherever today falls.
+  // here from today in UTC, and found in a year's window wherever today falls.
   const [ty, tm, td] = today.split("-").map(Number);
   const leapYear = (y: number) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
   const feb = (y: number) => `${y}-02-${leapYear(y) ? "29" : "28"}`;
@@ -348,6 +435,7 @@ console.log("\n[family-calendar] its members, activities and dates");
   const year = ((await c("get_upcoming_dates", { days_ahead: 366 })).body.dates ?? []) as { title: string; next_date: string }[];
   const leap = year.find((d) => d.title === "Leap day");
   assert(leap?.next_date === expected, `a yearly 29 February comes round on ${expected} (${JSON.stringify(leap)})`);
+  assert(!year.some((d) => d.title === "Old deadline"), "…and a one-time date already past is in no window, a year's included: it does not come round");
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

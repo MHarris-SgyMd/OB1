@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS activities (
   end_time          time,
   -- A dated activity's first day, or the first week a weekly one runs.
   start_date        date,
-  -- Its last day; null for one that runs on.
+  -- Its last day. Null: a dated activity is its start_date alone, and a
+  -- weekly one runs on (upstream's own reading of the column).
   end_date          date,
   location          text,
   notes             text,
@@ -73,7 +74,7 @@ CREATE INDEX IF NOT EXISTS important_dates_by_date ON important_dates (date_valu
 -- operation selects named columns, never `*`, so a column added here later
 -- changes no prepared statement's result (check 41).
 CREATE OR REPLACE VIEW activity_rows AS
-  SELECT a.id, a.family_member_id, a.title, a.activity_type, a.day_of_week, m.name AS member_name,
+  SELECT a.id, a.family_member_id, a.title, a.activity_type, a.day_of_week, m.name AS member_name, a.location, a.notes,
          a.start_date AS starts, a.end_date AS ends, a.start_time AS starts_at, a.created_at,
          jsonb_build_object(
            'id', a.id, 'family_member_id', a.family_member_id, 'title', a.title, 'activity_type', a.activity_type, 'day_of_week', a.day_of_week,
@@ -84,12 +85,25 @@ CREATE OR REPLACE VIEW activity_rows AS
          ) AS answer
     FROM activities a LEFT JOIN family_members m ON m.id = a.family_member_id;
 
+-- next_date: when the date next comes, on or after today in UTC, or null for a
+-- one-time date already past. A yearly one comes round on its month and day,
+-- whatever year it was stored under (a birth year, or next year's): moved to
+-- this year, and to next if that is past. Postgres moves 29 February to the
+-- 28th in a year without one.
 CREATE OR REPLACE VIEW important_date_rows AS
-  SELECT d.id, d.title, d.date_value AS day, d.recurring_yearly, d.reminder_days_before,
+  SELECT d.id, d.title, d.recurring_yearly, d.reminder_days_before,
+         CASE
+           WHEN NOT d.recurring_yearly THEN CASE WHEN d.date_value >= t.today THEN d.date_value END
+           WHEN (d.date_value + make_interval(years => t.year - extract(year FROM d.date_value)::int))::date >= t.today
+             THEN (d.date_value + make_interval(years => t.year - extract(year FROM d.date_value)::int))::date
+           ELSE (d.date_value + make_interval(years => t.year - extract(year FROM d.date_value)::int + 1))::date
+         END AS next_date,
          jsonb_build_object(
            'id', d.id, 'family_member_id', d.family_member_id, 'title', d.title, 'date_value', d.date_value::text,
            'recurring_yearly', d.recurring_yearly, 'reminder_days_before', d.reminder_days_before, 'notes', d.notes,
            'created_at', to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
            'family_member', CASE WHEN m.id IS NULL THEN NULL ELSE jsonb_build_object('id', m.id, 'name', m.name, 'relationship', m.relationship) END
          ) AS answer
-    FROM important_dates d LEFT JOIN family_members m ON m.id = d.family_member_id;
+    FROM important_dates d
+    LEFT JOIN family_members m ON m.id = d.family_member_id
+    CROSS JOIN LATERAL (SELECT (now() AT TIME ZONE 'UTC')::date AS today, extract(year FROM now() AT TIME ZONE 'UTC')::int AS year) t;
