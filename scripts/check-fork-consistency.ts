@@ -539,10 +539,10 @@
  *      working directory's file alone (SMD-2978: db-live ran
  *      server-portable/preflight.ts on a zod fetched at run time). Its probes
  *      pin which files turn it off
- *  45. no .md file states a suite's assertion count — `N assertions`
- *      anywhere, a suite beside `N passed/checks/cases/tests` or a tally, a
- *      command's `# N` comment, prose read by paragraph so a wrapped count is
- *      seen — since Fork Checks publishes each to the wiki's Test-counts page
+ *  45. no .md file states a suite's assertion count — a suite beside
+ *      `N assertions/passed/checks/cases/tests` or a tally, `NN assertions`
+ *      with no suite named, a command's `# N` comment, prose read by
+ *      paragraph so a wrapped count is seen — since Fork Checks publishes each to the wiki's Test-counts page
  *      on a push to main (SMD-3614, SMD-3655); changes/, CHANGELOG.md, two
  *      dated analyses and FORK.md's change rows keep theirs as records. Its
  *      probe pins what it refuses and passes
@@ -7930,13 +7930,16 @@ checkSecretsOnArgv();
  * suite's to the wiki's Test-counts page on a push to main, and no `.md` file
  * states one: a count in a doc is an edit every PR that adds an assertion
  * makes, and the line two such PRs conflict on. It fails:
- *   - `N assertions` anywhere, a suite named or not (`the live suite has
- *     1932 assertions`, the summary line `295 assertions: 295 passed`);
  *   - a suite (`test-*`, `eval-*` or `smoke*` .ts/.mjs/.js, or `bun run
- *     test`) beside `N passed`, `N checks`, `N cases` or `N tests`;
+ *     test`) beside `N assertions` or `N passed`, and beside `N checks`,
+ *     `N cases` or `N tests` of two digits or more;
+ *   - `N assertions` of two digits or more with no suite named (`the live
+ *     suite has 1932 assertions`; a suite's total has two digits, where
+ *     `each case makes 3 assertions` is prose about tests);
  *   - a suite followed within 40 characters by a tally, `1932/1932`;
- *   - on a line, a suite followed by a comment that opens with a number,
- *     `bun test-x.ts  # 1334 —`, `# 1334` or `# 3127 assertions`.
+ *   - a suite followed on its line by a comment that opens with a number:
+ *     `# 1334 —` anywhere, and on a code-block line `# 1334` too (in prose
+ *     `#123:` is an issue).
  * `N assertions: N passed` passes, as does a number that is not a count:
  * `# 14 labelled captures`, `(115) migrations`, `phase-1/2/3`, migration
  * `015/018`, and a `#123` issue in prose. Prose is read by paragraph and
@@ -7949,10 +7952,10 @@ checkSecretsOnArgv();
  */
 const COUNT_SUITE_SRC = String.raw`(?:\b(?:test|eval|smoke)[\w-]*\.(?:ts|mjs|js)\b|\bbun run test(?::[\w-]+)?\b)`;
 const COUNT_SUITE = new RegExp(COUNT_SUITE_SRC);
-/** A count of assertions, a suite named or not. */
-const COUNT_ASSERTIONS = /\b\d[\d,]*\s+assertions\b/;
-/** A count in other words, beside a suite in the same paragraph. */
-const COUNT_WORDS = /\b\d[\d,]*\s+(?:passed|checks|cases|tests)\b/;
+/** A suite's count of assertions with no suite named: two digits at least, so prose about a case's few is no count. */
+const COUNT_ASSERTIONS = /\b[1-9][\d,]*\d\s+assertions\b/;
+/** A count beside a suite in the same paragraph: any `N assertions` or `N passed`, and checks, cases or tests of two digits at least. */
+const COUNT_WORDS = /\b\d[\d,]*\s+(?:assertions|passed)\b|\b[1-9][\d,]*\d\s+(?:checks|cases|tests)\b/;
 /** A tally after a suite: two digits a side at least, and no third part. */
 const COUNT_RATIO = new RegExp(`${COUNT_SUITE_SRC}[^\\n]{0,40}?\\b[1-9]\\d+\\/[1-9]\\d+\\b(?!\\/)`);
 /** A command's comment that opens with a number, on a code-block line; in prose, where `#12:` is an issue, only `# N —`. */
@@ -8017,6 +8020,9 @@ function checkCountsInDocs() {
     ["`eval-projection-replay.ts` replays what migrations 015/018/021/034 made", "", false],
     ["`test-live.ts` failed on main (#123: a flake), fixed in #124: see it", "", false],
     ["- `test-live.ts` covers the workers.\n- 12 tests run beside it, in CI.", "", false],
+    ["A suite that makes 0 assertions fails its own report; each case makes 3 assertions.", "", false],
+    ["`test-live.ts`'s [38] covers 4 cases, and gains 2 tests here.", "", false],
+    ["`test-replay.ts`: 2 assertions", "", true],
     ["| 9 | `[fork] db: core schema` | Verified via PGlite — 49 assertions, no daemon needed. |", "FORK.md", false],
     ["| 9 | `[fork] db: core schema` | Verified via PGlite — 49 assertions, no daemon needed. |", "db/README.md", true],
   ];
@@ -8032,7 +8038,7 @@ function checkCountsInDocs() {
   for (const f of names) {
     if (f.startsWith("changes/") || f === "CHANGELOG.md" || COUNT_RECORDS.includes(f) || !existsSync(join(ROOT, f))) continue;
     for (const line of countLinesIn(readFileSync(join(ROOT, f), "utf8"), f)) {
-      fail(`${f}:${line}`, `states a suite's assertion count — Fork Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614)`);
+      fail(`${f}:${line}`, `states a suite's assertion count — Fork Checks publishes each suite's to the wiki's Test-counts page on a push to main (https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts); point there, or write the shape with N (\`N assertions: N passed\`) (check 45, SMD-3614, SMD-3655)`);
     }
   }
 }
