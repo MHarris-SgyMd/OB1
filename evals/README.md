@@ -4400,9 +4400,10 @@ computed from `docs/priority.md`'s weights.
   Done and a "No priority".
 
 Each item also carries the facts a later read will need (a due offset, a stated level, done, claimed, the blocks
-links), so SMD-3663 to SMD-3669 are seeded from the corpus the baseline was measured on. A hash pins the corpus,
-the stub embedder's section of `priority.ts` (its source text, noise weights included), the read depth and the bar.
-Changing any of them is a new registration with its baseline re-run, never an edit.
+links), so SMD-3663 to SMD-3669 are seeded from the corpus the baseline was measured on. A hash pins the corpus and
+`priority.ts` from the stub embedder through the reads, as source text with LF line endings: the stub (noise weights
+included), the score, the mutant, the bar and the reads' knobs. Changing any of them, a comment included, is a new
+registration with its baseline re-run, never an edit.
 
 **The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
 sit at a cosine of about 0.4, as unrelated texts do under a real model. A small hashed noise axis breaks ties
@@ -4416,8 +4417,9 @@ model's.
 * `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
 
 The self-check reads the knobs from `core/reads.ts` and from `search_thoughts`' own block of `core/schemas.ts` (its
-`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift. A read that errors on
-a prompt scores it false, false, 0, as the bar says, and the run lists the error.
+`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift. A measured read (a
+priority read, once one lands) that errors on a prompt scores it false, false, 0, as the bar says, and the run lists
+the error.
 
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;
@@ -4428,15 +4430,23 @@ a prompt scores it false, false, 0, as the bar says, and the run lists the error
 top-1 and top-3 are averaged over every prompt. tau is averaged over the prompts with two or more gold items, and a
 null tau among them counts as 0.
 
-**The mutant.** Each read is scored against its gold shuffled 2,000 times with a fixed seed. If the score reads the
+**The mutant.** Each read is scored against its gold shuffled 2,000 times, seeded per prompt (`db/test-support.ts`'s
+`seededRandom`), so prompts with golds of one length don't share their permutations. If the score reads the
 gold's order, the shuffled gold scores chance:
 * top-1 is 1/|gold| when the read's first hit is a gold item;
 * top-3 is the read's top three's share of the gold;
 * tau is 0.
 
-The mutant's tau and chance's are averaged over the same prompts as "mean tau". The run exits 1 when the mutant
-sits more than 0.05 from chance. The self-check also runs an order-blind top-1 through the mutant and requires it
-to land far from chance.
+The mutant's tau and chance's are averaged over the same prompts as "mean tau". The self-check also runs an
+order-blind top-1 through the mutant and requires it to land far from chance.
+
+The seeded run exits 1 when any of these holds:
+* a baseline read errors, since a baseline that never ran would set the bar;
+* a baseline read's scores differ from `priority.ts`'s recorded `BASELINE`, so a change to search on main that
+  moves the bar is seen and re-recorded, not absorbed;
+* the gold ceiling can't clear the bar;
+* the dogfood rows aren't sound;
+* the mutant sits more than 0.05 from chance.
 
 These mutants are each refused:
 * an order-blind top-1, by the self-check and by the seeded run's own chance check;
@@ -4444,10 +4454,10 @@ These mutants are each refused:
 * no background axis;
 * a null tau counted as 1;
 * no regression check;
-* a changed noise weight, or a changed bar (the hash);
-* a `search_thoughts` default changed for `limit` or `prefer_current`.
-
-A read made to throw on one prompt scores that prompt false, false, 0, and the run still prints its table.
+* a changed noise weight, bar, absent rank or read knob (the hash);
+* a `search_thoughts` default changed for `limit` or `prefer_current`;
+* a recorded baseline that differs from the run, a baseline read that throws, an unreachable bar, and a fixture
+  with no `rows` array (each fails the seeded run).
 
 **The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`). On the
 seeded set, against the best baseline read on each measure, a read helps only if all four hold:
@@ -4462,15 +4472,15 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `de5bcbc5395ceb9a`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, registration `5ba651be0fd4f447`; deterministic, two runs identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
 | --- | --- | --- | --- | --- | --- |
-| plain | 0.143 | 0.286 | 0.261 | 0.086 / 0.150 / -0.002 | 0.085 / 0.149 / 0.000 |
-| current | 0.143 | 0.286 | 0.300 | 0.086 / 0.150 / -0.003 | 0.085 / 0.149 / 0.000 |
-| filter | 0.000 | 0.000 | 0.055 | 0.000 / 0.076 / -0.001 | 0.000 / 0.078 / 0.000 |
-| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.431 / 0.715 / -0.001 | 0.428 / 0.711 / 0.000 |
+| plain | 0.143 | 0.286 | 0.261 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.300 | 0.085 / 0.147 / -0.003 | 0.085 / 0.149 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.000 / 0.075 / -0.005 | 0.000 / 0.078 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
 
 So a priority read must get top-1 on at least 5 of 7 prompts and a mean tau of at least 0.550, and keep
 `highest-value` and `due-soon` in the top 3.
@@ -4485,6 +4495,8 @@ What the baseline gets wrong:
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
+A row names its reads from `DOGFOOD_READS`: the seeded set's three, and `ticket_rows` (search filtered to board-sync's
+ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
 
 | date | pick | picked instead | read: rank of the pick |
 | --- | --- | --- | --- |

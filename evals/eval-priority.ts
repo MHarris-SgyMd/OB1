@@ -18,18 +18,14 @@
  *       SqlStore.hybridThoughts, at the knobs its tool would send. Prints the
  *       per-prompt hits, the table, the shuffled-gold mutant beside chance,
  *       and the bar a priority read must clear against this baseline. Exits
- *       1 when the mutant does not sit at chance. Keyless: no provider is
- *       called.
+ *       1 when a baseline read errors, when a baseline read's scores differ
+ *       from priority.ts's BASELINE, when the gold ceiling cannot clear the
+ *       bar, or when the mutant does not sit at chance. Keyless: no provider
+ *       is called.
  *
- * The reads measured. The baseline (Work 4) is today's main:
- *   plain   — the `search` tool's knobs (core/reads.ts's search): limit 10,
- *             threshold 0, recency weight 0, prefer_current off, no filter;
- *   current — the same with prefer_current on (059's lifecycle demotion),
- *             the read main already has for "finished work ranks lower";
- *   filter  — search_thoughts with the workaround SMD-3660 measured on
- *             2026-11-02, {"status_type":"backlog","priority":"High"}.
- * A later read joins READS here (SMD-3668's priority_weight, SMD-3669's
- * agenda) and is held to priority.ts's BAR against these three.
+ * The reads are priority.ts's READS: today's main as the baseline (plain,
+ * current, filter). A later read joins them as `measured` (SMD-3668's
+ * priority_weight, SMD-3669's agenda) and is held to the BAR against them.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
@@ -43,22 +39,15 @@ import { createAssert, resetSchema } from "../db/test-support.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  barOn, chanceOf, corpusHash, stubSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, MUTANT_SEED, READS, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type PromptScore,
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
 
-type Read = { name: string; filter: Record<string, unknown>; preferCurrent: boolean };
-
-export const READS: readonly Read[] = [
-  { name: "plain", filter: {}, preferCurrent: false },
-  { name: "current", filter: {}, preferCurrent: true },
-  { name: "filter", filter: { status_type: "backlog", priority: "High" }, preferCurrent: false },
-];
-
-const loadDogfood = (): DogfoodRow[] => (JSON.parse(readFileSync(DOGFOOD_PATH, "utf8")) as { rows: DogfoodRow[] }).rows;
+/** The fixture's rows as written, unchecked: dogfoodProblems says what is wrong with them. */
+const loadDogfood = (): unknown => (JSON.parse(readFileSync(DOGFOOD_PATH, "utf8")) as { rows?: unknown }).rows;
 
 /** A fixed id per item, so the reads' tie-break by id is the same every run. */
 const itemId = (i: number): string => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`;
@@ -79,9 +68,13 @@ function selfCheck(): void {
 
   console.log("[1] The corpus");
   assert(corpusProblems().length === 0, `the seeded corpus is sound${corpusProblems().length ? `: ${corpusProblems().join("; ")}` : ""}`);
-  assert(corpusHash() === REGISTERED_CORPUS, `the corpus, stub, READ_K and bar are the ones registered (${corpusHash()} = ${REGISTERED_CORPUS}); a change is a new registration, with its baseline re-run`);
-  const stubSrc = stubSource();
-  assert(stubSrc.includes("export const STUB_DIM") && stubSrc.includes("export function stubVector(") && !stubSrc.includes("export function kendallTauB("), "the registration hashes the stub embedder's whole section of priority.ts, its noise weights included, and nothing past it");
+  assert(corpusHash() === REGISTERED_CORPUS, `the corpus and priority.ts's registered section are the ones registered (${corpusHash()} = ${REGISTERED_CORPUS}); a change is a new registration, with its baseline re-run`);
+  const reg = registeredSource();
+  assert(["export const STUB_DIM", "export function stubVector(", "export function kendallTauB(", "export function scorePrompt(", "export function barOn(", "export function verdict(", "export const BAR ", "export const READ_K", "export const READS"].every((x) => reg.includes(x)) && !reg.includes("export function dogfoodProblems(") && !reg.includes("export const BASELINE"),
+    "the registration hashes the stub, the score, the mutant, the bar and the reads' knobs, and not the dogfood rows or the recorded baseline");
+  const fileText = readFileSync(join(HERE, "priority.ts"), "utf8");
+  assert(registeredSection(fileText.replace(/\r?\n/g, "\r\n")) === registeredSection(fileText) && registeredSection(fileText) === reg, "a CRLF checkout of priority.ts yields the same registered section, so the same hash");
+  assert(READS.every((r) => BASELINE[r.name] !== undefined || r.role === "measured"), "every baseline read has a recorded baseline");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
   assert(corpusProblems(ITEMS, [{ key: "x", query: "q", gold: ["nope"] }]).some((p) => p.includes("names nope")), "a gold naming no item is refused");
@@ -167,8 +160,11 @@ function selfCheck(): void {
   assert(/prefer_current: z\.boolean\(\)\.optional\(\)\.default\(false\)/.test(block), "search_thoughts' prefer_current defaults off, as the filter read sends it");
 
   console.log("[7] The dogfood rows");
-  const rows = loadDogfood();
-  assert(dogfoodProblems(rows).length === 0, `the committed rows are sound${dogfoodProblems(rows).length ? `: ${dogfoodProblems(rows).join("; ")}` : ""}`);
+  const raw = loadDogfood();
+  assert(dogfoodProblems(raw).length === 0, `the committed rows are sound${dogfoodProblems(raw).length ? `: ${dogfoodProblems(raw).join("; ")}` : ""}`);
+  const rows = raw as DogfoodRow[];
+  assert(dogfoodProblems(undefined).some((p) => p.includes("not an array")) && dogfoodProblems({ 0: rows[0] }).some((p) => p.includes("not an array")), "a fixture with no rows array is reported, not thrown on");
+  assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
   assert(dogfoodProblems([{ ...rows[0], date: 20261314 }]).some((p) => p.includes("date")), "a row's date must be a real YYYYMMDD day");
   assert(dogfoodProblems([{ ...rows[0], pick: "SMD-2888" as unknown as number }]).some((p) => p.includes("pick")), "a pick is the ticket's number, not its key (check 9 allows numbers and ids)");
@@ -229,11 +225,12 @@ async function seeded(): Promise<void> {
       const hits: string[][] = [];
       for (const p of PROMPTS) {
         // A read that errors on a prompt scores it false, false, 0 (the bar's edge case): no hits, every gold item absent.
+        // A baseline read's error also fails the run, below: a baseline that never ran would set the bar.
         try {
           const rows = await store.hybridThoughts({ query: p.query, embedding: stubVector(p.query, STUB_DIM, "query"), threshold: 0, limit: READ_K, filter: r.filter, preferCurrent: r.preferCurrent, recencyWeight: 0 });
           hits.push(rows.map((row) => keyOf.get(row.id) ?? `?${row.id}`));
         } catch (e) {
-          errors.push(`${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
+          errors.push(`${r.role} read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
           hits.push([]);
         }
       }
@@ -259,25 +256,36 @@ async function seeded(): Promise<void> {
   const table = [...READS.map((r) => ({ name: r.name, ...results.get(r.name)! })), { name: "gold (ceiling)", ...oracle }].map((r) => ({
     read: r.name,
     score: meanScore(r.scores, golds),
-    mutant: meanTriple(r.hits.map((h, i) => shuffledScore(h, golds[i])), golds),
+    mutant: meanTriple(r.hits.map((h, i) => shuffledScore(h, golds[i], scorePrompt, MUTANT_SEED + i)), golds),
     chance: meanTriple(r.hits.map((h, i) => chanceOf(h, golds[i])), golds),
   }));
   console.log(`\n${renderTable(table)}\n`);
 
   const off = table.filter((t) => Math.abs(t.mutant.top1 - t.chance.top1) > CHANCE_TOLERANCE || Math.abs(t.mutant.top3 - t.chance.top3) > CHANCE_TOLERANCE || Math.abs(t.mutant.tau - t.chance.tau) > CHANCE_TOLERANCE);
-  const bases = READS.map((r) => results.get(r.name)!.scores);
+  const bases = READS.filter((r) => r.role === "baseline").map((r) => results.get(r.name)!.scores);
   const t = barOn(bases, golds);
   const kept = t.keepTop3.map((i) => PROMPTS[i].key);
   console.log(`The bar a priority read must clear on this corpus (priority.ts's BAR, pre-registered): top-1 on at least ${t.top1Need} of ${t.prompts} (at least ${t.top1Floor}, and the best baseline's ${t.bestTop1} + ${BAR.top1Gain}); mean tau at least ${t.tauNeed.toFixed(3)} (the best baseline's ${t.bestTau.toFixed(3)} + ${BAR.tauGain}); top-3 kept on ${kept.length ? kept.join(", ") : "no prompt (no baseline read had any)"}.`);
   const ceiling = verdict(oracle.scores, bases, golds);
   console.log(`The gold ceiling against the baselines: ${ceiling.helped ? "helps (the bar is reachable)" : `fails: ${ceiling.failed.join("; ")}`}.`);
   if (errors.length) console.error(`\n${errors.length} read(s) errored, each scored false, false, 0 on its prompt:\n  ${errors.join("\n  ")}`);
-  console.log(`\nThe dogfood rows (fixtures/priority-dogfood.json, recorded by hand at the time):\n\n${renderDogfood(loadDogfood())}\n`);
-  if (off.length) {
-    console.error(`the shuffled-gold mutant is not at chance for ${off.map((t) => t.read).join(", ")}: the score reads something other than the gold's order`);
+  const raw = loadDogfood();
+  const dogfood = dogfoodProblems(raw);
+  console.log(`\nThe dogfood rows (fixtures/priority-dogfood.json, recorded by hand at the time):\n\n${dogfood.length ? `(not shown: ${dogfood.join("; ")})` : renderDogfood(raw as DogfoodRow[])}\n`);
+
+  const failures: string[] = [];
+  const baselineErrors = errors.filter((e) => e.startsWith("baseline "));
+  if (baselineErrors.length) failures.push(`${baselineErrors.length} baseline read(s) errored, and a baseline that never ran would set the bar`);
+  const drift = READS.filter((r) => r.role === "baseline").flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores, golds));
+  if (drift.length) failures.push(`the baseline moved from priority.ts's BASELINE (${drift.join("; ")}): re-record it with the main it was measured on, since the bar moves with it`);
+  if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
+  if (off.length) failures.push(`the shuffled-gold mutant is not at chance for ${off.map((t) => t.read).join(", ")}: the score reads something other than the gold's order`);
+  if (dogfood.length) failures.push(`the dogfood rows are not sound: ${dogfood.join("; ")}`);
+  if (failures.length) {
+    for (const f of failures) console.error(f);
     process.exit(1);
   }
-  console.log(`The shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every read.`);
+  console.log(`Every baseline read ran and matches its recorded baseline, the bar is reachable, and the shuffled-gold mutant sits within ${CHANCE_TOLERANCE} of chance for every read.`);
 }
 
 if (import.meta.main) {

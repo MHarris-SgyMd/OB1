@@ -37,6 +37,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { seededRandom } from "../db/test-support.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
 
@@ -152,31 +153,39 @@ export const PROMPTS: readonly Prompt[] = [
 ];
 
 /**
- * The registration: a hash of ITEMS, PROMPTS, the stub embedder (its
- * constants and the source of its functions, noise weights included: they
- * set the baseline the bar is relative to), READ_K and BAR, pinned so neither
- * the set nor the bar can change under a measured read. A change to any of
- * them is a new registration — the baseline re-run on it, and recorded —
- * never an edit (the self-check fails until this line moves with it).
+ * The registration: a hash of ITEMS, PROMPTS and registeredSource() — this
+ * file from the stub embedder to the reads, verbatim: the stub (its
+ * constants and code, noise weights included), the score, the mutant, the
+ * bar and the reads' knobs, everything that sets the baseline or the bar a
+ * read is judged by. Pinned so neither can change under a measured read: a
+ * change to any of it is a new registration — the baseline re-run on it, and
+ * recorded — never an edit (the self-check fails until this line moves with
+ * it). A comment edit there counts too, on purpose: the rule is "nothing in
+ * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "de5bcbc5395ceb9a";
+export const REGISTERED_CORPUS = "5ba651be0fd4f447";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
-  return createHash("sha256").update(JSON.stringify({ items, prompts, stub: stubSource(), readK: READ_K, bar: BAR })).digest("hex").slice(0, 16);
+  return createHash("sha256").update(JSON.stringify({ items, prompts, source: registeredSource() })).digest("hex").slice(0, 16);
 }
 
 /**
- * The stub embedder's section of this file, verbatim: its constants, stop
- * list, noise weights and code. Read from the source rather than from
- * String(fn), which is Bun's transpiled output and would move with a Bun
- * upgrade, not with the stub.
+ * This file from the stub embedder's section to the end of the reads',
+ * verbatim, line endings as LF (a CRLF checkout hashes the same). Read from
+ * the source rather than from String(fn), which is Bun's transpiled output
+ * and would move with a Bun upgrade, not with the eval.
  */
-export function stubSource(): string {
-  const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+export function registeredSource(): string {
+  return registeredSection(readFileSync(fileURLToPath(import.meta.url), "utf8"));
+}
+
+/** The registered section of a copy of this file's text, CRLF read as LF. */
+export function registeredSection(text: string): string {
+  const src = text.replace(/\r\n/g, "\n");
   // At a line's start, so the markers this function names inside its own quotes are not them.
   const from = src.indexOf("\n// ── The stub embedder ─");
-  const to = src.indexOf("\n// ── The score ─");
-  if (from < 0 || to < from) throw new Error("priority.ts: the stub embedder's section markers are missing");
+  const to = src.indexOf("\n// ── The dogfood rows ─");
+  if (from < 0 || to < from) throw new Error("priority.ts: the registered section's markers are missing");
   return src.slice(from, to);
 }
 
@@ -324,18 +333,6 @@ export function meanScore(scores: readonly PromptScore[], golds: readonly (reado
 
 // ── The shuffled-gold mutant ────────────────────────────────────────────────
 
-/** Mulberry32: a seeded generator, so the mutant's shuffles are the same every run. */
-export function rng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 export function shuffle<T>(xs: readonly T[], next: () => number): T[] {
   const out = [...xs];
   for (let i = out.length - 1; i > 0; i--) {
@@ -362,9 +359,13 @@ export function chanceOf(hits: readonly string[], gold: readonly string[]): { to
  * The mutant: `hits` scored against `gold` shuffled SHUFFLES times; tau
  * averaged over the shuffles where it is defined. `score` is scorePrompt; the
  * self-check passes an order-blind one to show the mutant tells them apart.
+ * The shuffles come from db/test-support's seededRandom (mulberry32, the one
+ * copy). A run seeds each prompt apart (MUTANT_SEED + its index), so prompts
+ * whose golds have one length don't share their permutations and their
+ * errors.
  */
 export function shuffledScore(hits: readonly string[], gold: readonly string[], score: (hits: readonly string[], gold: readonly string[]) => PromptScore = scorePrompt, seed = MUTANT_SEED, shuffles = SHUFFLES): { top1: number; top3: number; tau: number } {
-  const next = rng(seed);
+  const next = seededRandom(seed).rnd;
   let top1 = 0, top3 = 0, tau = 0, tauN = 0;
   for (let i = 0; i < shuffles; i++) {
     const s = score(hits, shuffle(gold, next));
@@ -448,6 +449,32 @@ export function verdict(read: readonly PromptScore[], baselines: readonly (reado
   return { helped: failed.length === 0, failed };
 }
 
+// ── The reads ───────────────────────────────────────────────────────────────
+
+/**
+ * A read the eval runs: the store's hybrid search at a tool's knobs.
+ * `baseline` reads are today's main, and the bar is measured against them:
+ * one that errors fails the run, since a baseline that never ran would set
+ * the bar. A `measured` read (SMD-3668's priority_weight, SMD-3669's agenda,
+ * when they land) that errors on a prompt scores it false, false, 0 — the
+ * bar's edge case.
+ */
+export type Read = { name: string; role: "baseline" | "measured"; filter: Record<string, unknown>; preferCurrent: boolean };
+
+/**
+ * The baseline (Work 4):
+ *   plain   — the `search` tool's knobs (core/reads.ts's search): limit 10,
+ *             threshold 0, recency weight 0, prefer_current off, no filter;
+ *   current — the same with prefer_current on (059's lifecycle demotion);
+ *   filter  — search_thoughts with the workaround SMD-3660 measured on
+ *             2026-11-02, {"status_type":"backlog","priority":"High"}.
+ */
+export const READS: readonly Read[] = [
+  { name: "plain", role: "baseline", filter: {}, preferCurrent: false },
+  { name: "current", role: "baseline", filter: {}, preferCurrent: true },
+  { name: "filter", role: "baseline", filter: { status_type: "backlog", priority: "High" }, preferCurrent: false },
+];
+
 // ── The dogfood rows ────────────────────────────────────────────────────────
 
 /**
@@ -480,9 +507,21 @@ export function isDay(n: unknown): boolean {
   return v >= 20000101 && d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate() === v;
 }
 
-export function dogfoodProblems(rows: readonly DogfoodRow[]): string[] {
+/**
+ * The read names a dogfood row may use: the seeded set's reads, and
+ * `ticket_rows` — search filtered to board-sync's ticket rows alone, the
+ * 2026-10-14 session's second read. A new name is added here with what it
+ * is, so rows stay comparable read by read.
+ */
+export const DOGFOOD_READS: readonly string[] = [...READS.map((r) => r.name), "ticket_rows"];
+
+/** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
+export function dogfoodProblems(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return ["the fixture's rows is not an array"];
+  const rows = raw as DogfoodRow[];
   const out: string[] = [];
   rows.forEach((r, i) => {
+    if (!r || typeof r !== "object") { out.push(`row ${i + 1}: not an object`); return; }
     const at = `row ${i + 1} (${r.date ?? "?"})`;
     if (!isDay(r.date)) out.push(`${at}: date is not a YYYYMMDD day`);
     if (i > 0 && r.date < rows[i - 1].date) out.push(`${at}: rows are not in date order`);
@@ -493,11 +532,36 @@ export function dogfoodProblems(rows: readonly DogfoodRow[]): string[] {
     for (const f of ["query", "note"] as const) if (typeof r[f] !== "string" || r[f].trim().length === 0) out.push(`${at}: ${f} is empty`);
     if (!r.reads || typeof r.reads !== "object" || Object.keys(r.reads).length === 0) out.push(`${at}: no read recorded`);
     for (const [name, v] of Object.entries(r.reads && typeof r.reads === "object" ? r.reads : {})) {
+      if (!DOGFOOD_READS.includes(name)) out.push(`${at}: read ${name} is not one of ${DOGFOOD_READS.join(", ")}`);
       if (!v || typeof v !== "object" || !("rank" in v)) { out.push(`${at}: read ${name} is not an object with a rank`); continue; }
       if (!(v.rank === null || (Number.isInteger(v.rank) && (v.rank as number) >= 0))) out.push(`${at}: read ${name}'s rank is not a number from 0 or null`);
     }
   });
   return out;
+}
+
+// ── The recorded baseline ───────────────────────────────────────────────────
+
+/**
+ * What each baseline read scored at REGISTERED_CORPUS, recorded (main
+ * 8aa855f1, 2026-11-02): top-1 and top-3 as prompt counts, mean tau to three
+ * places. `--seeded` fails when a run differs, so a change to search on main
+ * that moves the baseline — and with it the bar — is seen, and re-recorded
+ * here with the main it was measured on, not absorbed.
+ */
+export const BASELINE: Readonly<Record<string, { top1: number; top3: number; tau: number }>> = {
+  plain: { top1: 1, top3: 2, tau: 0.261 },
+  current: { top1: 1, top3: 2, tau: 0.3 },
+  filter: { top1: 0, top3: 0, tau: 0.055 },
+};
+
+/** How a read's scores differ from its recorded baseline; empty when they match. */
+export function baselineDrift(name: string, scores: readonly PromptScore[], golds: readonly (readonly string[])[]): string[] {
+  const want = BASELINE[name];
+  if (!want) return [`${name} has no recorded baseline`];
+  const m = meanScore(scores, golds);
+  const got = { top1: scores.filter((s) => s.top1).length, top3: scores.filter((s) => s.top3).length, tau: Math.round(m.tau * 1000) / 1000 };
+  return (["top1", "top3", "tau"] as const).filter((k) => got[k] !== want[k]).map((k) => `${name} ${k} ${got[k]}, recorded ${want[k]}`);
 }
 
 // ── The table ───────────────────────────────────────────────────────────────
