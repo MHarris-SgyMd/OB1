@@ -12,6 +12,10 @@
 # Never ship dependency trees — the image installs its own from bun.lock.
 **/node_modules
 
+# An agent's work-claim tokens (AGENTS.md, "Claim your work"; SMD-3602): never
+# in a build context a `compose up --build` from a worktree uploads.
+**/.work-claims
+
 # Everything outside the directories the images actually need (db/, server-portable/, plugins/,
 # mcp-server/, rest-client/, dashboard/).
 recipes
