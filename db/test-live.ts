@@ -18295,9 +18295,10 @@ if (want("36")) {
   // the long prior section and its single pooled connection is closed by now.
   const wsql = new SQL({ url: URL_!, max: 1 });
   // No table wipe: the prior section leaves ~20k rows whose per-row delete
-  // triggers would outrun the connection, and the digest needs no clean table —
-  // --min-importance 0 reads whatever is in the window and the stub ignores the
-  // content. These three recent rows are simply the newest in the window.
+  // triggers would outrun the connection, and the digest needs no clean table:
+  // it takes a share of each day and writer in the window (SMD-2653). These
+  // three rows are today's; each carries an importance, which the digest no
+  // longer reads, so none of it may reach the prompt.
   const rows = [
     { id: recordId("fork", "digest-a"), content: "zqdigest alpha — shipped the egress gate for the weekly digest sink", imp: 8 },
     { id: recordId("fork", "digest-b"), content: "zqdigest beta — decided the db/ verb home over an n8n template", imp: 7 },
@@ -18307,19 +18308,48 @@ if (want("36")) {
     await wsql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
       VALUES (${r.id}::uuid, ${r.content}, ${{ source: "fork", importance: r.imp }}::jsonb, content_fingerprint_of(${r.content}))`;
   }
+  // One row on each of three earlier days, then a burst of 100 from one writer,
+  // newer than all of them: the newest 80 would be the burst alone. Removed in
+  // the finally, so later sections see the table as before.
+  const floodEarlier = "zqflood earlier — the same writer, six days ago";
+  const earlier = [3, 4, 5].map((d) => ({ id: recordId("fork", `digest-day-${d}`), content: `zqdigest earlier — a thought from ${d} days ago`, days: d }));
+  for (const r of earlier) {
+    await wsql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+      VALUES (${r.id}::uuid, ${r.content}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${r.content}), now() - make_interval(days => ${r.days}::int))`;
+  }
+  // The writer is stamped from the ob1.actor envelope, never from the payload
+  // (050's ob1_stamp_actor), so the burst is written under an envelope of its own.
+  // The same writer's one row from six days ago leads that day's queue, where
+  // in the writer's alone it would be the 101st.
+  await wsql.begin(async (tx) => {
+    await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: "zqflood" })}, true)`;
+    await tx`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
+      SELECT gen_random_uuid(), c, ${{ source: "fork" }}::jsonb, content_fingerprint_of(c)
+        FROM (SELECT 'zqflood ' || g || ' — one key''s burst before the run' AS c FROM generate_series(1, 100) g) s`;
+    await tx`INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+      VALUES (gen_random_uuid(), ${floodEarlier}, ${{ source: "fork" }}::jsonb, content_fingerprint_of(${floodEarlier}), now() - make_interval(days => 6))`;
+  });
+  const [{ flooded }] = await wsql`SELECT count(*)::int AS flooded FROM thoughts WHERE metadata->>'actor_name' = 'zqflood'`;
+  assert(flooded === 101, `the burst and its writer's older row are planted under one actor_name (${flooded} of 101)`);
+  const planted = [...rows, ...earlier];
 
   // One stub for both hops: /chat/completions returns a canned digest (chatReqs),
   // /bot<token>/sendMessage counts the Telegram sends (tgReqs) and keeps the
-  // last one's Authorization (tgAuth).
+  // last one's Authorization (tgAuth). The last synthesis prompt is chatPrompt.
   let tgReqs = 0;
   let chatReqs = 0;
   let tgAuth: string | null = null;
+  let chatPrompt = "";
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
-    fetch(req) {
+    async fetch(req) {
       const p = new URL(req.url).pathname;
-      if (p.endsWith("/chat/completions")) { chatReqs++; return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] }); }
+      if (p.endsWith("/chat/completions")) {
+        chatReqs++;
+        chatPrompt = String(((await req.json()) as { messages?: { content?: string }[] }).messages?.at(-1)?.content ?? "");
+        return Response.json({ choices: [{ message: { content: "📌 Wins\n- zqdigest shipped the sink gate" } }] });
+      }
       if (p.includes("/sendMessage")) { tgReqs++; tgAuth = req.headers.get("authorization"); return Response.json({ ok: true, result: { message_id: tgReqs } }); }
       return new Response("not found", { status: 404 });
     },
@@ -18350,12 +18380,15 @@ if (want("36")) {
     TELEGRAM_BOT_TOKEN: "test-token",
     TELEGRAM_CHAT_ID: "test-chat",
   };
-  const tgArgs = ["--url", URL_!, "--output", "telegram", "--min-importance", "0", "--no-sensitivity-filter"];
+  const tgArgs = ["--url", URL_!, "--output", "telegram", "--no-sensitivity-filter"];
   try {
     tgReqs = 0; chatReqs = 0;
     const denied = await weeklyCli(tgArgs, base);
     assert(tgReqs === 0 && chatReqs >= 1 && /not .*posted to Telegram/.test(denied.err) && /deny \(the default\)/.test(denied.err),
       `under the default deny the digest is synthesized but not sent — the stub gets zero Telegram requests and the refusal names the rule (${tgReqs} send(s), ${chatReqs} synthesis; ${denied.err.trim().split("\n").pop()})`);
+    const burst = (chatPrompt.match(/zqflood \d+/g) ?? []).length;
+    assert(planted.every((r) => chatPrompt.includes(r.content)) && chatPrompt.includes(floodEarlier) && burst > 0 && !/"importance"\s*:/.test(chatPrompt),
+      `the prompt holds today's three rows and one from each of three earlier days beside a newer burst of 100 from one writer, that writer's row from six days ago, and no row's importance (SMD-2653): ${planted.filter((r) => chatPrompt.includes(r.content)).length} of 6, ${burst} of the burst, the writer's older row ${chatPrompt.includes(floodEarlier) ? "in" : "out"}`);
 
     tgReqs = 0; chatReqs = 0;
     const allowed = await weeklyCli(tgArgs, { ...base, OB1_EGRESS_ALLOW: "type:digest" });
@@ -18382,7 +18415,7 @@ if (want("36")) {
     // column it proceeds.
     const [{ has }] = await wsql`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has`;
     tgReqs = 0; chatReqs = 0;
-    const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram", "--min-importance", "0"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
+    const filtered = await weeklyCli(["--url", URL_!, "--output", "telegram"], { ...base, OB1_EGRESS_ALLOW: "type:digest" });
     if (has) {
       assert(filtered.code === 0 && tgReqs >= 1, `with a sensitivity_tier column the default filtered run proceeds and posts (exit ${filtered.code}; ${tgReqs} send(s))`);
     } else {
@@ -18391,6 +18424,7 @@ if (want("36")) {
     }
   } finally {
     stub.stop(true);
+    await wsql`DELETE FROM thoughts WHERE metadata->>'actor_name' = 'zqflood' OR id = ANY(${wsql.array(earlier.map((r) => r.id), "UUID")})`;
     await wsql.close();
   }
 }
