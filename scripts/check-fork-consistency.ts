@@ -7924,7 +7924,7 @@ function checkSecretsOnArgv() {
 }
 checkSecretsOnArgv();
 
-// ── 45: no doc states a suite's assertion count, which the wiki's Test-counts page carries (SMD-3614) ──
+// ── 45: no doc states a suite's assertion count, which the wiki's Test-counts page carries (SMD-3614, SMD-3655) ──
 /**
  * 45: a count is a fact about a commit's run, so Fork Checks publishes each
  * suite's to the wiki's Test-counts page on a push to main, and no `.md` file
@@ -7937,9 +7937,9 @@ checkSecretsOnArgv();
  *     suite has 1932 assertions`; a suite's total has two digits, where
  *     `each case makes 3 assertions` is prose about tests);
  *   - a suite followed within 40 characters by a tally, `1932/1932`;
- *   - a suite followed on its line by a comment that opens with a number:
- *     `# 1334 —` anywhere, and on a code-block line `# 1334` too (in prose
- *     `#123:` is an issue).
+ *   - a suite followed, before any other `#`, by a comment that opens with a
+ *     number: `# 1334 —` in prose or code, and `# 1334` on a code-block line
+ *     too (in prose `#123:` is an issue).
  * `N assertions: N passed` passes, as does a number that is not a count:
  * `# 14 labelled captures`, `(115) migrations`, `phase-1/2/3`, migration
  * `015/018`, and a `#123` issue in prose. Prose is read by paragraph and
@@ -7952,27 +7952,31 @@ checkSecretsOnArgv();
  */
 const COUNT_SUITE_SRC = String.raw`(?:\b(?:test|eval|smoke)[\w-]*\.(?:ts|mjs|js)\b|\bbun run test(?::[\w-]+)?\b)`;
 const COUNT_SUITE = new RegExp(COUNT_SUITE_SRC);
-/** A suite's count of assertions with no suite named: two digits at least, so prose about a case's few is no count. */
+/** A count of assertions with no suite named: two digits at least, so prose about a case's few is no count. */
 const COUNT_ASSERTIONS = /\b[1-9][\d,]*\d\s+assertions\b/;
 /** A count beside a suite in the same paragraph: any `N assertions` or `N passed`, and checks, cases or tests of two digits at least. */
 const COUNT_WORDS = /\b\d[\d,]*\s+(?:assertions|passed)\b|\b[1-9][\d,]*\d\s+(?:checks|cases|tests)\b/;
 /** A tally after a suite: two digits a side at least, and no third part. */
 const COUNT_RATIO = new RegExp(`${COUNT_SUITE_SRC}[^\\n]{0,40}?\\b[1-9]\\d+\\/[1-9]\\d+\\b(?!\\/)`);
-/** A command's comment that opens with a number, on a code-block line; in prose, where `#12:` is an issue, only `# N —`. */
-const COUNT_COMMENT = new RegExp(`${COUNT_SUITE_SRC}[^#\\n]*#\\s*\\d[\\d,]*\\s*(?:$|[—–;:(,]|-\\s)`);
-const COUNT_COMMENT_PROSE = new RegExp(`${COUNT_SUITE_SRC}[^#\\n]*#\\s*\\d[\\d,]*\\s*(?:[—–]|-\\s)`);
+/** A suite, then a comment that opens with a number and then `ends`. */
+const countComment = (ends: string) => new RegExp(`${COUNT_SUITE_SRC}[^#\\n]*#\\s*\\d[\\d,]*\\s*(?:${ends})`);
+/** On a code-block line, any end; in prose, where `#12:` is an issue, only `# N —`. */
+const COUNT_COMMENT = countComment(String.raw`$|[—–;:(,]|-\s`);
+const COUNT_COMMENT_PROSE = countComment(String.raw`[—–]|-\s`);
 /** Dated analyses that quote a run's count as what was measured then: records, as a change file is. */
 const COUNT_RECORDS = ["docs/mcp-sdk-v2-migration.md", "docs/operator-gui-dashboards-analysis.md"];
 /** FORK.md's numbered change rows (`| 9 | …`): each records what its change measured. */
 const COUNT_RECORD_ROW = /^\|\s*\d+\s*\|/;
+/** A unit of a doc, by its first line; `code` when it is a line of a fenced block. */
+type CountUnit = { line: number; text: string; code: boolean };
 /**
- * A doc's units, each with its first line: a prose paragraph or list item,
- * its lines joined; a line in a fenced block, a table row or a heading alone.
+ * A doc's units: a prose paragraph or list item, its lines joined; a line in
+ * a fenced block, a table row or a heading alone.
  */
-function countUnits(text: string): { line: number; text: string; code: boolean }[] {
-  const out: { line: number; text: string; code: boolean }[] = [];
+function countUnits(text: string): CountUnit[] {
+  const out: CountUnit[] = [];
   let fence = false;
-  let cur: { line: number; text: string; code: boolean } | null = null;
+  let cur: CountUnit | null = null;
   const flush = () => { if (cur) out.push(cur); cur = null; };
   text.split("\n").forEach((l, i) => {
     if (/^\s*(?:```|~~~)/.test(l)) { flush(); fence = !fence; return; }
