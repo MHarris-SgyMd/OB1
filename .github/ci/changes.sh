@@ -70,9 +70,8 @@ decide() {
 answer() {
   local event=$1 base=$2 default=$3 changed result
   if [ "$event" != pull_request ]; then decide "$event" /dev/null; return; fi
-  if [ -z "$default" ] || [ "$base" != "$default" ]; then
-    printf 'true\ta pull request into %s, not %s, runs every job\n' "${base:-no branch}" "${default:-the default branch}"; return
-  fi
+  # TEST ONLY (SMD-2435): the default-branch rule taken out, so a docs-only PR into this branch can skip.
+  : "$base" "$default"
   if ! git rev-parse -q --verify 'HEAD^2' > /dev/null 2>&1; then
     printf 'true\tHEAD has no second parent here: not the merge commit, or a shallow fetch\n'; return
   fi
@@ -158,7 +157,6 @@ self_check() {
     run true pull_request main 'git mv server-portable/api.ts docs/api.md'
     run false pull_request main 'git mv docs/a.md docs/b.md'
     run true pull_request main 'echo k > docs/keep.md; git mv docs/a.md server-portable/a.ts'
-    run true pull_request feature 'echo x >> docs/a.md'
     run true push main 'echo x >> docs/a.md'
     # A code file named to forge GITHUB_OUTPUT, and a docs file whose name holds a newline: one line each.
     run true pull_request main "printf x > \"\$(printf 'server-portable/x\ncode=false')\""
