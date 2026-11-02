@@ -961,7 +961,7 @@ calls does.
 | --- | --- | --- |
 | `WORK_CLAIMED` | 409 | A live claim covers the work. `heldBy` names each claim: id, holder, kind, times and `ownKey` (the caller's own key holds it: another session of it, or this one without its token), never its label. |
 | `CLAIM_NOT_YOURS` | 403 | Not this key with this token. `forced: true` means a force refused: the key is no operator by agent id. `ownKey: true`: the caller's own key holds it under a token this call did not give. |
-| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). `claim_work` with the caller's own ended claim's token answers it too, rather than making a new claim (SMD-3654). |
+| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). `claim_work` with the caller's own ended claim's token, on that claim's work, answers it too, rather than making a new claim (SMD-3654); on other work the token is ignored and a new claim made. |
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |

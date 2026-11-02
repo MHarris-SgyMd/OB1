@@ -99,10 +99,11 @@ const unattributedRefusal = (principal: Principal, id: string, forced: boolean) 
  * claim has the token (the writer will say so). "unread": the read failed, and a
  * renewal that then succeeds says it could not tell whether the claim had lapsed.
  */
-type LeaseBefore = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; holder: string } | null | "unread";
-async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string): Promise<LeaseBefore | undefined> {
+type LeaseBefore = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean } | null | "unread";
+type LeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
+async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string, work?: LeaseWork): Promise<LeaseBefore | undefined> {
   if (token === undefined) return undefined;
-  try { return await (await ctx.store()).claimLease(token, id); } catch { return "unread"; }
+  try { return await (await ctx.store()).claimLease(token, id, work); } catch { return "unread"; }
 }
 
 /** The lapse a renewal revived, if it did: the lease before had run out by the renewal. With the claims made or renewed on the work since (the first SINCE_MAX, the rest counted), or null when they can't be read. */
@@ -127,12 +128,13 @@ const unread = (what: string): never => {
 };
 
 export async function claimWork(ctx: Ctx, principal: Principal, input: Input<"claim_work">): Promise<Outcome<ClaimWorkResult, ClaimWorkCode>> {
-  const before = await leaseBefore(ctx, tokenOf(input.token));
-  // The caller's own token whose claim ended — released, or taken over after it lapsed — is refused as renew_claim
-  // refuses it, before 115's writer, which would make a new claim without a word: the silent revival by the other door
-  // (review pass 3). Another key's token is left to the writer, as renew_claim names the holder before the end.
-  // Without a token, claim_work makes a new claim as before.
-  if (before && before !== "unread" && before.releasedAt !== null && before.holder === principal.name) {
+  const before = await leaseBefore(ctx, tokenOf(input.token), undefined, { ticket: input.ticket, piece: input.piece, name: principal.name, agentId: principal.agentId });
+  // The caller's own token whose claim on exactly this work ended — released, or taken over after it lapsed — is
+  // refused as renew_claim refuses it, before 115's writer, which would make a new claim without a word: the silent
+  // revival by the other door (review pass 3). Only that work: a token passed while claiming other work — a split's
+  // pieces, the next ticket — is 115's to ignore, and a new claim is right (review pass 4). Another key's token is the
+  // writer's too, as renew_claim names the holder before the end. Without a token, a new claim as before.
+  if (before && before !== "unread" && before.releasedAt !== null && before.ownOnThisWork === true) {
     return refuse({ code: "CLAIM_RELEASED", retryable: false, id: before.id, releasedAt: before.releasedAt, takenOver: before.releaseReason === TAKEN_OVER, releasedBy: before.releasedBy, reason: before.releaseReason });
   }
   const a = await asked(async () => (await ctx.store()).claimWork({

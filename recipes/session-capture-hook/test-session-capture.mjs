@@ -3109,10 +3109,12 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (!c) return err(`Refused: no claim ${args.id}.`, { code: "CLAIM_NOT_FOUND", id: args.id });
     if (key !== "claim-key") return err(`Refused: claim ${args.id} is held by claude-code, not by this key with this token.`, { code: "CLAIM_NOT_YOURS", id: args.id, holder: "claude-code", forced: false, ownKey: false });
     if (args.token !== c.token) return err(`Refused: claim ${args.id} is held by your own key (claude-code) under a token this call did not give.`, { code: "CLAIM_NOT_YOURS", id: args.id, holder: "claude-code", forced: false, ownKey: true });
-    if (c.state === "released") return err(`Refused: claim ${args.id} was released by claude-code at 2026-11-01T00:00:00Z ("OB1 PR 600"); if the work is still yours to do, claim it again.`, { code: "CLAIM_RELEASED", id: args.id, takenOver: false });
+    if (c.state === "released") return err(`Refused: claim ${args.id} was released by claude-code at 2026-11-01T00:00:00Z ("OB1 PR 600"); if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`, { code: "CLAIM_RELEASED", id: args.id, takenOver: false });
     if (c.state === "taken") return err(`Refused: claim ${args.id} lapsed and was taken over by codex at 2026-11-01T00:00:00Z: stop work on it; list_claims shows the claim that holds the work now.`, { code: "CLAIM_RELEASED", id: args.id, takenOver: true });
     // Lapsed while another claim covers its work: not ended — 115 renews it once that claim ends.
     // As long as the real server's (review pass 4: the hook's 300-character cut lost its last sentence there).
+    // Six claims in the way, this worktree's own piece last: past the marker's cut (review pass 4).
+    if (c.state === "covered-long") return err(`Refused: SMD-9001 is covered by 6 live claims: ${Array.from({ length: 5 }, (_, i) => `SMD-9001 piece "PR ${i}" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8960 + i)})`).join("; ")}; SMD-9001 piece "PR 9" by your own key (claude-code) since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8084)}). A whole ticket and any of its pieces are the same work. Your claim lapsed before another covered its work.`, { code: "WORK_CLAIMED", heldBy: [] });
     if (c.state === "covered") return err(`Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2026-11-01T04:00:00.000Z. list_claims shows each claim's label, so a session can tell its own from another's. Wait for the claim to be released or to lapse, or claim other work. Your claim lapsed before another covered its work.`, { code: "WORK_CLAIMED", heldBy: [] });
     if (c.state === "unattributed") return err(`Error: the agent registry could not attribute this key just now; the token given is this claim's: keep it.`, { code: "CLAIM_UNATTRIBUTED", retryable: true, cause: "registry_away", id: args.id, forced: false });
     if (c.state === "badinput") return err(`Refused: the claim's input is malformed.`, { code: "REFUSED_CLAIM_INPUT", problem: "token" });
@@ -3756,6 +3758,14 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await agentCall("renew_claim", { id: C(62), token: tok(62) }, "Refused: SMD-9001 is covered by a live claim: …");
   assert(!existsSync(join(CLAIMS, `${C(68)}.blocked.json`)) && !existsSync(join(CLAIMS, `${C(62)}.blocked.json`)), "a call whose token no token file holds marks nothing — not even the file its id names");
   clearClaims();
+  // A claim_work for other work carrying a token meets a claim of its own, not that token's claim's end: no marker; one on the token file's work does mark (review pass 4).
+  putClaim(85);
+  age(85, 0);
+  await agentCall("claim_work", { ticket: "SMD-9001", piece: "PR 5", token: tok(85) }, `Refused: SMD-9001 PR 5 is covered by a live claim: SMD-9001 by your own key (claude-code) since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${C(85)}).`);
+  const otherWorkMarked = existsSync(join(CLAIMS, `${C(85)}.blocked.json`));
+  await agentCall("claim_work", { ticket: "smd-9001", token: tok(85) }, `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by codex since 2026-11-01T00:00:00.000Z, until 2099-01-01T00:00:00.000Z (claim ${uuid(8961)}). Your claim lapsed before another covered its work.`);
+  assert(!otherWorkMarked && existsSync(join(CLAIMS, `${C(85)}.blocked.json`)), "a claim_work for other work carrying the token marks nothing; one on the token file's work does");
+  clearClaims();
   // A renewal the server says revived a lapsed claim after claims were made on its work (SMD-3654): renewed, and marked.
   putClaim(70, {}, "revived");
   putClaim(71, {}, "revived-quiet");
@@ -3848,8 +3858,17 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   calls.length = 0;
   await claimsHook();
   const revivedRenewed = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(80)}.blocked.json`), "utf8")); } catch { return null; } })();
-  assert(!renews().length && new RegExp(`codex renewed SMD-9001 at .* \\(now released, claim ${uuid(8995)}\\)`).test(revivedRenewed?.blocked?.message ?? ""),
-    `a claim the hook knows lapsed, with one made before the lapse and renewed during it, is not revived (${revivedRenewed?.blocked?.message ?? "no marker"})`);
+  assert(!renews().length && new RegExp(`codex claimed SMD-9001 at \\S+, renewed at \\S+ \\(now released, claim ${uuid(8995)}\\)`).test(revivedRenewed?.blocked?.message ?? ""),
+    `a claim the hook knows lapsed, with one made before the lapse and renewed during it, is not revived, the marker giving both its times (review pass 4: one time hid a later renewal) (${revivedRenewed?.blocked?.message ?? "no marker"})`);
+  clearClaims();
+  // The hook's own WORK_CLAIMED past the cut: the line still names this worktree's own piece, read off the whole reply (review pass 4).
+  putClaim(83, {}, "covered-long");
+  putClaim(84, { piece: "PR 9" });
+  age(84, 0);
+  await claimsHook();
+  const longBlocked = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(83)}.blocked.json`), "utf8")); } catch { return null; } })();
+  assert(longBlocked?.blocked?.code === "WORK_CLAIMED" && !longBlocked.blocked.message.includes(C(84)) && new RegExp(`The claim in the way, ${C(84)}, is this worktree's own`).test(logText()),
+    "a WORK_CLAIMED cut before this worktree's own piece still says so in the line, read off the whole reply");
   clearClaims();
   putClaim(64);
   lapsedRecord(64);

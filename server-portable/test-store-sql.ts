@@ -1883,6 +1883,14 @@ console.log("\n[21] claimLease reads the lease a renewal starts from by its toke
   assert(a.outcome === "claimed" && b.outcome === "claimed" && byToken?.id === aId && byToken.expiresAt === a.claim?.expiresAt && byToken.releasedAt === null
       && byBoth?.id === aId && crossed === null && unknown === null,
     `the lease by token, by token and id; another claim's id, or a token no claim has, reads none (${JSON.stringify([byToken, byBoth, crossed, unknown])})`);
+  // claim_work's form: whether the claim is the caller's own on exactly the work asked, by 115's cleaning and holder test (review pass 4).
+  const here = await store.claimLease(aToken, undefined, { ticket: " smd-9310 ", piece: "pr 1", name: "smd-3654-store" });
+  const otherPiece = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", piece: "PR 2", name: "smd-3654-store" });
+  const wholeTicket = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", name: "smd-3654-store" });
+  const otherKey = await store.claimLease(aToken, undefined, { ticket: "SMD-9310", piece: "PR 1", name: "someone-else" });
+  const otherTicket = await store.claimLease(aToken, undefined, { ticket: "SMD-9399", piece: "PR 1", name: "smd-3654-store" });
+  assert(here?.ownOnThisWork === true && otherPiece?.ownOnThisWork === false && wholeTicket?.ownOnThisWork === false && otherKey?.ownOnThisWork === false && otherTicket?.ownOnThisWork === false && byToken !== null && !("ownOnThisWork" in byToken),
+    `the lease read with the work asked says whether it is the caller's own on exactly that work, as 115 cleans and tests it (${JSON.stringify([here?.ownOnThisWork, otherPiece?.ownOnThisWork, wholeTicket?.ownOnThisWork, otherKey?.ownOnThisWork, otherTicket?.ownOnThisWork])})`);
   // claimsMadeSince reads the first `limit` and counts them all (review pass 2: every row was fetched for ten).
   await store.releaseClaim({ id: aId, token: aToken, reason: "split", actor });
   await store.releaseClaim({ id: bId, token: String(b.token), reason: "split", actor });

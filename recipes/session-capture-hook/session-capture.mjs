@@ -3005,7 +3005,7 @@ export async function renewClaim(cfg, claim) {
   const said = markerSaid(`${code ? `${code}: ` : ""}${scrubTokens(oneLine(text))}`);
   if (toolRefused(text)) return cannot;
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
-  if (code === "WORK_CLAIMED") return { blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work and tell the user; a .blocked.json beside its token file says so, and renewals wait until it is deleted)` };
+  if (code === "WORK_CLAIMED") return { whole: scrubTokens(oneLine(text)), blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work and tell the user; a .blocked.json beside its token file says so, and renewals wait until it is deleted)` };
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
@@ -3110,7 +3110,7 @@ async function lapseCheck(cfg, claim, knownExpiry) {
   // Lapsed with nothing since: renewed, and the log says it had lapsed, as a brain since SMD-3654 says it (review pass 3: on an older brain it was a plain renewal).
   if (!since.length) return { quiet: ` (it had lapsed at ${mine.expiresAt}; no other claim was made or renewed on its work meanwhile)` };
   // "not renewed" in the marker itself: the agent reads the file, not the log, to know it must renew after a carry-on (review pass 3).
-  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} ${Date.parse(c.claimedAt) > lapsedAt ? "claimed" : "renewed"} ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${Date.parse(c.claimedAt) > lapsedAt ? c.claimedAt : c.renewedAt} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
+  const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
 }
 
@@ -3134,7 +3134,7 @@ async function renewOne(b, path, claim) {
       if (check.quiet && o.ok && !o.blocked && !o.line.includes(" (it had lapsed at ")) o.line += check.quiet;
     }
   } else o = await renewClaim(b.cfg, claim);
-  if (o.blocked) o.line += ownPieceNote(o.blocked.message, dirname(dirname(path)), claim.id);
+  if (o.blocked) o.line += ownPieceNote(o.whole ?? o.blocked.message, dirname(dirname(path)), claim.id);
   // An ended claim's stamp goes with its file; one whose file could not be
   // ended keeps a stamp, or every event would ask again (review pass 1).
   if (o.ended && endClaimFile(path, claim, o.ended)) { try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
@@ -3182,8 +3182,15 @@ function noteAgentClaimCall(hook, brains) {
     }
     return;
   }
-  // One claim in the way or several: render.ts says "a live claim" or "N live claims" (review pass 3: several went unmarked).
-  if (/\bis covered by (?:a live claim|\d+ live claims)\b/.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
+  // One claim in the way or several: render.ts says "a live claim" or "N live claims" (review pass 3: several went
+  // unmarked). Only a call on the token file's own work — renew_claim of its id, or claim_work of its ticket and piece
+  // — marks it: a claim_work for other work carrying the token met a claim of its own, not this one's end (review pass 4).
+  const input = hook.tool_input ?? {};
+  const itsWork = m[2] === "renew_claim"
+    ? String(input.id ?? "").toLowerCase() === f.claim.id
+    : String(input.ticket ?? "").trim().toUpperCase() === String(f.claim.ticket ?? "").trim().toUpperCase()
+      && String(input.piece ?? "").trim().toLowerCase() === String(f.claim.piece ?? "").trim().toLowerCase();
+  if (itsWork && /\bis covered by (?:a live claim|\d+ live claims)\b/.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
     const said = markerSaid(`WORK_CLAIMED: ${scrubTokens(oneLine(text))}`);
     const wrote = writeMarker(f.path, f.claim, "blocked", { code: "WORK_CLAIMED", message: said });
     log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} met ${said}${wrote ? "" : " (the marker could not be written)"}${ownPieceNote(text, root, f.claim.id)}`);

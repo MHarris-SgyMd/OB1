@@ -960,16 +960,26 @@ export class SqlStore implements ThoughtStore {
 
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
   // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
-  async claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; holder: string } | null> {
-    // Two statements, not `$id IS NULL OR id = $id`: a generic plan would lose the primary key.
-    const rows = (id === undefined
-      ? await this.sql`SELECT id, holder_name, expires_at, released_at, released_by, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
-      : await this.sql`SELECT id, holder_name, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
+  async claimLease(token: string, id?: string, work?: { ticket: string; piece?: string; name: string; agentId?: string }): Promise<{ id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean } | null> {
+    // Separate statements, not `$id IS NULL OR id = $id`: a generic plan would lose the primary key. claim_work's form
+    // asks, with 115's own functions, whether the claim is the caller's on exactly the work asked: a ticket or piece
+    // 115 would refuse raises here as it would there, and the writer then answers it.
+    const rows = (id !== undefined
+      ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
+      : work === undefined
+        ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`
+        : await this.sql`
+            SELECT id, expires_at, released_at, released_by, release_reason,
+                   (c.issue = ob1_work_claim_issue(${work.ticket}::text)
+                    AND c.piece_key = COALESCE(lower(ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece')), '')
+                    AND ob1_work_claim_is_holder(c, ${work.name}::text, ${work.agentId ?? null}::uuid, c.token_hash)) AS own_on_this_work
+              FROM work_claims c WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
     const r = rows[0];
-    if (!r || typeof r.id !== "string" || typeof r.holder_name !== "string" || r.expires_at == null) return null;
+    if (!r || typeof r.id !== "string" || r.expires_at == null) return null;
     return {
-      id: r.id, holder: r.holder_name, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
+      id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null),
       releasedBy: typeof r.released_by === "string" ? r.released_by : null, releaseReason: typeof r.release_reason === "string" ? r.release_reason : null,
+      ...(work !== undefined ? { ownOnThisWork: r.own_on_this_work === true } : {}),
     };
   }
 

@@ -1277,12 +1277,17 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const releasedClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken }, KEYS.writer);
   const releasedClaimMcp = await mcp("claim_work", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken });
   const liveMine = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9309' AND piece_key = 'pr 1' AND released_at IS NULL`;
-  // Another key's ended token is left to the writer: no claim of the rival's is named ended to it.
+  // The same work spelled as 115 cleans it is the same work; other work with that token is a new claim (review pass 4:
+  // a split's pieces were refused), and so is another key's call with it.
+  const foldedClaim = await rest("POST", "/v1/claims", { ticket: " smd-9309 ", piece: "pr 1", token: lapsesToken }, KEYS.writer);
+  const otherWork = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 3", token: lapsesToken }, KEYS.writer);
+  if (otherWork.body.token) await rest("POST", `/v1/claims/${(otherWork.body.claim as Claim | undefined)?.id}/release`, { token: otherWork.body.token, reason: "done" }, KEYS.writer);
   const rivalWithIt = await rest("POST", "/v1/claims", { ticket: "SMD-9312", token: lapsesToken }, KEYS.rival);
   assert(releasedClaim.status === 409 && releasedClaim.body.code === "CLAIM_RELEASED" && releasedClaim.body.takenOver === false && !("token" in releasedClaim.body)
       && releasedClaimMcp.isError && /was released by writer at \S+ \("done"\); if the work is still yours to do, ask the user before claiming it again/.test(releasedClaimMcp.text)
-      && liveMine[0].n === 0 && rivalWithIt.status === 200 && rivalWithIt.body.outcome === "claimed",
-    `claim_work with its own released claim's token is refused, asking the user, and claims nothing; another key's call with it is the writer's as before (${releasedClaim.status} ${releasedClaim.body.code} | ${liveMine[0].n} | ${rivalWithIt.status} ${rivalWithIt.body.outcome})`);
+      && liveMine[0].n === 0 && foldedClaim.status === 409 && foldedClaim.body.code === "CLAIM_RELEASED"
+      && otherWork.status === 200 && otherWork.body.outcome === "claimed" && rivalWithIt.status === 200 && rivalWithIt.body.outcome === "claimed",
+    `claim_work with its own released claim's token on that work, however spelled, is refused, asking the user, and claims nothing; on other work, or another key's call, it is the writer's (${releasedClaim.status} ${releasedClaim.body.code} | ${liveMine[0].n} | ${foldedClaim.status} | ${otherWork.status} ${otherWork.body.outcome} | ${rivalWithIt.status} ${rivalWithIt.body.outcome})`);
 
   // The two swaps an agent makes, each with a hint; list_claims says when its limit cut the list.
   const idForToken = await mcp("renew_claim", { id: firstId, token: firstId });
