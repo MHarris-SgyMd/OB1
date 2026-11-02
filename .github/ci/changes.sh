@@ -7,8 +7,9 @@
 # a pull request that edits it is judged by the copy already on its base.
 #
 # A pull request's checkout is its merge commit, so HEAD^1..HEAD is what it
-# changes, read NUL-separated with --no-renames: no path is quoted, and a
-# rename lists its old path too. code=false only for a pull request into the
+# changes, read with --raw -z --no-renames: no path is quoted, a rename lists
+# its old path too, and each path's modes come with it, so a symlink or a
+# submodule at a docs path is code (review pass 2: a symlink looped the walks). code=false only for a pull request into the
 # default branch whose every changed path is not_code's. Anything else is
 # code=true, and every job runs:
 # - another event (a push to main always runs everything);
@@ -16,7 +17,7 @@
 #   here, it would keep this green once retargeted (review pass 1);
 # - a HEAD with no second parent (not a merge commit, or a shallow fetch);
 # - a change git cannot list or that is empty;
-# - one path off the list.
+# - one path off the list, or a symlink or submodule anywhere.
 # No error here stops the step, so the job succeeds with an answer, and a job
 # that fails anyway makes every gated job run (their `if:`) and the aggregate red.
 set -uo pipefail
@@ -42,14 +43,23 @@ not_code() {
   return 1
 }
 
-# decide EVENT FILE: FILE holds the change's paths, NUL-separated. Prints
-# "true|false<TAB>why".
+# decide EVENT FILE: FILE holds `git diff --raw -z` records — ":OLDMODE NEWMODE
+# OLDSHA NEWSHA STATUS", NUL, the path, NUL. Prints "true|false<TAB>why".
 decide() {
-  local event=$1 file=$2 f n=0
+  local event=$1 file=$2 meta f n=0
   if [ "$event" != pull_request ]; then printf 'true\ta %s run runs every job\n' "$event"; return; fi
   if [ ! -s "$file" ]; then printf 'true\tno change read from HEAD^1..HEAD\n'; return; fi
-  while IFS= read -r -d '' f; do
+  while IFS= read -r -d '' meta; do
+    # A record with no path after it (a rename's third field, were renames on, ends the input so): code.
+    if ! IFS= read -r -d '' f; then printf 'true\ta change record with no path after it\n'; return; fi
     n=$((n + 1))
+    case "$meta" in
+      ':'*) ;;
+      *) printf 'true\ta change record git did not write as --raw\n'; return ;;
+    esac
+    case " ${meta#:} " in
+      *' 120000 '* | *' 160000 '*) printf 'true\t%s is a symlink or a submodule\n' "$f"; return ;;
+    esac
     if ! not_code "$f"; then printf 'true\t%s can affect the code jobs\n' "$f"; return; fi
   done < "$file"
   if [ "$n" = 0 ]; then printf 'true\tno path read from HEAD^1..HEAD\n'; return; fi
@@ -66,7 +76,7 @@ answer() {
     printf 'true\tHEAD has no second parent here: not the merge commit, or a shallow fetch\n'; return
   fi
   changed=$(mktemp) || { printf 'true\tno scratch file for the change\n'; return; }
-  if [ "$event" = pull_request ] && ! git diff -z --no-renames --name-only 'HEAD^1' HEAD > "$changed" 2> /dev/null; then : > "$changed"; fi
+  if [ "$event" = pull_request ] && ! git diff --raw -z --no-renames --no-abbrev 'HEAD^1' HEAD > "$changed" 2> /dev/null; then : > "$changed"; fi
   result=$(decide "$event" "$changed")
   rm -f "$changed"
   printf '%s\n' "$result"
@@ -75,10 +85,13 @@ answer() {
 self_check() {
   local dir fails=0 expect event got
   dir=$(mktemp -d)
-  # check EXPECT EVENT PATH...: decide on the paths as a pull request's change.
+  # check EXPECT EVENT PATH...: decide on the paths as a pull request's
+  # change, each a regular file's edit (MODE=… sets the new mode).
   check() {
+    local p
     expect=$1 event=$2; shift 2
-    if [ "$#" -gt 0 ]; then printf '%s\0' "$@" > "$dir/c"; else : > "$dir/c"; fi
+    : > "$dir/c"
+    for p in "$@"; do printf ':100644 %s 0000000 0000000 M\0%s\0' "${MODE:-100644}" "$p" >> "$dir/c"; done
     got=$(decide "$event" "$dir/c"); got=${got%%$'\t'*}
     if [ "$got" != "$expect" ]; then echo "changes.sh: $event $* is code=$got, not $expect" >&2; fails=$((fails + 1)); fi
   }
@@ -105,6 +118,11 @@ self_check() {
   check true push docs/a.md
   check true merge_group docs/a.md
   check true workflow_dispatch docs/a.md
+  MODE=120000 check true pull_request docs/loop.md
+  MODE=160000 check true pull_request docs/vendored.md
+  # Two names where a record and its path should be (--name-only's shape, or a rename's third field): code.
+  printf 'docs/a.md\0docs/b.md\0' > "$dir/c"; got=$(decide pull_request "$dir/c"); got=${got%%$'\t'*}
+  if [ "$got" != true ]; then echo "changes.sh: a record not in --raw form is code=$got, not true" >&2; fails=$((fails + 1)); fi
   # The run itself, in scratch repositories shaped as a pull request's
   # checkout: a merge commit whose first parent is the base, moved after the
   # branch, and whose second is the pull request's head. Each must write one
@@ -131,11 +149,14 @@ self_check() {
     run true pull_request main 'echo x >> server-portable/api.ts'
     run true pull_request main 'echo x >> docs/a.md; echo x >> server-portable/api.ts'
     run true pull_request main 'git mv server-portable/api.ts docs/api.md'
+    run false pull_request main 'git mv docs/a.md docs/b.md'
+    run true pull_request main 'echo k > docs/keep.md; git mv docs/a.md server-portable/a.ts'
     run true pull_request feature 'echo x >> docs/a.md'
     run true push main 'echo x >> docs/a.md'
     # A code file named to forge GITHUB_OUTPUT, and a docs file whose name holds a newline: one line each.
     run true pull_request main "printf x > \"\$(printf 'server-portable/x\ncode=false')\""
     run false pull_request main "printf x > \"\$(printf 'docs/a\nb.md')\""
+    run true pull_request main 'ln -s .. docs/loop.md'
     # A HEAD with no second parent: the pull request's head itself.
     rm -rf "$repo"; mkdir -p "$repo"; : > "$out"
     (cd "$repo" && g init -q && mkdir docs && echo b > docs/a.md && g add -A && g commit -qm base && echo x >> docs/a.md && g add -A && g commit -qm docs \
@@ -166,3 +187,5 @@ why=${why//[[:cntrl:]]/?}
 [ "$code" = false ] || code=true
 echo "code=$code: $why"
 { echo "code=$code"; echo "why=$why"; } >> "$out"
+# On the run's page too, so a run that stops skipping docs-only PRs says why (review pass 2).
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "**What the change can affect:** code=$code — $why" >> "$GITHUB_STEP_SUMMARY"; fi

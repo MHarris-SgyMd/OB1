@@ -557,7 +557,8 @@
  *      it stops listing db/with-postgres.sh or .github/ci/held-cases.sh
  *  47. no Markdown or image file that tracked code names (a path token in a
  *      non-comment line, read from the root or from the naming file's own
- *      directory) is on .github/ci/changes.sh's allowlist of paths that skip
+ *      directory — a lexical reading: a path built from pieces, a template
+ *      or a directory walk is not seen) is on .github/ci/changes.sh's allowlist of paths that skip
  *      Fork Checks' code jobs (SMD-2435), unless NAMED_NOT_READ lists it with
  *      the reason no gated job reads it — so a suite that starts reading a
  *      README fails here until the allowlist denies it; a stale entry fails
@@ -10234,18 +10235,19 @@ const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg
  * allowlist denies fails too.
  */
 const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
-  "AGENTS.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs" },
+  "AGENTS.md": { by: ["recipes/openclaw-taskflow-work-log/examples/writeback.json", "recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs, and in a recipe's example payload" },
   "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release.yml alone runs; the rest are repo-consistency's or the cut's" },
   "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
   "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
-  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/assemble-release.ts", "scripts/fork-index.ts"], why: "named in messages; written by fork-index.ts and assemble-release.ts, which no gated job runs" },
-  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/fork-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, and by ingest-records.ts as the changes/ file it skips" },
+  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/assemble-release.ts", "scripts/fork-index.ts", "extensions/package.json"], why: "named in messages and extensions/package.json's comment; written by fork-index.ts and assemble-release.ts, which no gated job runs" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "integrations/openclaw-agent-memory/plugin/package.json", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/fork-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, by ingest-records.ts as the changes/ file it skips, and in a plugin's npm files list" },
   "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
   "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
   "docs/01-getting-started.md": { by: ["db/test-schema.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
-  "docs/connector-taxonomy.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
+  "docs/connector-taxonomy.md": { by: ["docs/connector-registry.json", "scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs; the registry names it as its spec" },
   "docs/vendored-disposition.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
-  "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts"], why: "named in messages and assertion text" },
+  "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts", "evals/consolidate-labels.json"], why: "named in messages, assertion text and a label file's note" },
+  "integrations/openclaw-agent-memory/plugin/README.md": { by: ["integrations/openclaw-agent-memory/plugin/package.json"], why: "in the plugin's npm files list, which no job packs" },
   "integrations/agent-memory-api/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
   "jev/README.md": { by: ["db/consolidate.ts", "jev/test-jev.ts"], why: "named in messages" },
   "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
@@ -10264,10 +10266,11 @@ function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<s
   return named;
 }
 /** Whether check 47 reads a tracked file as code that can name a doc: a script, a workflow or compose file, a Dockerfile — not the checker or the classifier, whose lists name them on purpose. */
-const namesDocs = (f: string): boolean => (/\.(ts|mjs|js|sh|py|ya?ml|svelte)$/.test(f) || /(^|\/)[^/]*Dockerfile[^/]*$/.test(f)) && f !== SELF && f !== CHANGES_SCRIPT;
+const namesDocs = (f: string): boolean => (/\.(ts|mts|mjs|cjs|js|sh|py|ya?ml|json|toml|svelte)$/.test(f) || /(^|\/)[^/]*Dockerfile[^/]*$/.test(f)) && f !== SELF && f !== CHANGES_SCRIPT;
 function checkChangesAllowlist() {
   const fileProbes: [string, boolean][] = [
     [".github/workflows/fork-checks.yml", true], ["deploy/compose.yaml", true], ["deploy/smoke.sh", true], ["server-portable/Dockerfile", true],
+    ["extensions/package.json", true], ["server-portable/bunfig.toml", true], ["db/config.d.mts", true], ["x/y.cjs", true],
     ["deploy/orchestration/runner.Dockerfile", true], ["dashboard/src/routes/+page.svelte", true], ["evals/rerank-crossencoder.py", true],
     ["db/config.mjs", true], [SELF, false], [CHANGES_SCRIPT, false], ["docs/a.md", false], ["db/migrations/001_x.sql", false],
   ];
