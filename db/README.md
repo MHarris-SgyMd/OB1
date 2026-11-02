@@ -1808,9 +1808,10 @@ as wakes, its order (the most stalled, then the most stopped) letting them
 pick the three thoughts named. `extraction_progress.cuts` counts them,
 written by `note_extraction_cut` under 093's holder rule: cuts + 1 and
 nothing else moved, since a cut is no wake — it neither stalls the thought
-nor ends its gaining. `stops` now counts the wakes and the operator's second
-signal. 093's `note_extraction_stop` and `save_extraction_window` are
-redefined to set `cuts` back to 0 where either replaces a row of other text
+nor ends its gaining. `stops` now counts the wakes, a paused sleep's aborts
+(SMD-3379 PR 1c-3b) and the operator's second signal. 093's
+`note_extraction_stop` and `save_extraction_window` are redefined to set
+`cuts` back to 0 where either replaces a row of other text
 or windowing, as they do the stops. The scheduler's hard stop says it is its
 own (`PassStop`'s `cut`), extraction counts it so, and a brain before 101
 counts it not at all — never as a stop — and each extraction run says so
@@ -4320,24 +4321,25 @@ one a raw `BEGIN` opened); a transaction's handle is refused for one.
 ## Sleep: the passes while the brain is quiet (SMD-1794)
 
 `sleep.ts` runs re-embed, extraction and consolidation while the brain is
-quiet, and stops them within `--poll` seconds of the first live call being recorded —
-"dolphin sleep": one half works while the other keeps answering. The header
+quiet, and pauses them within `--poll` seconds of the first live call being
+recorded, until it is quiet again — "dolphin sleep": one half works while the
+other keeps answering. The header
 of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain, a call wakes it or its budget stops it
+bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain or its budget stops it, pausing for live calls
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained, or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained (a live write during its sweep), or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
-(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
-and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
+(`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_CAPTURE`,
+`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its four numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -4403,6 +4405,23 @@ are background work. The passes it runs write no audit row but re-embed's,
 for a row it gives its first vector, which is marked background as the
 mender's are (SMD-2679), so they never wake it.
 
+**What a live write does asleep** (SMD-3379 PR 1c-3b). It pauses the sleep
+rather than ending it: the passes wait between thoughts, between a long
+thought's windows and between a thought's pairs — a worker between thoughts
+holding no claim, one mid-thought keeping its claim and the windows answered —
+and go on once `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20, held to the
+quiet) have passed with no live write. The log says `paused:` and `resumed:`,
+and the row `paused { since }`. While paused, a model call in hand longer than
+60 s is aborted and its thought set back in the queue, extraction keeping its
+answered windows and counting the stop (093); consolidation's at most three a
+sleep. As the passes go on, the thoughts stopped that way are moved behind
+the newer work. A pause is not the clock's: the budget counts the passes'
+time. Under `--follow`, a live write that finds the pools drained — the work
+it added itself aside, a capture's extraction — ends the sleep as a wake did,
+so the next one reads re-embed's backlog and sweeps again; a live write
+during the sweep ends it too. A one-shot run pauses and drains, ending 0, or
+1 for a live write during its sweep.
+
 **What it does asleep.** First the re-derive pass (SMD-1794's order,
 SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
 delete or a replay took, deleted through `rebuild_derived`'s orphans-only mode,
@@ -4452,11 +4471,13 @@ start line counts only rows not yet claimed, so follow the `re-embed pass`
 row), and `reembed.ts --dry-run` before
 upgrading says how many. Then extraction alone until its
 pool drains, then consolidation beside it — the order "Start `extract` alone
-on a backlog" asks of an operator. A wake hard-stops the passes: every lease returned, the model call in
-hand aborted, the thoughts in hand moved to the back of the queue. A long
+on a backlog" asks of an operator. A live write pauses the passes (above),
+a call in hand a minute old aborted while paused and its thought set back; a
+sleep's end hard-stops them: every lease returned, the model call in hand
+aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (093, [Long thoughts
-resume](#extract-entitiests)), so one longer than every sleep advances by the
-windows each sleep finishes, and is done once its last is. Consolidation also
+resume](#extract-entitiests)), so one longer than every sleep or pause advances
+by the windows answered before each stop, and is done once its last is. Consolidation also
 joins once extraction holds nothing but thoughts that three or more long hard
 stops in a row took with no window saved between, and none saved since (093's
 `stalled` and `gained`, SMD-2694; long: the thought held a minute, provider
@@ -4464,7 +4485,7 @@ pauses aside, so a busy day's short sleeps count none) — a single window
 longer than every long sleep,
 or a stop that keeps landing past the last window, in the decider's call or
 the write — which would otherwise hold it back for as long as the brain keeps
-waking. The cost is an unextracted neighbour's: a newer thought judged
+pausing it. The cost is an unextracted neighbour's: a newer thought judged
 meanwhile misses its pair with such a thought, which consolidation reaches
 from its newer side only and does not revisit. Once taken, the decision
 holds for the rest of the sleep. Stalled thoughts go last: as each sleep
@@ -4484,7 +4505,7 @@ one-slot model the judge does not wait behind the window, and a night still
 reaches the thought. It is tried in every sleep once consolidation's pool
 drains, and finished by the first sleep long enough for both — one its clock
 (`--budget`) allows. Limits stand:
-sleeps of about a minute, each under the stall floor, neither stall a slow
+sleeps of about a minute on their clock, each under the stall floor, neither stall a slow
 window nor let it finish, and consolidation waits on it until a longer
 sleep; and once consolidation has joined, a stalled thought in hand keeps
 its turn, and a capture made then waits for the next sleep, where it goes
@@ -4558,7 +4579,9 @@ raised past the bound; one sleep stopped on its budget exits 1.
 **Upgrading to the budget.** The clock is on by default: from this release a
 long quiet night holds the model for 60 minutes, and the rest of a backlog
 waits for the next live call and the quiet. `OB1_SLEEP_BUDGET=0` (`--budget
-0`) and a recreate restore the old behaviour; a larger value drains a
+0`) and a recreate run a sleep until its pools drain, a live write then
+ending it (since SMD-3379 PR 1c-3b one that finds work pauses it, so a
+stalled thought keeps the sleep going); a larger value drains a
 backlog — a model change's re-pooled consolidation, say — in fewer nights.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
@@ -4586,14 +4609,14 @@ refusals again, and each names which it is:
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
 with `slept`, the current or last sleep's start and, once it is over, its
-end, and `reads`, whether its role read `query_log` at its start — so
-preflight judges what wakes the scheduler by the scheduler's role, not its
-own. Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
+end (it carried `reads`, whether its role read `query_log`, until SMD-3315,
+when the scheduler stopped reading it). Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
 running, for how long; awake, with when the last sleep ended and how long it
 lasted; "its last pass failed" while a pass's last word was a failure (into
 the next sleep, until one of its passes stamps); stopped once it ends, or
-stale, each with the service's restart; and what wakes it — a search or a
-write, or writes alone and why, each lesser case a warning with its fix. The
+stale, each with the service's restart; and what a live write does —
+pauses its passes, or ends a sleep whose pools are drained; a search does
+not. The
 `workers` row no longer reads it. Since SMD-2752 the row carries two more
 words, and the `sleep` row says each:
 - `waiting`, the passes waiting at their start for a provider that does not
@@ -4650,16 +4673,17 @@ read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
-the wakes (a hard stop counted on them, 093): how many, and the three most
-stalled, then most stopped, with their stops and windows kept — stalled as
-the scheduler reads it, 0 once a window is saved since the last stop — and
-since SMD-3060 the scheduler's own cuts of each, said apart from the stops
-and ordering nothing ("…, and 41 cut(s) of the scheduler's own"; none before
-101) — read at its first stamp awake
-or poll asleep, after each wake, at least every minute and before the row
-ends (but on a second signal, whose exit it would delay, or a failure), so a thought finished in
+its stops (a hard stop counted on them, 093: a wake's, a paused sleep's
+abort): how many, and the three most stalled, then most stopped, with their
+stops and windows kept — stalled as the scheduler reads it, 0 once a window
+is saved since the last stop — and since SMD-3060 the scheduler's own cuts
+of each, said apart from the stops and ordering nothing ("…, and 41 cut(s)
+of the scheduler's own"; none before 101) — read at its first stamp awake or
+poll asleep, after each wake or resume, at least every minute and before the
+row ends (but on a second signal, whose exit it would delay, or a failure),
+so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
-names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
+names them — "1 thought(s) held back across its stops — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
 stalled one, naming it: consolidation joins past it once extraction holds
 nothing else, and the first sleep long enough — its clock allowing — finishes it, or extraction run
@@ -4667,8 +4691,8 @@ by hand with the scheduler stopped. One whose windows are all kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
-Since SMD-3379 PR 1c-2 the readers take two fields that no scheduler writes
-yet; 1c-3 writes them. `paused { since }` is the scheduler paused by a live
+Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
+and 1c-4 will write `holds`. `paused { since }` is the scheduler paused by a live
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out
@@ -4883,10 +4907,11 @@ What the columns are not:
 - **p95 prints only from 20 samples up.** Below that, nearest rank makes it the
   single slowest call.
 - **The `workers` profile measures a pass that never yields.** Under the sleep
-  scheduler, a pass runs beside a burst until the scheduler's next poll sees the
-  burst's first recorded call: up to `--poll` (5 s) after that call ends. That is
-  a capture or two; a search does not wake it at all (SMD-3315). That window
-  was not measured here.
+  scheduler, a pass goes on claiming beside a burst until the scheduler's next
+  poll sees the burst's first recorded call: up to `--poll` (5 s) after that
+  call ends, its call in hand running on (aborted while paused once 60 s in hand,
+  SMD-3379 PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
+  not measured here.
 
 ### bench-querylog.ts
 
