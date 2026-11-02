@@ -108,7 +108,7 @@ if (!URL_) {
  * under; the short sections even the others out to it, by the section times
  * main's CI logs stamp in its runs from 7301d0f5 to e7220bd5 (SMD-3469):
  * sleep has [17] beside [38] and [10g], and the rest takes [10e], [37] and
- * [43] from extract. [41] went to sleep too once [10] grew 6 s (SMD-3379
+ * [43] from extract. [41] went to sleep too once [10] grew ~7 s (SMD-3379
  * PR 1c-3a), by the runs from 68ba1e13 to 6d613601 (SMD-3469 PR 2). The
  * rest's sections wait on the CPU, not on timers, so its time moves most
  * with the runner's speed. A cell's job runs ~18 s past its sections (~25 s
