@@ -1184,7 +1184,8 @@ async function selfCheckIn(scratch: string): Promise<number> {
 
 /**
  * The self-check, its env files in a directory of their own, not this one in the checkout: a run killed midway
- * leaves nothing in the tree, and a read-only checkout runs it. The directory goes on every path (SMD-3639).
+ * leaves nothing in the tree, and a read-only checkout runs it. The directory goes on return or throw; a kill
+ * leaves it in the temp directory (SMD-3639).
  */
 async function selfCheck(): Promise<number> {
   const scratch = mkdtempSync(join(tmpdir(), "ob1-provision-check-"));
