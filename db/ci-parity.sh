@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run what .github/workflows/fork-checks.yml runs, the way CI does:
-# the database-backed suites in CI's order against ONE shared Postgres, but for
-# test-upgrade and test-preflight, which run beside them on a second as CI's do;
-# and beside both, in a lane of their own, the suites and self-checks that need
-# none and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903, SMD-3638).
+# the data-layer job's database-backed suites in CI's order against ONE shared
+# Postgres; beside them, all from the start, test-live.ts's four shards, each on
+# a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
+# test-preflight on another as CI's are, and in a lane of their own the suites
+# and self-checks that need none and every directory's typecheck (SMD-1932,
+# SMD-1870, SMD-2903, SMD-3638).
 # Each row says how long it took, and one still running at its time limit, 600 s
 # unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647).
 #
@@ -287,8 +289,8 @@ free_rows() {
 # background from its start (SMD-2219, SMD-3195, SMD-3468) — CI side by side,
 # test-upgrade.ts and the first shard on pair-postgres, the rest on
 # preflight-postgres; here one after the other on one, each shard dropping the
-# schema before its first database section, which their lane's length, inside
-# the database lane's, makes free. The script runs itself again under a second
+# schema before its first database section, which costs nothing while the
+# lane's length stays inside the longest test-live shard's. The script runs itself again under a second
 # with-postgres.sh with --pair, and that run does only this — so a run needs
 # podman or docker even when DATABASE_URL is given, and without one this lane
 # fails with with-postgres.sh's "No working container runtime found".
@@ -303,6 +305,35 @@ pair_rows() {
   return "$FAILED"
 }
 
+# The live lanes (SMD-3688): test-live.ts's four shards side by side, each on a
+# Postgres of its own, as CI's db-live matrix runs them (SMD-3048, SMD-3169).
+# The script runs itself again under a with-postgres.sh per shard with --live,
+# and that run does only its shard's row. One Postgres per shard, not one with
+# four databases: roles and backends are the cluster's, and the suite makes
+# roles and counts connections. [2] edits a copy of the migrations, never the
+# tracked tree (SMD-3639), so no shard reads another's edit.
+# live_rows SHARD NOWFILE: one shard's row; at_row's file.
+live_rows() {
+  FAILED=0 NOW_FILE="$2"
+  BASE_ENV=$(env | LC_ALL=C sort)
+  # Each row a line of its own, as check 35 reads them.
+  if [ "$1" = rest ]; then
+    OB1_LIVE_SHARD=rest run db test-live.ts
+  elif [ "$1" = sleep ]; then
+    OB1_LIVE_SHARD=sleep run db test-live.ts
+  elif [ "$1" = long ]; then
+    OB1_LIVE_SHARD=long run db test-live.ts
+  elif [ "$1" = extract ]; then
+    OB1_LIVE_SHARD=extract run db test-live.ts
+  else
+    echo "ci-parity.sh --live takes rest, sleep, long or extract, not '$1'" >&2; return 2
+  fi
+  at_row ''
+  return "$FAILED"
+}
+# The live lanes' shards, in the order they are printed.
+LIVE_SHARDS="rest sleep long extract"
+
 # The lanes beside the database lane: each writes to a file, printed when the
 # database lane is done, one block each, so no lane's rows interleave with
 # another's. A Ctrl-C stops them whole through stop_lanes, since a
@@ -315,13 +346,18 @@ pair_rows() {
 # follow a lane: NAME.out its rows so far, NAME.now the row in hand, since
 # when, and the row before (SMD-3647).
 start_lanes() {
+  local shard
   LANES=$(mktemp -d "$PARITY_TMP/ci-parity-lanes.XXXXXX")
   LANES_AT=$SECONDS
-  echo "  … the other two lanes write to $LANES: free.out the database-free lane's rows, pair.out test-upgrade's and test-preflight's"
-  free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
-  FREE_PID=$!
+  echo "  … the other lanes write to $LANES: live-<shard>.out each test-live shard's row, pair.out test-upgrade's and test-preflight's, free.out the database-free lane's rows"
+  for shard in $LIVE_SHARDS; do
+    "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --live "$shard" "$LANES/live-$shard.now" < /dev/null > "$LANES/live-$shard.out" 2>&1 &
+    LIVE_PIDS="$LIVE_PIDS $!"
+  done
   "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
   PAIR_PID=$!
+  free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
+  FREE_PID=$!
 }
 stop_tree() {
   local child
@@ -331,7 +367,7 @@ stop_tree() {
 drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 stop_lanes() {
   local pid
-  for pid in $FREE_PID $PAIR_PID; do stop_tree "$pid"; done
+  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
   drop_lanes
 }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
@@ -358,12 +394,12 @@ wait_lane() {
 
 main() {
   FAILED=0
-  FREE_PID='' PAIR_PID='' LANES=''
+  FREE_PID='' PAIR_PID='' LIVE_PIDS='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
   # A closed terminal's hangup reaches every process of this script's group,
-  # the lanes and the pair lane's with-postgres.sh among them, and limit's trap
-  # ends each row's own group; so main() only exits, since stopping the pair
-  # lane too could cut its with-postgres.sh's container removal short. A HUP
+  # the lanes and their with-postgres.sh runs among them, and limit's trap
+  # ends each row's own group; so main() only exits, since stopping the lanes
+  # too could cut their with-postgres.sh's container removals short. A HUP
   # sent to this script alone exits once the database lane's row in hand ends,
   # leaving the lanes to run on unreported, each row within its limit.
   trap 'exit 129' HUP
@@ -371,26 +407,17 @@ main() {
   trap drop_lanes EXIT
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
-  # Against the shared Postgres, in CI's order.
-  # CI runs test-live.ts's four shards side by side, one matrix cell each,
-  # each on a fresh database (SMD-3048, SMD-3169). Here they run in series on
-  # the shared one, each dropping its schema first, which takes the rows and
-  # config keys the one before left; cluster roles and any table dropSchema
-  # does not list stay. A section broken by another's rows shows only in a
-  # full run.
-  OB1_LIVE_SHARD=rest run db test-live.ts
-  # The other two lanes start here, beside the rest of this one. Until
-  # SMD-3639 the rest shard's [2] appended a line to the tracked
-  # db/migrations/002 for a moment, which the database-free lane's checker
-  # (17c hashes the frozen migrations), test-engines and test-schema read, as
-  # do test-upgrade and test-preflight. It edits a copy now, so they could
-  # start first: SMD-3688 takes that up, with the shards side by side.
+  # Every other lane starts now, beside this one (SMD-3688): the four test-live
+  # shards (live_rows), test-upgrade and test-preflight (pair_rows), and the
+  # database-free rows (free_rows). Until SMD-3639 the rest shard's [2] appended
+  # a line to the tracked db/migrations/002 for a moment, which the checker
+  # (17c hashes the frozen migrations), test-engines, test-schema, test-upgrade
+  # and test-preflight read, so they waited for it; it edits a copy now.
   start_lanes
-  OB1_LIVE_SHARD=sleep run db test-live.ts
-  OB1_LIVE_SHARD=long run db test-live.ts
-  OB1_LIVE_SHARD=extract run db test-live.ts
-  # test-upgrade.ts and test-preflight.ts's shards run in the pair lane
-  # (pair_rows).
+
+  # Against the shared Postgres, in CI's order: the data-layer job's suites,
+  # which share CI's one Postgres service too, so state one leaves behind is
+  # caught here (the header's story).
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
@@ -417,6 +444,13 @@ main() {
   run extensions         test-tools.ts
 
   # Each pid cleared once waited, so a trap after cannot signal a reused one.
+  local shard pid
+  set -- $LIVE_PIDS
+  for shard in $LIVE_SHARDS; do
+    pid=$1; shift
+    wait_lane "$pid" "live-$shard" "test-live.ts's $shard shard, on a Postgres of its own"
+    LIVE_PIDS=${LIVE_PIDS# $pid}
+  done
   wait_lane "$PAIR_PID" pair "test-upgrade and test-preflight, on a Postgres of their own"
   PAIR_PID=''
   wait_lane "$FREE_PID" free "The database-free lane"
@@ -429,4 +463,7 @@ main() {
 if [ "${1:-}" = --pair ]; then
   [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --pair runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
   pair_rows "${2:-}"
+elif [ "${1:-}" = --live ]; then
+  [ -n "${DATABASE_URL:-}" ] || { echo "ci-parity.sh --live runs under with-postgres.sh, as main() starts it" >&2; exit 2; }
+  live_rows "${2:-}" "${3:-}"
 elif [ -n "${DATABASE_URL:-}" ]; then main; else exec "$ROOT/db/with-postgres.sh" "$0"; fi

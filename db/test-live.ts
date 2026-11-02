@@ -29,10 +29,10 @@
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
  * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169). From one checkout,
- * run them one at a time for now: [2] edits a copy of the migrations, no
- * longer the tracked tree (SMD-3639), but side by side has not been tried
- * (SMD-3688).
+ * every one on a database of its own (SMD-3048, SMD-3169), and so does
+ * db/ci-parity.sh, from one checkout, each under a with-postgres.sh of its own
+ * (SMD-3688): [2] edits a copy of the migrations, not the tracked tree
+ * (SMD-3639). Two shards on one database would drop each other's schema.
  */
 
 import { SQL } from "bun";
