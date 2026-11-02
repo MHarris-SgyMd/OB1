@@ -4379,6 +4379,118 @@ version 2. Two fresh blind raters per set re-labelled both sets under version 3:
 
 The pairs, the answers and the labels hold the brain's text, so they stay out of the repo.
 
+## Does a read put what matters first? (SMD-3662)
+
+`eval-priority.ts`, its rules in `priority.ts`. Twice a "highest-value unstarted issue" question went to both brains,
+and both put a ticket whose words matched the question ahead of the one the board said mattered: SMD-2540 over
+SMD-2888 on 2026-10-14, and SMD-1853 over SMD-2908 on 2026-11-02. SMD-3660's reads (`priority_weight`, the agenda)
+are meant to fix that, and none turns on by default without this number.
+
+```bash
+bun eval-priority.ts --self-check                       # the rules; no database, no model
+../db/with-postgres.sh bun eval-priority.ts --seeded    # the seeded set on a throwaway Postgres; keyless
+```
+
+**The seeded set.** It has 18 items and 7 prompts, with the gold order for each prompt written by judgement, not
+computed from `docs/priority.md`'s weights.
+* **Personal items:** a bill due tomorrow, a renewal next month, an operator's "this matters", a commitment from a
+  meeting, a home-maintenance task two weeks overdue, an action item done last week, and four pieces of chatter,
+  which are the newest rows.
+* **A small board:** an Urgent ticket that blocks another, a High, a claimed High, a blocked High, a Medium, a Low, a
+  Done and a "No priority".
+
+Each item also carries the facts a later read will need (a due offset, a stated level, done, claimed, the blocks
+links), so SMD-3663 to SMD-3669 are seeded from the corpus the baseline was measured on. A hash pins the corpus,
+the stub embedder's section of `priority.ts` (its source text, noise weights included), the read depth and the bar.
+Changing any of them is a new registration with its baseline re-run, never an edit.
+
+**The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
+sit at a cosine of about 0.4, as unrelated texts do under a real model. A small hashed noise axis breaks ties
+instead of the listing order. Plain search therefore ranks by word overlap. The seeded number measures how a read
+orders results on a fixed similarity, which is the part a priority read changes. The dogfood rows carry the real
+model's.
+
+**The reads** go through the server's own `SqlStore.hybridThoughts`, at the knobs the tools send:
+* `plain`: the `search` tool's knobs;
+* `current`: the same with `prefer_current` on;
+* `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
+
+The self-check reads the knobs from `core/reads.ts` and from `search_thoughts`' own block of `core/schemas.ts` (its
+`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift. A read that errors on
+a prompt scores it false, false, 0, as the bar says, and the run lists the error.
+
+**The score.** For each prompt:
+* **top-1:** the gold's first item is the read's first hit;
+* **top-3:** the gold's first item is among the read's first three;
+* **tau:** Kendall's tau-b between the gold order and the read's ranks of the gold items. An item the read left out
+  ranks 11, tied with the others left out.
+
+top-1 and top-3 are averaged over every prompt. tau is averaged over the prompts with two or more gold items, and a
+null tau among them counts as 0.
+
+**The mutant.** Each read is scored against its gold shuffled 2,000 times with a fixed seed. If the score reads the
+gold's order, the shuffled gold scores chance:
+* top-1 is 1/|gold| when the read's first hit is a gold item;
+* top-3 is the read's top three's share of the gold;
+* tau is 0.
+
+The mutant's tau and chance's are averaged over the same prompts as "mean tau". The run exits 1 when the mutant
+sits more than 0.05 from chance. The self-check also runs an order-blind top-1 through the mutant and requires it
+to land far from chance.
+
+These mutants are each refused:
+* an order-blind top-1, by the self-check and by the seeded run's own chance check;
+* a constant tau;
+* no background axis;
+* a null tau counted as 1;
+* no regression check;
+* a changed noise weight, or a changed bar (the hash);
+* a `search_thoughts` default changed for `limit` or `prefer_current`.
+
+A read made to throw on one prompt scores that prompt false, false, 0, and the run still prints its table.
+
+**The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`). On the
+seeded set, against the best baseline read on each measure, a read helps only if all four hold:
+* (a) it gets top-1 on at least 5 of the 7 prompts;
+* (b) it gets top-1 on at least 2 more prompts than the best baseline read;
+* (c) its mean tau is at least 0.25 above the best baseline read's;
+* (d) no prompt that a baseline read kept in the top 3 leaves it.
+
+These edge cases are fixed in advance:
+* a read's order is the order it returns;
+* a read that errors scores false, false, 0 on that prompt;
+* a read with a weight is measured once, at the value it would ship with;
+* the dogfood rows are reported beside the verdict and don't gate it.
+
+**Baseline, 2026-11-02** (main 8aa855f1, registration `de5bcbc5395ceb9a`; deterministic, two runs identical; the
+program's output, verbatim):
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.261 | 0.086 / 0.150 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.300 | 0.086 / 0.150 / -0.003 | 0.085 / 0.149 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.000 / 0.076 / -0.001 | 0.000 / 0.078 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.431 / 0.715 / -0.001 | 0.428 / 0.711 / 0.000 |
+
+So a priority read must get top-1 on at least 5 of 7 prompts and a mean tau of at least 0.550, and keep
+`highest-value` and `due-soon` in the top 3.
+
+What the baseline gets wrong:
+* **Plain search** gets one prompt right, `highest-value`, because the Urgent ticket's row says "unstarted". On
+  "which ticket should I pick up next?" it puts a renewal first and the claimed ticket second. On "what needs my
+  attention this week?" it puts a documentary first and the insurance claim, done last week, second.
+* **`prefer_current`** moves only the Done ticket down. The insurance claim's note says it's done but has no lifecycle
+  of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
+* **The filter** returns the two High backlog tickets for every prompt, the blocked one first, and nothing personal.
+
+**The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
+numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
+
+| date | pick | picked instead | read: rank of the pick |
+| --- | --- | --- | --- |
+| 2026-10-14 | SMD-2888 | SMD-2540 | plain absent; ticket_rows absent |
+| 2026-11-02 | SMD-2908 | SMD-1853 | plain absent; filter 4 |
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
