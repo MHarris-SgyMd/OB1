@@ -66,13 +66,17 @@ Every brain records who holds which work, so two agents never build one change (
 If `open-brain` has no `claim_work` tool, say why:
 - the brain's release predates SMD-3598, so neither `list_claims` nor `claim_work` is there;
 - the key lacks write scope, so `list_claims` is there but `claim_work` isn't;
+- the key is capture-scoped, so only `capture_thought` is there;
 - the connector is down, so none of its tools answer; claim (step 2) once it answers again.
 
 1. **Before recommending or starting work,** check the ticket's work, whatever tools you have:
    - **Find its work.** Run `git fetch`, then look at `git worktree list`, the branches carrying the ticket's id, and its open PRs (`gh pr list --search <ticket id> --state open`). If you can't read Linear or GitHub, say so and ask the user before starting.
-   - **Check its claims.** Call `list_claims` with `ticket` for each ticket you consider.
+   - **Check its claims.** Call `list_claims` with `ticket` and `include_ended: true` for each ticket you consider. Without `include_ended` a lapsed claim isn't listed at all.
    - **A live claim's work is held.** Leave it alone, and name the claim's label, holder and lease end. A claim whose id is in your worktree's `.work-claims/` is yours, or your caller's: carry on.
-   - **A lapsed claim is free only once its work is.** Under this rule a holder lapses after a day without renewing, or a week with its PR open. An unmerged worktree, branch or open PR for the ticket is paused work, with a claim or without one: tell the user before starting.
+   - **A lapsed claim is free only once its work is.** Under this rule a holder lapses after a day without renewing, or a week with its PR open.
+     - A lapsed claim that was never released, whose PR hasn't merged or closed, may be work paused on another machine, unpushed. Tell the user before starting.
+     - So is an unmerged worktree, branch or open PR for the ticket, with a claim or without one.
+     - A lapsed claim whose PR merged or closed is free.
    - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done or Canceled, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does.
 2. **Before you create the branch,** call `claim_work` with:
    - `ticket`;
@@ -81,11 +85,11 @@ If `open-brain` has no `claim_work` tool, say why:
    - a `label` naming your tool, machine and branch, such as `codex@laptop codex/smd-1234-short-name`.
 
    Then create the worktree and branch, keep the token (step 3), and move the ticket to In Progress for people reading Linear. On `WORK_CLAIMED`, read whose claim is in the way:
-   - **its id is in your `.work-claims/`:** it is yours. Work under it, or release it and claim the piece.
+   - **its id is in your `.work-claims/`:** it is yours. Work under it, or release it and claim the piece. The reply's advice about a lost token is not for you.
    - **your key's, but not in your files:** another session of yours. Stop, and give the user its label from `list_claims`.
    - **another key's:** stop, and tell the user who holds it.
 
-   **When a ticket's work splits into several PRs,** release the whole-ticket claim and delete its token file. Claim the open PR's piece with `lease_seconds: 604800`, and each later piece when you create its worktree.
+   **When a ticket's work splits into several PRs,** release the whole-ticket claim and delete its token file, or the `.ended.json` the hook may have just made of it. Claim the open PR's piece with `lease_seconds: 604800`, and each later piece when you create its worktree.
 3. **Keep the token** `claim_work` returns in `.work-claims/<claim id>.json` at the new worktree's root, as soon as the worktree exists, and nowhere else. Make the directory first (POSIX shell):
 
    ```sh
@@ -107,6 +111,7 @@ If `open-brain` has no `claim_work` tool, say why:
    - **A refusal saying the claim was released, or lapsed and was taken over,** means stop work on it and tell the user. Don't claim the work again without asking, whatever the reply suggests.
    - **A `<claim id>.ended.json` in `.work-claims/`** means the same: the hook found the claim ended. Read its `ended.message`, tell the user, and delete the file once they have decided.
    - **`WORK_CLAIMED` on a renewal** means your claim lapsed and another claim now covers its work: stop while that one holds.
+   - **A `<claim id>.blocked.json` in `.work-claims/`** means the hook's renewal met that `WORK_CLAIMED`. Another agent may have built part of the work since. Read its `blocked.message`, stop, and tell the user. The hook renews that claim again only once you delete the marker, after the user has decided.
 5. **When you open the PR, or hand over the command that opens it,** set `"lease_seconds": 604800` (a week) in the token file, then renew with it. The claim then holds while the PR waits for review.
 6. **Release** at merge or abandon, before removing the worktree:
    - **Before you ask for the merge,** renew. A refusal saying the claim was taken over means someone else may have built the work: tell the user instead of merging.
@@ -114,7 +119,14 @@ If `open-brain` has no `claim_work` tool, say why:
    - **If the merge happened after your session ended,** the next session in the worktree releases first (step 4).
 7. **If you lose the token,** wait for the lease to lapse and claim the work again: your key takes over its own lapsed claim with a new token. A re-claim of work whose PR is open takes `lease_seconds: 604800`. Or ask the user to release it with an operator key, with a reason.
 
-**Keys.** A claim belongs to its key's agent id: the key that claimed it renews it, and no other. Give sessions an agent-kind key, set with `SELECT set_agent_kind('<key name>', 'agent');`. The operator key, which can force-release any claim, belongs to the person. Switch a session's key only when it holds no live claims.
+**Keys.** A claim belongs to its key's agent id: the key that claimed it renews it, and no other. The operator key can force-release any claim, and it belongs to the person, so give sessions an agent-kind key.
+
+A default install hands its one key to the coding client, and SETUP.md classifies that key `operator`. In that case, mint a write key for sessions:
+1. `bun server-portable/keygen.ts --name claude-code --scope write`, then add its line to `MCP_ACCESS_KEYS`.
+2. `SELECT set_agent_kind('claude-code', 'agent');`
+3. Point the connector at the new key.
+
+Switch a session's key only when it holds no live claims.
 
 ### Quick checks
 

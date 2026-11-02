@@ -87,7 +87,7 @@ FROM YOUR OPEN BRAIN SETUP
 
 GENERATED DURING SETUP
   Capture-scoped key (step 1; shown once by keygen):              ____________
-  Claim key file (step 2, optional; the agent's own write key):   ____________
+  Claim key file (step 2, optional; a copy of your connector's key, mode 600):  ____________
   Config file (step 2):   ~/.config/open-brain/session-capture.json
   State directory:        ~/.local/state/open-brain/session-capture/
 
@@ -176,7 +176,18 @@ Then paste the hook `--print-hook claude-code --fan-out` prints (step 4): an asy
   - `server` is the MCP server the claim was made through, and it is required. A claim is renewed only on the brain whose `connector` is that name and that has a claim key, one brain or several, so a token never goes to a brain that didn't issue it. A file without one is skipped.
 - **Keeping it out of git.** The directory's own `.gitignore` keeps it out of git on any branch and in any repo. `.work-claims` in the repo's `.gitignore` does too. The token proves the claim to anyone holding your key.
 
-Give the brain the agent's key as `claim_key` (or `claim_key_file`): the very key the agent claims with, which for Claude Code is the `x-brain-key` of its brain connector. A claim belongs to the key's agent id, and only that key can renew it. A second key can't share the id: the server takes one key per name in `MCP_ACCESS_KEYS`, and its preflight fails, keeping the REST core down, when a name appears twice. The claims hook needs the capture config of step 1 as well; it adds to it and doesn't stand alone.
+Give the brain your agents claim through the agent's key, as `claim_key_file` (or `claim_key`): the very key the agent claims with. Only that brain needs one, stable in this repo's setup, not its canary. A claim belongs to the key's agent id, and only that key can renew it. A second key can't share the id: the server takes one key per name in `MCP_ACCESS_KEYS`, and its preflight fails, keeping the REST core down, when a name appears twice. The claims hook needs the capture config of step 1 as well; it adds to it and doesn't stand alone.
+
+For Claude Code, the key is the `x-brain-key` of its brain connector. Copy it into the file without it ever reaching the terminal (a full path: `~` is not expanded in the config):
+
+```bash
+umask 077; claude mcp get open-brain | sed -n 's/^.*x-brain-key:[[:space:]]*//p' > /home/you/.config/open-brain/stable-claims.key
+test -s /home/you/.config/open-brain/stable-claims.key && echo written
+```
+
+A connector that carries its key on its url (`?key=`) has no header, so the file comes out empty: put the raw key you kept at keygen time in it instead. Keep the file mode 600; `--check` warns about one others can read.
+
+If that key is your operator key, which a default install hands its coding client (SETUP.md classifies it `operator`), first give sessions an agent key of their own, as AGENTS.md's "Claim your work" says under **Keys**. The claim key then holds no operator power. The operator key can force-release any claim, and it sits in a file read at every tool call. A Codex session on a different key can't be renewed through this brain's one claim key; its agent renews by the rule.
 
 ```json
 {
@@ -187,7 +198,14 @@ Give the brain the agent's key as `claim_key` (or `claim_key_file`): the very ke
 }
 ```
 
-The one-brain shape takes `connector` and `claim_key` too (`{"url", "key", "connector": "open-brain", "claim_key_file"}`), and `OB1_CLAIM_KEY` in the environment wins over its claim key. The brain `OB1_BRAIN_URL` names has no connector, so it renews no claims: no token goes to it, and `OB1_CLAIM_KEY` beside it is unused. `--check` warns about an `OB1_CLAIM_KEY` that no brain reads, beside `OB1_BRAIN_URL` or a `brains` list.
+The one-brain shape takes `connector` and a claim key too:
+
+```json
+{ "url": "http://127.0.0.1:8010/mcp", "key_file": "/home/you/.config/open-brain/capture.key",
+  "connector": "open-brain", "claim_key_file": "/home/you/.config/open-brain/stable-claims.key" }
+```
+
+`OB1_CLAIM_KEY` in the environment wins over the one-brain file's claim key. The brain `OB1_BRAIN_URL` names has no connector, so it renews no claims: no token goes to it, a claim key in the file goes unused, and `OB1_CLAIM_KEY` beside it is unused. `--check` warns about each. A claim key that can't be read — a missing or empty file, a `~` path — turns claims off for that brain and leaves the capture running; `--check` fails with the reason, and a checkpoint logs it.
 
 - **When it renews.**
   - **At a compaction and at a session's end:** each claim the worktree holds a token for, unless it was attempted within the last minute.
@@ -203,11 +221,11 @@ The one-brain shape takes `connector` and `claim_key` too (`{"url", "key", "conn
   - a token the brain does not match;
   - a claim key that is not the holder's;
   - a claim this brain does not have (claimed on another brain: name it in `server`);
-  - `WORK_CLAIMED`: the claim lapsed and another claim covers its work. Migration 115 renews it once that claim ends, and the line says to stop work meanwhile.
-- **What it refuses to read.** These are skipped and named at a checkpoint: a file not named `<claim id>.json`, one whose `id` its name does not match, one without a `server`, a token file that is a symlink, a `.work-claims` that is one, and a file or directory it cannot read. The hook writes `.ended.json` to a fresh file, created exclusively, and renames it into place. A symlink planted at either name is therefore replaced or refused, never followed.
-- **The log** names each claim by its work and id, never its token; a token-shaped run in a brain's words, an error, a ticket or a file name is masked. The hook owns the token files. A file or directory others can read, as a Write tool leaves a file, is closed to 600 or 700 through a handle opened without following links, and the line names which.
+- **When another claim covers its work** (`WORK_CLAIMED`: the claim lapsed, and another key claimed the work or a piece of it), the hook keeps the token and writes `<id>.blocked.json` beside it, with the code and the brain's words. Migration 115 would renew the claim once that other claim ends, silently, though another agent may have built part of the work meanwhile. So the hook renews it no more until the agent deletes the marker, which the rule has it do once the user has decided. A checkpoint logs each claim it holds back.
+- **What it refuses to read.** These are skipped and named at a checkpoint: a file not named `<claim id>.json`, one whose `id` its name does not match, one without a `server`, a token file that is a symlink or a second link to another file (a hardlink), a `.work-claims` that is a symlink, and a file or directory it cannot read. The hook writes `.ended.json` to a fresh file, created exclusively, and renames it into place. A symlink planted at either name is therefore replaced or refused, never followed.
+- **The log** names each claim by its work and id, never its token; a token-shaped run in a brain's words, an error, a ticket or a file name is masked. The hook owns the token files. A file or directory others can read, as a Write tool leaves a file, is closed to 600 or 700 through a handle opened without following links — and a file only when it is still the one the claim was read from, one link and the same inode — and the line names which.
 - **Two at once.** Each claim is stamped before its call, so within one run, and for a run that starts after the stamp, a due claim is renewed once. Hooks fired in the same instant can both renew it, which costs one extra call.
-- **By hand.** `bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]` renews a worktree's claims now, or the one named, and prints what happened. It exits 1 when one was kept or skipped, and 0 when each was renewed or found ended. `--check` says whether the claim key can call `renew_claim`.
+- **By hand.** `bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]` renews a worktree's claims now, or the one named, and prints what happened, terminal or not. It exits 1 when one was kept, blocked or skipped, or a `--claim` id has a bad token file or none, and 0 when each was renewed or found ended. A `--claim` that is no claim id is refused, exit 2, without being shown, so a token given there by mistake reaches neither the terminal nor the log. `--check` says where the claim key came from, that it can call `renew_claim`, and for which connector; it fails a claim key on a brain with no `connector`, which could renew nothing.
 
 To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
 
@@ -305,7 +323,7 @@ It prints a `PostToolUse` entry on every tool (`"matcher": "*"`) and a `UserProm
 
 **Merge, don't paste over.** The printed object is a whole `{"hooks": {…}}`. Settings that already hold the session hooks (and the fan-out's) take its entries inside their existing `hooks` object:
 - append its `PostToolUse` group to the `PostToolUse` array, beside the fan-out's;
-- add `UserPromptSubmit` as a new key.
+- add its `UserPromptSubmit` group: as a new key, or appended to an existing `UserPromptSubmit` array.
 
 A second top-level `"hooks"` key would leave one of the two sets silently unread. `/hooks` in Claude Code lists what it loaded. The same applies to the fan-out's hook.
 
@@ -363,6 +381,17 @@ Solution: find the episode's `captured` lines in the hook's log (`grep 'session=
 
 Once the key resolves, its next summaries supersede each other again, though the first after the fix still stands beside the last one before it. To link two that stand side by side, use a write key: `update_thought` with `id` the newer summary and `supersedes` the older — the `id=` values of that session's `captured` lines. A link between two of this key's own summaries takes neither (migration 092), so the hook's next summary still supersedes the newer one — unless the older was written while the registry could not attribute the key (its capture row has no agent id), or is, or later becomes, taken by another key: that one counts as another's, the link takes the newer, and the hook's pointer onto the newer lapses.
 
+**Issue: a work claim lapsed though the hook is installed**
+Solution: from a terminal in that worktree, `bun session-capture.mjs --renew-claims` renews now and prints the reason; `grep 'claims:' <state>/log` shows what the hook said before.
+- `no brain … has connector "<server>"`: the token file's `server` matches no brain's `connector`. Set the connector your agents claim through on that brain.
+- `brain "<name>" (connector …) has no claim_key`, or `claims are off on brain …`: give that brain a readable claim key.
+- `OB1_BRAIN_URL is set, and its brain renews no claims`: unset it in the hook's environment.
+- `kept: … CLAIM_NOT_YOURS … (claim_key must be the very key …)`: the claim key isn't the key the agent claimed with. A rotated connector key, or a Codex session on its own key.
+- `blocked: …`: another claim covered the work after this one lapsed. The agent reads `<id>.blocked.json`, tells you, and deletes it once you've decided.
+- `skipped …: no "server"` or another skip: the token file isn't in the rule's shape.
+- No `claims:` line at all: the session's working directory was outside the worktree (the main checkout, editing the worktree by path), so the hook looked in the wrong `.work-claims/`. Or nothing fired: the claims hook isn't pasted, and the session neither compacted nor ended within the lease.
+- `--check` should show a `claim key (…): ok for connector …` line for that brain.
+
 **Issue: a search result reads `Checkpoint: compacted at … continuing`**
 Solution: that summary was captured before a compaction, of a session still running; its next checkpoint or its end supersedes it, and search marks the superseded hit. Nothing to do.
 
@@ -388,10 +417,10 @@ Both parsers, the summary's shape and caps, every secret pattern's probe and the
 - the quarter-lease interval, a file's own lease, and two runs at once in one process renewing once;
 - checkpoints, Stop turns when due and not, events the hook does not capture on, and `--claims` on a session hook;
 - released and taken-over claims ending their files without the token, and a planted symlink replaced rather than followed;
-- each kept case (`WORK_CLAIMED`, `CLAIM_UNATTRIBUTED`, `REFUSED_CLAIM_INPUT`, a brain echoing the token, masked), an ended file that cannot be rewritten, and symlinked token files and directories skipped;
-- a token file or directory others can read (644, 640, 755) closed to 600 or 700 and named, a file or the directory swapped for a symlink mid-run left alone, a FIFO swapped in mid-run not holding the run, a symlink at the ended file's temporary name refused, and no claim key or no worktree;
+- `WORK_CLAIMED` writing `<id>.blocked.json` and holding renewals until it is deleted; each kept case (`CLAIM_UNATTRIBUTED`, `REFUSED_CLAIM_INPUT`, a brain echoing the token, masked, a JSON-RPC -32602 envelope read as a key that cannot renew), an ended file that cannot be rewritten, and symlinked token files and directories skipped;
+- a token file or directory others can read (644, 640, 755) closed to 600 or 700 and named, a file or the directory swapped for a symlink mid-run left alone, a FIFO swapped in mid-run not holding the run, a symlink at the ended file's temporary name refused, a token file that is a hardlink skipped and one swapped in mid-run left alone, and no claim key or no worktree;
 - the brain chosen by `server` against each brain's `connector`, one brain or several: a file with no `server`, one naming another brain's or an unkeyed brain's connector, and `OB1_BRAIN_URL`'s brain renewing nothing;
-- the detached child at a tool and at a checkpoint, `--renew-claims` and `--claim` in either case and for an id with a bad file or none, `OB1_CLAIM_KEY` and its warning, the claims hook under a mistyped `OB1_CAPTURE_ON_SECRET`, `--print-hook --claims`, `--check` and the config's refusals;
+- the detached child at a tool and at a checkpoint, `--renew-claims` and `--claim` in either case and for an id with a bad file or none, `OB1_CLAIM_KEY` and its warnings, a `--claim` that is no uuid refused unshown, the claims hook under a mistyped `OB1_CAPTURE_ON_SECRET`, `--print-hook --claims`, `--check` (the key's source and connector, a key with no connector failed, a key file others can read, one `OB1_BRAIN_URL` leaves unused), a missing, `~` or empty claim key turning claims off while the capture runs, and the config's refusals;
 - tokens masked in a brain's words, as markdown escapes them, in an error the call throws on, and in a ticket.
 
 It runs in CI's repo-consistency job.

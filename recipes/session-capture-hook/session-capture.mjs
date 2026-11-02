@@ -422,12 +422,19 @@ export function loadBrains() {
   const keyOf = (b) => { const k = b.key || (b.key_file ? readFileSync(b.key_file, "utf8").trim() : ""); return k ? String(k) : ""; };
   // The work claims' key (SMD-3602): the very key an agent claims with — its
   // connector's own, since a server takes one key per name — which renews the
-  // claims a worktree keeps tokens for.
-  const claimKeyOf = (b, where) => {
+  // claims a worktree keeps tokens for. Claims are an add-on: a claim key that
+  // cannot be read (a missing file, an empty one) turns claims off for that
+  // brain, says so at --check and at a checkpoint, and leaves the capture
+  // running (review pass 4). Where the key came from is kept for --check.
+  const claimSettings = (b, where, envKey) => {
     if (b.claim_key !== undefined && b.claim_key_file !== undefined) throw new Error(`${where} sets both "claim_key" and "claim_key_file" — give one`);
-    const k = b.claim_key || (b.claim_key_file ? readFileSync(b.claim_key_file, "utf8").trim() : "");
-    if ((b.claim_key !== undefined || b.claim_key_file !== undefined) && !k) throw new Error(`${where} has an empty claim key — give it the write key your agents claim with`);
-    return k ? String(k) : "";
+    if (envKey) return { claimKey: String(envKey), claimKeySource: "OB1_CLAIM_KEY" };
+    if (b.claim_key !== undefined) return b.claim_key ? { claimKey: String(b.claim_key), claimKeySource: "claim_key" } : { claimKeyError: `the claim_key in ${where} is empty — give it the write key your agents claim with` };
+    if (b.claim_key_file === undefined) return {};
+    const file = String(b.claim_key_file);
+    let k;
+    try { k = readFileSync(file, "utf8").trim(); } catch (e) { return { claimKeyFile: file, claimKeyError: `the claim_key_file in ${where}, ${file}, cannot be read (${e?.code ?? "error"})${file.startsWith("~") ? " — write it as a full path: ~ is not expanded" : ""}` }; }
+    return k ? { claimKey: k, claimKeySource: "claim_key_file", claimKeyFile: file } : { claimKeyFile: file, claimKeyError: `the claim_key_file in ${where}, ${file}, is empty — put the write key your agents claim with in it` };
   };
   // One brain: the environment's url, or the file's one-brain shape. A brains
   // list beside OB1_BRAIN_URL is passed over for the variable's one brain, as the
@@ -442,7 +449,8 @@ export function loadBrains() {
     // from (review passes 2 and 3).
     const fromEnv = Boolean(process.env.OB1_BRAIN_URL);
     if (!fromEnv && cfg.connector !== undefined && !(typeof cfg.connector === "string" && CONNECTOR_RE.test(cfg.connector))) throw new Error(`${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)`);
-    const claimKey = fromEnv ? "" : process.env.OB1_CLAIM_KEY || claimKeyOf(cfg, CONFIG_PATH);
+    // Beside OB1_BRAIN_URL a claim key in the file goes unused: --check says so (review pass 4).
+    const claim = fromEnv ? (cfg.claim_key !== undefined || cfg.claim_key_file !== undefined ? { claimKeyIgnored: true } : {}) : claimSettings(cfg, CONFIG_PATH, process.env.OB1_CLAIM_KEY);
     const connector = fromEnv ? undefined : cfg.connector;
     // Before the missing-key error: a connector URL pasted with its ?key= and no
     // `key` is told where the key goes, not to write a url it already has.
@@ -450,7 +458,7 @@ export function loadBrains() {
     if (!endpoint || !key) {
       throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
     }
-    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...(connector ? { connector } : {}), ...(claimKey ? { claimKey } : {}), ...shared } }];
+    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...(connector ? { connector } : {}), ...claim, ...shared } }];
   }
   // Several brains (SMD-3313). Each is named, once, as a directory may be; its
   // url and key are its own, never the file's top-level ones, which beside a
@@ -480,8 +488,8 @@ export function loadBrains() {
     if ((b.write_key !== undefined || b.write_key_file !== undefined) && !writeKey) throw new Error(`brain "${name}" in ${CONFIG_PATH} has an empty write key — mint one on that brain: bun server-portable/keygen.ts --name claude-code --scope write`);
     if (b.connector !== undefined && seenConnectors.has(b.connector)) throw new Error(`${CONFIG_PATH} names connector "${b.connector}" for two brains — a connector's writes reach one brain`);
     if (b.connector !== undefined) seenConnectors.add(b.connector);
-    const claimKey = claimKeyOf(b, `brain "${name}" in ${CONFIG_PATH}`);
-    return { name, listed: true, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...(claimKey ? { claimKey } : {}), ...shared } };
+    const claim = claimSettings(b, `brain "${name}" in ${CONFIG_PATH}`, undefined);
+    return { name, listed: true, root: i === 0 ? STATE_BASE : join(STATE_BASE, "brains", name), cfg: { url: endpoint, key, where, ...(b.connector ? { connector: b.connector } : {}), ...(writeKey ? { writeKey: String(writeKey) } : {}), ...claim, ...shared } };
   });
 }
 
@@ -2784,7 +2792,8 @@ async function fanOutHook(hook, brains) {
  */
 async function checkWrites(brain, brains, tag) {
   const cfg = brain.cfg;
-  if (cfg.connector) {
+  // Said only where something is copied: a connector set for work claims alone is no fan-out (SMD-3602 review pass 4).
+  if (cfg.connector && brains.some((b) => b.cfg.writeKey)) {
     const to = brains.filter((b) => b !== brain && b.cfg.writeKey).map((b) => b.name);
     console.log(`${tag}fan-out: writes through ${cfg.connector} ${to.length ? `are copied to ${to.join(", ")}` : "stay on this brain (no other brain has a write_key)"}`);
   }
@@ -2873,8 +2882,12 @@ export function worktreeRoot(dir) {
 /**
  * The token files a worktree holds: `{ path, claim }`, or `{ path, bad }`
  * naming what is wrong — never the token. Only `<claim id>.json`, a regular
- * file in a real directory: a symlink, which could point the hook's write at
- * another file or send another tree's token, is refused (review pass 1).
+ * file of one link in a real directory, read through a handle opened without
+ * following a link: a symlink (review pass 1) or a hardlink (review pass 4)
+ * could point the hook's change at another file or send another tree's token.
+ * A claim keeps the file's device and inode, so a later change acts on that
+ * same file or on none. Markers the hook writes (`.ended.json`,
+ * `.blocked.json`) are passed over.
  */
 export function claimFiles(root) {
   const dir = join(root, CLAIMS_DIRNAME);
@@ -2883,14 +2896,20 @@ export function claimFiles(root) {
   if (!st.isDirectory()) return [{ path: dir, bad: st.isSymbolicLink() ? "a symlink, not a directory: make it a directory of its own" : "not a directory" }];
   let names;
   try { names = readdirSync(dir); } catch (e) { return [{ path: dir, bad: `unreadable (${e?.code ?? "error"})` }]; }
-  return names.filter((n) => n.endsWith(".json") && !n.endsWith(".ended.json")).sort().map((n) => {
+  return names.filter((n) => n.endsWith(".json") && !n.endsWith(".ended.json") && !n.endsWith(".blocked.json")).sort().map((n) => {
     const path = join(dir, n);
     const named = CLAIM_FILE_RE.exec(n)?.[1]?.toLowerCase();
     if (!named) return { path: join(dir, scrubTokens(n)), bad: "not named <claim id>.json" };
-    if (!lstatOf(path)?.isFile()) return { path, id: named, bad: "not a regular file (a symlink?)" };
+    let fd, raw, file;
+    try {
+      fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      file = fstatSync(fd);
+      if (!file.isFile() || file.nlink !== 1) return { path, id: named, bad: "not a regular file of one link (a symlink or a hardlink?)" };
+      raw = readFileSync(fd, "utf8");
+    } catch (e) {
+      return { path, id: named, bad: e?.code === "ELOOP" || e?.code === "EMLINK" ? "not a regular file of one link (a symlink or a hardlink?)" : `unreadable (${e?.code ?? "error"})` };
+    } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
     let c;
-    let raw;
-    try { raw = readFileSync(path, "utf8"); } catch (e) { return { path, id: named, bad: `unreadable (${e?.code ?? "error"})` }; }
     try { c = JSON.parse(raw); } catch { return { path, id: named, bad: "not JSON" }; }
     if (!c || typeof c !== "object" || Array.isArray(c)) return { path, id: named, bad: "not a JSON object" };
     if (typeof c.id !== "string" || !UUID_ONLY_RE.test(c.id)) return { path, id: named, bad: `no claim id (a uuid) in "id"` };
@@ -2900,72 +2919,93 @@ export function claimFiles(root) {
     if (c.server == null) return { path, id: named, bad: `no "server": the MCP server the claim was made through, which picks the brain it is renewed on` };
     if (!(typeof c.server === "string" && CONNECTOR_RE.test(c.server))) return { path, id: named, bad: `a "server" that is no MCP server's name` };
     const text = (v) => (typeof v === "string" && v.trim() ? scrubTokens(oneLine(v)).slice(0, 100) : undefined);
-    return { path, claim: { id: named, token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server ?? undefined } };
+    return { path, claim: { id: named, token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server, dev: file.dev, ino: file.ino } };
   });
 }
 
 /** A claim as the log names it: its work and its id, never its token. */
 const claimLabel = (c) => `${c.ticket ? `${c.ticket}${c.piece ? ` ${c.piece}` : ""} ` : ""}(claim ${c.id})`;
+/** The marker beside a token file: `<id>.ended.json`, `<id>.blocked.json`. */
+const markerPath = (path, kind) => path.replace(/\.json$/, `.${kind}.json`);
 
 /**
  * The brain a claim is renewed on: the one whose `connector` is the token
- * file's `server` and that has a `claim_key` — one brain or several, the same
+ * file's `server`, if it has a claim key — one brain or several, the same
  * rule, so a token goes to no brain that did not issue it. Passes 1 and 2 each
- * special-cased a shape and each leaked or skipped (review pass 3).
- * `{ brain }` or `{ skip }`.
+ * special-cased a shape and each leaked or skipped (review pass 3). A skip says
+ * which: no brain with that connector, its claim key missing or unreadable
+ * (review pass 4), or OB1_BRAIN_URL's brain. `{ brain }` or `{ skip }`.
  */
 function brainForClaim(claim, brains) {
-  const b = brains.find((x) => x.cfg.claimKey && x.cfg.connector === claim.server);
-  if (b) return { brain: b };
+  const b = brains.find((x) => x.cfg.connector === claim.server);
+  if (b?.cfg.claimKey) return { brain: b };
+  if (b) return { skip: b.cfg.claimKeyError ? `claims are off on brain "${b.name}": ${b.cfg.claimKeyError}` : `brain "${b.name}" (connector "${claim.server}") has no claim_key` };
   if (process.env.OB1_BRAIN_URL) return { skip: `OB1_BRAIN_URL is set, and its brain renews no claims (it has no connector to match "${claim.server}")` };
-  return { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" and a claim_key — give that brain both` };
+  return { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" — give the brain your agents claim through that connector and a claim_key` };
 }
+
+/** A call the key may not make, as the server answers it: a JSON-RPC -32602 envelope (what the real server sends, review pass 4) or an isError result in the SDK's words. */
+const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
+const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
  * One renewal through the brain's claim key. `ok` with the new expiry;
  * `ended` — the claim was released, by its holder, an operator, or a takeover
- * after it lapsed (stop work on it); `keep` — anything else, the token kept: the
- * brain away, the registry away, a key that is not the holder's, a claim this
- * brain does not have, and WORK_CLAIMED — lapsed while another claim covers its
- * work, which 115 renews once that claim ends (review pass 1). Each with a line
- * for the log: the code first, the token never.
+ * after it lapsed (stop work on it); `blocked` — WORK_CLAIMED: lapsed while
+ * another claim covers its work, which 115 renews once that claim ends, so the
+ * token is kept but the agent must be told before it renews again (review
+ * passes 1 and 4); `keep` — anything else, the token kept: the brain away, the
+ * registry away, a key that is not the holder's, a claim this brain does not
+ * have. Each with a line for the log: the code first, the token never.
  */
 export async function renewClaim(cfg, claim) {
   const what = claimLabel(claim);
+  const cannot = { keep: true, line: `kept: ${what} — the claim key cannot call renew_claim: a key without write scope, or a brain from before SMD-3598` };
   let result;
   try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "renew_claim", arguments: { id: claim.id, token: claim.token, ...(claim.lease ? { lease_seconds: claim.lease } : {}) } }, 15_000); }
-  catch (e) { return { keep: true, line: `kept: ${what} — ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}` }; }
+  catch (e) {
+    const msg = String(e?.message ?? e);
+    return toolRefused(msg) ? cannot : { keep: true, line: `kept: ${what} — ${scrubTokens(oneLine(msg)).slice(0, 200)}` };
+  }
   const text = textOfResult(result);
   if (!result?.isError) {
     const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
     return { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
   }
   const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
-  const said = `${code ? `${code}: ` : ""}${scrubTokens(oneLine(text)).slice(0, 300)}`;
-  if (SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text)) return { keep: true, line: `kept: ${what} — the claim key cannot call renew_claim: a key without write scope, or a brain from before SMD-3598` };
+  // Long enough for the server's last sentence (review pass 4: 300 cut "Your claim lapsed before another covered its work").
+  const said = `${code ? `${code}: ` : ""}${scrubTokens(oneLine(text)).slice(0, 600)}`;
+  if (toolRefused(text)) return cannot;
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
-  if (code === "WORK_CLAIMED") return { keep: true, line: `kept: ${what} — ${said} (stop work while that claim holds; it renews once it ends)` };
+  if (code === "WORK_CLAIMED") return { blocked: { code, message: said }, line: `blocked: ${what} — ${said} (stop work while that claim holds; ${claim.id}.blocked.json says so, and renewals wait until it is deleted)` };
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
   if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
 }
 
 /**
- * An ended claim's token file becomes `<id>.ended.json`: the work, the code
- * and the brain's words, the token dropped — it proves nothing now. Only when
- * the file is still a regular file holding the token renewed: one the agent
- * rewrote meanwhile is left alone. Written to a fresh file and renamed into
- * place, so a symlink planted at the name is replaced, never followed (review
- * pass 1). Returns whether the file was ended.
+ * The same file the claim was read from: a regular file of one link with the
+ * device and inode the read recorded. Anything swapped in since is not it.
  */
-function endClaimFile(path, claim, ended) {
+function sameFile(path, claim) {
+  const st = lstatOf(path);
+  return Boolean(st?.isFile() && st.nlink === 1 && st.dev === claim.dev && st.ino === claim.ino);
+}
+
+/**
+ * A marker beside the token file — `<id>.<kind>.json` with the work, the code,
+ * the brain's words and when, never the token — written to a fresh file,
+ * created exclusively, and renamed into place, so a symlink planted at either
+ * name is refused or replaced, never followed (review pass 1). Only while the
+ * token file is still the one the claim was read from, holding its token.
+ */
+function writeMarker(path, claim, kind, body) {
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    if (!lstatOf(path)?.isFile()) return false;
+    if (!sameFile(path, claim)) return false;
     if (String(JSON.parse(readFileSync(path, "utf8"))?.token ?? "").toLowerCase() !== claim.token) return false;
-    writeFileSync(tmp, `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, ended: { ...ended, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(tmp, path.replace(/\.json$/, ".ended.json"));
-    unlinkSync(path);
+    writeFileSync(tmp, `${JSON.stringify({ id: claim.id, ticket: claim.ticket, piece: claim.piece, [kind]: { ...body, at: new Date().toISOString() } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(tmp, markerPath(path, kind));
     return true;
   } catch {
     try { unlinkSync(tmp); } catch { /* none */ }
@@ -2973,18 +3013,28 @@ function endClaimFile(path, claim, ended) {
   }
 }
 
+/** An ended claim's token file becomes `<id>.ended.json`, the token dropped: it proves nothing now. Whether it was ended. */
+function endClaimFile(path, claim, ended) {
+  if (!writeMarker(path, claim, "ended", ended)) return false;
+  try { unlinkSync(path); } catch { /* gone */ }
+  return true;
+}
+
 /**
  * Close `p` to `mode` if others can read it, through a handle opened with
- * O_NOFOLLOW (and `extra`, O_DIRECTORY for the directory): fstat and fchmod act
- * on what was opened, never on a symlink's target. Whether it changed anything.
+ * O_NOFOLLOW and O_NONBLOCK (and `extra`, O_DIRECTORY for the directory):
+ * fstat and fchmod act on what was opened — a regular file or a directory,
+ * never a symlink's target or a FIFO (review passes 2 and 3) — and a file only
+ * when it is the one the claim was read from, one link, same inode (review
+ * pass 4: a hardlink swapped in lent it another file). Whether it changed anything.
  */
-function closeUp(p, mode, extra) {
+function closeUp(p, mode, extra, claim) {
   let fd;
   try {
-    // O_NONBLOCK: a FIFO swapped in at the name would otherwise hold the open for ever (review pass 3).
     fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK | extra);
     const st = fstatSync(fd);
     if (!(st.isFile() || st.isDirectory()) || !(st.mode & 0o077)) return false;
+    if (claim && (st.nlink !== 1 || st.dev !== claim.dev || st.ino !== claim.ino)) return false;
     fchmodSync(fd, mode);
     return true;
   } catch { return false; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
@@ -2993,19 +3043,20 @@ function closeUp(p, mode, extra) {
 async function renewOne(b, path, claim) {
   useStateRoot(b.root);
   // The hook owns the file it renews from: one a Write tool left at 644, or a
-  // directory others can list, is closed first (review pass 1) — through a
-  // handle opened without following a symlink, so a link swapped in since the
-  // read never moves the change onto another file (review pass 2).
+  // directory others can list, is closed first (review pass 1).
   const closed = [];
   if (process.platform !== "win32") {
     if (closeUp(dirname(path), 0o700, fsConstants.O_DIRECTORY)) closed.push("its directory was open to others: now mode 700");
-    if (closeUp(path, 0o600, 0)) closed.push("its token file was readable by others: now mode 600");
+    if (closeUp(path, 0o600, 0, claim)) closed.push("its token file was readable by others: now mode 600");
   }
   const o = await renewClaim(b.cfg, claim);
   // An ended claim's stamp goes with its file; one whose file could not be
   // ended keeps a stamp, or every event would ask again (review pass 1).
   if (o.ended && endClaimFile(path, claim, o.ended)) { try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
-  else writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
+  else {
+    if (o.blocked && !writeMarker(path, claim, "blocked", o.blocked)) o.line += " (the marker could not be written)";
+    writeClaimState(claim.id, { ...readClaimState(claim.id), at: Date.now(), ...(o.ok ? { ok: Date.now(), expiresAt: o.expiresAt } : {}), last: o.line });
+  }
   if (closed.length) o.line += ` (${closed.join("; ")})`;
   log(`claims: ${o.line}`);
   return o;
@@ -3015,12 +3066,13 @@ async function renewOne(b, path, claim) {
  * Renew the claims whose tokens the worktree holding `cwd` keeps: those due —
  * a quarter lease since the last attempt, or, with `force` (a checkpoint), a
  * minute — or, with `now` (a run by hand, the hook's child), every claim, or
- * the claims `only` names by id. Each is stamped before its call, so a second
- * event at the same moment finds it not due. A file that cannot be renewed
- * (unreadable, no brain for it) is logged under `force` or `now` alone: a
- * quiet hook on every tool would log it every time. With `detach` the calls go
- * to a child, told the claims by id (an id is no secret, a path might be), as
- * the capture's do. Returns the outcomes.
+ * the claims `only` names by id. Each is stamped before its call, so a run
+ * that starts after the stamp finds it not due. A claim with a
+ * `<id>.blocked.json` beside it waits until the agent deletes it (review pass
+ * 4). A file that cannot be renewed (unreadable, no brain for it, blocked) is
+ * logged under `force` or `now` alone: a quiet hook on every tool would log it
+ * every time. With `detach` the calls go to a child, told the claims by id (an
+ * id is no secret, a path might be), as the capture's do. Returns the outcomes.
  */
 export async function renewClaims(cwd, brains, { force = false, now: atOnce = false, detach = false, only } = {}) {
   const root = worktreeRoot(cwd);
@@ -3034,6 +3086,7 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
   for (const f of files) {
     if (only && !only.includes(f.claim?.id ?? f.id)) continue;
     if (f.bad) { skip(`skipped ${f.path}: ${f.bad}`); continue; }
+    if (existsSync(markerPath(f.path, "blocked"))) { skip(`blocked: ${claimLabel(f.claim)} — another claim covered its work; delete ${f.claim.id}.blocked.json once the user has decided, and renewals resume`); continue; }
     const { brain, skip: why } = brainForClaim(f.claim, brains);
     if (!brain) { skip(`skipped ${claimLabel(f.claim)}: ${why}`); continue; }
     useStateRoot(brain.root);
@@ -3047,7 +3100,8 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
     useStateRoot(work[0].brain.root);
     ensureDirs();
     const fd = openSync(LOG_PATH(), "a", 0o600);
-    const child = spawn(process.execPath, [SELF, "--renew-claims", "--cwd", root, ...work.flatMap((w) => ["--claim", w.f.claim.id])], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
+    // --from-hook: the child's stdout is the log, so it prints nothing there; a run by hand always prints (review pass 4).
+    const child = spawn(process.execPath, [SELF, "--renew-claims", "--from-hook", "--cwd", root, ...work.flatMap((w) => ["--claim", w.f.claim.id])], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env } });
     child.unref();
     closeSync(fd);
     return [...outcomes, { detached: child.pid }];
@@ -3056,14 +3110,26 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
   return outcomes;
 }
 
-/** --check's line for a brain with a claim key: that it can renew. Returns the exit code. */
+/**
+ * --check's lines for a brain's claim key: claims off (a key file it can't
+ * read, an empty key), a key that renews nothing (no connector), a key file
+ * others can read, one OB1_BRAIN_URL leaves unused, and that the key can renew
+ * — naming where the key came from and its connector (review pass 4). Returns
+ * the exit code.
+ */
 async function checkClaims(brain, tag) {
   const cfg = brain.cfg;
+  if (cfg.claimKeyIgnored) console.error(`${tag}warning: OB1_BRAIN_URL is set, so the claim key in ${CONFIG_PATH} is not used — the variable's brain renews no claims`);
+  if (cfg.claimKeyError) { console.error(`session-capture: ${tag}claims are off: ${cfg.claimKeyError}`); return 1; }
   if (!cfg.claimKey) return 0;
+  if (!cfg.connector) { console.error(`session-capture: ${tag}the claim key renews nothing: this brain has no "connector" — set it to the MCP server your agents claim through (open-brain), the "server" their token files name`); return 1; }
+  if (cfg.claimKeyFile && process.platform !== "win32") {
+    try { if (statSync(cfg.claimKeyFile).mode & 0o077) console.error(`${tag}warning: ${cfg.claimKeyFile} (the claim key) is readable by others — chmod 600 it`); } catch { /* read at load; gone since */ }
+  }
   let names;
   try { names = ((await rpc({ ...cfg, key: cfg.claimKey }, "tools/list", {}, 15_000)).tools ?? []).map((t) => t.name); } catch (e) { console.error(`session-capture: ${tag}the claim key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
   if (!names.includes("renew_claim")) { console.error(`session-capture: ${tag}the claim key cannot call renew_claim — ${names.includes("list_claims") || names.includes("capture_thought") ? "give claim_key the write key your agents claim with" : "this brain's server is from before SMD-3598: upgrade it"}`); return 1; }
-  console.log(`${tag}claim key: ok — it can renew claims. The claims renewed are those whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/; the key must be the very key the agent claims with (its connector's own: a server takes one key per name)`);
+  console.log(`${tag}claim key (${cfg.claimKeySource}): ok for connector ${cfg.connector} — it can renew claims. The claims renewed are those whose tokens a session's worktree keeps in ${CLAIMS_DIRNAME}/ with "server": "${cfg.connector}"; the key must be the very key the agent claims with (its connector's own: a server takes one key per name)`);
   return 0;
 }
 
@@ -3267,20 +3333,23 @@ export async function main(argv) {
       code = Math.max(code, c, await checkWrites(b, brains, tag), await checkClaims(b, tag));
     }
     // OB1_CLAIM_KEY is the one-brain shape's; beside a brains list it is read by no brain (review pass 1).
-    if (process.env.OB1_CLAIM_KEY && (brains.some((b) => b.listed) || process.env.OB1_BRAIN_URL)) console.error(`warning: OB1_CLAIM_KEY is set but no brain uses it — it is read for the one-brain config file alone (OB1_BRAIN_URL's brain renews no claims); with a brains list give the brain its own claim_key`);
+    if (process.env.OB1_CLAIM_KEY && (brains.some((b) => b.listed) || process.env.OB1_BRAIN_URL)) console.error(`warning: OB1_CLAIM_KEY is set but no brain uses it — it is read for the one-brain config file alone${process.env.OB1_BRAIN_URL ? " (OB1_BRAIN_URL's brain renews no claims)" : "; with a brains list give the brain its own claim_key"}`);
     return code;
   }
   if (has(args, "--renew-claims")) {
     // The claims a worktree keeps tokens for, renewed now: by hand (the
     // current directory's worktree, or --cwd's), or as the hook's child, told
     // by id which claims it stamped (SMD-3602).
+    const ids = flagAll(args, "--claim").map((s) => s.toLowerCase()).filter(Boolean);
+    // A --claim that is no claim id is refused unechoed: a token given there by mistake is not printed or logged (review pass 4).
+    if (ids.some((id) => !UUID_ONLY_RE.test(id))) { console.error("session-capture: --claim takes a claim id (a uuid) — the value given is not one, and is not shown"); return 2; }
     let brains;
     try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
-    const ids = flagAll(args, "--claim").map((s) => s.toLowerCase()).filter(Boolean);
     const cwd = flag(args, "--cwd") || process.cwd();
     const dir = isAbsolute(cwd) ? cwd : join(process.cwd(), cwd);
     const outcomes = await renewClaims(dir, brains, { now: true, ...(ids.length ? { only: ids } : {}) });
-    if (process.stdout.isTTY || !ids.length) {
+    // The hook's child writes to the log already; a run by hand prints, terminal or not (review pass 4: an agent's shell is no terminal).
+    if (!has(args, "--from-hook")) {
       if (!outcomes.length) console.log(`no claims to renew: ${worktreeRoot(dir) ? `no token files in ${join(worktreeRoot(dir), CLAIMS_DIRNAME)}/` : "not inside a git worktree"}`);
       for (const o of outcomes) console.log(o.line);
     }
