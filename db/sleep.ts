@@ -295,7 +295,7 @@
  * (SMD-3379 PR 1c-3b; brain-info and preflight read it, 1c-2); `aside`, re-embed set aside on a model switch, with the model
  * the brain records and this stack's, or down for the sleep, with what set it
  * down (SMD-2679 PR 4b); `held`, the thoughts
- * extraction holds back across the wakes —
+ * extraction holds back across its stops (a wake's, a paused sleep's abort) —
  * how many, and the three most stalled with their stops, windows kept and
  * the scheduler's own cuts (101; read as none before it),
  * read at the first stamp awake or poll asleep, after each wake, at least
@@ -628,10 +628,10 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
 }
 
 /**
- * The thoughts extraction holds back across the wakes: pending or in flight,
+ * The thoughts extraction holds back across its stops: pending or in flight,
  * a hard stop counted on them (093), of the text and windowing in force —
  * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped: by the
- * wakes, the scheduler's own cuts counted apart (101, SMD-3060) and only said —
+ * wakes and a paused sleep's aborts, the scheduler's own cuts counted apart (101, SMD-3060) and only said —
  * none where `cuts` is not there to read (a brain before 101).
  */
 async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Promise<SleepHeld> {
@@ -1104,7 +1104,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     }
     if (SIG !== undefined) {
       const held = await heldBack(sql, JOBS.extract, SIG, CUTS);
-      if (held.total) out(`  held back across wakes (${held.thoughts.length} of ${held.total}): ${held.thoughts.map(heldWords).join("; ")}`);
+      if (held.total) out(`  held back across stops (${held.thoughts.length} of ${held.total}): ${held.thoughts.map(heldWords).join("; ")}`);
     }
     // The re-derive sweep's pool, as the first sleep would read it (SMD-2679).
     if (sweepRead === "yes") {
@@ -1207,10 +1207,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (last) stamper.slept?.(last);
   }
   /**
-   * The thoughts extraction holds back across the wakes, on the row for
+   * The thoughts extraction holds back across its stops, on the row for
    * preflight's `sleep` row (SMD-2694): read at the first stamp awake or the
-   * first poll asleep, after each wake, at least every minute after — a thought held back is most
-   * often finished in a long sleep, which ends at the next live call or its
+   * first poll asleep, after each wake or resume, at least every minute after — a thought held back is most
+   * often finished in a long sleep, which ends once its pools drain or on its
    * clock, an hour or more later (review pass 1) — and before the row ends; carried by the next
    * write. A courtesy, as the tail move is: a read that fails is said once and
    * leaves the row's last word on them.
@@ -2003,16 +2003,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (live === null) return stopped();
       sleptUntil = live.now;
       const nowMs = live.now.getTime();
-      // A write newer than any seen landed now, or — one committed late, dated
-      // before the last read's now — at that read: the capture counts from
-      // there, and from this read on the sleep's first, whose last read was the sweep's.
+      // A write newer than any seen: it stays new, read again, until a poll
+      // reaches the wake below — one cut short by a pass's end (re-embed's
+      // set-down) acts on it at the next (review pass 3).
       const wrote = live.write !== null && (lastWrite === null || live.write.getTime() > lastWrite);
-      /** The newest write seen before this read: this poll's is new until the poll acts on it. */
+      /** The newest write seen before this read. */
       const seenBefore = lastWrite;
-      if (wrote) {
-        lastWrite = live.write!.getTime();
-        landedAt = Math.max(lastWrite, lastNow ?? nowMs);
-      }
+      const lastNowBefore = lastNow;
       lastNow = nowMs;
       readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK_S * 1000));
       // A thought held back finished in this sleep is not named until the next wake otherwise.
@@ -2035,8 +2032,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         await stopPasses(true, true);
         err(`  the sleep stops on its budget: a pass's statement timed out${FOLLOW ? " — the next sleep begins after a live call" : ""}`);
         budgetKind = "statement";
-        // This poll's write, if any, neither paused nor ended the sleep: the rest waits from before it (review pass 2).
-        budgetFrom = restFrom(seenBefore);
+        // This poll's write, if any, neither paused nor ended the sleep: the rest waits from before it (review passes 2 and 3).
+        budgetFrom = restFrom(lastWrite);
         return "budget";
       }
       // A pass that ended by itself before the wake is read first: a refusal
@@ -2074,6 +2071,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       }
       // A live write in the clock's grace ends the sleep as before; one that
       // finds nothing left to do (--follow) ends it too; any other pauses it.
+      // The write acted on from here: it landed now, or — one committed late,
+      // dated before the last read's now — at that read, and on the sleep's
+      // first read at this one, whose last was the sweep's: the capture counts from there.
+      if (wrote) {
+        lastWrite = live.write!.getTime();
+        landedAt = Math.max(lastWrite, lastNowBefore ?? nowMs);
+      }
       // Read without the work this poll's new writes queued themselves — a
       // capture's extraction, an edit's again — work for the next sleep; a
       // claim queued before, or in hand, is the sleep's own (review pass 2).

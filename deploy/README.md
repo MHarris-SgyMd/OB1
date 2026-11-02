@@ -2306,7 +2306,7 @@ podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -
 **Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_CAPTURE` (1–86400, held
 to the quiet: the quiet after the newest live call before paused passes go
 on, unset 20), `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a
-live call before it pauses; a call in hand runs on, aborted past 60 s of a pause) and `OB1_SLEEP_WORKERS` (each pass's workers, unset 1), digits only (`deploy/.env.example`). The budget (SMD-2679):
+live call before it pauses; a call in hand runs on, aborted while paused once 60 s in hand) and `OB1_SLEEP_WORKERS` (each pass's workers, unset 1), digits only (`deploy/.env.example`). The budget (SMD-2679):
 `OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes, its pauses aside (0–10080, unset 60; 0
 for no clock) — at it the passes stop after the thought in hand and the next
 sleep waits for a live call — and each pass's session settings:

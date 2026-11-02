@@ -4485,9 +4485,8 @@ refusals again, and each names which it is:
 
 **Heartbeat.** `--follow` stamps `heartbeat:sleep` at least every minute,
 with `slept`, the current or last sleep's start and, once it is over, its
-end, and `reads`, whether its role read `query_log` at its start — so
-preflight judges what wakes the scheduler by the scheduler's role, not its
-own. Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
+end (it carried `reads`, whether its role read `query_log`, until SMD-3315,
+when the scheduler stopped reading it). Preflight's own `sleep` row reads it (SMD-2678): asleep, its passes
 running, for how long; awake, with when the last sleep ended and how long it
 lasted; "its last pass failed" while a pass's last word was a failure (into
 the next sleep, until one of its passes stamps); stopped once it ends, or
@@ -4550,7 +4549,7 @@ read one answer for who runs re-embed (`reembedRunner` in
 server-portable/brain-info.ts, SMD-2679 PR 4b).
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
-the wakes (a hard stop counted on them, 093): how many, and the three most
+its stops (a hard stop counted on them, 093: a wake's, a paused sleep's abort): how many, and the three most
 stalled, then most stopped, with their stops and windows kept — stalled as
 the scheduler reads it, 0 once a window is saved since the last stop — and
 since SMD-3060 the scheduler's own cuts of each, said apart from the stops
@@ -4785,8 +4784,8 @@ What the columns are not:
 - **The `workers` profile measures a pass that never yields.** Under the sleep
   scheduler, a pass goes on claiming beside a burst until the scheduler's next
   poll sees the burst's first recorded call: up to `--poll` (5 s) after that
-  call ends, its call in hand running on (aborted past 60 s of the pause, SMD-3379
-  PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
+  call ends, its call in hand running on (aborted while paused once 60 s in hand,
+  SMD-3379 PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
   not measured here.
 
 ### bench-querylog.ts
@@ -6036,10 +6035,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1946 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1947 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1089 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 141 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 285 assertions
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 434 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
