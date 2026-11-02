@@ -367,7 +367,7 @@ if (want("2")) {
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
-    assert(drifted.stderr.split(`Migrations read from ${copy}, not db/migrations`).length === 2, "…reading the suite's copy, which it names once, not db/migrations");
+    assert(drifted.stderr.split(`Reading migrations from ${copy}, not db/migrations`).length === 2, "…reading the suite's copy, which it names once, not db/migrations");
     // Which stream each goes to, as main's migrator wrote them: the warning and
     // the rule to stderr, the summary to stdout. The in-process comparison
     // below cannot see this — both runs are this migrate.ts (review pass 4).
@@ -383,10 +383,10 @@ if (want("2")) {
     rmSync(copy, { recursive: true, force: true });
   }
   const restored = await migrate();
-  assert(restored.code === 0 && !restored.stderr.includes("Migrations read from") && readFileSync(tree002, "utf8") === treeBefore, "the tree's own migrations, 002 as [2] found it, show no drift, and a run given no directory names none");
+  assert(restored.code === 0 && !restored.stderr.includes("Reading migrations from") && readFileSync(tree002, "utf8") === treeBefore, "the tree's own migrations, 002 as [2] found it, show no drift, and a run given no directory names none");
   // A blank setting is unset; a directory that is not there is refused by name, exit 2, as an empty one is (review pass 1).
   const blank = await runMigrator(URL_!, envWith(" "));
-  assert(blank.code === 0 && !blank.stderr.includes("Migrations read from"), `a blank OB1_TEST_MIGRATIONS_DIR reads the tree's migrations and names no directory (exit ${blank.code})`);
+  assert(blank.code === 0 && !blank.stderr.includes("Reading migrations from"), `a blank OB1_TEST_MIGRATIONS_DIR reads the tree's migrations and names no directory (exit ${blank.code})`);
   const gone = await runMigrator(URL_!, envWith(copy));
   assert(gone.code === 2 && gone.stderr.includes(`${copy} is not a directory`) && !/\n\s+at /.test(gone.stderr), `a directory that is gone is refused by name, exit 2, with no stack (exit ${gone.code}: ${gone.stderr.trim().split("\n").pop()})`);
 }

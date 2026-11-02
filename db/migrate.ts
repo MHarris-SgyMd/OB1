@@ -158,9 +158,11 @@ export interface MigrateOptions {
   /**
    * Where the core migrations live; the tree's db/migrations unless a suite
    * names another, a copy it may edit (SMD-3639); blank is unset, a relative
-   * path is resolved against the working directory. The CLI reads it from
-   * OB1_TEST_MIGRATIONS_DIR, so a spawned run can be pointed there too; a run
-   * given one says so on stderr before it reads a file.
+   * path is resolved against the migrator process's working directory. The
+   * CLI reads it from OB1_TEST_MIGRATIONS_DIR, so a spawned run can be pointed
+   * there too. Test-only: no deploy file or operator sets it, and a brain
+   * always reads db/migrations; a run given one says so on stderr before it
+   * reads a file.
    */
   migrationsDir?: string;
   /**
@@ -605,7 +607,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       listed = readdirSync(coreDir);
     } catch (e) {
       if (coreDir === MIGRATIONS_DIR) throw e;
-      err(`${coreDir} is not a directory this run can read (${(e as { code?: string }).code ?? "error"}): the migrations directory a suite named (OB1_TEST_MIGRATIONS_DIR).`);
+      err(`${coreDir} is not a directory this run can read (${(e as { code?: string }).code ?? "error"}): the migrations directory a suite named (migrationsDir or OB1_TEST_MIGRATIONS_DIR).`);
       return null;
     }
     const names = listed
@@ -694,7 +696,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
   }
 
-  if (coreDir !== MIGRATIONS_DIR) err(`Migrations read from ${coreDir}, not db/migrations: a suite's directory (OB1_TEST_MIGRATIONS_DIR).`);
+  if (coreDir !== MIGRATIONS_DIR) err(`Reading migrations from ${coreDir}, not db/migrations: a test suite's setting (OB1_TEST_MIGRATIONS_DIR); unset it to apply the brain's own.`);
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
