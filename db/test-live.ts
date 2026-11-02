@@ -43,7 +43,7 @@ import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
-import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
@@ -52,7 +52,7 @@ import { reviewProposal } from "../server-portable/proposal-review.ts";
 import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, namedSince, readJudgeWindow, recordSubject, RELEASE_WAIT, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, namedSince, readJudgeWindow, recordSubject, RELEASE_WAIT, STRIKES, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -7103,13 +7103,23 @@ if (want("10h")) {
    * (PR 6a, review pass 1).
    */
   const flaked = new Set<string>();
+  /** Each probe's word in turn (PR 6b-1, a following run's start probe): "503" out, "404" the model unserved, "401" the key refused; else it answers. */
+  const probeScript: string[] = [];
+  let probes = 0;
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-judge" }] });
       const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[]; reasoning_effort?: string };
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        probes++;
+        const word = probeScript.shift();
+        if (word === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+        if (word === "404") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
+        if (word === "401") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
       if (!user.startsWith("Each item is one stored thought.")) {
         extractCalls++;
@@ -7122,6 +7132,8 @@ if (want("10h")) {
       // Awaited: a case's edit lands before the answer does (the stale case, review pass 4).
       await onOwn?.(thought);
       if (!body.model?.startsWith("stub-judge")) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
+      // A thought the provider fails whenever it is asked, while it answers the rest (PR 6b-1's STRIKES).
+      if (thought.includes("strike-judge")) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (thought.includes("flaky-judge") && !flaked.has(thought)) {
         flaked.add(thought);
         return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -7343,12 +7355,16 @@ if (want("10h")) {
     // question, as the pass refuses its own key's change, and a dry run says a run would be (review pass 1: it renamed
     // the pool unasked).
     asked = ownCalls;
-    const unswitched = await sweep();
-    const unswitchedDry = await sweep({ dryRun: true });
+    // Each refusal heard by its kind (PR 6b-1, onStart); a dry run's said, not heard.
+    const unswitchedHeard: StartResult[] = [], unswitchedDryHeard: StartResult[] = [];
+    const unswitched = await sweep({ onStart: (r) => unswitchedHeard.push(r) });
+    const unswitchedDry = await sweep({ dryRun: true, onStart: (r) => unswitchedDryHeard.push(r) });
     assert(unswitched.code === 2 && /Refusing to sweep under a pool other than the one ob1_config names without --switch-key: the subject pool is subjects:r1\.2; this run's is subjects:r1\.2:p2r/.test(unswitched.stderr)
         && (await named()) === "subjects:r1.2" && ownCalls === asked
         && /A run would be refused: the subject pool is subjects:r1\.2; this run's is subjects:r1\.2:p2r .*, and it needs --switch-key\./.test(unswitchedDry.stdout),
       `a run under another pool's key without --switch-key is refused, nothing named or asked, and a dry run says so (exit ${unswitched.code}: ${unswitched.stderr.trim().split("\n")[1]?.slice(0, 120)})`);
+    assert(JSON.stringify(unswitchedHeard) === JSON.stringify([{ ok: false, refused: "key" }]) && unswitchedDryHeard.length === 0,
+      `…its refusal heard by its kind, key, and the dry run's not heard (${JSON.stringify(unswitchedHeard)}, ${JSON.stringify(unswitchedDryHeard)})`);
 
     // A stop with an own question in hand: that thought is finished, its answer recorded, never dropped or left
     // unanswered (review pass 1), nothing after it is asked, 130, and what was pooled and not taken waits in the pool.
@@ -7629,10 +7645,12 @@ if (want("10h")) {
     // run's, and the case held nothing).
     await setNamed("subjects:r1.2");
     const gatedEnv = { ...env, OB1_LLM_LOCAL: "", OB1_CHAT_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "" };
-    const gated = await sweep({ switchKey: true }, gatedEnv);
+    const gatedHeard: StartResult[] = [];
+    const gated = await sweep({ switchKey: true, onStart: (r) => gatedHeard.push(r) }, gatedEnv);
     assert(gated.code === 2 && /Nothing would be asked for its subject: .* Or run --subjects rules, which asks no model, from a pool of its own \(with --switch-key while another is named\)\./.test(gated.stderr)
         && ownCalls === asked && (await named()) === "subjects:r1.2",
       `a policy that refuses every row: refused before any question or naming, the pool named left as it was, exit 2 (exit ${gated.code})`);
+    assert(JSON.stringify(gatedHeard) === JSON.stringify([{ ok: false, refused: "egress" }]), `…heard by its kind, egress (PR 6b-1): ${JSON.stringify(gatedHeard)}`);
     const gatedRules = await sweep({ model: false }, gatedEnv);
     assert(gatedRules.code === 0, `…and --subjects rules, which sends nothing, runs under it (exit ${gatedRules.code})`);
     const gatedDry = await sweep({ dryRun: true }, gatedEnv);
@@ -7660,9 +7678,10 @@ if (want("10h")) {
     // The outage: the thought a server error fails goes back to the pool where it stood, its attempt not counted, and the
     // run pauses holding no claim, so each call runs on a claim of its own, its lease fresh, the same thought taken again
     // (review pass 1: four calls could outrun the one lease; PR 6a's review pass 3: held through the pause, the claim
-    // needed its lease kept; its review pass 4: put back at the tail, a run asked a thought behind it), and the thought
-    // it ended at is sent to the end of the pool, so the next run starts with another (review pass 1: it came first
-    // again, and ended every run). The three pooled oldest first, the session summary oldest.
+    // needed its lease kept; its review pass 4: put back at the tail, a run asked a thought behind it) — until its second
+    // error, which sends it behind every thought queued before it, so the next claim asks another (PR 6b-1's STRIKES) —
+    // and the thought it ended at is sent to the end of the pool, so the next run starts with another (review pass 1: it
+    // came first again, and ended every run). The three pooled oldest first, the session summary oldest.
     for (const [id, ago] of [[none, 3], [garbled, 2], [utf, 1]] as const) {
       await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${ago}) WHERE thought_id = ${id}::uuid AND work_type = ${POOL}`;
     }
@@ -7691,9 +7710,9 @@ if (want("10h")) {
     const [{ n: downAttempts }] = (await sql`SELECT max(attempt_count)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id IN (${none}::uuid, ${garbled}::uuid, ${utf}::uuid)`) as { n: number }[];
     const downNamed = (id: string) => (id === none ? "none" : id === garbled ? "garbled" : "utf");
     assert(down.code === 1 && /The provider is not answering after 3 pauses/.test(down.stderr) && ownCalls === asked + 4 && (await poolOf()).pending === 3
-        && downAsked.map(downNamed).join(",") === "none,none,none,none" && freshLeases === 4 && last === none && downAttempts === 0
+        && downAsked.map(downNamed).join(",") === "none,none,garbled,garbled" && freshLeases === 4 && last === garbled && downAttempts === 0
         && claimedAts.length === 4 && new Set(claimedAts).size === 4 && claimedAts.every((at, i) => i === 0 || at > claimedAts[i - 1]),
-      `a server error puts its thought back in the pool where it stood, its attempt not counted, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "the one asked" : "another"})`);
+      `a server error puts its thought back in the pool where it stood, its attempt not counted, its second behind the rest, and is paused for three times, each call on a fresh claim of its own, then ends the sweep, exit 1, the thought it ended at sent to the end of the pool (exit ${down.code}, ${ownCalls - asked} call(s), asked ${downAsked.map(downNamed).join(",")}, ${freshLeases} on a fresh lease, downAttempts ${downAttempts}, last ${last === none ? "none" : last === garbled ? "garbled" : last === utf ? "utf" : "another"})`);
 
     // A brain without 113's close, or 111's door: the sweep refuses by name; without the door the pass extracts, and
     // says once that it records no subject.
@@ -7766,9 +7785,11 @@ if (want("10h")) {
         const granted = await migrateInProcess({ grant: SROLE, groups: "capture,server,worker,extraction" });
         assert(granted.code === 0, `the role is granted capture, server, worker and extraction (exit ${granted.code}: ${granted.stderr.trim().slice(0, 200)})`);
         asked = ownCalls;
-        const roleSweep = await sweep({}, sEnv, sUrl);
+        const roleHeard: StartResult[] = [];
+        const roleSweep = await sweep({ onStart: (r) => roleHeard.push(r) }, sEnv, sUrl);
         assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subject needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
           `a role without the structure group: the sweep refused before any question, exit 2 (exit ${roleSweep.code}, ${ownCalls - asked} asked: ${roleSweep.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
+        assert(JSON.stringify(roleHeard) === JSON.stringify([{ ok: false, refused: "tables" }]), `…heard by its kind, tables (PR 6b-1): ${JSON.stringify(roleHeard)}`);
         const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
         assert(roleDry.code === 0 && /A run would be refused: this role cannot write a thought's subject\./.test(roleDry.stdout),
           `…and a dry run under it counts, and says a run would be refused (exit ${roleDry.code})`);
@@ -11106,26 +11127,6 @@ if (want("10h")) {
           && /; this run's judge model, stub-judge-2, is not held$/m.test(dryOther.stdout),
         `a following run stopped at the naming's write or in the pooling exits 0, and a dry --judge-checked run of an unheld model is told so without a lift's disclaimer (naming ${watchedStops.naming}; pooling ${watchedStops.pooling}): ${dryOther.stdout.trim().slice(0, 300)}`);
 
-      // A scheduler's statement_timeout in the pooling, held up on a claim's row lock, is thrown, as the naming's write's is.
-      const [poolingT] = await seedAll(["Pooling note 1: sweep-pass-good work, its claim's row held."]);
-      await sql`UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_filled'`;
-      const rowHolder = new SQL({ url: URL_!, max: 1 });
-      const rh = await rowHolder.reserve();
-      let poolingOut = "";
-      try {
-        await rh`BEGIN`;
-        await rh`SELECT 1 FROM thought_work_claims WHERE thought_id = ${poolingT}::uuid AND work_type = ${POOL} FOR UPDATE`;
-        poolingOut = await sweep({ session: { statement_timeout: "1500" }, limit: 1, signal: backstop() }).then((r) => `exit ${r.code}: ${r.stderr.trim().slice(0, 160)}`, (e: Error) => `rejected: ${e.message}`);
-        await rh`ROLLBACK`;
-      } finally {
-        rh.release();
-        await rowHolder.close({ timeout: 5 });
-      }
-      assert(/^rejected: canceling statement due to statement timeout/.test(poolingOut),
-        `a scheduler's statement_timeout in the pooling is thrown, for it to read as its budget's (${poolingOut})`);
-      await drop([poolingT]);
-      await sweep({ limit: 1 });
-
       // A following run's stop is its end wherever it lands: at the pool's lock, 0 (review pass 1, cold read and
       // run-it: 130 there, and in the naming's other waits).
       await alarmAt(48, 1);
@@ -11167,6 +11168,216 @@ if (want("10h")) {
           && Object.keys(read({ tripped: null, held: ["a"], namedAt: { a: "t0" } }).namedAt).length === 0
           && JSON.stringify(["t", null].map((tripped) => { const w = read({ tripped, back: [u1, "x", 3, u1, u2], nothing: true }); return `${w.back.join("+")}/${w.nothing}`; })) === JSON.stringify([`${u1}+${u2}/true`, "/false"]),
         "judgeHeld holds the models a trip holds alone, and the window's hold, each model's last trip, held or lifted, and the hand-back are read beside a trip's stamp only");
+
+      // PR 6b-1: the sweep keeps the claim passes' contract with a scheduler. Its start is heard (onStart): a refusal by
+      // its kind, and the thoughts' beginning, through; a dry run's and a held follower's go unheard. Its own options'
+      // refusals are usage (the cases above hold key, egress and tables).
+      await alarmAt(48, 1);
+      const hearInto = (into: StartResult[]) => (r: StartResult) => { into.push(r); };
+      const usageHeard: StartResult[] = [], checkUsageHeard: StartResult[] = [], handHeard: StartResult[] = [], dryHeard: StartResult[] = [], heldHeard: StartResult[] = [];
+      const usageStart = await sweep({ follow: 0.5, onStart: hearInto(usageHeard) });
+      const identityHeard: StartResult[] = [];
+      const identityStart = await sweep({ onStart: hearInto(identityHeard) }, { ...env, OB1_WORKER_KEY: "d".repeat(64) });
+      const checkAlone = await sweep({ check: true, onStart: hearInto(checkUsageHeard) });
+      const handProbes = probes;
+      const handStart = await sweep({ limit: 1, onStart: hearInto(handHeard), signal: backstop() });
+      const handProbed = probes - handProbes;
+      const dryStart = await sweep({ dryRun: true, onStart: hearInto(dryHeard) });
+      await keepWindow("2000-01-01 00:00:00+00", ["stub-judge"], ["stub-judge"]);
+      const heldStart = await sweep({ follow: 1, onStart: hearInto(heldHeard), signal: backstop() });
+      await alarmAt(48, 1);
+      assert(usageStart.code === 2 && JSON.stringify(usageHeard) === JSON.stringify([{ ok: false, refused: "usage" }])
+          && identityStart.code === 2 && /OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS/.test(identityStart.stderr) && JSON.stringify(identityHeard) === JSON.stringify([{ ok: false, refused: "identity" }])
+          && checkAlone.code === 2 && /^check is a following run's start: pass follow beside it, and no dry run\.$/m.test(checkAlone.stderr)
+          && JSON.stringify(checkUsageHeard) === JSON.stringify([{ ok: false, refused: "usage" }])
+          && handStart.code === 0 && JSON.stringify(handHeard) === JSON.stringify([{ ok: true, provider: "up" }]) && handProbed === 0
+          && dryStart.code === 0 && dryHeard.length === 0 && heldStart.code === 3 && heldHeard.length === 0,
+        `the run's start is heard as a claim pass's is: its options' refusal usage, an unknown worker key identity, check without follow refused so, a hand run's beginning through once and unprobed, a dry run's and a held follower's unheard (exits ${[usageStart, identityStart, checkAlone, handStart, dryStart, heldStart].map((r) => r.code).join(", ")}; heard ${JSON.stringify([usageHeard, identityHeard, checkUsageHeard, handHeard, dryHeard, heldHeard])}; ${handProbed} probe(s))`);
+
+      // …and its start alone (check): its probe of the judge, the provider answering or not yet, a hold the scheduler's
+      // to read, ended before its first write, 0, nothing claimed or asked.
+      const [checkT] = await seedAll(["Check note 1: sweep-pass-good work, pending through a check."]);
+      const checkAsked = ownCalls;
+      const upHeard: StartResult[] = [], outHeard: StartResult[] = [], heldCheckHeard: StartResult[] = [];
+      const checkUp = await sweep({ follow: 1, check: true, onStart: hearInto(upHeard), signal: backstop() });
+      probeScript.push("503");
+      const checkOut = await orHung(sweep({ follow: 1, check: true, onStart: hearInto(outHeard), signal: backstop() }), 10_000);
+      probeScript.length = 0;
+      await keepWindow("2000-01-01 00:00:00+00", ["stub-judge"], ["stub-judge"]);
+      const checkHeld = await sweep({ follow: 1, check: true, onStart: hearInto(heldCheckHeard), signal: backstop() });
+      await alarmAt(48, 1);
+      assert(checkUp.code === 0 && JSON.stringify(upHeard) === JSON.stringify([{ ok: true, provider: "up" }])
+          && checkOut?.code === 0 && JSON.stringify(outHeard) === JSON.stringify([{ ok: true, provider: "out" }])
+          && /^ {2}stub-judge is not answering at start \(503 .*\) — a following run waits for it at its own start$/m.test(checkOut.stderr)
+          && checkHeld.code === 0 && JSON.stringify(heldCheckHeard) === JSON.stringify([{ ok: true, provider: "up" }])
+          && ownCalls === checkAsked && (await claimOf(checkT))?.status === "pending",
+        `a following run's start alone probes its judge and ends before its first write, 0, its provider up or out, a hold left to the scheduler, nothing asked or claimed (exits ${checkUp.code}, ${checkOut?.code ?? "still running at 10 s"}, ${checkHeld.code}; heard ${JSON.stringify([upHeard, outHeard, heldCheckHeard])}): ${checkOut?.stderr.trim().slice(0, 200)}`);
+      await drop([checkT]);
+
+      // …and a following run refused at its probe, before any claim: the judge model unserved (model), the endpoint
+      // refusing the call (provider).
+      const missingHeard: StartResult[] = [], refusedProbeHeard: StartResult[] = [];
+      probeScript.push("404");
+      const missingStart = await sweep({ follow: 1, onStart: hearInto(missingHeard), signal: backstop() });
+      probeScript.push("401");
+      const refusedStart = await sweep({ follow: 1, onStart: hearInto(refusedProbeHeard), signal: backstop() });
+      probeScript.length = 0;
+      assert(missingStart.code === 2 && JSON.stringify(missingHeard) === JSON.stringify([{ ok: false, refused: "model" }]) && /does not serve stub-judge, OB1_JUDGE_MODEL, at start \(404 /.test(missingStart.stderr)
+          && refusedStart.code === 2 && JSON.stringify(refusedProbeHeard) === JSON.stringify([{ ok: false, refused: "provider" }]) && /refuses a one-token call at start \(401 /.test(refusedStart.stderr)
+          && ownCalls === checkAsked,
+        `a following run's probe refuses its start as a claim pass's does, nothing asked: an unserved model, model, a refusing endpoint, provider (exits ${missingStart.code}, ${refusedStart.code}; heard ${JSON.stringify([missingHeard, refusedProbeHeard])}): ${missingStart.stderr.trim().slice(-160)} | ${refusedStart.stderr.trim().slice(-160)}`);
+
+      // …and one whose judge does not answer its probe waits at its start, said through its row (startWait), claiming
+      // nothing until it answers, then goes on; a stop during the wait is its end, 0; a model found unserved once it
+      // answers is refused then.
+      const restoreOutage = shortenOutage(200, 400);
+      const waited: string[] = [];
+      const waitRow = {
+        key: "heartbeat:sleep", stamp: async (o: string) => { waited.push(`stamp:${o}`); }, end: async (o: string) => { waited.push(`end:${o}`); },
+        startWait: async (on: boolean) => { waited.push(`startWait:${on}`); }, providerWait: async (on: boolean) => { waited.push(`providerWait:${on}`); },
+        during: <T,>(p: Promise<T>) => p, alive: async () => {},
+      } as unknown as PassStamper;
+      const waitHeard: StartResult[] = [], lateHeard: StartResult[] = [];
+      let startWaitRun: SweepRun | null = null, stoppedWait: SweepRun | null = null, lateMissing: SweepRun | null = null;
+      let startWaitWords = "", stoppedWaitWords = "", startWaitAsked = 0;
+      const [startWaitT] = await seedAll(["Start note 2: sweep-pass-good work, claimed once the judge answers."]);
+      try {
+        probeScript.push("503", "503");
+        const askedBefore = ownCalls;
+        startWaitRun = await orHung(sweep({ follow: 1, limit: 1, stamper: waitRow, onStart: hearInto(waitHeard), signal: backstop() }));
+        startWaitAsked = ownCalls - askedBefore;
+        startWaitWords = waited.join(",");
+        waited.length = 0;
+        probeScript.splice(0, probeScript.length, ...Array.from({ length: 40 }, () => "503"));
+        const startWaitStop = new AbortController();
+        const startWaitStopping = orHung(sweep({ follow: 1, stamper: waitRow, signal: AbortSignal.any([startWaitStop.signal, backstop()]) }));
+        await pollUntil(async () => waited.includes("startWait:true"), 10_000);
+        startWaitStop.abort();
+        stoppedWait = await startWaitStopping;
+        stoppedWaitWords = waited.join(",");
+        probeScript.splice(0, probeScript.length, "503", "404");
+        lateMissing = await orHung(sweep({ follow: 1, onStart: hearInto(lateHeard), signal: backstop() }));
+      } finally {
+        probeScript.length = 0;
+        restoreOutage();
+      }
+      assert(startWaitRun?.code === 0 && startWaitWords === "startWait:true,startWait:false,end:stopped" && JSON.stringify(waitHeard) === JSON.stringify([{ ok: true, provider: "up" }])
+          && /^ {2}stub-judge is not answering at start \(503 .*\) — the run claims nothing until it does;/m.test(startWaitRun.stderr) && /^ {2}stub-judge answers after \d+ s$/m.test(startWaitRun.stdout)
+          && startWaitAsked === 1 && (await claimOf(startWaitT))?.status === "succeeded"
+          && stoppedWait?.code === 0 && stoppedWaitWords === "startWait:true,startWait:false,end:stopped" && /stopped before the pass began/.test(stoppedWait.stderr)
+          && lateMissing?.code === 2 && JSON.stringify(lateHeard) === JSON.stringify([{ ok: false, refused: "model" }]),
+        `a following run waits at its start for a judge not answering, said through its row, and claims once it answers; stopped there, 0; unserved once it answers, model (exits ${startWaitRun?.code ?? "still running at 30 s"}, ${stoppedWait?.code ?? "still running at 30 s"}, ${lateMissing?.code ?? "still running at 30 s"}; words ${startWaitWords} | ${stoppedWaitWords}; heard ${JSON.stringify([waitHeard, lateHeard])}; ${startWaitAsked} asked)`);
+      await drop([startWaitT]);
+
+      // …and its waits for the provider mid-run said through its row (providerWait): from a transient error to the next
+      // answer, and unsaid as a run the provider's outage ends ends.
+      const restoreWaitPauses = shortenPauses();
+      let providerRun: SweepRun | null = null, providerOut: SweepRun | null = null;
+      let providerWords = "", providerOutWords = "", providerOutT = "";
+      const [providerT] = await seedAll(["Wait note 1: sweep-pass-good work, its first question failed."]);
+      try {
+        waited.length = 0;
+        judgeScript.splice(0, judgeScript.length, "503");
+        // Followed to its next empty poll and stopped there, so the wait unsaid at the answer is told from one unsaid only
+        // as the run ends.
+        const providerStop = new AbortController();
+        const providerFollowing = orHung(sweep({ follow: 1, stamper: waitRow, signal: AbortSignal.any([providerStop.signal, backstop()]) }));
+        await pollUntil(async () => waited.includes("stamp:ok"), 20_000);
+        providerStop.abort();
+        providerRun = await providerFollowing;
+        providerWords = waited.join(",");
+        waited.length = 0;
+        judgeMode = "503";
+        [providerOutT] = await seedAll(["Wait note 2: sweep-pass-good work, its provider out."]);
+        providerOut = await orHung(sweep({ follow: 1, stamper: waitRow, signal: backstop() }));
+        providerOutWords = waited.join(",");
+      } finally {
+        judgeMode = "answer";
+        judgeScript.length = 0;
+        restoreWaitPauses();
+      }
+      assert(providerRun?.code === 0 && providerWords.startsWith("providerWait:true,providerWait:false,stamp:ok") && providerWords.endsWith("end:stopped") && !providerWords.slice(36).includes("providerWait") && (await claimOf(providerT))?.status === "succeeded"
+          && providerOut?.code === 1 && providerOutWords === "providerWait:true,providerWait:false,end:failed" && /The provider is not answering after 3 pauses/.test(providerOut.stderr),
+        `a following run's wait for the provider is said through its row from its error to the next answer, and unsaid as an outage ends it (exits ${providerRun?.code ?? "still running at 30 s"}, ${providerOut?.code ?? "still running at 30 s"}; words ${providerWords} | ${providerOutWords})`);
+      await drop([providerT, providerOutT]);
+
+      // …and a thought the provider fails whenever it is asked, while it answers the rest (STRIKES): it keeps its place at
+      // its first error, goes behind at its second, and at its third, others answered since, its claim fails as its own,
+      // said once, the run going on unpaused; where the provider answers nothing, nothing is struck, and the outage ends
+      // the run as before.
+      const restoreStrikePauses = shortenPauses();
+      const strikeAsks: string[] = [];
+      onOwn = (t) => {
+        for (const [k, w] of [["x", "Strike note 1"], ["y", "Strike note 2"], ["z", "Strike note 3"], ["o", "Strike note 4"]] as const) if (t.includes(w)) strikeAsks.push(k);
+      };
+      let strikeRun: SweepRun | null = null, outageRun: SweepRun | null = null;
+      let outageAsks = "", strikeOutage = "";
+      const [strikeX, strikeY, strikeZ] = await seedAll(["Strike note 1: strike-judge work, failed by the provider whenever it is asked.", "Strike note 2: sweep-pass-good work, answered.", "Strike note 3: sweep-pass-good work, answered too."]);
+      try {
+        strikeRun = await orHung(sweep({ signal: backstop() }));
+        const asksBefore = strikeAsks.length;
+        judgeMode = "503";
+        [strikeOutage] = await seedAll(["Strike note 4: sweep-pass-good work, its provider out."]);
+        outageRun = await orHung(sweep({ signal: backstop() }));
+        outageAsks = strikeAsks.slice(asksBefore).join(",");
+      } finally {
+        judgeMode = "answer";
+        onOwn = null;
+        restoreStrikePauses();
+      }
+      const struckClaim = await claimOf(strikeX);
+      assert(strikeRun?.code === 1 && strikeAsks.slice(0, 5).join(",") === "x,x,y,z,x" && struckClaim?.status === "failed"
+          && /^the provider failed it 3 times in one run while it answered others: /.test(struckClaim.last_error ?? "")
+          && (await statusOf([strikeY, strikeZ])).join(",") === "succeeded,succeeded"
+          && (strikeRun.stderr.match(/: the provider failed it 3 times in this run while it answered others/g) ?? []).length === 1
+          && /1 failed by the provider 3 times while it answered others/.test(tally(strikeRun)) && STRIKES === 3
+          && outageRun?.code === 1 && outageAsks === "o,o,o,o" && (await claimOf(strikeOutage))?.status === "pending" && /The provider is not answering after 3 pauses/.test(outageRun.stderr),
+        `a thought the provider fails at its third error, others answered since its first, has its claim failed as its own, said once, and an outage strikes none (exits ${strikeRun?.code ?? "still running at 30 s"}, ${outageRun?.code ?? "still running at 30 s"}; asks ${strikeAsks.join(",")}; claim ${struckClaim?.status} ${struckClaim?.last_error?.slice(0, 90)}): ${strikeRun ? tally(strikeRun) : ""}`);
+      await drop([strikeX, strikeY, strikeZ, strikeOutage]);
+
+      // …and the pooling, a scan of every thought with no current subject, exempt from a scheduler's statement_timeout:
+      // waiting on a claim's row past the budget, it goes on and lands; the mark after it keeps the budget, thrown past
+      // it, as a statement at the run's start is.
+      const [poolT] = await seedAll(["Pool note 1: sweep-pass-good work, its claim's row held as the pooling requeues it."]);
+      await sql`UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_filled'`;
+      const enqueuedOf = async () => ((await sql`SELECT enqueued_at::text AS at FROM thought_work_claims WHERE thought_id = ${poolT}::uuid AND work_type = ${POOL}`) as { at: string }[])[0]?.at ?? "";
+      const enqueuedBefore = await enqueuedOf();
+      const claimRowHolder = new SQL({ url: URL_!, max: 1 });
+      const markRowHolder = new SQL({ url: URL_!, max: 1 });
+      const claimRow = await claimRowHolder.reserve();
+      const markRow = await markRowHolder.reserve();
+      let exemptRun: SweepRun | null = null, poolingWaited = false, markHeld = false, heldPast = 0;
+      try {
+        await claimRow`BEGIN`;
+        await claimRow`SET LOCAL lock_timeout = '20s'`;
+        await claimRow`SELECT 1 FROM thought_work_claims WHERE thought_id = ${poolT}::uuid AND work_type = ${POOL} FOR UPDATE`;
+        const exempting = settled(sweep({ session: { statement_timeout: "1500" }, limit: 1, signal: backstop() }));
+        poolingWaited = await pollUntil(() => waitingOnLock("requeue_thought_work("), 20_000);
+        const heldFrom = Date.now();
+        await Bun.sleep(2500);
+        // The mark's row held before the pooling goes on, so the mark waits on it past the budget.
+        await markRow`BEGIN`;
+        await markRow`SET LOCAL lock_timeout = '20s'`;
+        await markRow`SELECT 1 FROM ob1_config WHERE key = 'subject_pool_filled' FOR UPDATE`;
+        markHeld = true;
+        heldPast = Date.now() - heldFrom;
+        await claimRow`COMMIT`;
+        exemptRun = await orHung(exempting, 20_000);
+      } finally {
+        await claimRow`ROLLBACK`.catch(() => {});
+        await markRow`ROLLBACK`.catch(() => {});
+        claimRow.release();
+        markRow.release();
+        await claimRowHolder.close({ timeout: 5 });
+        await markRowHolder.close({ timeout: 5 });
+      }
+      const enqueuedAfter = await enqueuedOf();
+      const [{ filledNow }] = (await sql`SELECT value AS "filledNow" FROM ob1_config WHERE key = 'subject_pool_filled'`) as { filledNow: string }[];
+      await sql`UPDATE ob1_config SET value = ${POOL} WHERE key = 'subject_pool_filled'`;
+      assert(poolingWaited && heldPast >= 2500 && markHeld && enqueuedAfter !== enqueuedBefore && filledNow === ""
+          && exemptRun?.code === -1 && /^rejected: .*statement timeout/i.test(exemptRun.stderr),
+        `a pooling held past a scheduler's budget goes on and lands, and the mark after it keeps the budget, thrown past it (waited ${poolingWaited}, held ${heldPast} ms past, requeued ${enqueuedBefore} → ${enqueuedAfter}, mark ${JSON.stringify(filledNow)}, exit ${exemptRun?.code ?? "still running at 20 s"}): ${exemptRun?.stderr.trim().slice(0, 200)}`);
+      await drop([poolT]);
     } finally {
       Object.assign(JUDGE_ALARM, { window: alarmDefaults.window, share: 1 });
       onOwn = null;

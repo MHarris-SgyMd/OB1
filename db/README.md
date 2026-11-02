@@ -3048,7 +3048,7 @@ bun extract-entities.ts --url … --subjects --dry-run    # how many each would 
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
 bun extract-entities.ts --url … --subjects --judge-checked # the garbage-judge alarm off, for a judge model checked and found right; lifts a trip's hold on a scheduler's runs of that model (--limit 1: one thought asked)
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a scheduler's following run a trip holds, or a --judge-checked run whose model a trip named after it began, before its lift (PR 6a) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits or at the admit gate; a scheduler's following run stopped by its first exits 0, unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, failed by the provider a third time in the run while it answered others, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants, or the provider's refusal, a following run's start probe of its judge model among them (PR 6b-1) · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a scheduler's following run a trip holds, or a --judge-checked run whose model a trip named after it began, before its lift (PR 6a) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits or at the admit gate; a scheduler's following run stopped by its first exits 0, unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3431,8 +3431,8 @@ would take (the pool's claims, a gone worker's run-out leases among them, or eve
 thought with no current subject while its pool is not named), and reads on
 through a signal, as the pass's does; its pages go by thought id, so with
 `--limit` it counts the first by id, which a run need not take first. Sleep
-does not run the sweep yet: that is SMD-3306 PR 6b, on SMD-3379's scheduler,
-for which PR 6a readies it (a scheduler's run of the sweep, below).
+does not run the sweep yet: that is SMD-3306 PR 6b-2, on SMD-3379's scheduler,
+for which PRs 6a and 6b-1 ready it (a scheduler's run of the sweep, below).
 
 **A judge that answers garbage stops the sweep, exit 3 (SMD-3306 PR 5b).** The
 pass's alarm (SMD-2266, above), for the judge model, judged after each claim the
@@ -3504,10 +3504,21 @@ it catch a judge that never ends its answer: `qwen3.5:0.8b`, thinking, ran 3 of
 3 canary thoughts to the 300 s limit, and a call past the limit is no answer, so
 each such claim fails at the limit a call, through the pool.
 
-**A scheduler's run of the sweep (SMD-3306 PR 6a).** `sweepSubjects` takes most
-of the options the sleep scheduler drives the claim passes with, so that sleep
-can run it (PR 6b); none is the CLI's, and it reports no start (`onStart`) and
-runs no start check yet, 6b's. `follow` (whole seconds): at an empty pool the
+**A scheduler's run of the sweep (SMD-3306 PRs 6a and 6b-1).** `sweepSubjects`
+takes most of the options the sleep scheduler drives the claim passes with, so
+that sleep can run it (PR 6b-2); none is the CLI's. It reports its start as a
+claim pass does (`onStart`, PR 6b-1): each refusal of its start by its kind —
+its options' (`usage`), the egress gate's, the tables' and the grants'
+(`tables`), the worker key's (`identity`, `lookup`), another pool named
+(`key`), a following run's judge model unserved or its endpoint refusing the
+probe (`model`, `provider`) — or through as its thoughts begin; a dry run's
+refusals are said, not heard, and a trip's hold is no start refusal, its 3
+unheard. A following run probes its judge model with one token before any
+claim, as a follower does, and waits at its start for one not answering,
+claiming nothing until it does, a stop ending the wait; `check` is a following
+run's start alone, sleep's start check, its refusals and its probe heard, ended
+before the trip's hold and its first write, 0. `follow` (whole seconds): at an
+empty pool the
 run waits that long and claims again, reading the pool's name and another run's
 trip at each claim, until its stop, which ends it as a follower's does wherever
 it lands, exit 0 (130 at once on the second), unless the thought in hand it lets
@@ -3523,7 +3534,12 @@ attempt not counted and its place under `--limit` given back, and the run pauses
 before its next claim, holding no claim, which takes it again through that gate,
 the pauses counting the provider's errors since its last answer, across thoughts
 (a timeout or an egress refusal is no answer), the pool's name, another run's
-trip and its own edits read as at any claim. A stop at the gate, or a gate
+trip and its own edits read as at any claim. At a thought's second such error
+in a run it goes behind every one queued before it, so the next claim asks
+another, and at its third, the provider having answered another since its
+first, its claim fails as the thought's own, said once, for `--retry-failed`,
+in any run (PR 6b-1, the maintainer's choice: each run had asked the rest, then
+ended on it). A stop at the gate, or a gate
 answering after the stop, ends the run, nothing more named, pooled or claimed; a
 run the trip's hold keeps from starting is refused before any gate. Beside the
 stop, `onPass` hands its caller the call's own abort (`abortInHand`, PR 1b-2's):
@@ -3536,13 +3552,20 @@ word, `ok` at each poll that finds the pool empty and, as it ends, `failed` for
 an end of its
 own (a refusal, its own options' among them, the provider or the database, the
 alarm, a throw) or `stopped`; it beats no row while it works through a pool, a
-scheduler's row being the scheduler's to keep. `session` opens the run's own
+scheduler's row being the scheduler's to keep. It hears the run's waits for the
+provider too, as a claim pass's caller does (PR 6b-1): `startWait` while a
+following run waits at its start, `providerWait` from a transient error until
+the provider's next answer or the run's end. `session` opens the run's own
 client and its watching connection with the scheduler's per-pass settings
 (refused beside a caller's client; the worker key's lookup opens its one
 connection without them, as the claim passes' does). A statement past its
 statement_timeout at the run's start is thrown, as a claim pass's start-of-pass
-scan's is, for the scheduler to read as its budget's, the naming's write and its
-pooling among them, whose waits have no other end. One over a thought is the
+scan's is, for the scheduler to read as its budget's, the naming's write among
+them, whose wait has no other end; the pooling, a scan of every thought with no
+current subject, runs exempt (PR 6b-1, the maintainer's choice: on a large brain
+it outlasts the budget, the pool never filled and every period ended on it), its
+waits said and a stop cancelling it, the budget set back as it ends, for the
+mark after it and the claims. One over a thought is the
 thought's or the poll's, as a claim pass's is (review pass 6): its own write
 past it fails the thought, for `--retry-failed`; its claim, its read, a put-back
 or set-back, its release or its answer's window costs the run its poll, counted
@@ -3560,9 +3583,7 @@ end says the database already, a claim that landed after a second stop's
 hand-back keeping it said, and its stop line says the claims go back as their
 leases run out); an answer judged after its claim's release (unread, or keyed)
 whose window write passes it is not in the window, the claim as released, the
-run losing its poll; a pooling, a scan of every thought,
-can outlast it on a large brain, and would end each period on its budget, never
-marking its pool filled (6b's to exempt). `banner: false` leaves the start's
+run losing its poll. `banner: false` leaves the start's
 lines out. No one is there to pass `--judge-checked` to a scheduler's run, so a
 trip holds the pool's following runs of each judge model whose answers gave no
 subject, beside an earlier trip's not lifted, kept in the window, each model
@@ -4645,7 +4666,8 @@ after a live call and the quiet" while it waits for one (`resting`), no
 warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
 that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
 above). Since SMD-2679's PR 4b its `waiting` and `waitingMidPass` name
-`reembed` too, `reembedJob` is its own re-embed key (`reembed:<model>@<dim>`,
+`reembed` too (and `subjects`, the subject sweep, read since SMD-3306 PR 6b-1
+for the scheduler PR 6b-2 makes run it), `reembedJob` is its own re-embed key (`reembed:<model>@<dim>`,
 which preflight reads whose key it is from, not from its own environment; a
 row without one is read as a scheduler that runs no re-embed — v1.9.0's, one
 whose width forms no key, or one whose model name falls outside a model
@@ -4696,10 +4718,14 @@ and 1c-4 will write `holds`. `paused { since }` is the scheduler paused by a liv
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out
-of its work, one to three, each `{ pass, why, until }`:
-- `pass` is `reembed`, `extract` or `consolidate`;
-- `why` is one of re-embed's set-down kinds (above), `lookup` or
-  `model-switch`;
+of its work, one to four, each `{ pass, why, until }`:
+- `pass` is `reembed`, `extract`, `consolidate` or `subjects` (the subject
+  sweep, read since SMD-3306 PR 6b-1, which PR 6b-2's scheduler runs);
+- `why` is one of re-embed's set-down kinds (above), `lookup`,
+  `model-switch` or `judge` — the garbage-judge alarm's trip holding the
+  sweep's judge model, for which preflight's `sleep` row names the hand run
+  that lifts it (`--subjects --judge-checked --limit 1`, once the model is
+  checked);
 - `until` is the time it re-arms on the database's clock, or null for an
   event rather than a time.
 
