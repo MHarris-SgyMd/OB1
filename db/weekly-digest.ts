@@ -33,7 +33,6 @@
  *   bun db/weekly-digest.ts --url … --output stdout            # print only (no delivery hop)
  *   bun db/weekly-digest.ts --url … --output file              # write ./digests/YYYY-MM-DD.md
  *   bun db/weekly-digest.ts --url … --window 14                # last 14 days
- *   bun db/weekly-digest.ts --url … --min-importance 3         # lower the threshold
  *   bun db/weekly-digest.ts --url … --include-personal         # include sensitivity_tier=personal
  *   bun db/weekly-digest.ts --url … --no-sensitivity-filter    # ⚠ send every row (see below)
  *   bun db/weekly-digest.ts --url … --model <id>               # else OB1_DIGEST_MODEL, else the brain's chat model
@@ -67,8 +66,8 @@ import type { SQL } from "bun";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-// How many ranked thoughts are serialized into the synthesis prompt. The pool
-// is ranked above this cap, then trimmed. Bigger = more context, more tokens.
+// How many thoughts are serialized into the synthesis prompt: pickForDigest's
+// share of the window. Bigger = more context, more tokens.
 const SYNTHESIZE_INPUT_CAP = 80;
 
 // Hard ceiling on rows read per run — protects a huge window + heavy capture
@@ -111,8 +110,11 @@ export type DigestThought = {
   content: string;
   created_at: string | Date;
   metadata: Record<string, unknown> | null;
-  /** Present only when the install has a native `importance` column. */
-  importance?: number | string | null;
+  /**
+   * The row's place in its day and writer's queue, 1 for the newest: readThoughts
+   * numbers each (day, `metadata.actor_name`) group newest first.
+   */
+  turn?: number;
 };
 
 type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
@@ -120,36 +122,29 @@ type ChatCompletion = { choices?: Array<{ message?: { content?: string } }> };
 // ── Ranking (pure) ────────────────────────────────────────────────────────
 
 /**
- * The importance score: a native top-level `importance` when the install has
- * one, else `metadata.importance`, else 0. A numeric string in either place is
- * accepted (some capture pipelines stringify the field).
+ * The thoughts the digest reads: the window spread over its days and writers,
+ * at most `cap`, newest first. Rows are taken a turn at a time: the newest of
+ * every (day, writer) group, then the second of each, and so on, newest first
+ * within a turn. So a quiet day keeps its share beside a busy one, and a key
+ * that floods the window gets one row per day per turn, as every other writer
+ * does. Stable takes about 60 thoughts a day (2026-11-02): the newest 80 alone
+ * would be a day and a half of a "weekly" digest.
+ *
+ * `importance` takes no part. It is retired (SMD-3661, `docs/priority.md`
+ * decision 8): any key could set it on its own rows, so ten captures carrying a
+ * high value ranked every other key's thought out (SMD-2653). Once the
+ * effective priority exists (SMD-3667) the digest ranks by that. Times compare
+ * as instants: a row from the database carries a Date, whose string leads with
+ * its weekday. An unreadable time sorts last.
  */
-export function thoughtImportance(t: DigestThought): number {
-  const read = (v: unknown): number | null => {
-    if (typeof v === "number" && Number.isFinite(v)) return v;
-    if (typeof v === "string") {
-      const n = Number(v);
-      if (Number.isFinite(n)) return n;
-    }
-    return null;
+export function pickForDigest(thoughts: DigestThought[], cap = SYNTHESIZE_INPUT_CAP): DigestThought[] {
+  const at = (t: DigestThought) => {
+    const ms = new Date(t.created_at).getTime();
+    return Number.isFinite(ms) ? ms : -Infinity;
   };
-  return read(t.importance) ?? read(t.metadata?.importance) ?? 0;
-}
-
-/**
- * Rank the pool by importance, then recency. When too few clear the threshold
- * the digest would come out thin, so the pool widens to the top 60 by
- * importance+recency; either way the result is capped at 200.
- */
-export function rankAndTrim(thoughts: DigestThought[], minImportance: number): { pool: DigestThought[]; widened: boolean } {
-  const sorted = [...thoughts].sort((a, b) => {
-    const d = thoughtImportance(b) - thoughtImportance(a);
-    return d !== 0 ? d : String(b.created_at).localeCompare(String(a.created_at));
-  });
-  const high = sorted.filter((t) => thoughtImportance(t) >= minImportance);
-  const widened = high.length < 10;
-  const pool = widened ? sorted.slice(0, 60) : high;
-  return { pool: pool.slice(0, 200), widened };
+  const newestFirst = (a: DigestThought, b: DigestThought) => (at(a) === at(b) ? 0 : at(a) < at(b) ? 1 : -1);
+  const turn = (t: DigestThought) => t.turn ?? 1;
+  return [...thoughts].sort((a, b) => turn(a) - turn(b) || newestFirst(a, b)).slice(0, cap).sort(newestFirst);
 }
 
 // ── The digest's egress subject (pure) ──────────────────────────────────────
@@ -180,14 +175,13 @@ export function buildUserPrompt(thoughts: DigestThought[], startDate: Date, endD
     id: t.id,
     date: String(t.created_at instanceof Date ? t.created_at.toISOString() : t.created_at).slice(0, 10),
     type: t.metadata?.type ?? null,
-    importance: thoughtImportance(t) || null,
     content: String(t.content ?? "").slice(0, 280),
     topics: (Array.isArray(t.metadata?.topics) ? (t.metadata!.topics as unknown[]) : []).slice(0, 5),
     tags: (Array.isArray(t.metadata?.tags) ? (t.metadata!.tags as unknown[]) : []).slice(0, 5),
   }));
   return (
     `Weekly digest for ${fmt(startDate)} – ${fmt(endDate)}.\n` +
-    `Source: ${rows.length} high-signal thoughts.\n\n` +
+    `Source: ${rows.length} thoughts, a share of each day and writer in the window.\n\n` +
     `INPUT:\n${JSON.stringify(rows)}\n\n` +
     `Produce the digest now.`
   );
@@ -224,25 +218,22 @@ const FAIL_CLOSED =
   "  --no-sensitivity-filter to accept sending ALL rows in the window.";
 
 /**
- * The week's rows, ordered newest first and capped. `restricted` (always) and
+ * The window's rows, each numbered by its turn (pickForDigest), in turn order and
+ * capped, so a cap reached on a busy window drops later turns, not whole
+ * days or writers. `restricted` (always) and
  * `personal` (unless includePersonal) are excluded when the column exists, by
- * the column or the row's `metadata.sensitivity_tier`;
- * `importance` is selected only when the column exists (else read from
- * metadata). Returns the rows, or `{ failClosed: true }` when the sensitivity
- * column is missing and the filter was not waived.
+ * the column or the row's `metadata.sensitivity_tier`. Returns the rows, or
+ * `{ failClosed: true }` when the sensitivity column is missing and the filter
+ * was not waived.
  */
 export async function readThoughts(
   sql: SQL,
   opts: { windowDays: number; includePersonal: boolean; noSensitivityFilter: boolean },
 ): Promise<{ failClosed: true } | { failClosed: false; rows: DigestThought[] }> {
   const [cols] = await sql`
-    SELECT
-      EXISTS (SELECT 1 FROM information_schema.columns
-              WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has_sensitivity,
-      EXISTS (SELECT 1 FROM information_schema.columns
-              WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'importance') AS has_importance`;
+    SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'thoughts' AND column_name = 'sensitivity_tier') AS has_sensitivity`;
   const hasSensitivity = Boolean(cols.has_sensitivity);
-  const hasImportance = Boolean(cols.has_importance);
   const filter = !opts.noSensitivityFilter;
 
   if (filter && !hasSensitivity) return { failClosed: true };
@@ -250,7 +241,6 @@ export async function readThoughts(
   // Column names are fixed strings gated by the existence probe above — never
   // caller input — so building the select list is safe. Values go as $-params.
   const selectCols = ["id", "content", "created_at", "metadata"];
-  if (hasImportance) selectCols.push("importance");
   if (filter && hasSensitivity) selectCols.push("sensitivity_tier");
 
   const params: unknown[] = [opts.windowDays];
@@ -265,7 +255,11 @@ export async function readThoughts(
   }
 
   const rows = (await sql.unsafe(
-    `SELECT ${selectCols.join(", ")} FROM thoughts WHERE ${where} ORDER BY created_at DESC LIMIT ${FETCH_HARD_CAP}`,
+    `SELECT ${selectCols.join(", ")}, turn FROM (
+       SELECT ${selectCols.join(", ")},
+              (row_number() OVER (PARTITION BY created_at::date, metadata->>'actor_name' ORDER BY created_at DESC, id))::int AS turn
+         FROM thoughts WHERE ${where}) w
+      ORDER BY turn, created_at DESC LIMIT ${FETCH_HARD_CAP}`,
     params,
   )) as DigestThought[];
   return { failClosed: false, rows };
@@ -356,7 +350,6 @@ function deliverFile(text: string, startDate: Date, endDate: Date, model: string
 
 type RunArgs = {
   windowDays: number;
-  minImportance: number;
   model: string | undefined;
   output: "telegram" | "stdout" | "file";
   includePersonal: boolean;
@@ -378,7 +371,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   const keyName = id.identity.keyName;
 
   console.log(
-    `weekly-digest: window=${args.windowDays}d min-importance=${args.minImportance} model=${model} ` +
+    `weekly-digest: window=${args.windowDays}d model=${model} ` +
       `output=${args.output} include-personal=${args.includePersonal}`,
   );
   console.log(`  synthesis egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
@@ -417,13 +410,8 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
     return 0;
   }
 
-  const { pool, widened } = rankAndTrim(read.rows, args.minImportance);
-  if (widened) {
-    console.error(
-      `  note: fewer than 10 thoughts at or above --min-importance=${args.minImportance}; widened to the top 60 by importance+recency (stock installs score importance in metadata.importance — pass --min-importance 0 if none is scored).`,
-    );
-  }
-  console.log(`  ranked pool: ${pool.length} thought(s)`);
+  const pool = pickForDigest(read.rows);
+  console.log(`  picked ${pool.length} thought(s) across the window's days and writers`);
 
   const endDate = new Date();
   const startDate = new Date(Date.now() - args.windowDays * 86_400_000);
@@ -451,8 +439,7 @@ async function run(sql: SQL, url: string, args: RunArgs): Promise<number> {
   }
   if (args.output === "stdout") return 0;
   if (args.output === "file") {
-    const used = Math.min(pool.length, SYNTHESIZE_INPUT_CAP);
-    console.log(`  wrote ${deliverFile(digest, startDate, endDate, model, { used, poolSize: pool.length })}`);
+    console.log(`  wrote ${deliverFile(digest, startDate, endDate, model, { used: pool.length, poolSize: read.rows.length })}`);
     return 0;
   }
 
@@ -490,7 +477,6 @@ if (import.meta.main) {
     {
       url: "one",
       window: "one",
-      "min-importance": "one",
       model: "one",
       output: "one",
       "include-personal": "none",
@@ -501,7 +487,6 @@ if (import.meta.main) {
       hints: {
         url: "<postgres://…>",
         window: "<days> (7)",
-        "min-importance": "<n> (4)",
         model: "<id — else OB1_DIGEST_MODEL, else the brain's chat model>",
         output: "<telegram|stdout|file> (telegram)",
       },
@@ -516,7 +501,6 @@ if (import.meta.main) {
   }
   const args: RunArgs = {
     windowDays: cli.int("window", { absent: 7, min: 1, max: 3660 }),
-    minImportance: cli.number("min-importance", { absent: 4, min: 0, fraction: true }),
     model: cli.value("model"),
     output: outputRaw,
     includePersonal: cli.has("include-personal"),

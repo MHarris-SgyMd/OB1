@@ -976,29 +976,37 @@ set_canary_own() {
 # made before SMD-2583 holds stable's password, and the one written later
 # is the file's own.
 #
-# The plugins' login role (db/config.mjs PLUGIN_LOGIN_ROLE, ob1_plugins) the
-# same way, where the canary's Postgres has one and its file sets
-# OB1_PLUGIN_DB_PASSWORD (SMD-3032): migrate.ts makes the role with that
-# password when it is absent and never changes it after (its "keeps the
-# password it was made with"), so a canary whose role was made on stable's
-# password, and whose file now holds one of its own, would fail its plugins'
-# logins (review pass 1). A role is the cluster's, which the refresh leaves.
+# Each plugin's login role (db/config.mjs pluginIdents, ob1_plugins_<name>)
+# the same way, where the canary's Postgres has one and its file sets
+# OB1_PLUGIN_DB_PASSWORD (SMD-3032, SMD-2756): migrate.ts makes each role with
+# a password derived from that secret when it is absent and never changes it
+# after (its "keeps the password it was made with"), so a canary whose roles
+# were made under stable's secret, and whose file now holds one of its own,
+# would fail its plugins' logins (review pass 1). A role is the cluster's,
+# which the refresh leaves. Each password is derived by config.mjs's own
+# pluginLoginPassword and reaches psql on its stdin, never on a command line.
 set_canary_password() {
-  local pw plugin_pw
+  local pw plugin_pw logins
   # By value: a value spanning lines in the file could hold a line that reads
   # POSTGRES_PASSWORD= in `config --environment`'s output (review pass 3).
   pw="$(env_file value "$CANARY_ENV" POSTGRES_PASSWORD)"
   [ -n "$pw" ] || { echo "$CANARY_ENV sets no POSTGRES_PASSWORD." >&2; exit 1; }
-  plugin_pw="$(env_file value "$CANARY_ENV" OB1_PLUGIN_DB_PASSWORD)"
-  OB1_CANARY_PW="$pw" OB1_CANARY_PLUGIN_PW="$plugin_pw" "$RUNTIME" exec -i -e OB1_CANARY_PW -e OB1_CANARY_PLUGIN_PW "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null <<'SQL'
+  OB1_CANARY_PW="$pw" "$RUNTIME" exec -i -e OB1_CANARY_PW "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null <<'SQL'
 \getenv pw OB1_CANARY_PW
 ALTER ROLE postgres PASSWORD :'pw';
-\getenv plugin_pw OB1_CANARY_PLUGIN_PW
-SELECT :'plugin_pw' <> '' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_plugins') AS set_plugin \gset
-\if :set_plugin
-ALTER ROLE ob1_plugins PASSWORD :'plugin_pw';
-\endif
 SQL
+  plugin_pw="$(env_file value "$CANARY_ENV" OB1_PLUGIN_DB_PASSWORD)"
+  [ -n "$plugin_pw" ] || return 0
+  logins="$("$RUNTIME" exec "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qXtA -c "SELECT rolname FROM pg_roles WHERE rolname ~ '^ob1_plugins_[a-z0-9_]+\$' ORDER BY rolname")"
+  [ -n "$logins" ] || return 0
+  # The role's name past its prefix is a plugin name pluginIdents maps back to it.
+  # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
+  printf '%s\n' "$logins" | OB1_SECRET="$plugin_pw" OB1_CONFIG="$REPO/db/config.mjs" bun --no-env-file -e '
+const { pluginLoginPassword } = await import(process.env.OB1_CONFIG);
+for (const role of (await Bun.stdin.text()).split("\n").filter(Boolean)) {
+  if (!/^ob1_plugins_[a-z0-9_]+$/.test(role)) throw new Error("not a plugin login role: " + role);
+  console.log(`ALTER ROLE "${role}" PASSWORD '"'"'${pluginLoginPassword(process.env.OB1_SECRET, role.slice("ob1_plugins_".length))}'"'"';`);
+}' | "$RUNTIME" exec -i "$1" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qX >/dev/null
 }
 GIT_SHA="${OB1_GIT_SHA:-$(git -C "$REPO" describe --always --dirty 2>/dev/null || echo unknown)}"
 

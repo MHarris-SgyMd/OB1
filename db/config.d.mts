@@ -268,12 +268,14 @@ export const LOCK_TIMEOUT_S: number;
 export function migrationNameProblem(names: string[]): string | null;
 /** A plugin's name: lower-case words joined by single hyphens (SMD-2310). */
 export const PLUGIN_NAME_RE: RegExp;
-/** A plugin's own Postgres schema and the role that owns it: `plugin_<name>`, `ob1_plugin_<name>`, hyphens read as underscores (SMD-2310). */
-export function pluginIdents(name: string): { schema: string; role: string };
-/** The login role every plugin's SQL runs on: NOINHERIT, SET on each plugin role, nothing on the core (SMD-2310). */
-export const PLUGIN_LOGIN_ROLE: string;
-/** `url` as PLUGIN_LOGIN_ROLE with `password`, every other part kept. */
-export function pluginLoginUrl(url: string, password: string): string;
+/** A plugin's own Postgres schema, the role that owns it and the login role its SQL runs on: `plugin_<name>`, `ob1_plugin_<name>`, `ob1_plugins_<name>`, hyphens read as underscores (SMD-2310, SMD-2756). */
+export function pluginIdents(name: string): { schema: string; role: string; login: string };
+/** The one login role every plugin's SQL ran on before SMD-2756, SET on every plugin role: the migrator retires it. */
+export const SHARED_PLUGIN_LOGIN: string;
+/** A plugin's login password: the hex HMAC-SHA256 of its login role's name under OB1_PLUGIN_DB_PASSWORD (SMD-2756). */
+export function pluginLoginPassword(secret: string, name: string): string;
+/** `url` as the plugin's login role with its derived password, every other part kept. */
+export function pluginLoginUrl(url: string, name: string, secret: string): string;
 /** What in a plugin's schema its role does not own — relations, routines, types — each with the ALTER keyword that hands it back and its owner; none for a missing role (SMD-2310). */
 export function pluginForeignOwned(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>, schema: string, role: string): Promise<{ kind: string; ident: string; owner: string }[]>;
 /** The SET list that returns a claim row to its pool — requeue()'s. */
