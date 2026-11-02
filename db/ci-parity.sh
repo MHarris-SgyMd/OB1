@@ -379,11 +379,12 @@ main() {
   # does not list stay. A section broken by another's rows shows only in a
   # full run.
   OB1_LIVE_SHARD=rest run db test-live.ts
-  # The other two lanes start here, beside the rest of this one, and not
-  # before: the rest shard's [2] appends a line to the tracked
-  # db/migrations/002 for a moment, and the database-free lane's checker (17c
-  # hashes the frozen migrations), test-engines and test-schema read the file,
-  # as do test-upgrade and test-preflight (SMD-3639).
+  # The other two lanes start here, beside the rest of this one. Until
+  # SMD-3639 the rest shard's [2] appended a line to the tracked
+  # db/migrations/002 for a moment, which the database-free lane's checker
+  # (17c hashes the frozen migrations), test-engines and test-schema read, as
+  # do test-upgrade and test-preflight. It edits a copy now, so they could
+  # start first: SMD-3688 takes that up, with the shards side by side.
   start_lanes
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts

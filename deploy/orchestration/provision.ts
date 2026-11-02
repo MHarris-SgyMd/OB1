@@ -826,7 +826,7 @@ function fakeN8n() {
  *   - a mint whose env write fails;
  *   - a rate-limited sign-in, a custom email, and an over-long password.
  */
-async function selfCheck(): Promise<number> {
+async function selfCheckIn(scratch: string): Promise<number> {
   const fails: string[] = [];
   const expect = (what: string, ok: boolean) => { if (!ok) fails.push(what); };
   const throws = (fn: () => unknown, re: RegExp) => { try { fn(); return false; } catch (e) { return re.test(String((e as Error).message)); } };
@@ -873,8 +873,8 @@ async function selfCheck(): Promise<number> {
   expect("keyExpiry reads exp", keyExpiry(jwt({ exp: 1_900_000_000 })) === 1_900_000_000);
   expect("keyExpiry is null without exp, or for a non-JWT", keyExpiry(jwt({ sub: "x" })) === null && keyExpiry("not-a-jwt") === null);
 
-  const file = join(HERE, `.self-check.${process.pid}.env`);
-  const fresh = join(HERE, `.self-check.${process.pid}.new.env`);
+  const file = join(scratch, "check.env");
+  const fresh = join(scratch, "check.new.env");
   try {
     writeFileSync(file, "A=1\nN8N_API_KEY=old\nB=2\n", { mode: 0o640 });
     setEnvValue(file, "N8N_API_KEY", "new");
@@ -951,7 +951,7 @@ async function selfCheck(): Promise<number> {
 
   // The key decisions, against a fake n8n that checks the owner's email, password and session.
   const f = fakeN8n();
-  const keyFile = join(HERE, `.self-check.${process.pid}.keys.env`);
+  const keyFile = join(scratch, "check.keys.env");
   try {
     const now = Math.floor(Date.now() / 1000);
     const opts = (env: Record<string, string>, more: Partial<Options> = {}): Options => ({ base: f.base, env, envFile: keyFile, credentials: [], workflows: [], ...more });
@@ -994,7 +994,7 @@ async function selfCheck(): Promise<number> {
     expect("a plain run sweeps this file's leftover, and keeps a hand-made key and another file's", !r8.key.minted && r8.key.revoked === 1 && f.s.keys.size === 3 && f.s.keys.has(handMade.id) && f.s.keys.has(otherFile.id));
     // A copy of the file carries its tag. The copy mints under a tag of its own and revokes nothing;
     // after the original rotates, both keys still answer (review pass 3: they revoked each other).
-    const copyFile = join(HERE, `.self-check.${process.pid}.copy.env`);
+    const copyFile = join(scratch, "check.copy.env");
     try {
       writeFileSync(copyFile, readFileSync(keyFile, "utf8"), { mode: 0o600 });
       const cp = await ensureApiKey({ ...opts({ ...base, ...parseEnv(readFileSync(copyFile, "utf8")) }), envFile: copyFile });
@@ -1008,7 +1008,7 @@ async function selfCheck(): Promise<number> {
       rmSync(copyFile, { force: true });
     }
     // A moved file: without --adopt the old tag's keys are named and left; with it they are revoked.
-    const movedFile = join(HERE, `.self-check.${process.pid}.moved.env`);
+    const movedFile = join(scratch, "check.moved.env");
     try {
       const orig = file();
       writeFileSync(movedFile, readFileSync(keyFile, "utf8"), { mode: 0o600 });
@@ -1180,6 +1180,20 @@ async function selfCheck(): Promise<number> {
   for (const x of fails) console.error(`FAIL ${x}`);
   console.log(fails.length ? `provision self-check: ${fails.length} failed` : "provision self-check: OK");
   return fails.length ? 1 : 0;
+}
+
+/**
+ * The self-check, its env files in a directory of their own, not this one in the checkout: a run killed midway
+ * leaves nothing in the tree, and a read-only checkout runs it. The directory goes on return or throw; a kill
+ * leaves it in the temp directory (SMD-3639).
+ */
+async function selfCheck(): Promise<number> {
+  const scratch = mkdtempSync(join(tmpdir(), "ob1-provision-check-"));
+  try {
+    return await selfCheckIn(scratch);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 if (import.meta.main && process.argv.includes("--self-check")) process.exit(await selfCheck());
