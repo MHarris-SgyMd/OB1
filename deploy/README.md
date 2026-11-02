@@ -2265,7 +2265,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `asleep:` when a sleep begins, `extraction drained — consolidating
-beside it`, and `awake:` with the live call that woke it; `budget:` at its start
+beside it`, `paused:` with the live call that paused it and `resumed:` once
+the capture has passed, and `awake:` with the live call that ended it (its
+pools drained, or the clock spent); `budget:` at its start
 names the budget in force, and a sleep it stops says why — `the sleep's budget
 is spent (60 min)`, `… still in hand 300 s past the budget — stopped now`, or
 `<pass>: a statement passed the pass's statement_timeout (300 s)` with `the
@@ -2317,7 +2319,9 @@ scheduler), `OB1_SLEEP_WORK_MEM` and `OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
 last sleep stopped, and how many sleeps stopped on it. **The clock is on by
 default:** upgraded, a quiet night holds the model for an hour, and the rest
 of a backlog waits for the next live call — `OB1_SLEEP_BUDGET=0` and a
-recreate restore the old behaviour, a larger value drains a backlog sooner. The scheduler reads its
+recreate run a sleep until its pools drain, a live write then ending it (one
+that finds work pauses it, so a stalled thought keeps the sleep going since
+SMD-3379 PR 1c-3b); a larger value drains a backlog sooner. The scheduler reads its
 environment once, so recreate the coordinator after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
 A `restart` keeps the values it was created with.

@@ -138,7 +138,7 @@
  * set-aside (SMD-2694), the restart, the let-out's — and its hard stop of the
  * passes when one ends by itself, a follower is found outside or the sleep
  * throws, is counted on the thought in hand as a cut, apart from its stops,
- * which say the wakes and the operator's second signal (migration 101's
+ * which say the wakes, a paused sleep's aborts and the operator's second signal (migration 101's
  * `cuts`, SMD-3060): a cut stalls nothing, and a long outage's cuts no
  * longer read as wakes nor decide which held thoughts are named; read on
  * the row once the scheduler is restarted after 101. A stalled thought is
@@ -214,8 +214,8 @@
  *    the poll;
  *  - a sleep runs --budget minutes (60) at most: then its passes stop after
  *    the thought in hand, every lease returned, and none starts; one still in
- *    hand 300 s later is stopped hard, a cut (101). A wake in that grace ends
- *    it at once, as any wake does. The stop is counted only when it cut work
+ *    hand 300 s later is stopped hard, a cut (101). A live write in that grace
+ *    ends it at once, as a wake did before the pause (Pausing). The stop is counted only when it cut work
  *    — a pass's pool not drained as the drain reads it (consolidation's not
  *    yet enqueued included, re-embed's only while it runs — not set down
  *    or aside — and only the leases this sleep can work; another process's
@@ -2011,7 +2011,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const seenBefore = lastWrite;
       const lastNowBefore = lastNow;
       lastNow = nowMs;
-      readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK_S * 1000));
       // A thought held back finished in this sleep is not named until the next wake otherwise.
       if (Date.now() - heldAt >= everyMs) await sayHeld();
       if (await outsideNow()) {
@@ -2078,6 +2077,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         lastWrite = live.write!.getTime();
         landedAt = Math.max(lastWrite, lastNowBefore ?? nowMs);
       }
+      // The read's window moves here too, so a write left new reads again however old (review pass 4).
+      readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK_S * 1000));
       // Read without the work this poll's new writes queued themselves — a
       // capture's extraction, an edit's again — work for the next sleep; a
       // claim queued before, or in hand, is the sleep's own (review pass 2).

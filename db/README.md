@@ -4457,7 +4457,9 @@ raised past the bound; one sleep stopped on its budget exits 1.
 **Upgrading to the budget.** The clock is on by default: from this release a
 long quiet night holds the model for 60 minutes, and the rest of a backlog
 waits for the next live call and the quiet. `OB1_SLEEP_BUDGET=0` (`--budget
-0`) and a recreate restore the old behaviour; a larger value drains a
+0`) and a recreate run a sleep until its pools drain, a live write then
+ending it (since SMD-3379 PR 1c-3b one that finds work pauses it, so a
+stalled thought keeps the sleep going); a larger value drains a
 backlog — a model change's re-pooled consolidation, say — in fewer nights.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
