@@ -818,6 +818,37 @@ export function createAssert(): {
 }
 
 /**
+ * Where a sharded suite's assertions were made (SMD-3614). test-live and
+ * test-preflight run their sections by shard, each section's header asking
+ * want(), so an assertion made outside every section runs in every shard and
+ * is counted once a shard where a full run counts it once. The README's
+ * per-shard counts used to show it, adding up to more than the full run's;
+ * with the counts on the wiki, the run sees it itself: want() tells `at()`
+ * which header ran last and whether its section runs here, and an assertion
+ * made while it does not — after a section another shard runs, or before the
+ * first header — is noted, for the suite's [doc] check to fail on. A part
+ * every shard runs on purpose ([end]) marks itself with `at(id, true)`. A
+ * full run runs every section, so it notes only an assertion before the first
+ * header; the shards, which CI runs, see the rest.
+ */
+export function trackSections(assert: (cond: unknown, label: string) => void): {
+  at: (id: string, runs: boolean) => void;
+  assert: (cond: unknown, label: string) => void;
+  outside: () => readonly string[];
+} {
+  let last: { id: string; runs: boolean } | undefined;
+  const outside: string[] = [];
+  return {
+    at(id, runs) { last = { id, runs }; },
+    assert(cond, label) {
+      if (!last?.runs) outside.push(`${last ? `after [${last.id}], which this run skips` : "before the first header"}: ${label.slice(0, 100)}`);
+      assert(cond, label);
+    },
+    outside: () => outside,
+  };
+}
+
+/**
  * A Request whose `url` is the string given, as Bun hands a handler one built
  * from a `Host` it never checked (`http://x:99999/mcp`, or the bare `/mcp`).
  * Request's own constructor refuses such a URL, so it is stood in for
