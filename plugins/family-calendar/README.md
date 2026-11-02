@@ -69,18 +69,30 @@ Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off
 The standalone server kept its rows in `public.family_members`, `public.activities` and `public.important_dates`. A plugin's migrations run as its own role in its own schema, and cannot adopt them. Neither dogfood brain held them. On a brain that does:
 
 1. Turn the plugin on (above).
-2. Copy the rows across as the database owner, in `psql`:
+2. Copy the rows across as the database owner, in `psql`. It is one transaction, so a refused row copies nothing and the whole block can be run again:
 
    ```sql
-   INSERT INTO plugin_family_calendar.family_members (id, name, relationship, birth_date, notes, created_at)
-     SELECT id, name, relationship, birth_date, notes, coalesce(created_at, now()) FROM public.family_members;
-   INSERT INTO plugin_family_calendar.activities (id, family_member_id, title, activity_type, day_of_week, start_time, end_time, start_date, end_date, location, notes, created_at)
-     SELECT id, family_member_id, title, activity_type, lower(day_of_week), start_time, end_time, start_date, end_date, location, notes, coalesce(created_at, now()) FROM public.activities;
-   INSERT INTO plugin_family_calendar.important_dates (id, family_member_id, title, date_value, recurring_yearly, reminder_days_before, notes, created_at)
-     SELECT id, family_member_id, title, date_value, coalesce(recurring_yearly, false), coalesce(reminder_days_before, 7), notes, coalesce(created_at, now()) FROM public.important_dates;
+   \set ON_ERROR_STOP on
+   BEGIN;
+   INSERT INTO plugin_family_calendar.family_members (id, user_id, name, relationship, birth_date, notes, created_at)
+     SELECT id, user_id, name, relationship, birth_date, notes, coalesce(created_at, now()) FROM public.family_members;
+   INSERT INTO plugin_family_calendar.activities (id, user_id, family_member_id, title, activity_type, day_of_week, start_time, end_time, start_date, end_date, location, notes, created_at)
+     SELECT id, user_id, family_member_id, title, activity_type, lower(day_of_week), start_time, end_time, start_date, end_date, location, notes, coalesce(created_at, now()) FROM public.activities;
+   INSERT INTO plugin_family_calendar.important_dates (id, user_id, family_member_id, title, date_value, recurring_yearly, reminder_days_before, notes, created_at)
+     SELECT id, user_id, family_member_id, title, date_value, coalesce(recurring_yearly, false), coalesce(reminder_days_before, 7), notes, coalesce(created_at, now()) FROM public.important_dates;
+   COMMIT;
    ```
 
-   - **A refused copy.** The plugin's tables check what the old ones did not: a lower-case day name, an end date on or after the start, a name and title of 1 to 200 characters, and a reminder of 0 to 365 days. If a row breaks one of these, the copy is refused and names the check. Fix that row in `public` and run the copy again.
+   - **`user_id`.** Each row keeps its `user_id`, in the column the plugin keeps and ignores. Rows from two users land in one household, and the column still says whose each was.
+   - **A refused copy.** The plugin's tables check what the old ones did not:
+     - a lower-case day name;
+     - an activity with a day or a start date;
+     - an end date on or after the start;
+     - a name and title of 1 to 200 characters;
+     - a reminder of 0 to 365 days.
+
+     If a row breaks one of these, the copy names the check and nothing is copied. Fix that row in `public` and run the block again.
+   - **Times.** A time stored with seconds (`16:00:30`) is answered to the minute (`16:00`).
    - **Leftover tables.** Once the plugin's answers look right, the old tables can be dropped by hand.
 
 ## Troubleshooting

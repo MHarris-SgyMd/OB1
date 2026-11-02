@@ -117,7 +117,7 @@ function opOf(plugin: string, key: string) {
 function restCall(plugin: string, key: string, input: Body): { method: string; path: string; body: unknown } {
   const op = opOf(plugin, key);
   const rest = { ...input };
-  const path = op.path.replace(/\{(\w+)\}/g, (_m, f: string) => {
+  const path = op.path.replace(/\{([a-z_]+)\}/g, (_m, f: string) => {
     const v = rest[f];
     delete rest[f];
     return encodeURIComponent(String(v));
@@ -161,26 +161,34 @@ async function call(plugin: string, key: string, input: Body, opts: { as?: strin
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NO_ROW = "00000000-0000-4000-8000-00000000dead";
 
-console.log("\n[2] Each ported plugin's tools behind each key's scope: a read key its reads alone, a write key all of them, a capture key none");
+console.log("\n[2] Each ported plugin's tools behind each key's scope: a read key its reads alone, a capture key its captures alone, a write key all of them; each refused the rest");
 {
   const writer = (await toolsFor(KEYS.writer)).map((t) => t.name);
   const readerTools = await toolsFor(KEYS.reader);
   const reader = readerTools.map((t) => t.name);
+  const writerTools = await toolsFor(KEYS.writer);
   const capture = (await toolsFor(KEYS.capture)).map((t) => t.name);
   for (const name of PORTED) {
     const manifest = REGISTRY.find((p) => p.name === name)!;
     const prefix = `${name.replaceAll("-", "_")}_`;
-    const all = Object.keys(manifest.operations).map((k) => prefix + k).sort();
-    const reads = Object.entries(manifest.operations).filter(([, op]) => op.scope === "read").map(([k]) => prefix + k).sort();
-    assert(writer.filter((t) => t.startsWith(prefix)).sort().join() === all.join(), `${name}: a write key sees all ${all.length} of its tools`);
-    assert(reader.filter((t) => t.startsWith(prefix)).sort().join() === reads.join() && reads.length > 0, `${name}: a read key sees its ${reads.length} reads alone (${reads.join(", ")})`);
-    assert(readerTools.filter((t) => t.name.startsWith(prefix)).every((t) => t.annotations?.readOnlyHint === true), `${name}: each read is annotated read-only`);
-    assert(!capture.some((t) => t.startsWith(prefix)), `${name}: a capture key sees none of them`);
-    for (const [key] of Object.entries(manifest.operations).filter(([, op]) => op.scope === "write")) {
-      const r = restCall(name, key, {});
-      const refused = await rest(r.method, r.path, r.body, KEYS.reader);
-      const viaMcp = await mcp("tools/call", { name: prefix + key, arguments: {} }, KEYS.reader);
-      assert(refused.status === 403 && refused.body.needs === "write" && viaMcp.error?.message === `Tool ${prefix + key} not found`, `${name}: a read key cannot call ${prefix + key}: 403 needs write over REST, and over MCP no such tool for it (${refused.status} ${JSON.stringify(refused.body).slice(0, 80)}; ${JSON.stringify(viaMcp).slice(0, 200)})`);
+    const ops = Object.entries(manifest.operations);
+    const named = (scope?: string) => ops.filter(([, op]) => scope === undefined || op.scope === scope).map(([k]) => prefix + k).sort();
+    const mine = (tools: string[]) => tools.filter((t) => t.startsWith(prefix)).sort().join();
+    assert(ops.length > 0 && mine(writer) === named().join(), `${name}: a write key sees all ${ops.length} of its tools`);
+    assert(mine(reader) === named("read").join(), `${name}: a read key sees its ${named("read").length} read(s) alone (${named("read").join(", ") || "none"})`);
+    assert(mine(capture) === named("capture").join(), `${name}: a capture key sees its ${named("capture").length} capture(s) alone (${named("capture").join(", ") || "none"})`);
+    assert(writerTools.filter((t) => t.name.startsWith(prefix)).every((t) => (t.annotations?.readOnlyHint === true) === named("read").includes(t.name)), `${name}: each read is annotated read-only, and nothing else is`);
+    // Refused by scope before the input is read, so an empty input reaches the gate: 403 naming the scope over REST,
+    // and over MCP no such tool for that key.
+    for (const [key, op] of ops) {
+      for (const [label, as, mayCall] of [["read", KEYS.reader, op.scope === "read"], ["capture", KEYS.capture, op.scope === "capture"]] as const) {
+        if (mayCall) continue;
+        const r = restCall(name, key, {});
+        const refused = await rest(r.method, r.path, r.body, as);
+        const viaMcp = await mcp("tools/call", { name: prefix + key, arguments: {} }, as);
+        assert(refused.status === 403 && refused.body.needs === op.scope && viaMcp.error?.message === `Tool ${prefix + key} not found`,
+          `${name}: a ${label} key cannot call ${prefix + key}: 403 needs ${op.scope} over REST, and over MCP no such tool for it (${refused.status} ${JSON.stringify(refused.body).slice(0, 80)}; ${JSON.stringify(viaMcp).slice(0, 120)})`);
+      }
     }
   }
 }
@@ -204,6 +212,9 @@ console.log("\n[family-calendar] its members, activities and dates");
   const adaId = String(ada.body.member?.id);
   const ben = await c("add_family_member", { name: "Ben" }, { door: "mcp" });
   assert(ben.status === 200 && UUID.test(ben.body.member?.id) && ben.body.member?.relationship === null && ben.body.member?.birth_date === null, `…over MCP too, the optional fields null (${JSON.stringify(ben.viaMcp).slice(0, 160)})`);
+  const nul = await c("add_family_member", { name: "Cy\u0000" });
+  const nulSearch = await c("search_activities", { query: "a\u0000b" });
+  assert(nul.status === 400 && nulSearch.status === 400, `a NUL character, which Postgres will not store in text, is refused at 400 in a body and in a query, not the database's 500 (${nul.status}, ${nulSearch.status})`);
   const stored = await one<{ user_id: string | null }>(sql`SELECT user_id::text FROM plugin_family_calendar.family_members WHERE id = ${adaId}`);
   assert(stored.user_id === null, "the row's user_id is left null: kept, and ignored (decided 2026-11-02)");
   const badDay = await c("add_family_member", { name: "Cy", birth_date: "2018-02-30" });
@@ -218,8 +229,10 @@ console.log("\n[family-calendar] its members, activities and dates");
   const ongoing = await c("add_activity", { title: "Piano", activity_type: "music", start_date: "2026-09-15", start_time: "18:00" }, { door: "mcp" });
   const ahead = await c("add_activity", { title: "Ski trip", activity_type: "sports", start_date: "2026-09-28", start_time: "07:00" });
   const lapsed = await c("add_activity", { family_member_id: adaId, title: "Summer tennis", activity_type: "sports", day_of_week: "tuesday", start_date: "2026-06-01", end_date: "2026-08-31", start_time: "10:00" });
-  const made = [swim, camp, ended, ongoing, ahead, lapsed];
-  assert(made.every((r) => r.status === 200 && UUID.test(r.body.activity?.id)), `add_activity ×6 (${made.map((r) => r.status === 200 ? "" : JSON.stringify(r.body)).join("").slice(0, 200)})`);
+  // A weekly one with no start date, ended before every week read below: with Swimming, the two with none, newest first.
+  const chess = await c("add_activity", { title: "Chess", activity_type: "games", day_of_week: "sunday", end_date: "2026-06-30" });
+  const made = [swim, camp, ended, ongoing, ahead, lapsed, chess];
+  assert(made.every((r) => r.status === 200 && UUID.test(r.body.activity?.id)), `add_activity ×7 (${made.map((r) => r.status === 200 ? "" : JSON.stringify(r.body)).join("").slice(0, 200)})`);
   assert(swim.body.activity?.family_member_id === adaId && swim.body.activity?.family_member?.name === "Ada" && swim.body.activity?.start_time === "16:00" && swim.body.activity?.day_of_week === "monday" && camp.body.activity?.family_member === null && camp.body.activity?.start_date === "2026-09-20",
     `…each answered with its member (or null for the whole family's), its times HH:MM and dates bare (${JSON.stringify(swim.body.activity).slice(0, 200)})`);
 
@@ -245,7 +258,7 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(titles(both) === "Summer tennis,Swimming", `…the filters together (${titles(both)})`);
   const every = await c("search_activities", {});
   const order = ((every.body.activities ?? []) as { title: string }[]).map((a) => a.title);
-  assert(every.status === 200 && order.join() === "Ski trip,Autumn camp,Piano,Spring term,Summer tennis,Swimming", `…none lists all six, latest start date first, then those with none, newest first (${order.join()})`);
+  assert(every.status === 200 && order.join() === "Ski trip,Autumn camp,Piano,Spring term,Summer tennis,Chess,Swimming", `…none lists all seven, latest start date first, then the two with none, newest first (${order.join()})`);
   // A weekly activity is listed only where its day in the week is within its own dates: a Monday class starting on the
   // Wednesday of the week of 2026-09-21 first falls on the 28th, and a Monday club ending Sunday the 20th last fell on the 14th.
   const late = await c("add_activity", { title: "Late Monday class", activity_type: "music", day_of_week: "monday", start_date: "2026-09-23" });
@@ -278,6 +291,10 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(badDow.status === 400 && badTime.status === 400, `a day not lower-case, a time past 23:59: refused before the database (${badDow.status}, ${badTime.status})`);
   const strays = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_family_calendar.activities WHERE title = 'x'`);
   assert(strays.n === 0, "none of the refused ones stored a row");
+  // The rule NO_WHEN answers is the table's too, so a row written around the operation (a copy from the old tables) is held to it.
+  let tableSaid = "";
+  try { await sql`INSERT INTO plugin_family_calendar.activities (title) VALUES ('no when')`; } catch (e) { tableSaid = (e as Error).message; }
+  assert(/check constraint/.test(tableSaid), `…and the table refuses an activity with neither a day nor a start date itself (${tableSaid.slice(0, 100)})`);
 
   // Dates: a birthday whose stored year is long past (the old server never listed one), a deadline, one past, one beyond.
   const bdayOn = await fromToday(10);
@@ -304,6 +321,11 @@ console.log("\n[family-calendar] its members, activities and dates");
   assert(noMemberDate.status === 404 && noMemberDate.body.code === "NO_SUCH_MEMBER", "a date for a member that is not there: 404 NO_SUCH_MEMBER");
   const zeroDate = await c("add_important_date", { title: "x", date_value: "0000-02-29" });
   assert(zeroDate.status === 400, `a date in the year 0000: 400 (${zeroDate.status})`);
+  const strayDates = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_family_calendar.important_dates WHERE title = 'x'`);
+  assert(strayDates.n === 0, "neither refused date stored a row");
+  const hints = Object.fromEntries((await toolsFor(KEYS.writer)).filter((t) => t.name.startsWith("family_calendar_")).map((t) => [t.name, t.annotations]));
+  assert(JSON.stringify(hints.family_calendar_add_activity) === JSON.stringify({ destructiveHint: false, openWorldHint: false }) && JSON.stringify(hints.family_calendar_get_upcoming_dates) === JSON.stringify({ readOnlyHint: true, openWorldHint: false }),
+    `its hints: an add destroys nothing, and every operation is closed-world (${JSON.stringify(hints).slice(0, 200)})`);
 
   // Dates added after the windows above were read: a yearly one whose anniversary is today, a 29 February, and two
   // dated thirty and thirty-one days on, either side of the default.
@@ -346,4 +368,3 @@ mcpServer.stop(true);
 apiServer.stop(true);
 await sql.close();
 report();
-process.exit(0);

@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS activities (
   location          text,
   notes             text,
   created_at        timestamptz NOT NULL DEFAULT now(),
-  CHECK (end_date IS NULL OR start_date IS NULL OR end_date >= start_date)
+  CONSTRAINT activities_end_not_before_start CHECK (end_date IS NULL OR start_date IS NULL OR end_date >= start_date),
+  -- Weekly, dated, or both: one with neither falls in no week.
+  CONSTRAINT activities_weekly_or_dated CHECK (day_of_week IS NOT NULL OR start_date IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS important_dates (

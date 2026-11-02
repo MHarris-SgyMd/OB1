@@ -12,8 +12,8 @@ const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 const Day = z.iso.date().refine((d) => !d.startsWith("0000-"), "a date from the year 0001");
 /** A time of day, HH:MM on the 24-hour clock. */
 const Time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "a time of day, HH:MM");
-/** Free text a person types: trimmed, and at most `max` characters. */
-const text = (max: number) => z.string().trim().max(max);
+/** Free text a person types: trimmed, at most `max` characters, and no NUL, which Postgres will not store in text. */
+const text = (max: number) => z.string().trim().max(max).refine((s) => !s.includes("\u0000"), "no NUL character");
 
 /** The member an activity or a date belongs to, or null for the whole family's. */
 const MemberRef = z.object({ id: z.string(), name: z.string(), relationship: z.string().nullable() }).nullable();
@@ -30,6 +30,10 @@ const ImportantDate = z.object({
   reminder_days_before: z.number().int(), notes: z.string().nullable(), created_at: z.string(), family_member: MemberRef,
 });
 const UpcomingDate = ImportantDate.extend({ next_date: z.string(), days_until: z.number().int(), remind: z.boolean() });
+
+/** MCP hints: every operation reaches the plugin's own tables alone, and an add adds a row, destroying nothing. A read is read-only already. */
+const CLOSED = { openWorldHint: false } as const;
+const ADDS = { destructiveHint: false, openWorldHint: false } as const;
 
 /** A row's answer as the migration's views build it (activity_rows, important_date_rows): one jsonb object, the shape the output declares. */
 type Answer<T> = { answer: T };
@@ -52,6 +56,7 @@ export default definePlugin({
       title: "Add a family member",
       description: "Adds a person to the household roster. An activity or an important date names a member by the id this answers.",
       scope: "write",
+      annotations: ADDS,
       method: "POST",
       path: "/members",
       input: {
@@ -74,6 +79,7 @@ export default definePlugin({
       title: "Schedule an activity",
       description: "Schedules an activity: weekly on day_of_week, or dated alone, from start_date to end_date (no end_date: it runs on). family_member_id names whose it is; without one it is the whole family's. One with neither a day nor a start date is refused (NO_WHEN), as is a member that is not there (NO_SUCH_MEMBER) and an end_date before the start_date (BAD_DATES).",
       scope: "write",
+      annotations: ADDS,
       method: "POST",
       path: "/activities",
       input: {
@@ -111,6 +117,7 @@ export default definePlugin({
       title: "The week's schedule",
       description: "The activities of the seven days from week_start (a Monday, say): each weekly activity whose day in that week falls within its own start_date and end_date, where it has them, and each dated one whose start_date to end_date (no end_date: running on) overlaps the week. Ordered by start time; each carries its member, or null for the whole family's.",
       scope: "read",
+      annotations: CLOSED,
       method: "GET",
       path: "/week",
       input: {
@@ -122,7 +129,7 @@ export default definePlugin({
         const member = family_member_id ?? null;
         const { weekEnd, rows } = await ctx.db.tx(async (sql) => {
           const [{ weekEnd }] = await sql<{ weekEnd: string }>`SELECT (${week_start}::date + 6)::text AS "weekEnd"`;
-          // A weekly activity falls once in any seven days: on `on`, its
+          // A weekly activity falls once in any seven days: on on_day, its
           // day's offset from week_start's. It is listed when that day is
           // within its own dates; a dated one when its span meets the week.
           const rows = await sql<Answer<z.input<typeof Activity>>>`
@@ -144,6 +151,7 @@ export default definePlugin({
       title: "Search activities",
       description: "Activities whose title or member's name holds the query (any case), of one type, or one member's: each filter optional, and those given all apply. Latest start date first, then those with none.",
       scope: "read",
+      annotations: CLOSED,
       method: "GET",
       path: "/activities",
       input: {
@@ -171,6 +179,7 @@ export default definePlugin({
       title: "Add a date to remember",
       description: "Adds a birthday, an anniversary or a deadline. recurring_yearly makes it come round each year on the same day (29 February on the 28th in other years); reminder_days_before is how far ahead get_upcoming_dates flags it, 7 unless given. A member that is not there is refused (NO_SUCH_MEMBER).",
       scope: "write",
+      annotations: ADDS,
       method: "POST",
       path: "/dates",
       input: {
@@ -201,6 +210,7 @@ export default definePlugin({
       title: "Upcoming dates",
       description: "The important dates from today to days_ahead days on (30 unless given), soonest first. A yearly one counts on its next anniversary: next_date gives it and days_until how far off it is, and remind says whether that is within its reminder_days_before. Today is the database's date.",
       scope: "read",
+      annotations: CLOSED,
       method: "GET",
       path: "/dates",
       input: { days_ahead: z.number().int().min(0).max(366).default(30).describe("How many days ahead to look, 0 to 366") },

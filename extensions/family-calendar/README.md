@@ -80,9 +80,9 @@ Try these prompts:
 ```
 Add my family members: me (Jonathan), spouse (Sarah), and two kids (Emma age 8, Noah age 5).
 
-Add a recurring activity: Emma has soccer practice every Tuesday from 5-6pm at Lincoln Park, starting March 18.
+Add a recurring activity: Emma has soccer practice every Tuesday from 5-6pm at Lincoln Park, starting this week.
 
-Show me our schedule for the week of March 17.
+Show me our schedule for next week.
 
 Add an important date: Emma's birthday is May 15, remind me 7 days before.
 
