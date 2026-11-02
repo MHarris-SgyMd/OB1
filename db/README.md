@@ -1780,8 +1780,8 @@ as wakes, its order (the most stalled, then the most stopped) letting them
 pick the three thoughts named. `extraction_progress.cuts` counts them,
 written by `note_extraction_cut` under 093's holder rule: cuts + 1 and
 nothing else moved, since a cut is no wake — it neither stalls the thought
-nor ends its gaining. `stops` now counts the wakes and the operator's second
-signal. 093's `note_extraction_stop` and `save_extraction_window` are
+nor ends its gaining. `stops` now counts the wakes, a paused sleep's aborts
+(SMD-3379 PR 1c-3b) and the operator's second signal. 093's `note_extraction_stop` and `save_extraction_window` are
 redefined to set `cuts` back to 0 where either replaces a row of other text
 or windowing, as they do the stops. The scheduler's hard stop says it is its
 own (`PassStop`'s `cut`), extraction counts it so, and a brain before 101
@@ -4559,7 +4559,7 @@ and ordering nothing ("…, and 41 cut(s) of the scheduler's own"; none before
 or poll asleep, after each wake, at least every minute and before the row
 ends (but on a second signal, whose exit it would delay, or a failure), so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
-names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
+names them — "1 thought(s) held back across its stops — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
 stalled one, naming it: consolidation joins past it once extraction holds
 nothing else, and the first sleep long enough — its clock allowing — finishes it, or extraction run
@@ -4783,10 +4783,11 @@ What the columns are not:
 - **p95 prints only from 20 samples up.** Below that, nearest rank makes it the
   single slowest call.
 - **The `workers` profile measures a pass that never yields.** Under the sleep
-  scheduler, a pass runs beside a burst until the scheduler's next poll sees the
-  burst's first recorded call: up to `--poll` (5 s) after that call ends. That is
-  a capture or two; a search does not wake it at all (SMD-3315). That window
-  was not measured here.
+  scheduler, a pass goes on claiming beside a burst until the scheduler's next
+  poll sees the burst's first recorded call: up to `--poll` (5 s) after that
+  call ends, its call in hand running on (aborted past 60 s of the pause, SMD-3379
+  PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
+  not measured here.
 
 ### bench-querylog.ts
 
@@ -6035,9 +6036,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1942 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1946 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1089 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 137 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 141 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 285 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 434 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)

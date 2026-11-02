@@ -5097,7 +5097,7 @@ if (configFailed) {
             // run may have finished them since (review pass 1).
             const held = h.held;
             const stuck = down ? [] : held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
-            const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its wakes — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
+            const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its stops — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
             const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.stops} sleep(s) stopped on it since ${down ? "it last started" : "it started"}` : "";
             // Re-embed set aside or down by the scheduler, by its own word
             // (SMD-2679 PR 4b): extraction and consolidation run on. A set-down
