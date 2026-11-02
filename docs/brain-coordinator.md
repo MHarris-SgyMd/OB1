@@ -156,7 +156,7 @@ Plugin tables stay where SMD-2310 put them: schema `plugin_<name>`, owned by rol
 - **Data operations** are declared beside the public ones, with `ctx.db` handlers and a scope, and served only to a run of the same plugin whose declaration lists them and whose bound covers their scope (a hook's run excepted, as "A webhook" says). Neither `tools/list` nor the OpenAPI document lists them.
 - **One data operation is one transaction.** A sequence that must be atomic (read a row and write it back; insert into two tables) is one operation, never several workflow steps, since a workflow has no transaction across its steps.
 - **No n8n node reaches Postgres**, so `orchestration-tool.md`'s decision 3 (n8n's store is not the brain's server) and decision 4's REST-core boundary hold.
-- **Each plugin logs in as its own role** (SMD-2756, decided 2026-10-28). Handler SQL still runs in the REST core's process, so each plugin's pool and migrations log in as a login role of its own that may `SET ROLE` to its own plugin's role alone, its password derived from one master secret. SQL that undoes its role can then reach no other plugin's tables. This lands before the first port that carries SQL.
+- **Each plugin logs in as its own role** (SMD-2756, decided 2026-10-28). Handler SQL still runs in the REST core's process, so each plugin's pool and migrations log in as a login role of its own that may `SET ROLE` to its own plugin's role alone, its password derived from one master secret. SQL that undoes its role can then reach no other plugin's tables. Built: the role is `ob1_plugins_<name>`, its password the HMAC of its name under `OB1_PLUGIN_DB_PASSWORD`, and the migrator retires the shared `ob1_plugins` (`db/README.md`, "Plugin migrations").
 
 ## What n8n runs with
 

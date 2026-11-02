@@ -24,7 +24,7 @@ import { createRestApp } from "./rest/app.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
-import { pluginLoginUrl } from "../db/config.mjs";
+import { pluginLoginPassword, pluginLoginUrl } from "../db/config.mjs";
 
 const { assert, report } = createAssert();
 
@@ -173,12 +173,22 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   try { loadPlugins("", [withOp("Bad", "x")]); } catch (e) { thrown = (e as Error).message; }
   assert(/a plugin manifest is malformed/.test(thrown), "a malformed manifest in the tree throws even when no plugin is enabled");
   assert(pluginProblem("nope") !== null && pluginProblem("example") === null && pluginProblem(undefined) === null, "pluginProblem: the throw as a sentence, null when sound");
-  // The plugin login role's URL: its user replaced, its password encoded, and a URL with no host refused —
-  // the parser ignores a user set on one, and the connection would be the server's own role.
-  const login = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain?sslmode=disable", "a%41b@c:d/e#f?g&h=i"));
-  assert(login.username === "ob1_plugins" && decodeURIComponent(login.password) === "a%41b@c:d/e#f?g&h=i" && login.host === "db:5432" && login.search === "?sslmode=disable", "the login URL: the user replaced, the password encoded (a % kept), the rest kept");
+  // A plugin's login role's URL (SMD-2756): its user the plugin's own login, its password the HMAC of
+  // that login's name under the secret, and a URL with no host refused — the parser ignores a user set
+  // on one, and the connection would be the server's own role.
+  const secret = "a%41b@c:d/e#f?g&h=i";
+  const login = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain?sslmode=disable", "my-plugin", secret));
+  const derived = new Bun.CryptoHasher("sha256", secret).update("ob1_plugins_my_plugin").digest("hex");
+  assert(login.username === "ob1_plugins_my_plugin" && login.password === derived && pluginLoginPassword(secret, "my-plugin") === derived && login.host === "db:5432" && login.search === "?sslmode=disable",
+    "the login URL: the user the plugin's own login, the password the HMAC of its name under the secret, the rest kept");
+  const other = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain", "other", secret));
+  assert(other.username === "ob1_plugins_other" && other.password !== login.password && /^[0-9a-f]{64}$/.test(other.password) && pluginLoginPassword(`${secret}x`, "my-plugin") !== derived,
+    "another plugin's login has a password of its own, and another secret gives another password");
+  // Trimmed, as the server's trimmedEnv reads it: the migrator and canary.sh read the variable untrimmed (review pass 4).
+  assert(pluginLoginPassword(` ${secret}\t\n`, "my-plugin") === derived && pluginLoginPassword(`${secret} `, "my-plugin") === pluginLoginPassword(secret, "my-plugin"),
+    "whitespace around the secret derives the same password, so a quoted value with a stray space still matches the servers'");
   let noHost = "";
-  try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p"); } catch (e) { noHost = (e as Error).message; }
+  try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p", "s"); } catch (e) { noHost = (e as Error).message; }
   assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);
   // That refusal is a plugin transaction's, not the store's start: a server on
   // such a URL with the password set still starts and serves the core.

@@ -105,14 +105,15 @@ const names = (raw: string | undefined) => planPasses(raw).children.map((c) => c
   ok(args("extract") === "--follow --workers 1" && args("extract", { OB1_EXTRACT_FOLLOW: "30", OB1_EXTRACT_WORKERS: "2" }) === "--follow 30 --workers 2",
     "extract: --follow with its seconds only when set, one worker unless set");
   ok(args("consolidate") === "--follow --workers 1" && args("consolidate", { OB1_CONSOLIDATE_FOLLOW: "45" }) === "--follow 45 --workers 1", "consolidate: the same");
-  ok(args("sleep") === "--follow --quiet 300 --poll 5 --workers 1 --budget 60 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64",
+  ok(args("sleep") === "--follow --quiet 300 --capture 20 --poll 5 --workers 1 --budget 60 --statement-timeout 300 --work-mem 4 --maintenance-work-mem 64"
+      && args("sleep", { OB1_SLEEP_CAPTURE: "45" }).includes("--capture 45") && CHILDREN.sleep.digits.includes("OB1_SLEEP_CAPTURE"),
     `sleep: the service's defaults (${args("sleep")})`);
   const dumped = CHILDREN.sleep.args({ OB1_SLEEP_DUMP_DIR: "/var/lib/ob1/no such dir", OB1_SLEEP_BUDGET: "0" });
   ok(dumped.slice(-2).join("|") === "--dump-dir|/var/lib/ob1/no such dir" && dumped[dumped.indexOf("--budget") + 1] === "0",
     "sleep: --dump-dir only when set, the path one argument with its space; a 0 kept, not the default");
   ok(CHILDREN.sleep.requireKey && CHILDREN.extract.requireKey && CHILDREN.consolidate.requireKey && !CHILDREN["board-sync"].requireKey,
     "the key guard on the three that name themselves by OB1_WORKER_KEY, not on board-sync");
-  ok(CHILDREN.sleep.digits.length === 7 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
+  ok(CHILDREN.sleep.digits.length === 8 && CHILDREN.extract.digits.join() === "OB1_EXTRACT_FOLLOW,OB1_EXTRACT_WORKERS", "every number setting guarded digits only");
 }
 
 // ---------------------------------------------------------------------------
