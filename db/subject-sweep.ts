@@ -14,17 +14,17 @@
  *   bun db/extract-entities.ts --url … --subjects --judge-checked # the alarm off, a trip's hold on its model lifted
  *   --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off)
  *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
- *   exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it
- *   claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage,
- *   configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a
- *   pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model
- *   likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this
- *   run began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a
- *   following run a trip holds (judgeHeld), or a --judge-checked run whose model a trip named after it began · 130 a
- *   signal (the first after the call in hand, which can run to the limit a call; a second at once, the claim in hand
- *   handed back, unjudged, unless its finish holds the window's lock: that lands, judged, a trip it made said or not),
- *   or a caller's stop during the naming's waits or at the admit gate; a following run, a scheduler's, stopped by its
- *   first exits 0
+ *   exits 0 clean · 1 claims failed (unanswered, unread or refused, a write past a scheduler's statement_timeout, or a
+ *   lease run out at its last attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout
+ *   in a run not following, or the provider or the database stopped answering · 2 usage, configuration, another pool
+ *   named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role
+ *   without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its
+ *   last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (JUDGE_ALARM;
+ *   ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a following run a trip holds
+ *   (judgeHeld), or a --judge-checked run whose model a trip named after it began · 130 a signal (the first after the
+ *   call in hand, which can run to the limit a call; a second at once, the claim in hand handed back, unjudged, unless
+ *   its finish holds the window's lock: that lands, judged, a trip it made said or not), or a caller's stop during the
+ *   naming's waits or at the admit gate; a following run, a scheduler's, stopped by its first exits 0
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
@@ -99,17 +99,16 @@
  * past its statement_timeout thrown at its start, its naming or pooling, and over a thought failing the thought on its
  * own write, else costing the run its poll, as a claim pass's; its start's lines left out. Unlike a claim pass, an
  * outage of the provider or the database ends it (1), for the scheduler to start it again; the stop and the call's
- * abort are its
- * caller's from its first claim, the gate before the pool hearing the caller's signal; and it reports no start (no
- * onStart) and runs no start check, 6b's (review passes 1 and 2, cold read). No one is there to pass --judge-checked,
- * so a trip holds the pool's following runs of each judge model it names, beside an earlier trip's not lifted: one does
- * not start while a trip's hold on its model stands (judgeHeld), exit 3, until a run of that model with --judge-checked
- * --limit 1, once it is checked, lifts the hold it read as it began (heldSince, namedSince), or with --limit the count
- * of the last trip's hand-back still pending, which the held line offers the models that trip named when its answers
- * naming nothing tripped it alone; a trip naming the model since the run began refuses the lift, exit 3, nothing
- * claimed. A run of another judge model is not held, and lifts nothing; the pool's key changing starts a window of the
- * new pool's at its first answer, so a switch back finds no hold. Every answer counts as in a hand run (the
- * maintainer's choice, 2026-10-31): a pooling again — a rules version changed, the reasoning turned off, a pooling
+ * abort are its caller's from its first claim, the gate before the pool hearing the caller's signal; and it reports no
+ * start (no onStart) and runs no start check, 6b's (review passes 1 and 2, cold read). No one is there to pass
+ * --judge-checked, so a trip holds the pool's following runs of each judge model it names, beside an earlier trip's not
+ * lifted: one does not start while a trip's hold on its model stands (judgeHeld), exit 3, until a run of that model
+ * with --judge-checked --limit 1, once it is checked, lifts the hold it read as it began (heldSince, namedSince), or
+ * with --limit the count of the last trip's hand-back still pending, which the held line offers the models that trip
+ * named when its answers naming nothing tripped it alone; a trip naming the model since the run began refuses the lift,
+ * exit 3, nothing claimed. A run of another judge model is not held, and lifts nothing; the pool's key changing starts
+ * a window of the new pool's at its first answer, so a switch back finds no hold. Every answer counts as in a hand run
+ * (the maintainer's choice, 2026-10-31): a pooling again — a rules version changed, the reasoning turned off, a pooling
  * broken off or its mark blanked by hand — asks again together each thought the judge named nothing for, and ten of
  * them trip a judge that is right, a trip whose hold waits for that hand run.
  *
@@ -403,12 +402,15 @@ export interface SubjectSweepOptions {
    * does. A statement past its statement_timeout at the run's start is thrown, as a claim pass's start-of-pass scan's
    * is, for the scheduler to read as its budget's: the naming's write and its pooling too, whose waits have no end of
    * their own but the timeout, where the wait for writers polls and goes on; a pooling, a scan of every thought, can
-   * outlast it on a large brain. One over a thought is the thought's or the poll's, as a claim pass's is, not the run's
-   * (review pass 6, run-it: thrown, it ended the scheduler's sleep on its budget): its own write's fails it
-   * (overBudget); its claim's, its read's, a put-back's, its release's or its answer's window's costs the run its poll
-   * (lostPoll). The run's hand-back of what it holds, at its end, a lost poll or a second stop, waits up to
-   * RELEASE_WAIT whatever the budget, so a row held past a short budget leaves no claim leased to its end, and one held
-   * longer does not hold the scheduler's stop. An answer judged after its claim's release (unread, or keyed) whose
+   * outlast it on a large brain. So is one in the count of spent leases at the end of a run that ends by itself, which
+   * a scheduler's follower does not. One over a thought is the thought's or the poll's, as a claim pass's is, not the
+   * run's (review pass 6, run-it: thrown, it ended the scheduler's sleep on its budget): its own write's fails it
+   * (overBudget); its claim's, its read's, a put-back's or set-back's or the claim's state read after one, its
+   * release's or its answer's window's costs the run its poll (lostPoll). Only the budget's: another error there, an
+   * operator's cancel among them, is thrown as before. The run's hand-back of what it holds, at its end, a lost poll or
+   * a second stop, waits up to RELEASE_WAIT whatever the budget, so a row held past a short budget leaves no claim
+   * leased to its end, and one held longer holds the scheduler's stop no longer than RELEASE_WAIT, or twice it when the
+   * stop lands during a lost poll's hand-back. An answer judged after its claim's release (unread, or keyed) whose
    * window write passes it is not in the window, the claim as released. Refused beside `sql`, a caller's client, which
    * it would not reach.
    */
@@ -702,10 +704,11 @@ async function sweep(
   const stoppedCode = FOLLOW_S > 0 ? 0 : 130;
   /**
    * A statement past a scheduler's statement_timeout (`session`; sleep.ts's statementTimedOut, its rule): at the run's
-   * start thrown, as a claim pass's start-of-pass scan's is, for the scheduler to read as its budget's, where one under
-   * a role's or the database's own timeout, a hand run's, ends in words (review pass 1, cold read: the naming's write
-   * and the pooling ended 1, which a scheduler reads as a pass ending by itself, where every other statement's was
-   * thrown); over a thought, the thought's or the poll's (overBudget, lostPoll; review pass 6).
+   * start thrown, as a claim pass's start-of-pass scan's is, for the scheduler to read as its budget's; over a thought,
+   * the thought's or the poll's (overBudget, lostPoll; review pass 6). One under a role's or the database's own
+   * timeout, a hand run's, ends the naming's write and the pooling in words (review pass 1, cold read: they ended 1,
+   * which a scheduler reads as a pass ending by itself, where every other statement's was thrown), and is thrown
+   * elsewhere, as an operator's cancel ("user request") is.
    */
   const budgetTimedOut = (e: unknown): boolean =>
     o.session !== undefined && sqlState(e) === "57014" && /statement timeout/i.test(String((e as Error)?.message ?? ""));
@@ -1384,6 +1387,11 @@ async function sweep(
   const hardStop = new AbortController();
   let ended = false;
   let hardRelease: Promise<unknown> | null = null;
+  /**
+   * Whether a claim landed after the second stop, its statement having waited through it: the stop's hand-back may have
+   * run past it, so that hand-back's landing says nothing of what this run still holds (review pass 7, run-it).
+   */
+  let claimedPastHard = false;
   const passStop: PassStop = () => {
     if (ended) return null;
     if (!stop.signal.aborted) {
@@ -1473,17 +1481,25 @@ async function sweep(
   };
 
   /**
-   * A statement past a scheduler's statement_timeout over a thought but its own write — its claim, its read, a put-back
-   * or set-back, its release, its answer's window — costs the run its poll, not its end, as one on a claim costs a
-   * claim pass's worker its (sleep.ts; review pass 6, run-it: thrown, it ended the scheduler's sleep on its budget,
-   * cutting the other passes): what the run holds goes back, its attempt not counted, and one in hand not yet counted
-   * gives back its place under --limit; said once and counted, a following run claims again after its follow, through
-   * the gate, and one not following ends there, 1. A stop ends it there too, what it holds handed back as it ends.
-   * False ends the run.
+   * A statement past a scheduler's statement_timeout over a thought but its own write — `what`: its claim, its read, a
+   * put-back or set-back or the claim's state read after one, its release, its answer's window — costs the run its
+   * poll, not its end, as one on a claim costs a claim pass's worker its (sleep.ts; review pass 6, run-it: thrown, it
+   * ended the scheduler's sleep on its budget, cutting the other passes): counted, and said once, naming the first.
+   * What the run holds goes back, its attempt not counted, and the claim in hand not yet counted gives back its place
+   * under --limit; a following run claims again through the gate after its follow or the provider's pause, the longer,
+   * or ends at its limit, and one not following ends there, 1, its end's hand-back saying where it leaves the claims.
+   * A stop, before the hand-back or during it, ends the run there, said so (review pass 7, cold read and run-it: one
+   * during it was said as a poll to come, or ended 1; one before it, after a failure was said, left the claim pending
+   * with nothing said of why). False ends the run.
    */
-  const lostPoll = async (e: unknown, inHand: boolean): Promise<boolean> => {
-    if (stop.signal.aborted) return false;
+  const lostPoll = async (e: unknown, what: string, inHand: boolean): Promise<boolean> => {
     n.pollsLost++;
+    const why = `${what} passed the scheduler's statement_timeout (${String((e as Error)?.message ?? e).slice(0, 200)})`;
+    const stopped = () => {
+      sayOnce("pollLost", `  ${why}: the run loses this poll, and its stop ends it there`);
+      return false;
+    };
+    if (stop.signal.aborted) return stopped();
     let back: number | null = null;
     try {
       back = await releaseHeld();
@@ -1494,14 +1510,14 @@ async function sweep(
       }
     }
     if (inHand && back) taken--;
-    const why = `a statement passed the scheduler's statement_timeout (${String((e as Error)?.message ?? e).slice(0, 200)})`;
-    const held = back === null ? "what it held goes back as each lease runs out" : back ? "what it held is back in the pool" : "it held no claim";
+    if (stop.signal.aborted) return stopped();
     if (!FOLLOW_S) {
-      endedBy = { code: 1, line: `\n  The sweep stops here: ${why}; ${held}. Run it again.` };
+      endedBy = { code: 1, line: `\n  The sweep stops here: ${why}. Run it again.` };
       return false;
     }
-    sayOnce("pollLost", `  ${why}: the run loses this poll, not its end; ${held}, and it claims again in ${FOLLOW_S} s`);
     pauseMs = Math.max(pauseMs, FOLLOW_S * 1000);
+    const held = back === null ? "what it held goes back as each lease runs out, or as the run ends" : back ? "what it held is back in the pool" : "it held no claim";
+    sayOnce("pollLost", `  ${why}: the run loses this poll, not its end; ${held}, and ${LIMIT && taken >= LIMIT ? "it ends at its limit" : `it claims again in ${Math.round(pauseMs / 1000)} s`}`);
     return true;
   };
 
@@ -1875,6 +1891,7 @@ async function sweep(
           if (claimedSince === null) claimedSince = ((await sql`SELECT clock_timestamp()::text AS at`)[0] as { at: string }).at;
           moved = await poolMoved(sql, false);
           got = moved === null ? (await sql`SELECT thought_id FROM claim_thoughts(${POOL}, ${workerId}, 1, ${TTL_S}, ${MAX_ATTEMPTS})`) as { thought_id: string }[] : [];
+          if (got.length > 0 && hardStop.signal.aborted) claimedPastHard = true;
           // Another run's trip since this run began, read once the claim is taken, so one that landed before the claim
           // is seen and the thought goes back unasked, as the run ends (review pass 3, cold read: read before the
           // claim, a trip between the two went unseen, and the run asked a thought it had handed back).
@@ -1884,7 +1901,7 @@ async function sweep(
           }
         } catch (e) {
           if (budgetTimedOut(e)) {
-            if (await lostPoll(e, false)) continue;
+            if (await lostPoll(e, "the claim", false)) continue;
             break;
           }
           if (!databaseUnavailable(e)) throw e;
@@ -1917,7 +1934,7 @@ async function sweep(
              WHERE t.id = ${id}::uuid`) as Candidate[];
         } catch (e) {
           if (budgetTimedOut(e)) {
-            if (await lostPoll(e, true)) continue;
+            if (await lostPoll(e, `${id}'s read`, true)) continue;
             break;
           }
           if (!databaseUnavailable(e)) throw e;
@@ -1938,9 +1955,10 @@ async function sweep(
         try {
           done = await one(row).finally(() => inCall.end(workerId));
         } catch (e) {
-          // A put-back or set-back past the budget; one()'s own writes fail their thought (overBudget).
+          // A put-back or set-back past the budget, or the claim's state read after one found it gone; one()'s own
+          // writes fail their thought (overBudget).
           if (!budgetTimedOut(e)) throw e;
-          if (await lostPoll(e, true)) continue;
+          if (await lostPoll(e, `${row.id}'s put-back, set-back or claim read`, true)) continue;
           break;
         }
         if (done === false) break;
@@ -1965,11 +1983,11 @@ async function sweep(
               if (done.release === "failed") n.lostFailed++;
             }
           } catch (e) {
-            // Its outcome unrecorded: the claim handed back and taken again, its answer unjudged, a failure left out of
-            // the failure count (lostPoll).
+            // Its outcome unrecorded: the claim handed back, taken again by a following run, its answer unjudged, a
+            // failure left out of the failure count (lostPoll).
             if (budgetTimedOut(e)) {
               if (done.release === "failed") n.lostFailed++;
-              if (await lostPoll(e, false)) continue;
+              if (await lostPoll(e, `${id}'s release`, false)) continue;
               break;
             }
             if (!databaseUnavailable(e)) throw e;
@@ -1987,7 +2005,7 @@ async function sweep(
           } catch (e) {
             // Its window write past the budget: the answer not in the window, the claim as released (lostPoll).
             if (!budgetTimedOut(e)) throw e;
-            if (await lostPoll(e, false)) continue;
+            if (await lostPoll(e, `${id}'s answer's window`, false)) continue;
             break;
           }
           answered = null;
@@ -2007,8 +2025,10 @@ async function sweep(
     if (!DRY_RUN) {
       await releaseHeld().catch(async (e) => {
         // The second stop's hand-back, landed, left this one nothing to hand back (review pass 4, cold read: this one's
-        // failure said the claims would go back as their leases ran out, though they were back).
-        if (hardRelease !== null && (await hardRelease) !== null) return;
+        // failure said the claims would go back as their leases ran out, though they were back), but a claim landing
+        // after that stop, which its hand-back may have run past (review pass 7, run-it: one was left leased, unsaid,
+        // the stop line saying it was back).
+        if (!claimedPastHard && hardRelease !== null && (await hardRelease) !== null) return;
         handedBack = false;
         // Said, but when the run's end says the database already (review pass 4, run-it: after the provider's end, a
         // hand-back the database cut off went unsaid, the claim leased to its end).

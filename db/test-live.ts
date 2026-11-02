@@ -9962,6 +9962,11 @@ if (want("10h")) {
       await alarmAt(48, 1);
       /** A run's rejection as a run of its own, so a regression fails its case rather than the suite. */
       const settled = (run: Promise<SweepRun>) => run.catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
+      /** Whether another backend runs a statement holding `fragment`, waiting on a lock (`event`, its kind, when given). */
+      const waitingOnLock = async (fragment: string, event: string | null = null) => ((await sql`
+        SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}
+           AND (${event}::text IS NULL OR wait_event = ${event}::text)`) as { n: number }[])[0].n > 0;
       const ownIds = await seedAll(["Budget note 1: sweep-pass-good work, its door held past the budget.", "Budget note 2: nothing to name here, its finish held past the budget.", "Budget note 3: sweep-pass-good work, its door free."]);
       const doorHolder = new SQL({ url: URL_!, max: 1 });
       const dh = await doorHolder.reserve();
@@ -9985,9 +9990,13 @@ if (want("10h")) {
         `a thought's own write past a scheduler's budget fails that thought, said once, and the run goes on, each answer judged as a failed one's is (exit ${ownRun?.code ?? "still running at 30 s"}, claims ${JSON.stringify(ownClaims)}, its answer ${JSON.stringify(ownNamed)}, ${ownWindow?.answers.length} answer(s)): ${ownRun?.stdout.trim().slice(-200)} | ${ownRun?.stderr.trim().slice(0, 300)}`);
       await drop(ownIds);
 
-      // A finish past it at the window's lock, its claim's release and the window rolled back with it: the answer, judged
-      // once the window is let go after the claim failed, neither finished nor closed, which a trip would hand back.
+      // A finish past it at the window's lock, here closing an out-of-date subject standing on the thought: the close, its
+      // claim's release and the window rolled back with it, the subject counted standing, and the answer, judged once
+      // the window is let go after the claim failed, neither finished nor closed, so a trip leaves its failed claim alone.
       const [finishT] = await seedAll(["Budget note 9: nothing to name here either, its finish's window held past the budget."]);
+      // A model's subject under an older question's key: standing, out of date under this pool's.
+      const [{ f: finishF }] = (await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${finishT}::uuid`) as { f: string }[];
+      await recordSubject(sql, { id: finishT, fingerprint: finishF }, "phrase:the oldest question", "model", "subject:stub-judge@p1", subjectRecipe({ by: "model", model: "stub-judge", temperature: 0, reasoning: "off", answer: "{}" }), null);
       const finishHolder = new SQL({ url: URL_!, max: 1 });
       const fc = await finishHolder.reserve();
       let finishHeld: Promise<void> | null = null;
@@ -10010,9 +10019,10 @@ if (want("10h")) {
         await finishHolder.close({ timeout: 5 });
       });
       const finishAnswer = (await windowOf())?.answers.find((a) => a.t === finishT);
-      assert(finishRun?.code === 1 && (await claimOf(finishT))?.status === "failed" && finishAnswer?.g === "n" && finishAnswer.f === false && finishAnswer.c === false
-          && tally(finishRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout",
-        `a finish past a scheduler's budget at the window's lock fails the thought, its answer judged after it neither finished nor closed (exit ${finishRun?.code ?? "still running at 30 s"}, its answer ${JSON.stringify(finishAnswer)}): ${finishRun?.stdout.trim().slice(-200)} | ${finishRun?.stderr.trim().slice(0, 300)}`);
+      const [{ standing: finishStanding }] = (await sql`SELECT count(*)::int AS standing FROM thought_facets WHERE thought_id = ${finishT}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { standing: number }[];
+      assert(finishRun?.code === 1 && (await claimOf(finishT))?.status === "failed" && finishAnswer?.g === "n" && finishAnswer.f === false && finishAnswer.c === false && finishStanding === 1
+          && tally(finishRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout — among them, 1 with an out-of-date subject still standing",
+        `a finish past a scheduler's budget at the window's lock fails the thought, its out-of-date subject standing and counted, its answer judged after it neither finished nor closed (exit ${finishRun?.code ?? "still running at 30 s"}, its answer ${JSON.stringify(finishAnswer)}, ${finishStanding} standing): ${finishRun?.stdout.trim().slice(-200)} | ${finishRun?.stderr.trim().slice(0, 300)}`);
       await drop([finishT]);
 
       // …and one elsewhere over a thought costs the run its poll, not its end, what it held back in the pool, said once:
@@ -10045,7 +10055,7 @@ if (want("10h")) {
       }
       const claimGap = claimGates.length >= 3 ? claimGates[2] - claimGates[1] : -1;
       assert(claimRun?.code === 0 && (await claimOf(claimT))?.status === "succeeded" && claimGap >= 3200
-          && (claimRun.stderr.match(/a statement passed the scheduler's statement_timeout \(canceling statement due to statement timeout\): the run loses this poll, not its end; it held no claim, and it claims again in 1 s/g) ?? []).length === 1
+          && (claimRun.stderr.match(/^ {2}the claim passed the scheduler's statement_timeout \(canceling statement due to statement timeout\): the run loses this poll, not its end; it held no claim, and it claims again in 1 s$/gm) ?? []).length === 1
           && tally(claimRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
         `a claim past a scheduler's budget costs the run its poll, said once, and a following run claims again a follow later, through the gate, the table's 2.5 s and the follow's 1 s apart (exit ${claimRun?.code ?? "still running at 20 s"}, gates ${claimGates.length}, ${claimGap} ms between the claims' two): ${claimRun?.stdout.trim().slice(-200)} | ${claimRun?.stderr.trim().slice(0, 300)}`);
       await drop([claimT]);
@@ -10087,7 +10097,7 @@ if (want("10h")) {
       });
       const releaseClaim = await claimOf(releaseT);
       assert(releaseRun?.code === 0 && releaseClaim?.status === "pending" && !/claim\(s\) failed/.test(releaseRun.stderr)
-          && /: the run loses this poll, not its end; what it held is back in the pool, and it claims again in 1 s$/m.test(releaseRun.stderr)
+          && new RegExp(`^ {2}${releaseT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held is back in the pool, and it ends at its limit$`, "m").test(releaseRun.stderr)
           && tally(releaseRun) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape; 1 poll(s) lost to the scheduler's statement_timeout",
         `a release past a scheduler's budget costs the run its poll, the claim back in the pool and its failure left out of the run's count (exit ${releaseRun?.code ?? "still running at 30 s"}, claim ${JSON.stringify(releaseClaim)}): ${releaseRun?.stdout.trim().slice(-200)} | ${releaseRun?.stderr.trim().slice(0, 300)}`);
       await drop([releaseT]);
@@ -10115,29 +10125,33 @@ if (want("10h")) {
       });
       const windowAfter = await windowOf();
       assert(windowRun?.code === 1 && (await claimOf(windowT))?.status === "succeeded" && windowAfter !== null && !windowAfter.answers.some((a) => a.t === windowT)
-          && /^ {2}The sweep stops here: a statement passed the scheduler's statement_timeout \(canceling statement due to statement timeout\); it held no claim\. Run it again\.$/m.test(windowRun.stderr)
+          && new RegExp(`^ {2}The sweep stops here: ${windowT}'s answer's window passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\)\\. Run it again\\.$`, "m").test(windowRun.stderr)
           && tally(windowRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
         `an answer's window write past a scheduler's budget costs a run not following its poll, which ends it there, 1, the answer not in the window, the claim as released (exit ${windowRun?.code ?? "still running at 30 s"}, ${windowAfter?.answers.length} answer(s), its own ${windowAfter?.answers.some((a) => a.t === windowT)}): ${windowRun?.stdout.trim().slice(-200)} | ${windowRun?.stderr.trim().slice(0, 300)}`);
       await drop([windowT]);
 
-      // A put-back after the provider's transient error, the run following: taken again and answered.
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 100, 100, 100);
+      // A put-back after the provider's transient error, a run following with --limit 1: the thought back with its place
+      // under the limit, asked again after the provider's pause, the longer than the follow, and answered.
+      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 3000, 100, 100);
       const [putT] = await seedAll(["Budget note 7: flaky-judge sweep-pass-good work, its put-back held past the budget."]);
       const putFree = holdClaimRow("Budget note 7", () => putT, 2500);
+      /** When each question about the thought came: the second the pause's length after the hand-back. */
+      const putCalls: number[] = [];
+      const putHold = onOwn;
+      onOwn = (t) => {
+        if (t.includes("Budget note 7")) putCalls.push(Date.now());
+        return putHold?.(t);
+      };
       const putAsked = ownCalls;
-      const putStop = new AbortController();
-      const putRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([putStop.signal, backstop()]) }));
-      await pollUntil(async () => (await claimOf(putT))?.status === "succeeded", 20_000);
-      putStop.abort();
-      const putRun = await orHung(putRunning, 20_000).finally(async () => {
-        putStop.abort();
+      const putRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
         await putFree();
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
-      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2
-          && /: the run loses this poll, not its end; what it held is back in the pool, and it claims again in 1 s$/m.test(putRun.stderr)
+      const putGap = putCalls.length === 2 ? putCalls[1] - putCalls[0] : -1;
+      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2 && putGap >= 4500
+          && new RegExp(`^ {2}${putT}'s put-back, set-back or claim read passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held is back in the pool, and it claims again in 3 s$`, "m").test(putRun.stderr)
           && tally(putRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
-        `a put-back past a scheduler's budget costs the run its poll, the thought back in the pool and asked again (exit ${putRun?.code ?? "still running at 20 s"}, ${ownCalls - putAsked} asked): ${putRun?.stdout.trim().slice(-200)} | ${putRun?.stderr.trim().slice(0, 300)}`);
+        `a put-back past a scheduler's budget costs the run its poll, the thought back with its place under --limit and asked again after the provider's pause (exit ${putRun?.code ?? "still running at 30 s"}, ${ownCalls - putAsked} asked, ${putGap} ms apart): ${putRun?.stdout.trim().slice(-200)} | ${putRun?.stderr.trim().slice(0, 300)}`);
       await drop([putT]);
 
       // Its read, the run following with --limit 1: the thought in hand back in the pool with its place under the
@@ -10149,11 +10163,11 @@ if (want("10h")) {
       let readHeld: Promise<void> | null = null;
       const readAsked = ownCalls;
       const readRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, admit: async () => {
-        // The first claim's gate takes the thoughts, which the claim does not read and its read does, for 2 s.
+        // The first claim's gate takes the thoughts, which the claim does not read and its read does, for 3 s.
         if (++readGates !== 2) return;
         await readConn`BEGIN`;
         await readConn`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`;
-        readHeld = Bun.sleep(2000).then(async () => { await readConn`COMMIT`; });
+        readHeld = Bun.sleep(3000).then(async () => { await readConn`COMMIT`; });
       }, signal: backstop() }))).finally(async () => {
         await (readHeld as Promise<void> | null)?.catch(() => {});
         readConn.release();
@@ -10165,30 +10179,51 @@ if (want("10h")) {
         `a claim's read past a scheduler's budget costs the run its poll, the thought in hand back with its place under --limit, taken again and answered (exit ${readRun?.code ?? "still running at 30 s"}, ${ownCalls - readAsked} asked): ${readRun?.stdout.trim().slice(-200)} | ${readRun?.stderr.trim().slice(0, 300)}`);
       await drop([readT]);
 
-      // A stop while a statement over a thought waits past the budget ends the run there, its poll neither counted lost
-      // nor said, what it holds handed back as it ends: here the claim, the run following, stopped as it waits.
+      // A stop while a statement over a thought waits past the budget ends the run there, the poll counted lost and said
+      // so, not as a poll to come (review pass 7, cold read): here its claim, holding nothing yet, the run following,
+      // stopped once the claim is seen waiting on the table.
       const [stopT] = await seedAll(["Budget note 10: sweep-pass-good work, its claim held as the run stops."]);
       const stopHolder = new SQL({ url: URL_!, max: 1 });
       const sc = await stopHolder.reserve();
       let stopGates = 0;
       let budgetStopHeld: Promise<void> | null = null;
       const budgetStop = new AbortController();
-      const stoppedRun = await orHung(settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
+      const stoppedRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
         if (++stopGates !== 2) return;
         await sc`BEGIN`;
         await sc`LOCK TABLE thought_work_claims IN EXCLUSIVE MODE`;
         budgetStopHeld = Bun.sleep(2500).then(async () => { await sc`COMMIT`; });
-        // The stop once the claim, past this gate, waits on the table.
-        setTimeout(() => budgetStop.abort(), 700);
-      }, signal: AbortSignal.any([budgetStop.signal, backstop()]) }))).finally(async () => {
+      }, signal: AbortSignal.any([budgetStop.signal, backstop()]) }));
+      const claimWaited = await pollUntil(() => waitingOnLock("claim_thoughts("), 20_000);
+      budgetStop.abort();
+      const stoppedRun = await orHung(stoppedRunning, 20_000).finally(async () => {
         await (budgetStopHeld as Promise<void> | null)?.catch(() => {});
         sc.release();
         await stopHolder.close({ timeout: 5 });
       });
-      assert(stoppedRun?.code === 0 && (await claimOf(stopT))?.status === "pending" && !/loses this poll|poll\(s\) lost/.test(`${stoppedRun.stdout}${stoppedRun.stderr}`)
-          && /stopped after 0 thought\(s\)/.test(stoppedRun.stderr),
-        `a stop while a claim waits past a scheduler's budget ends the run there, no poll counted lost nor said (exit ${stoppedRun?.code ?? "still running at 30 s"}): ${stoppedRun?.stdout.trim().slice(-200)} | ${stoppedRun?.stderr.trim().slice(0, 300)}`);
+      assert(claimWaited && stoppedRun?.code === 0 && (await claimOf(stopT))?.status === "pending"
+          && /^ {2}the claim passed the scheduler's statement_timeout \(canceling statement due to statement timeout\): the run loses this poll, and its stop ends it there$/m.test(stoppedRun.stderr)
+          && !/claims again/.test(stoppedRun.stderr) && /stopped after 0 thought\(s\)/.test(stoppedRun.stderr) && tally(stoppedRun) === "0 subject(s) recorded; 1 poll(s) lost to the scheduler's statement_timeout",
+        `a stop while a claim waits past a scheduler's budget ends the run there, the poll counted and said lost to the stop (waited ${claimWaited}, exit ${stoppedRun?.code ?? "still running at 20 s"}): ${stoppedRun?.stdout.trim().slice(-200)} | ${stoppedRun?.stderr.trim().slice(0, 300)}`);
       await drop([stopT]);
+
+      // …and one while the lost poll's hand-back waits, the claim's row held past the budget and then the stop: the claim
+      // back once the row is let go, the poll said lost to the stop, not as a poll to come (review pass 7, cold read).
+      const [handT] = await seedAll(["Budget note 17: sweep-pass-good work, its release and hand-back held as the run stops."]);
+      const handFree = holdClaimRow("Budget note 17", () => handT, 4500);
+      const handStop = new AbortController();
+      const handRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([handStop.signal, backstop()]) }));
+      const handWaited = await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000);
+      handStop.abort();
+      const handRun = await orHung(handRunning, 20_000).finally(async () => {
+        handStop.abort();
+        await handFree();
+      });
+      assert(handWaited && handRun?.code === 0 && (await claimOf(handT))?.status === "pending"
+          && new RegExp(`^ {2}${handT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`, "m").test(handRun.stderr)
+          && !/claims again/.test(handRun.stderr) && /stopped after 1 thought\(s\): what it held is back in the pool/.test(handRun.stderr),
+        `a stop while a lost poll's hand-back waits ends the run there, said so, the claim back as the row is let go (waited ${handWaited}, exit ${handRun?.code ?? "still running at 20 s"}): ${handRun?.stdout.trim().slice(-200)} | ${handRun?.stderr.trim().slice(0, 300)}`);
+      await drop([handT]);
 
       // …and a hard stop while a thought's own write waits past it: the thought unfinished, the stop's to hand back,
       // neither failed nor counted nor said as a write past the budget.
@@ -10197,26 +10232,202 @@ if (want("10h")) {
       const hc2 = await hardHolder.reserve();
       let hardStopOf: PassStop | null = null;
       let hardRun: SweepRun | null = null;
-      onOwn = (t) => {
-        if (!t.includes("Budget note 11")) return;
-        // Both stops once the door's write waits on the case's lock.
-        setTimeout(() => {
-          (hardStopOf as PassStop | null)?.();
-          (hardStopOf as PassStop | null)?.();
-        }, 700);
-      };
+      let doorWaited = false;
       try {
         await hc2`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardT}::uuid::text, 0))`;
-        hardRun = await orHung(settled(sweep({ session: { statement_timeout: "1500" }, onPass: (st) => { hardStopOf = st; }, signal: backstop() })));
+        const hardRunning = settled(sweep({ session: { statement_timeout: "1500" }, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
+        // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
+        // slow answer let the stops land before the write, which the case then never met).
+        doorWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        (hardStopOf as PassStop | null)?.();
+        (hardStopOf as PassStop | null)?.();
+        hardRun = await orHung(hardRunning);
       } finally {
-        onOwn = null;
         await hc2`SELECT pg_advisory_unlock_all()`.catch(() => {});
         hc2.release();
         await hardHolder.close({ timeout: 5 });
       }
-      assert(hardRun?.code === 130 && (await claimOf(hardT))?.status === "pending" && !/its write passed/.test(hardRun.stderr) && tally(hardRun) === "0 subject(s) recorded",
-        `a hard stop while a thought's own write waits past a scheduler's budget leaves the thought to the stop's hand-back, not failed, counted or said (exit ${hardRun?.code ?? "still running at 30 s"}): ${hardRun?.stdout.trim().slice(-200)} | ${hardRun?.stderr.trim().slice(0, 300)}`);
+      assert(doorWaited && hardRun?.code === 130 && (await claimOf(hardT))?.status === "pending" && !/its write passed/.test(hardRun.stderr) && tally(hardRun) === "0 subject(s) recorded",
+        `a hard stop while a thought's own write waits past a scheduler's budget leaves the thought to the stop's hand-back, not failed, counted or said (waited ${doorWaited}, exit ${hardRun?.code ?? "still running at 30 s"}): ${hardRun?.stdout.trim().slice(-200)} | ${hardRun?.stderr.trim().slice(0, 300)}`);
       await drop([hardT]);
+
+      // A first stop there lets the thought in hand finish: failed, said and counted, the run then stopped, 0 (review
+      // pass 7, run-it: no case held which a first stop gets).
+      const [onceT] = await seedAll(["Budget note 13: sweep-pass-good work, its door held as the run stops once."]);
+      const onceHolder = new SQL({ url: URL_!, max: 1 });
+      const oc = await onceHolder.reserve();
+      const onceStop = new AbortController();
+      let onceRun: SweepRun | null = null;
+      let onceWaited = false;
+      try {
+        await oc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${onceT}::uuid::text, 0))`;
+        const onceRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
+        onceWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        onceStop.abort();
+        onceRun = await orHung(onceRunning, 20_000);
+      } finally {
+        onceStop.abort();
+        await oc`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        oc.release();
+        await onceHolder.close({ timeout: 5 });
+      }
+      assert(onceWaited && onceRun?.code === 0 && (await claimOf(onceT))?.status === "failed" && /: its write passed the scheduler's statement_timeout/.test(onceRun.stderr)
+          && /stopped after 1 thought\(s\)/.test(onceRun.stderr) && tally(onceRun) === "0 subject(s) recorded; 1 failed on a write past the statement_timeout",
+        `a first stop while a thought's own write waits past a scheduler's budget lets it finish, failed and said, the run then stopped (waited ${onceWaited}, exit ${onceRun?.code ?? "still running at 20 s"}): ${onceRun?.stdout.trim().slice(-200)} | ${onceRun?.stderr.trim().slice(0, 300)}`);
+      await drop([onceT]);
+
+      // Two polls lost in one run, the line said once and the summary counting both: each claim waits on another run's
+      // claim whose lease has run out, held past the budget, which the claim reaps first; let go at the third claim's
+      // gate (review pass 7, run-it: a line said at every lost poll lived).
+      const [lapseT, twoLostT] = await seedAll(["Budget note 12a: sweep-pass-good work, its lease run out and held.", "Budget note 12b: sweep-pass-good work, claimed after two lost polls."]);
+      await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-another-run', claimed_at = now() - interval '1 hour', ttl_expires_at = now() - interval '1 minute' WHERE thought_id = ${lapseT}::uuid AND work_type = ${POOL}`;
+      const lapseHolder = new SQL({ url: URL_!, max: 1 });
+      const lc = await lapseHolder.reserve();
+      let twoGates = 0;
+      let lapseHeld = true;
+      const twoStop = new AbortController();
+      let twoLostRun: SweepRun | null = null;
+      try {
+        await lc`BEGIN`;
+        await lc`SELECT 1 FROM thought_work_claims WHERE thought_id = ${lapseT}::uuid AND work_type = ${POOL} FOR UPDATE`;
+        const twoRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
+          // Before the pool, then before each claim: the third claim's lets the run-out lease go.
+          if (++twoGates !== 4) return;
+          await lc`COMMIT`;
+          lapseHeld = false;
+        }, signal: AbortSignal.any([twoStop.signal, backstop()]) }));
+        await pollUntil(async () => (await statusOf([lapseT, twoLostT])).join(",") === "succeeded,succeeded", 30_000);
+        twoStop.abort();
+        twoLostRun = await orHung(twoRunning, 20_000);
+      } finally {
+        twoStop.abort();
+        if (lapseHeld) await lc`ROLLBACK`.catch(() => {});
+        lc.release();
+        await lapseHolder.close({ timeout: 5 });
+      }
+      assert(twoLostRun?.code === 0 && twoGates >= 4 && (await statusOf([lapseT, twoLostT])).join(",") === "succeeded,succeeded"
+          && (twoLostRun.stderr.match(/^ {2}the claim passed the scheduler's statement_timeout/gm) ?? []).length === 1
+          && tally(twoLostRun) === "2 subject(s) recorded (2 by stub-judge); 2 poll(s) lost to the scheduler's statement_timeout",
+        `two polls lost in one run are said once and counted twice (exit ${twoLostRun?.code ?? "still running at 20 s"}, gates ${twoGates}): ${twoLostRun?.stdout.trim().slice(-200)} | ${twoLostRun?.stderr.trim().slice(0, 400)}`);
+      await drop([lapseT, twoLostT]);
+
+      // Every kind in one run, following with --limit 3: an unread answer failed as ever; a door held past the budget,
+      // failed on its write and said once; and a keyed answer whose release is held past the budget and then past the
+      // hand-back's own wait (RELEASE_WAIT, shortened): the poll lost, said once, the claim left to its lease, said again
+      // at the run's end. Two failures counted, the unread one and the write (review pass 7, run-it: the two said-once
+      // flags crossed, a succeeded release counted among the lost failures, or the hand-back's failure thrown, each
+      // lived).
+      garbledAnswers = true;
+      const [mixUnread, mixDoor, mixLease] = await seedAll(["Budget note 14a: garbled sweep-pass-good work, unread.", "Budget note 14b: sweep-pass-good work, its door held past the budget.", "Budget note 14c: sweep-pass-good work, its release and hand-back held past both."]);
+      const mixHolder = new SQL({ url: URL_!, max: 1 });
+      const mh = await mixHolder.reserve();
+      const mixFree = holdClaimRow("Budget note 14c", () => mixLease, 4000);
+      let mixRun: SweepRun | null = null;
+      try {
+        await mh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${mixDoor}::uuid::text, 0))`;
+        RELEASE_WAIT.ms = 500;
+        mixRun = await orHung(settled(sweep({ follow: 1, limit: 3, session: { statement_timeout: "1500" }, signal: backstop() })));
+      } finally {
+        RELEASE_WAIT.ms = 30_000;
+        garbledAnswers = savedGarbledHere;
+        await mixFree();
+        await mh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        mh.release();
+        await mixHolder.close({ timeout: 5 });
+      }
+      const mixStates = (await statusOf([mixUnread, mixDoor, mixLease])).join(",");
+      assert(mixRun?.code === 1 && mixStates === "failed,failed,claimed"
+          && (mixRun.stderr.match(/: its write passed the scheduler's statement_timeout/g) ?? []).length === 1
+          && new RegExp(`^ {2}${mixLease}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held goes back as each lease runs out, or as the run ends, and it ends at its limit$`, "m").test(mixRun.stderr)
+          && /the claims this run holds could not go back to the pool/.test(mixRun.stderr) && /^ {2}2 claim\(s\) failed: fix the cause/m.test(mixRun.stderr)
+          && tally(mixRun) === "1 subject(s) recorded (1 by stub-judge); 1 answered not as JSON of the expected shape, 1 failed on a write past the statement_timeout; 1 poll(s) lost to the scheduler's statement_timeout",
+        `a run meeting every kind says each once and counts the two failures it made, its lost claim left to its lease, said (exit ${mixRun?.code ?? "still running at 30 s"}, claims ${mixStates}): ${mixRun?.stdout.trim().slice(-260)} | ${mixRun?.stderr.trim().slice(0, 500)}`);
+      await drop([mixUnread, mixDoor, mixLease]);
+
+      // An operator's cancel of a statement over a thought ("user request") is no budget's: thrown, as before, for the
+      // scheduler to read as a pass that throws (review pass 7, run-it: read as any 57014, it lived), the budget long.
+      const [cancelT] = await seedAll(["Budget note 15: sweep-pass-good work, its door's write cancelled by hand."]);
+      const cancelHolder = new SQL({ url: URL_!, max: 1 });
+      const cnc = await cancelHolder.reserve();
+      let cancelRun: SweepRun | null = null;
+      let cancelWaited = false;
+      // Stopped as the case ends, so a run that took the cancel for the budget's, and follows on, ends with it.
+      const cancelStop = new AbortController();
+      try {
+        await cnc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${cancelT}::uuid::text, 0))`;
+        const cancelRunning = settled(sweep({ follow: 1, session: { statement_timeout: "30000" }, signal: AbortSignal.any([cancelStop.signal, backstop()]) }));
+        cancelWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
+        await sql`SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND query LIKE ${"%record_thought_subject(%"}`;
+        cancelRun = await orHung(cancelRunning, 20_000);
+      } finally {
+        cancelStop.abort();
+        await cnc`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        cnc.release();
+        await cancelHolder.close({ timeout: 5 });
+      }
+      assert(cancelWaited && cancelRun?.code === -1 && /^rejected: canceling statement due to user request/m.test(cancelRun.stderr),
+        `an operator's cancel of a thought's write under a scheduler's session is thrown, not taken for the budget's (waited ${cancelWaited}, exit ${cancelRun?.code ?? "still running at 20 s"}): ${cancelRun?.stderr.trim().slice(0, 300)}`);
+      await drop([cancelT]);
+
+      // A hard stop while a claim waits on the claims' table: its hand-back, waiting there too, runs past the claim, which
+      // lands after it, so the final hand-back's failure past its own wait is said, and the stop line does not call the
+      // claim back (review pass 7, run-it: review pass 4's skip read any landed hard hand-back as nothing left, the
+      // claim leased unsaid). Each step on what it waits for: the claim behind the table's lock, then behind another run's
+      // run-out lease, so the hand-back lands first; the thoughts held so the claim's read waits while the table is taken
+      // again. The table taken in SHARE mode, which stops the claim's and the hand-backs' updates but not the lease's
+      // row lock, a FOR UPDATE's ROW SHARE (EXCLUSIVE waited on it, the gate with it, and hung the shard); each lock
+      // bounded, so a step that cannot be had fails the case.
+      const [raceT, raceLapse] = await seedAll(["Budget note 16a: sweep-pass-good work, claimed as the run stops twice.", "Budget note 16b: sweep-pass-good work, another run's lease run out."]);
+      await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'subjects-another-run', claimed_at = now() - interval '1 hour', ttl_expires_at = now() - interval '1 minute' WHERE thought_id = ${raceLapse}::uuid AND work_type = ${POOL}`;
+      const raceConns = [new SQL({ url: URL_!, max: 1 }), new SQL({ url: URL_!, max: 1 }), new SQL({ url: URL_!, max: 1 }), new SQL({ url: URL_!, max: 1 })];
+      const [rTable, rLapse, rThoughts, rTable2] = await Promise.all(raceConns.map((c) => c.reserve()));
+      let raceStopOf: PassStop | null = null;
+      let raceGates = 0;
+      let raceSteps = "";
+      let raceRun: SweepRun | null = null;
+      const raceStop = new AbortController();
+      RELEASE_WAIT.ms = 1000;
+      try {
+        await rLapse`BEGIN`;
+        await rLapse`SELECT 1 FROM thought_work_claims WHERE thought_id = ${raceLapse}::uuid AND work_type = ${POOL} FOR UPDATE`;
+        const raceRunning = settled(sweep({ follow: 1, session: { statement_timeout: "30000" }, onPass: (st) => { raceStopOf = st; }, admit: async () => {
+          if (++raceGates !== 2) return;
+          await rTable`BEGIN`;
+          await rTable`SET LOCAL lock_timeout = '15s'`;
+          await rTable`LOCK TABLE thought_work_claims IN SHARE MODE`;
+        }, signal: AbortSignal.any([raceStop.signal, backstop()]) }));
+        if (await pollUntil(() => waitingOnLock("claim_thoughts("), 20_000)) raceSteps += "a";
+        (raceStopOf as PassStop | null)?.();
+        (raceStopOf as PassStop | null)?.();
+        if (await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000)) raceSteps += "b";
+        await rTable`COMMIT`;
+        // The hand-back lands; the claim now waits on the run-out lease's row.
+        if (await pollUntil(async () => !(await waitingOnLock("release_claims_for_worker(")) && ((await waitingOnLock("claim_thoughts(", "transactionid")) || (await waitingOnLock("claim_thoughts(", "tuple"))), 20_000)) raceSteps += "c";
+        await rThoughts`BEGIN`;
+        await rThoughts`SET LOCAL lock_timeout = '15s'`;
+        await rThoughts`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`;
+        const [{ pid: thoughtsPid }] = (await rThoughts`SELECT pg_backend_pid() AS pid`) as { pid: number }[];
+        await rLapse`COMMIT`;
+        // The claim lands and its read waits on the thoughts, seen by its blocker (its text runs past what
+        // pg_stat_activity keeps); the table taken again, then the thoughts let go.
+        if (await pollUntil(async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${thoughtsPid}::int = ANY(pg_blocking_pids(pid))`) as { n: number }[])[0].n > 0, 20_000)) raceSteps += "d";
+        await rTable2`BEGIN`;
+        await rTable2`SET LOCAL lock_timeout = '15s'`;
+        await rTable2`LOCK TABLE thought_work_claims IN SHARE MODE`;
+        await rThoughts`COMMIT`;
+        raceRun = await orHung(raceRunning, 20_000);
+      } finally {
+        raceStop.abort();
+        RELEASE_WAIT.ms = 30_000;
+        for (const c of [rTable, rLapse, rThoughts, rTable2]) await c`ROLLBACK`.catch(() => {});
+        for (const c of [rTable, rLapse, rThoughts, rTable2]) c.release();
+        await Promise.all(raceConns.map((c) => c.close({ timeout: 5 })));
+      }
+      const [{ leased }] = (await sql`SELECT count(*)::int AS leased FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'claimed' AND worker_id LIKE 'subjects-%' AND worker_id <> 'subjects-another-run'`) as { leased: number }[];
+      assert(raceSteps === "abcd" && raceRun?.code === 130 && leased === 1
+          && /the claims this run holds could not go back to the pool/.test(raceRun.stderr) && /stopped after 0 thought\(s\): what it held goes back as each lease runs out/.test(raceRun.stderr),
+        `a claim landing past a hard stop's hand-back keeps the final hand-back's failure said and the stop line true (steps ${raceSteps}, exit ${raceRun?.code ?? "still running at 20 s"}, ${leased} leased): ${raceRun?.stderr.trim().slice(0, 400)}`);
+      await drop([raceT, raceLapse]);
 
       // The call in hand's own abort beside the stop (db/lease.ts's InHandAbort, sleep's N12 to come): none is in hand
       // as the thoughts begin, nor one younger than the age asked; the call it aborts goes back unanswered and so
