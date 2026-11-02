@@ -26,7 +26,7 @@
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync, unlinkSync, utimesSync, renameSync, symlinkSync, chmodSync, realpathSync, statSync, lstatSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
@@ -3129,12 +3129,12 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   const putClaim = (n, extra = {}, state = "live") => {
     claims.set(C(n), { token: tok(n), state });
     const p = join(CLAIMS, `${C(n)}.json`);
-    writeFileSync(p, JSON.stringify({ id: C(n), token: tok(n), ticket: "SMD-9001", ...extra }), { mode: 0o600 });
+    writeFileSync(p, JSON.stringify({ id: C(n), token: tok(n), ticket: "SMD-9001", server: "open-brain", ...extra }), { mode: 0o600 });
     return p;
   };
   const clearClaims = () => { for (const f of readdirSync(CLAIMS)) rmSync(join(CLAIMS, f)); };
   const CLAIM_CFG = join(TMP, "claims.json");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   const env = { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG };
   const claimsHook = (extra = {}, envOver = {}) => runHook({ session_id: "s-claims", hook_event_name: "PostToolUse", tool_name: "Bash", cwd: SUB, ...extra }, { ...env, ...envOver }, ["--claims"]);
   const logText = () => (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "");
@@ -3191,7 +3191,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(renews().length === 1, "a second event inside the quarter lease renews nothing");
   // Two runs at the same moment: the first stamps the claim before its call, so the second finds it not due (review pass 1).
   const { renewClaims } = await import(SCRIPT);
-  const brainsHere = [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", claimKey: "claim-key" } }];
+  const brainsHere = [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claimKey: "claim-key" } }];
   age(1, 61);
   const [twinA, twinB] = await Promise.all([renewClaims(SUB, brainsHere), renewClaims(SUB, brainsHere)]);
   assert(renews().length === 2 && twinA.length + twinB.length === 1, `two runs at once renew a due claim once — the stamp is written before the call (${renews().length - 1} renewal(s))`);
@@ -3346,21 +3346,21 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   age(9, 61);
   await claimsHook();
   assert(existsSync(kept) && /held by your own key/.test(logText().split("\n").filter(Boolean).pop()), "a token the brain does not match is kept, with the brain's words");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "other-claim-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "other-claim-key" }), { mode: 0o600 });
   age(9, 61);
   await claimsHook();
   assert(/claim_key must be the very key the agent claimed with — its connector's own/.test(logText().split("\n").filter(Boolean).pop()), "a claim key that is not the holder's is kept, and the log says which key it must be");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   claims.delete(C(9));
   age(9, 61);
   await claimsHook();
-  assert(existsSync(kept) && /claimed on another brain\?/.test(logText().split("\n").filter(Boolean).pop()), "a claim this brain does not have is kept: it may be another brain's");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
+  assert(existsSync(kept) && /has no such claim: was it made through another server\?/.test(logText().split("\n").filter(Boolean).pop()), "a claim this brain does not have is kept: it may be another brain's");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
   claims.set(C(9), { token: tok(9), state: "live" });
   age(9, 61);
   await claimsHook();
   assert(/the claim key cannot call renew_claim/.test(logText().split("\n").filter(Boolean).pop()), "a claim key that cannot renew is named");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
 
   // A token file others can read — as a Write tool leaves it — is closed by the hook, and renewed (review pass 1).
   clearClaims();
@@ -3387,7 +3387,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   const swapped = putClaim(29); // C(29) sorts after C(28): renewed second
   chmodSync(swapped, 0o644);
   slowRenewMs = 600;
-  const racing = renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", claimKey: "claim-key" } }], { now: true });
+  const racing = renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claimKey: "claim-key" } }], { now: true });
   await sleep(200); // claim 28's renewal is at the brain; 29's file was read before it
   rmSync(swapped);
   symlinkSync(target, swapped);
@@ -3395,17 +3395,54 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   slowRenewMs = 0;
   assert((statSync(target).mode & 0o777) === 0o755, `a token file swapped for a symlink mid-run: its target keeps mode 755 (now ${(statSync(target).mode & 0o777).toString(8)})`);
   clearClaims();
+  // The directory swapped for a symlink mid-run: the link's target keeps its mode too (review pass 3).
+  const OTHER_DIR = join(TMP, "other-dir");
+  mkdirSync(OTHER_DIR, { recursive: true });
+  chmodSync(OTHER_DIR, 0o755);
+  putClaim(39);
+  putClaim(40);
+  slowRenewMs = 600;
+  const racingDir = renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claimKey: "claim-key" } }], { now: true });
+  await sleep(200); // claim 39 at the brain; 40's file read before it
+  renameSync(CLAIMS, `${CLAIMS}.real`);
+  symlinkSync(OTHER_DIR, CLAIMS);
+  await racingDir;
+  slowRenewMs = 0;
+  rmSync(CLAIMS);
+  renameSync(`${CLAIMS}.real`, CLAIMS);
+  assert((statSync(OTHER_DIR).mode & 0o777) === 0o755, `the directory swapped for a symlink mid-run: its target keeps mode 755 (now ${(statSync(OTHER_DIR).mode & 0o777).toString(8)})`);
+  clearClaims();
+  // Group-readable alone (640) is open too (review pass 3).
+  const group = putClaim(41);
+  chmodSync(group, 0o640);
+  await renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claimKey: "claim-key" } }], { now: true });
+  assert((statSync(group).mode & 0o777) === 0o600, "a token file its group can read (640) is closed to 600");
+  clearClaims();
+  // A FIFO swapped in mid-run is opened without blocking and left alone: the run ends (review pass 3).
+  if (process.platform !== "win32") {
+    putClaim(42);
+    const fifoAt = putClaim(43);
+    slowRenewMs = 600;
+    const racingFifo = renewIn(SUB, [{ name: "brain", root: STATE, cfg: { url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claimKey: "claim-key" } }], { now: true });
+    await sleep(200);
+    rmSync(fifoAt);
+    spawnSync("mkfifo", ["-m", "644", fifoAt]);
+    const ended = await Promise.race([racingFifo.then(() => "done"), sleep(8000).then(() => "hung")]);
+    slowRenewMs = 0;
+    assert(ended === "done" && (statSync(fifoAt).mode & 0o777) === 0o644, `a FIFO swapped in for a token file mid-run does not hold the run, and its mode is left alone (${ended})`);
+    clearClaims();
+  }
 
   // No claim key, or no worktree: nothing called, nothing said on a quiet event; a checkpoint names the file it could not renew.
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key" }), { mode: 0o600 });
   putClaim(11);
   calls.length = 0;
   const before = logText().length;
   await claimsHook();
   assert(!renews().length && logText().length === before, "with no claim key a quiet event renews nothing and logs nothing");
   await runHook({ session_id: "s-claims-nokey", transcript_path: CLAUDE_T, cwd: SUB, hook_event_name: "SessionEnd" }, env);
-  assert(!renews().length && /claims: skipped SMD-9001 \(claim [0-9a-f-]{36}\): no brain in .* has a claim_key/.test(logText()), "…and a checkpoint logs why the claim was not renewed");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  assert(!renews().length && /claims: skipped SMD-9001 \(claim [0-9a-f-]{36}\): no brain in .* has connector "open-brain" and a claim_key/.test(logText()), "…and a checkpoint logs why the claim was not renewed");
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   await claimsHook({ cwd: TMP });
   await claimsHook({ cwd: undefined });
   assert(!renews().length, "a session outside any worktree, or with no cwd, renews nothing");
@@ -3417,10 +3454,10 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     { name: "stable", url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claim_key: "claim-key" },
     { name: "canary", url: CLAIMS_URL, key: "cap-key", connector: "open-brain-canary", claim_key: "other-claim-key", write_key: "claim-key" },
   ] }), { mode: 0o600 });
-  putClaim(12);
+  putClaim(12, { server: undefined });
   calls.length = 0;
   await runHook({ session_id: "s-claims-multi", hook_event_name: "SessionEnd", cwd: SUB }, { ...env, OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG });
-  assert(!renews().length && /the config lists several brains — name the claim's MCP server as "server"/.test(logText()), "several brains and no server named: the claim is not renewed — its token goes to no brain that may not have issued it — and a checkpoint says to name it");
+  assert(!renews().length && /claims: skipped .*\.json: no "server": the MCP server the claim was made through/.test(logText()), "a token file with no server is not renewed — its token goes to no brain that may not have issued it — and a checkpoint says why");
   clearClaims();
   // A server naming a brain with no claim key is skipped, never called with no key (review pass 1).
   putClaim(25, { server: "open-brain-canary" });
@@ -3468,27 +3505,30 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   clearClaims();
 
   // OB1_CLAIM_KEY is the one-brain shape's claim key, over the file's; beside a brains list --check says no brain uses it.
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key" }), { mode: 0o600 });
   putClaim(27);
   calls.length = 0;
   await claimsHook({}, { OB1_CLAIM_KEY: "claim-key" });
   assert(renews().length === 1 && renews()[0].key === "claim-key", "OB1_CLAIM_KEY gives the one-brain shape its claim key");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
   const ckEnv = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: MULTI_CFG, OB1_CLAIM_KEY: "stray-key" } });
   assert(/warning: OB1_CLAIM_KEY is set but no brain uses it/.test(ckEnv.err) && !ckEnv.err.includes("stray-key"), "beside a brains list, --check warns that OB1_CLAIM_KEY is read by no brain, without printing it");
   const ckOne = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG, OB1_CLAIM_KEY: "claim-key" } });
   assert(ckOne.code === 0 && !/OB1_CLAIM_KEY is set but no brain uses it/.test(ckOne.err), "…and on the one-brain shape, which reads it, it does not");
   clearClaims();
 
-  // The rule's own template names a server: a config of one brain — which has no connector — renews it all the same (review pass 2).
-  putClaim(35, { server: "open-brain" });
+  // One rule for one brain or several: the brain whose connector is the file's server, and no other (review pass 3).
+  putClaim(36, { server: "open-brain-canary" });
+  putClaim(35);
   calls.length = 0;
-  await claimsHook();
-  assert(renews().length === 1 && renews()[0].args.id === C(35), "a one-brain config renews a token file whose server it has no connector for");
+  await runHook({ session_id: "s-claims-onebrain", hook_event_name: "SessionEnd", cwd: SUB }, env);
+  assert(renews().length === 1 && renews()[0].args.id === C(35) && !calls.some((c) => c.args?.id === C(36)) && /claims: skipped SMD-9001 \(claim [0-9a-f-]{36}\): no brain in .* has connector "open-brain-canary"/.test(logText()),
+    "a one-brain config renews the file whose server is its connector, and sends a file naming another server nowhere");
+  rmSync(join(CLAIMS, `${C(36)}.json`));
   // An upper-case id given by hand is the claim's id all the same (an id with letters: the others here are digits).
   const LETTERED = "abcdef12-0000-4000-8000-00000000abcd";
   claims.set(LETTERED, { token: tok(9), state: "live" });
-  writeFileSync(join(CLAIMS, `${LETTERED}.json`), JSON.stringify({ id: LETTERED, token: tok(9), ticket: "SMD-9001" }), { mode: 0o600 });
+  writeFileSync(join(CLAIMS, `${LETTERED}.json`), JSON.stringify({ id: LETTERED, token: tok(9), ticket: "SMD-9001", server: "open-brain" }), { mode: 0o600 });
   const upper = await spawnScript(["--renew-claims", "--cwd", SUB, "--claim", LETTERED.toUpperCase()], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(upper.code === 0 && renews().length === 2 && renews()[1].args.id === LETTERED, "--claim takes the id in either case");
   rmSync(join(CLAIMS, `${LETTERED}.json`));
@@ -3496,12 +3536,19 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   age(35, 61);
   const typo = await claimsHook({}, { OB1_CAPTURE_ON_SECRET: "redactt" });
   assert(typo.code === 0 && renews().length === 3, "a mistyped OB1_CAPTURE_ON_SECRET does not stop the claims hook renewing");
-  // OB1_BRAIN_URL makes the brain the variable's: the file's claim key — and the tokens — never go to it; OB1_CLAIM_KEY does (review pass 2).
+  // OB1_BRAIN_URL's brain has no connector, so it renews no claims: neither the file's claim key nor OB1_CLAIM_KEY sends a token to it (review passes 2 and 3).
   age(35, 61);
   await claimsHook({}, { OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key" });
-  assert(renews().length === 3, "with OB1_BRAIN_URL set, the file's claim key is not used: nothing is sent");
   await claimsHook({}, { OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key", OB1_CLAIM_KEY: "claim-key" });
-  assert(renews().length === 4 && renews()[3].key === "claim-key", "…and OB1_CLAIM_KEY beside it is");
+  assert(renews().length === 3, "with OB1_BRAIN_URL set, no claim is renewed — with the file's claim key or OB1_CLAIM_KEY — so no token goes to the variable's brain");
+  const ckUrl = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG, OB1_BRAIN_URL: CLAIMS_URL, OB1_CAPTURE_KEY: "cap-key", OB1_CLAIM_KEY: "claim-key" } });
+  assert(/warning: OB1_CLAIM_KEY is set but no brain uses it — .*OB1_BRAIN_URL's brain renews no claims/.test(ckUrl.err), "…and --check says OB1_CLAIM_KEY goes unused beside OB1_BRAIN_URL");
+  // --claim for an id with no token file, or a bad one, is said and fails the run (review pass 3).
+  const missing = await spawnScript(["--renew-claims", "--cwd", SUB, "--claim", C(37)], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(missing.code === 1 && new RegExp(`skipped claim ${C(37)}: no token file for it`).test(logText()), "--claim for an id no file holds exits 1, and says so");
+  writeFileSync(join(CLAIMS, `${C(38)}.json`), JSON.stringify({ id: C(38), token: tok(8) })); // no server
+  const badOne = await spawnScript(["--renew-claims", "--cwd", SUB, "--claim", C(38)], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
+  assert(badOne.code === 1 && new RegExp(`skipped .*${C(38)}\\.json: no "server"`).test(logText()), "--claim for a bad file exits 1, naming what is wrong — a file with no server among them");
   clearClaims();
 
   // The hook to paste, the check and the config.
@@ -3515,7 +3562,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(phCodex.code === 2 && /renews with renew_claim itself/.test(phCodex.err) && phMixed.code === 2, "Codex, and --claims beside a session hook's flag, are refused");
   const ck = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(ck.code === 0 && /claim key: ok — it can renew claims/.test(ck.out), "--check says the claim key can renew");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "cap-key" }), { mode: 0o600 });
   const ckCap = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(ckCap.code === 1 && /the claim key cannot call renew_claim — give claim_key the write key your agents claim with/.test(ckCap.err), "…and fails a claim key that cannot");
   const KEYFILE = join(TMP, "claim.key");
@@ -3524,7 +3571,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(/sets both "claim_key" and "claim_key_file"/.test(await cfgErr({ url: CLAIMS_URL, key: "cap-key", claim_key: "k", claim_key_file: KEYFILE })), "a config giving claim_key and claim_key_file is refused");
   assert(/brain "stable" .* has an empty claim key/.test(await cfgErr({ brains: [{ name: "stable", url: CLAIMS_URL, key: "cap-key", claim_key: "" }] })), "…and an empty claim key");
   assert(/sets "claim_key" beside "brains"/.test(await cfgErr({ claim_key: "k", brains: [{ name: "stable", url: CLAIMS_URL, key: "cap-key" }] })), "…and a claim key beside a brains list");
-  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, key: "cap-key", claim_key_file: KEYFILE }), { mode: 0o600 });
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key_file: KEYFILE }), { mode: 0o600 });
   const ckFile = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(ckFile.code === 0 && /claim key: ok/.test(ckFile.out), "a claim_key_file is read, its newline trimmed");
   claimsBrain.stop(true);

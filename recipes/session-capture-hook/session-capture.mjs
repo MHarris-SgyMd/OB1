@@ -62,7 +62,7 @@
  *   bun session-capture.mjs --check                      # config + endpoint (warned if on a pre-v2.0.0 stack's legacy root or tier route) + key scope; writes nothing
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
  *   bun session-capture.mjs --print-hook claude-code --claims   # the claims hook: renews a worktree's work claims while a session works (SMD-3602)
- *   bun session-capture.mjs --renew-claims [--cwd <dir>] # renew the claims this worktree keeps tokens for, now
+ *   bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]  # renew the claims this worktree keeps tokens for, now
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
@@ -435,16 +435,22 @@ export function loadBrains() {
   if (process.env.OB1_BRAIN_URL || cfg.brains === undefined) {
     const url = process.env.OB1_BRAIN_URL || cfg.url;
     const key = process.env.OB1_CAPTURE_KEY || keyOf(cfg);
-    // With OB1_BRAIN_URL the brain is the variable's, so the file's claim key —
-    // and the tokens it renews — never go to it: only OB1_CLAIM_KEY does (review pass 2).
-    const claimKey = process.env.OB1_CLAIM_KEY || (process.env.OB1_BRAIN_URL ? "" : claimKeyOf(cfg, CONFIG_PATH));
+    // Work claims (SMD-3602) are renewed on the brain whose `connector` is the
+    // token file's `server`, and nowhere else. The one-brain file names its
+    // connector beside its claim key; the brain OB1_BRAIN_URL names has neither,
+    // so it renews no claims — no token goes to a brain it may not have come
+    // from (review passes 2 and 3).
+    const fromEnv = Boolean(process.env.OB1_BRAIN_URL);
+    if (!fromEnv && cfg.connector !== undefined && !(typeof cfg.connector === "string" && CONNECTOR_RE.test(cfg.connector))) throw new Error(`${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)`);
+    const claimKey = fromEnv ? "" : process.env.OB1_CLAIM_KEY || claimKeyOf(cfg, CONFIG_PATH);
+    const connector = fromEnv ? undefined : cfg.connector;
     // Before the missing-key error: a connector URL pasted with its ?key= and no
     // `key` is told where the key goes, not to write a url it already has.
     const endpoint = url ? endpointOf(url, urlSource()) : undefined;
     if (!endpoint || !key) {
       throw new Error(`no endpoint or key — write ${CONFIG_PATH} as ${CONFIG_SHAPE} (mint the key with: bun server-portable/keygen.ts --name session-hook --scope capture)`);
     }
-    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...(claimKey ? { claimKey } : {}), ...shared } }];
+    return [{ name: "brain", root: STATE_BASE, cfg: { url: endpoint, key, where: urlSource(), ...(connector ? { connector } : {}), ...(claimKey ? { claimKey } : {}), ...shared } }];
   }
   // Several brains (SMD-3313). Each is named, once, as a directory may be; its
   // url and key are its own, never the file's top-level ones, which beside a
@@ -2821,7 +2827,7 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 // at its worktree's root, git-ignored, mode 600. The hook renews each claim
 // whose token the session's worktree holds, through the config's `claim_key`
 // — the very key the agent claims with: at a compaction and a session's end,
-// and, with the `--claims` hook pasted, every quarter lease while tools run and
+// and, with the `--claims` hook pasted, at most hourly while tools run and
 // prompts arrive. It never claims (a branch for a ticket and a scratch branch
 // look alike) and never releases (a session can end with its PR open): a claim
 // ends at its release, or lapses when nothing renews it. The agent renews too;
@@ -2881,17 +2887,18 @@ export function claimFiles(root) {
     const path = join(dir, n);
     const named = CLAIM_FILE_RE.exec(n)?.[1]?.toLowerCase();
     if (!named) return { path: join(dir, scrubTokens(n)), bad: "not named <claim id>.json" };
-    if (!lstatOf(path)?.isFile()) return { path, bad: "not a regular file (a symlink?)" };
+    if (!lstatOf(path)?.isFile()) return { path, id: named, bad: "not a regular file (a symlink?)" };
     let c;
     let raw;
-    try { raw = readFileSync(path, "utf8"); } catch (e) { return { path, bad: `unreadable (${e?.code ?? "error"})` }; }
-    try { c = JSON.parse(raw); } catch { return { path, bad: "not JSON" }; }
-    if (!c || typeof c !== "object" || Array.isArray(c)) return { path, bad: "not a JSON object" };
-    if (typeof c.id !== "string" || !UUID_ONLY_RE.test(c.id)) return { path, bad: `no claim id (a uuid) in "id"` };
-    if (c.id.toLowerCase() !== named) return { path, bad: `its "id" is not the claim its name says` };
-    if (typeof c.token !== "string" || !CLAIM_TOKEN_RE.test(c.token)) return { path, bad: `no token (wc_ and 64 hex digits) in "token"` };
-    if (c.lease_seconds != null && !(Number.isInteger(c.lease_seconds) && c.lease_seconds >= 60 && c.lease_seconds <= 604_800)) return { path, bad: `a "lease_seconds" that is not 60 to 604800` };
-    if (c.server != null && !(typeof c.server === "string" && CONNECTOR_RE.test(c.server))) return { path, bad: `a "server" that is no MCP server's name` };
+    try { raw = readFileSync(path, "utf8"); } catch (e) { return { path, id: named, bad: `unreadable (${e?.code ?? "error"})` }; }
+    try { c = JSON.parse(raw); } catch { return { path, id: named, bad: "not JSON" }; }
+    if (!c || typeof c !== "object" || Array.isArray(c)) return { path, id: named, bad: "not a JSON object" };
+    if (typeof c.id !== "string" || !UUID_ONLY_RE.test(c.id)) return { path, id: named, bad: `no claim id (a uuid) in "id"` };
+    if (c.id.toLowerCase() !== named) return { path, id: named, bad: `its "id" is not the claim its name says` };
+    if (typeof c.token !== "string" || !CLAIM_TOKEN_RE.test(c.token)) return { path, id: named, bad: `no token (wc_ and 64 hex digits) in "token"` };
+    if (c.lease_seconds != null && !(Number.isInteger(c.lease_seconds) && c.lease_seconds >= 60 && c.lease_seconds <= 604_800)) return { path, id: named, bad: `a "lease_seconds" that is not 60 to 604800` };
+    if (c.server == null) return { path, id: named, bad: `no "server": the MCP server the claim was made through, which picks the brain it is renewed on` };
+    if (!(typeof c.server === "string" && CONNECTOR_RE.test(c.server))) return { path, id: named, bad: `a "server" that is no MCP server's name` };
     const text = (v) => (typeof v === "string" && v.trim() ? scrubTokens(oneLine(v)).slice(0, 100) : undefined);
     return { path, claim: { id: named, token: c.token.toLowerCase(), ticket: text(c.ticket), piece: text(c.piece), lease: c.lease_seconds ?? undefined, server: c.server ?? undefined } };
   });
@@ -2901,20 +2908,17 @@ export function claimFiles(root) {
 const claimLabel = (c) => `${c.ticket ? `${c.ticket}${c.piece ? ` ${c.piece}` : ""} ` : ""}(claim ${c.id})`;
 
 /**
- * The brain a claim is renewed on. A config of one brain: that brain, if it
- * has a `claim_key`, whatever the file's `server` says — the one-brain shape
- * has no connector to match it, and the rule's template always names one
- * (review pass 2). Several brains: the one whose `connector` is the file's
- * `server`, which must be named — a token goes to no brain that did not issue
- * it (review pass 1). `{ brain }` or `{ skip }`.
+ * The brain a claim is renewed on: the one whose `connector` is the token
+ * file's `server` and that has a `claim_key` — one brain or several, the same
+ * rule, so a token goes to no brain that did not issue it. Passes 1 and 2 each
+ * special-cased a shape and each leaked or skipped (review pass 3).
+ * `{ brain }` or `{ skip }`.
  */
 function brainForClaim(claim, brains) {
-  if (brains.length === 1) return brains[0].cfg.claimKey ? { brain: brains[0] } : { skip: `no brain in ${CONFIG_PATH} has a claim_key` };
-  if (claim.server) {
-    const b = brains.find((x) => x.cfg.claimKey && x.cfg.connector === claim.server);
-    return b ? { brain: b } : { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" and a claim_key` };
-  }
-  return { skip: `the config lists several brains — name the claim's MCP server as "server" in the token file` };
+  const b = brains.find((x) => x.cfg.claimKey && x.cfg.connector === claim.server);
+  if (b) return { brain: b };
+  if (process.env.OB1_BRAIN_URL) return { skip: `OB1_BRAIN_URL is set, and its brain renews no claims (it has no connector to match "${claim.server}")` };
+  return { skip: `no brain in ${CONFIG_PATH} has connector "${claim.server}" and a claim_key — give that brain both` };
 }
 
 /**
@@ -2942,7 +2946,7 @@ export async function renewClaim(cfg, claim) {
   if (code === "CLAIM_RELEASED") return { ended: { code, message: said }, line: `ended: ${what} — ${said}` };
   if (code === "WORK_CLAIMED") return { keep: true, line: `kept: ${what} — ${said} (stop work while that claim holds; it renews once it ends)` };
   if (code === "CLAIM_NOT_YOURS") return { keep: true, line: `kept: ${what} — ${said}${result.structuredContent.ownKey ? "" : " (claim_key must be the very key the agent claimed with — its connector's own)"}` };
-  if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (claimed on another brain? name its MCP server as "server" in the token file)` };
+  if (code === "CLAIM_NOT_FOUND") return { keep: true, line: `kept: ${what} — ${said} (the brain whose connector is "${claim.server}" has no such claim: was it made through another server?)` };
   return { keep: true, line: `kept: ${what} — ${said}` };
 }
 
@@ -2977,8 +2981,10 @@ function endClaimFile(path, claim, ended) {
 function closeUp(p, mode, extra) {
   let fd;
   try {
-    fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | extra);
-    if (!(fstatSync(fd).mode & 0o077)) return false;
+    // O_NONBLOCK: a FIFO swapped in at the name would otherwise hold the open for ever (review pass 3).
+    fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK | extra);
+    const st = fstatSync(fd);
+    if (!(st.isFile() || st.isDirectory()) || !(st.mode & 0o077)) return false;
     fchmodSync(fd, mode);
     return true;
   } catch { return false; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
@@ -3022,8 +3028,11 @@ export async function renewClaims(cwd, brains, { force = false, now: atOnce = fa
   const now = Date.now();
   const work = [], outcomes = [];
   const skip = (line) => { outcomes.push({ skipped: true, line }); if (force || atOnce) { useStateRoot(brains[0].root); log(`claims: ${line}`); } };
-  for (const f of claimFiles(root)) {
-    if (only && !only.includes(f.claim?.id)) continue;
+  const files = claimFiles(root);
+  // An id asked for by hand that no file holds is said, not passed over (review pass 3).
+  for (const id of only ?? []) if (!files.some((f) => (f.claim?.id ?? f.id) === id)) skip(`skipped claim ${id}: no token file for it in ${join(root, CLAIMS_DIRNAME)}`);
+  for (const f of files) {
+    if (only && !only.includes(f.claim?.id ?? f.id)) continue;
     if (f.bad) { skip(`skipped ${f.path}: ${f.bad}`); continue; }
     const { brain, skip: why } = brainForClaim(f.claim, brains);
     if (!brain) { skip(`skipped ${claimLabel(f.claim)}: ${why}`); continue; }
@@ -3258,7 +3267,7 @@ export async function main(argv) {
       code = Math.max(code, c, await checkWrites(b, brains, tag), await checkClaims(b, tag));
     }
     // OB1_CLAIM_KEY is the one-brain shape's; beside a brains list it is read by no brain (review pass 1).
-    if (process.env.OB1_CLAIM_KEY && brains.some((b) => b.listed)) console.error(`warning: OB1_CLAIM_KEY is set but no brain uses it — it is read for the one-brain shape alone; with a brains list give the brain its own claim_key`);
+    if (process.env.OB1_CLAIM_KEY && (brains.some((b) => b.listed) || process.env.OB1_BRAIN_URL)) console.error(`warning: OB1_CLAIM_KEY is set but no brain uses it — it is read for the one-brain config file alone (OB1_BRAIN_URL's brain renews no claims); with a brains list give the brain its own claim_key`);
     return code;
   }
   if (has(args, "--renew-claims")) {
