@@ -3052,6 +3052,44 @@ function closeUp(p, mode, extra, claim) {
   } catch { return false; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
 }
 
+/** Two claims' work overlaps: the same piece, or either is the whole ticket — 115's rule, by the pieces' words (case folded, white space collapsed). */
+const pieceKey = (p) => (typeof p === "string" ? p.trim().replace(/\s+/g, " ").toLowerCase() : "");
+const overlaps = (a, b) => !pieceKey(a.piece) || !pieceKey(b.piece) || pieceKey(a.piece) === pieceKey(b.piece);
+
+/** A note for a blocked line whose claim in the way is this worktree's own (its id among the token files): the rule says release the older one (review pass 5). */
+function ownPieceNote(text, root, claimId) {
+  const own = new Set(claimFiles(root).map((f) => f.claim?.id).filter(Boolean));
+  const mine = [...String(text).matchAll(new RegExp(UUID, "gi"))].map((m) => m[0].toLowerCase()).find((id) => id !== claimId && own.has(id));
+  return mine ? ` The claim in the way, ${mine}, is this worktree's own: release the older claim and delete its files.` : "";
+}
+
+/**
+ * Before reviving a claim the hook's own record shows lapsed — its last known
+ * expiry past — list the ticket's claims, ended ones included: a renewal
+ * revives a lapsed claim without saying so (SMD-3654), and the hook's renewal
+ * at a resuming prompt would otherwise erase the lapse the rule's check looks
+ * for (review pass 5, against a real server). Live (the agent renewed it) or
+ * lapsed with no claim on overlapping work made since: renew. Lapsed with one:
+ * `blocked`, the marker written as for WORK_CLAIMED. Can't tell: `keep`.
+ */
+async function lapseCheck(cfg, claim, knownExpiry) {
+  if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
+  let result;
+  try { result = await rpc({ ...cfg, key: cfg.claimKey }, "tools/call", { name: "list_claims", arguments: { ticket: claim.ticket, include_ended: true, limit: 1000 } }, 15_000); }
+  catch (e) { return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and the claims made since could not be listed: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}` }; }
+  let claims = result?.structuredContent?.claims;
+  if (!Array.isArray(claims)) { try { claims = JSON.parse(textOfResult(result)).claims; } catch { claims = undefined; } }
+  if (result?.isError || !Array.isArray(claims)) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims gave no list to check: ${scrubTokens(oneLine(textOfResult(result))).slice(0, 200)}` };
+  const mine = claims.find((c) => String(c?.id).toLowerCase() === claim.id);
+  if (!mine) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims for ${claim.ticket} doesn't list it` };
+  if (mine.state !== "lapsed") return {};
+  const lapsedAt = Date.parse(mine.expiresAt);
+  const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && Date.parse(c?.claimedAt) > lapsedAt && overlaps(c, mine));
+  if (!since.length) return {};
+  const said = scrubTokens(`CLAIMED_WHILE_LAPSED: lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${oneLine(String(c.piece)).slice(0, 100)}` : ""} at ${c.claimedAt} (now ${c.state})`).join("; ")}`).slice(0, 600);
+  return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
+}
+
 async function renewOne(b, path, claim) {
   useStateRoot(b.root);
   // The hook owns the file it renews from: one a Write tool left at 644, or a
@@ -3061,7 +3099,14 @@ async function renewOne(b, path, claim) {
     if (closeUp(dirname(path), 0o700, fsConstants.O_DIRECTORY)) closed.push("its directory was open to others: now mode 700");
     if (closeUp(path, 0o600, 0, claim)) closed.push("its token file was readable by others: now mode 600");
   }
-  const o = await renewClaim(b.cfg, claim);
+  const known = readClaimState(claim.id).expiresAt;
+  let o;
+  if (typeof known === "string" && Date.parse(known) < Date.now()) {
+    const check = await lapseCheck(b.cfg, claim, known);
+    if (check.blocked || check.keep) o = check.blocked ? { blocked: check.blocked, line: check.line } : { keep: true, line: check.keep };
+    else { o = await renewClaim(b.cfg, claim); if (check.note) o.line += check.note; }
+  } else o = await renewClaim(b.cfg, claim);
+  if (o.blocked) o.line += ownPieceNote(o.blocked.message, dirname(dirname(path)), claim.id);
   // An ended claim's stamp goes with its file; one whose file could not be
   // ended keeps a stamp, or every event would ask again (review pass 1).
   if (o.ended && endClaimFile(path, claim, o.ended)) { try { unlinkSync(claimStatePath(claim.id)); } catch { /* none */ } }
@@ -3073,6 +3118,40 @@ async function renewOne(b, path, claim) {
   if (closed.length) o.line += ` (${closed.join("; ")})`;
   log(`claims: ${o.line}`);
   return o;
+}
+
+/**
+ * The claims hook's look at the agent's own claim calls (review pass 5,
+ * against a real server): a `renew_claim`, or a `claim_work` with a token,
+ * through a connector whose name a token file in the worktree gives as its
+ * `server`, found by the token the call carried. Answered `WORK_CLAIMED`, the
+ * claim gets its `<id>.blocked.json`, as the hook's own renewal would give it
+ * — else the agent's next renewal, once the covering claim ends, revives it
+ * silently. Renewed, the hook records the new expiry, so its own record never
+ * reads a lapse the agent's renewal prevented. Nothing is sent to a brain.
+ */
+function noteAgentClaimCall(hook, brains) {
+  if (String(hook.hook_event_name ?? "") !== "PostToolUse") return;
+  const m = /^mcp__([A-Za-z0-9_-]+)__(renew_claim|claim_work)$/.exec(String(hook.tool_name ?? ""));
+  const token = String(hook.tool_input?.token ?? "").toLowerCase();
+  if (!m || !CLAIM_TOKEN_RE.test(token)) return;
+  const root = worktreeRoot(hook.cwd);
+  if (!root) return;
+  const f = claimFiles(root).find((x) => x.claim && x.claim.token === token && x.claim.server === m[1]);
+  if (!f) return;
+  const brain = brains.find((x) => x.cfg.connector === f.claim.server) ?? brains[0];
+  useStateRoot(brain.root);
+  const text = resultText(hook.tool_response);
+  const renewed = new RegExp(`^Renewed your claim on .* until (\\S+) \\(claim (${UUID})\\)`, "i").exec(text);
+  if (renewed && renewed[2].toLowerCase() === f.claim.id) {
+    writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
+    return;
+  }
+  if (/\bis covered by a live claim\b/.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
+    const said = `WORK_CLAIMED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
+    const wrote = writeMarker(f.path, f.claim, "blocked", { code: "WORK_CLAIMED", message: said });
+    log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} met ${said}${wrote ? "" : " (the marker could not be written)"}${ownPieceNote(text, root, f.claim.id)}`);
+  }
 }
 
 /**
@@ -3500,6 +3579,7 @@ export async function main(argv) {
   // the hook captures on, a command given --claims by hand still captures, the
   // renewal after it (review pass 1: it silently captured nothing).
   if (claimsOnly) {
+    try { noteAgentClaimCall(hook, brains); } catch (e) { useStateRoot(brains[0].root); log(`claims: error: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}`); }
     try { await renewClaims(hook.cwd, brains, { detach: !sync }); } catch (e) { useStateRoot(brains[0].root); log(`claims: error: ${scrubTokens(oneLine(String(e?.message ?? e))).slice(0, 200)}`); }
     return 0;
   }

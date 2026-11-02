@@ -3088,6 +3088,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   // rpcEnvelopeForMissingTool: answer a tool the key can't call as the real server does, a JSON-RPC -32602 error
   // envelope (review pass 4, run against a stack of this branch), rather than the SDK's isError result.
   let away = false, slowRenewMs = 0, rpcEnvelopeForMissingTool = false;
+  const listed = new Map(); // ticket → the claims list_claims answers (review pass 5's lapse check)
   const claimsBrain = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
     if (away) return new Response("Bad Gateway", { status: 502 });
     if (slowRenewMs) await sleep(slowRenewMs); // a brain slow to answer: a renewal in the foreground would hold the hook
@@ -3102,6 +3103,8 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (!surface.includes(name)) return Response.json(envelope(rpcEnvelopeForMissingTool ? { error: { code: -32602, message: `Tool ${name} not found` } } : { result: { isError: true, content: [{ type: "text", text: `MCP error -32602: Tool ${name} not found` }] } }));
     const err = (text, sc) => Response.json(envelope({ result: { isError: true, content: [{ type: "text", text }], structuredContent: { retryable: false, ...sc, text } } }));
     if (name === "capture_thought") return Response.json(envelope({ result: { content: [{ type: "text", text: `Captured as idea — id ${uuid(8800)}` }], structuredContent: { id: uuid(8800) } } }));
+    // list_claims as the real server answers it: { claims: [{ id, piece, holder, claimedAt, expiresAt, state }], truncated }.
+    if (name === "list_claims") { const value = { claims: listed.get(String(args.ticket)) ?? [], truncated: false }; return Response.json(envelope({ result: { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value } })); }
     const c = claims.get(args.id);
     if (!c) return err(`Refused: no claim ${args.id}.`, { code: "CLAIM_NOT_FOUND", id: args.id });
     if (key !== "claim-key") return err(`Refused: claim ${args.id} is held by claude-code, not by this key with this token.`, { code: "CLAIM_NOT_YOURS", id: args.id, holder: "claude-code", forced: false, ownKey: false });
@@ -3720,6 +3723,82 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   await spawnScript(["--renew-claims", "--cwd", SUB], { env: { OB1_SESSION_CAPTURE_CONFIG: CLAIM_CFG } });
   assert(/claims: kept: .* — the claim key cannot call renew_claim/.test(logText().split("\n").filter(Boolean).pop()), "a JSON-RPC -32602 'Tool not found' envelope reads as a key that cannot renew");
   rpcEnvelopeForMissingTool = false;
+  clearClaims();
+  writeFileSync(CLAIM_CFG, JSON.stringify({ url: CLAIMS_URL, connector: "open-brain", key: "cap-key", claim_key: "claim-key" }), { mode: 0o600 });
+
+  // The agent's own claim calls, seen by the claims hook's PostToolUse (review pass 5, against a real server).
+  const agentCall = (tool, input, text) => claimsHook({ tool_name: `mcp__open-brain__${tool}`, tool_input: input, tool_response: [{ type: "text", text }] });
+  putClaim(60);
+  putClaim(61, { piece: "PR 2" });
+  age(60, 0); age(61, 0); // not due: only the agent's call can mark them
+  calls.length = 0;
+  await agentCall("renew_claim", { id: C(60), token: tok(60) }, `Refused: SMD-9001 is covered by a live claim: SMD-9001 piece "PR 2" by claude-code (claim ${C(61)}) since 2026-11-01T00:00:00.000Z. Your claim lapsed before another covered its work.`);
+  const agentBlocked = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(60)}.blocked.json`), "utf8")); } catch { return null; } })();
+  assert(agentBlocked?.blocked?.code === "WORK_CLAIMED" && !JSON.stringify(agentBlocked).includes("wc_") && !renews().length,
+    "the agent's own renew_claim answered WORK_CLAIMED leaves a .blocked.json, as the hook's renewal would — else its next renewal revives the claim silently");
+  assert(new RegExp(`claims: blocked: .*the agent's own renew_claim met WORK_CLAIMED.*The claim in the way, ${C(61)}, is this worktree's own: release the older claim`).test(logText()),
+    "…and when the claim in the way is this worktree's own piece, the line says to release the older claim");
+  clearClaims();
+  putClaim(68);
+  age(68, 0);
+  await agentCall("renew_claim", { id: C(68), token: tok(7) }, "Refused: SMD-9001 is covered by a live claim: …");
+  await agentCall("renew_claim", { id: C(62), token: tok(62) }, "Refused: SMD-9001 is covered by a live claim: …");
+  assert(!existsSync(join(CLAIMS, `${C(68)}.blocked.json`)) && !existsSync(join(CLAIMS, `${C(62)}.blocked.json`)), "a call whose token no token file holds marks nothing — not even the file its id names");
+  clearClaims();
+  // The agent's successful renewal is recorded, so the hook's record never reads a lapse the agent prevented.
+  putClaim(62);
+  age(62, 0);
+  await agentCall("renew_claim", { id: C(62), token: tok(62) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(62)}).`);
+  assert(stateOf(62)?.expiresAt === "2099-01-01T00:00:00.000Z", "an agent's renewal seen by the claims hook updates the expiry the hook records");
+  clearClaims();
+
+  // A claim the hook's record shows lapsed: before reviving it, the claims made since are listed (review pass 5:
+  // the hook's renewal at a resuming prompt erased the lapse the rule's check looks for).
+  const past = new Date(Date.now() - 3_600_000).toISOString();
+  const lapsedRecord = (n) => { mkdirSync(join(STATE, "claims"), { recursive: true }); writeFileSync(join(STATE, "claims", `${C(n)}.json`), JSON.stringify({ at: Date.now() - 2 * 3_600_000, expiresAt: past })); };
+  const listEntry = (n, extra) => ({ id: C(n), piece: null, holder: "claude-code", claimedAt: new Date(Date.now() - 86_400_000).toISOString(), expiresAt: past, state: "lapsed", ...extra });
+  putClaim(63);
+  lapsedRecord(63);
+  listed.set("SMD-9001", [listEntry(63), { id: uuid(8999), piece: "PR 2", holder: "codex", claimedAt: new Date(Date.now() - 1_800_000).toISOString(), expiresAt: past, state: "released" }]);
+  calls.length = 0;
+  await claimsHook();
+  const revived = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(63)}.blocked.json`), "utf8")); } catch { return null; } })();
+  assert(!renews().length && calls.some((c) => c.name === "list_claims" && c.args.include_ended === true) && revived?.blocked?.code === "CLAIMED_WHILE_LAPSED" && /codex claimed SMD-9001 PR 2 at .* \(now released\)/.test(revived.blocked.message),
+    "a claim the hook knows lapsed, with another claim made on its work since, is not revived: it gets a marker naming who claimed what and when");
+  clearClaims();
+  putClaim(64);
+  lapsedRecord(64);
+  listed.set("SMD-9001", [listEntry(64), { id: uuid(8998), piece: null, holder: "codex", claimedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), expiresAt: past, state: "released" }]);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && !existsSync(join(CLAIMS, `${C(64)}.blocked.json`)), "…lapsed with nothing claimed on its work since, it is renewed");
+  clearClaims();
+  putClaim(69, { piece: "PR 1" });
+  lapsedRecord(69);
+  listed.set("SMD-9001", [listEntry(69, { piece: "PR 1" }), { id: uuid(8997), piece: "PR 2", holder: "codex", claimedAt: new Date(Date.now() - 1_800_000).toISOString(), expiresAt: past, state: "live" }]);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && !existsSync(join(CLAIMS, `${C(69)}.blocked.json`)), "…and one whose since-claims are on other pieces only is renewed: their work doesn't overlap");
+  clearClaims();
+  putClaim(65);
+  lapsedRecord(65);
+  listed.set("SMD-9001", [listEntry(65, { state: "live", expiresAt: new Date(Date.now() + 3_600_000).toISOString() })]);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1, "…and one the agent renewed meanwhile (listed live) is renewed");
+  clearClaims();
+  putClaim(66, { ticket: undefined });
+  lapsedRecord(66);
+  calls.length = 0;
+  await claimsHook();
+  assert(renews().length === 1 && /its token file names no ticket, so claims made while it lapsed at .* were not checked/.test(logText().split("\n").filter(Boolean).pop()), "…one whose token file names no ticket is renewed, the line saying the check was not made");
+  clearClaims();
+  putClaim(67);
+  lapsedRecord(67);
+  listed.set("SMD-9001", []);
+  calls.length = 0;
+  await claimsHook();
+  assert(!renews().length && /kept: .* list_claims for SMD-9001 doesn't list it/.test(logText().split("\n").filter(Boolean).pop()), "…and one list_claims doesn't list is kept, not renewed blind");
   clearClaims();
   claimsBrain.stop(true);
 }
