@@ -14,7 +14,7 @@ This hook runs at a session's checkpoints — before each compaction (Claude Cod
 
 **An episode is a piece of the session's work (SMD-2013).** A two-day session moves through several tickets, and one summary of all of them named the first task, mixed every task's sources and answered no search well. So an episode ends, and the next begins at the next ask, at a compaction (the harness's summary line), when the session is on another branch at that ask — or, with no branch to go by, in a directory inside none the episode ran in — or at an ask naming a ticket none of the episode's asks, its branch or its directory named (on a branch that names a ticket, a mention does not end the episode; only an ask followed by the move to the new ticket's branch does). Not a move: a `cd` within the checkout, or out of it with the branch unchanged (the harness records the shell's directory per command), a move the session came back from before the next ask, a detached `HEAD` mid-rebase, and a move to a branch or directory that names a ticket the episode is about — its opening ask's, its first ask's, its home's — since the branch is made a few lines after the ask that names its ticket. A ticket key in an ask is one of the teams the session's branches or directories have named so far, in any case — `smd-1234` under an `smd-` branch — so `node-22` and `AES-256` are no tickets; before any team is known, a key in capitals counts. Work between a boundary and the next ask — the assistant finishing after a compaction, or after the move — belongs to the ask that caused it; the move itself is the next episode's, so an ended episode keeps its branch, directory and ticket. Boundaries are fixed once written: appending to the transcript never moves an earlier one, so an episode's ordinal, text and fingerprint stand. Each episode chains under its own key — the first under the session's id, so a session of one episode is captured exactly as before — and a re-ending supersedes only the episode that changed. A run's child posts every episode the run prepared; the five per run bound what waited from before. `--dry-run` prints the segmentation before the texts, so you can see where the boundaries fall before installing anything. A Stop hook's interval counts the session's last capture across its episodes, so a new episode inside the interval is not captured at once.
 
-The transcript itself is never sent. Nothing is read from the brain. The key the hook holds can add a thought and do nothing else.
+The transcript itself is never sent. Nothing is read from the brain. The key the hook holds can add a thought and do nothing else. A brain given a claim key (step 2) also has the hook renew the work claims a worktree keeps tokens for (SMD-3602). That key is the agent's own and writes, so it is opt-in. Keep it in its own `claim_key_file`, so the config file itself still holds only the capture key.
 
 ## What Is Sent — Exactly
 
@@ -87,6 +87,7 @@ FROM YOUR OPEN BRAIN SETUP
 
 GENERATED DURING SETUP
   Capture-scoped key (step 1; shown once by keygen):              ____________
+  Claim key file (step 2, optional; a copy of your connector's key, mode 600):  ____________
   Config file (step 2):   ~/.config/open-brain/session-capture.json
   State directory:        ~/.local/state/open-brain/session-capture/
 
@@ -163,6 +164,71 @@ Then paste the hook `--print-hook claude-code --fan-out` prints (step 4): an asy
 - **In order, one at a time.** Each receiving brain has its own queue (`writes/pending/` under its state directory) and one drain at a time. A copy the brain does not take now — it is away, its store is down, the write key cannot write — stops the queue, so nothing made after it lands before it; the rest wait, and land in order at the next write, at a session event (at most every five minutes while the queue is held, and always at a session's end), or by hand: `bun session-capture.mjs --drain-writes --brain <name>`. A copy still held after a week is given up, as the capture queue gives a payload up. One drain runs at a time: its lock is renewed before each copy, and only a dead holder's, or one silent for fifteen minutes (a copy's longest is five 90-second tries), is taken back. The one copy such a stalled holder had in flight is the only one two drains can both post, and its key lands it as one thought.
 - **What is skipped.** An edit or delete of a thought the brain never got (made before the copying began, or by the brain's own writers) is skipped and logged. A pointer it does not know — a `derived_from` or `supersedes` naming such a thought, a board-sync row's id, or one that would close a loop there — is dropped and the write sent again, and so is metadata its server refuses. A fault on the brain (its REST core or store restarting) holds the queue, as the brain being away does. A capture whose text that brain already holds lands on that thought, now named by the first brain's id too, and the log says so. A copy refused for good — an input the brain's server cannot validate among them — goes to `writes/dead/`, pruned after thirty days. The brain's log names each copy by its tool and id, never its text.
 - `--check` names the connector and where its writes go, and for each receiving brain that its write key can capture, edit and delete and that its server keeps a `client_key` (a server from before migration 112 fails it), with what its queue holds and how old its oldest copy is.
+
+**Renewing work claims** (SMD-3602): an agent claims its ticket on the brain before it creates the branch (`claim_work`, SMD-3598), on a lease of a day. It keeps the token it gets back in `.work-claims/<claim id>.json` at its worktree's root, mode 600, in a directory of mode 700 holding a `.gitignore` of `*`:
+
+```json
+{ "id": "<the claim id>", "token": "wc_…", "ticket": "SMD-1234", "piece": "PR 2", "lease_seconds": 86400, "server": "open-brain" }
+```
+
+- **The fields.** `id` and `token` are required, and the file is named by the id. `ticket` and `piece` name the work in the log.
+  - `lease_seconds` is the lease each renewal sets: 60 to 604800, or the server's four hours if absent. The rule has an agent claim for a day and set a week once its PR opens. A renewal without it would cut the lease back to four hours.
+  - `server` is the MCP server the claim was made through, and it is required. A claim is renewed only on the brain whose `connector` is that name and that has a claim key, one brain or several, so a token never goes to a brain that didn't issue it. A file without one is skipped.
+- **Keeping it out of git.** The directory's own `.gitignore` keeps it out of git on any branch and in any repo. `.work-claims` in the repo's `.gitignore` does too. The token proves the claim to anyone holding your key.
+
+Give the brain your agents claim through the agent's key, as `claim_key_file` (or `claim_key`): the very key the agent claims with. Only that brain needs one, stable in this repo's setup, not its canary. A claim belongs to the key's agent id, and only that key can renew it. A second key can't share the id: the server takes one key per name in `MCP_ACCESS_KEYS`, and its preflight fails, keeping the REST core down, when a name appears twice. The claims hook needs the capture config of step 1 as well; it adds to it and doesn't stand alone.
+
+For Claude Code, the key is the `x-brain-key` of its brain connector. Copy it into the file without it ever reaching the terminal (a full path: `~` is not expanded in the config):
+
+```bash
+umask 077; claude mcp get open-brain | sed -n 's/^.*x-brain-key:[[:space:]]*//p' > /home/you/.config/open-brain/stable-claims.key
+test -s /home/you/.config/open-brain/stable-claims.key && echo written
+```
+
+A connector that carries its key on its url (`?key=`) has no header, so the file comes out empty: put the raw key you kept at keygen time in it instead. Keep the file mode 600; `--check` warns about one others can read.
+
+If that key is your operator key, which a default install hands its coding client (SETUP.md classifies it `operator`), first give sessions an agent key of their own, as AGENTS.md's "Claim your work" says under **Keys**. The claim key then holds no operator power. The operator key can force-release any claim, and it sits in a file read at every tool call. A Codex session on a different key can't be renewed through this brain's one claim key; its agent renews by the rule.
+
+```json
+{
+  "brains": [
+    { "name": "stable", "url": "http://127.0.0.1:8010/mcp", "key_file": "/home/you/.config/open-brain/stable.key",
+      "connector": "open-brain", "claim_key_file": "/home/you/.config/open-brain/stable-claims.key" }
+  ]
+}
+```
+
+The one-brain shape takes `connector` and a claim key too:
+
+```json
+{ "url": "http://127.0.0.1:8010/mcp", "key_file": "/home/you/.config/open-brain/capture.key",
+  "connector": "open-brain", "claim_key_file": "/home/you/.config/open-brain/stable-claims.key" }
+```
+
+`OB1_CLAIM_KEY` in the environment wins over the one-brain file's claim key. The brain `OB1_BRAIN_URL` names has no connector, so it renews no claims: no token goes to it, a claim key in the file goes unused, and `OB1_CLAIM_KEY` beside it is unused. `--check` warns about each. A claim key that can't be read — a missing or empty file, a `~` path — turns claims off for that brain and leaves the capture running; `--check` fails with the reason, and a checkpoint logs it.
+
+- **When it renews.**
+  - **At a compaction and at a session's end:** each claim the worktree holds a token for, unless it was attempted within the last minute.
+  - **On a Stop hook's turn:** only the claims that are due.
+  - **With the claims hook pasted (step 4):** every tool call and every prompt renews what is due.
+
+  A claim is due a quarter of its lease after the last attempt, but never less than a minute or more than an hour after it: hourly on four hours, a day or a week. A lease shorter than four minutes is renewed every minute, so it has less than three quarters of its time to spare at each renewal; a 60-second lease lapses for an instant before each one. A session waiting overnight renews nothing, and a claim on a day's lease outlasts the night.
+- **Where it looks.** The session's working directory, symlinks resolved, up to the nearest directory with a `.git`: a checkout's directory, a worktree's file, a submodule's file. A session must run inside its worktree: one whose working directory is the main checkout, editing a worktree by path, renews the main checkout's claims and not the worktree's.
+- **It never claims and never releases.** Claiming stays the agent's explicit step, since the hook can't tell a branch for a ticket from a scratch branch. A session can end with its PR still open, so a claim ends when the agent releases it at merge or abandon, or lapses when nothing renews it. The agent renews too; the hook is the backstop.
+- **When the claim has ended,** released by its holder, an operator, or a takeover after it lapsed, the token file becomes `<id>.ended.json`. It keeps the work, the code and the brain's words (`lapsed and was taken over by …: stop work on it`) and drops the token.
+- **Anything else keeps the file**, and the next due event tries again. Each case is a `claims: kept:` line in the log, the code first:
+  - the brain away, or its agent registry away (`CLAIM_UNATTRIBUTED`);
+  - a token the brain does not match;
+  - a claim key that is not the holder's;
+  - a claim this brain does not have (made through another server than the file names);
+- **When another claim covers its work** (`WORK_CLAIMED`: the claim lapsed, and another claim, by any key including your own, now covers overlapping work), the hook keeps the token and writes `<id>.blocked.json` beside it, with the code and the brain's words. Migration 115 would renew the claim once that other claim ends, silently, though another agent may have built part of the work meanwhile. So the hook renews it no more until the agent deletes the marker, which the rule has it do on the user's decision. A checkpoint logs each claim it holds back. The marker is written whenever the token file still holds the token renewed, even if the agent rewrote the file during the call.
+- **The agent's own claim calls.** With the claims hook pasted, the hook reads the result of the agent's own `renew_claim`, or `claim_work` with a token, through the connector its token file names. A `WORK_CLAIMED` there writes the same `<id>.blocked.json`, so the agent's next renewal doesn't revive the claim silently once the covering claim ends. A renewal there records the new expiry, so the hook's record never reads a lapse the agent prevented. If the claim in the way is this worktree's own piece, the line says to release the older claim instead.
+- **Before reviving a claim it knows lapsed** (its recorded expiry past), the hook lists the ticket's claims, ended ones included. A claim on overlapping work made since the lapse means another agent may have built part of it. Then the claim is not renewed, and a `.blocked.json` names who claimed what and when. With none, or with the claim listed live (the agent renewed it), it is renewed. A token file with no `ticket` is renewed unchecked, and the line says so. A claim `list_claims` doesn't list is kept, not renewed blind.
+- **What the marker still can't see.** An agent's own renewal after a long absence, with no claims hook to see it, revives a lapsed claim without a word: `renew_claim` doesn't say a claim had lapsed. That is SMD-3654's to fix, on the server. Until then the rule has an agent list the ticket's claims, lapsed ones included, before renewing a claim that may have lapsed.
+- **What it refuses to read.** These are skipped and named at a checkpoint: a file not named `<claim id>.json`, one whose `id` its name does not match, one without a `server`, a token file that is a symlink or a second link to another file (a hardlink), a `.work-claims` that is a symlink, and a file or directory it cannot read. The hook writes `.ended.json` to a fresh file, created exclusively, and renames it into place. A symlink planted at either name is therefore replaced or refused, never followed.
+- **The log** names each claim by its work and id, never its token; a token-shaped run in a brain's words, an error, a ticket or a file name is masked. The hook owns the token files. A file or directory others can read, as a Write tool leaves a file, is closed to 600 or 700 through a handle opened without following links — and a file only when it is still the one the claim was read from, one link and the same inode — and the line names which.
+- **Two at once.** Each claim is stamped before its call, so within one run, and for a run that starts after the stamp, a due claim is renewed once. Hooks fired in the same instant can both renew it, which costs one extra call.
+- **By hand.** `bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]` renews a worktree's claims now, or the one named, and prints what happened, terminal or not. It exits 1 when one was kept, blocked or skipped, or a `--claim` id has a bad token file or none, and 0 when each was renewed or found ended. A `--claim` that is no claim id is refused, exit 2, without being shown, so a token given there by mistake reaches neither the terminal nor the log. `--check` says where the claim key came from, that it can call `renew_claim`, and for which connector; it fails a claim key on a brain with no `connector`, which could renew nothing.
 
 To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
 
@@ -250,6 +316,22 @@ bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code --
 
 It prints a `PostToolUse` entry with `"matcher": "^mcp__open-brain__(capture_thought|update_thought|delete_thought)$"` (the config's connector) and `"async": true`, to paste beside the others. Anchored, because the harness reads a matcher holding any character past letters, digits and `_-|,` as an unanchored pattern.
 
+**The claims hook** (SMD-3602, Claude Code only), for a config that gives a brain a `claim_key` (step 2):
+
+```bash
+bun recipes/session-capture-hook/session-capture.mjs --print-hook claude-code --claims
+```
+
+It prints a `PostToolUse` entry on every tool (`"matcher": "*"`) and a `UserPromptSubmit` entry, both `"async": true` and both running the script with `--claims`. They renew what is due and capture and copy nothing. The flag keeps them apart from the fan-out's `PostToolUse`, which would otherwise copy a write twice. On a session hook's own event a command given `--claims` still captures, then renews. A run with nothing due reads a directory and exits.
+
+**Merge, don't paste over.** The printed object is a whole `{"hooks": {…}}`. Settings that already hold the session hooks (and the fan-out's) take its entries inside their existing `hooks` object:
+- append its `PostToolUse` group to the `PostToolUse` array, beside the fan-out's;
+- add its `UserPromptSubmit` group: as a new key, or appended to an existing `UserPromptSubmit` array.
+
+A second top-level `"hooks"` key would leave one of the two sets silently unread. `/hooks` in Claude Code lists what it loaded. The same applies to the fan-out's hook.
+
+Codex has no async hook. Its agent renews with `renew_claim` itself, and its session hook renews once, at SessionEnd, or on each due turn with `--print-hook codex --event Stop --min-interval <minutes>` pasted.
+
 **The time budget.** Claude Code gives SessionEnd hooks 1.5 seconds between them by default and raises that to the hook's own `timeout` (at most 60); Codex allows 1 second, at most 3. PreCompact shares no budget — a command hook's default of 600 seconds stands — but a compaction waits on the hook, so it is printed with the same `"timeout": 10`. The transcript file is written asynchronously and may lag the conversation by a message or two when a checkpoint fires; the session's end has them all. The hook does its local work — read, summarise, scan — in the foreground (about 50 ms on a 20 MB transcript) and hands the network call to a detached child, then exits 0. The child posts, records the new thought's id, and writes one line to the log.
 
 ### 5. End a session and look
@@ -302,6 +384,17 @@ Solution: find the episode's `captured` lines in the hook's log (`grep 'session=
 
 Once the key resolves, its next summaries supersede each other again, though the first after the fix still stands beside the last one before it. To link two that stand side by side, use a write key: `update_thought` with `id` the newer summary and `supersedes` the older — the `id=` values of that session's `captured` lines. A link between two of this key's own summaries takes neither (migration 092), so the hook's next summary still supersedes the newer one — unless the older was written while the registry could not attribute the key (its capture row has no agent id), or is, or later becomes, taken by another key: that one counts as another's, the link takes the newer, and the hook's pointer onto the newer lapses.
 
+**Issue: a work claim lapsed though the hook is installed**
+Solution: from a terminal in that worktree, `bun session-capture.mjs --renew-claims` renews now and prints the reason; `grep 'claims:' <state>/log` shows what the hook said before.
+- `no brain … has connector "<server>"`: the token file's `server` matches no brain's `connector`. Set the connector your agents claim through on that brain.
+- `brain "<name>" (connector …) has no claim_key`, or `claims are off on brain …`: give that brain a readable claim key.
+- `OB1_BRAIN_URL is set, and its brain renews no claims`: unset it in the hook's environment.
+- `kept: … CLAIM_NOT_YOURS … (claim_key must be the very key …)`: the claim key isn't the key the agent claimed with. A rotated connector key, or a Codex session on its own key.
+- `blocked: …`: another claim covered the work after this one lapsed, or was made on it while it was lapsed. The agent reads `<id>.blocked.json`, tells you, and deletes it once you've decided.
+- `skipped …: no "server"` or another skip: the token file isn't in the rule's shape.
+- No `claims:` line at all: the session's working directory was outside the worktree (the main checkout, editing the worktree by path), so the hook looked in the wrong `.work-claims/`. Or nothing fired: the claims hook isn't pasted, and the session neither compacted nor ended within the lease.
+- `--check` should show a `claim key (…): ok for connector …` line for that brain.
+
 **Issue: a search result reads `Checkpoint: compacted at … continuing`**
 Solution: that summary was captured before a compaction, of a session still running; its next checkpoint or its end supersedes it, and search marks the superseded hit. Nothing to do.
 
@@ -321,4 +414,16 @@ Solution: Codex allows SessionEnd hooks at most 3 seconds; the foreground finish
 bun recipes/session-capture-hook/test-session-capture.mjs   # no real brain or model: synthetic transcripts, a fake MCP endpoint and a fake model endpoint
 ```
 
-Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the redaction (SMD-2127) — a SINGLE-LINE secret blanked (the value's span, quotes of every kind, three rules at one site as one marker, the fingerprint the blanked text's, provenance untouched, the marker in what reaches the endpoint and the key not, `redactions=N` in the log) and a MULTI-LINE key blob refused (PGP armor, a footer-less body, a name-split block, a word-shaped line, found on the raw sources), a misspelt `OB1_CAPTURE_ON_SECRET` refused on every path, `metadata.redactions` sent as the count and dropped-and-reposted when the server refuses the key (SMD-2168), and under `refuse` the refusal as it was — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, a session's end stepping aside for its checkpoint's child and posted by it once the checkpoint has landed, superseding it, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end; the segmenter's boundaries rule by rule and a session of four episodes — two compactions, a move, three tickets — captured one thought each with its own provenance, a re-ending superseding only the episode that changed, a secret in one episode refusing that episode alone, the newest five of seven handed to the run's child and the rest to a later run, the segmentation `--dry-run` prints (SMD-2013); and the opt-in model summary (SMD-2014) — the egress rule (local declared, never guessed; deny/allow/off), the config knobs read from the file and the environment, `modelSummary` returning the model's text on the happy path and the derived text on every fallback (off, unconfigured, egress-refused before anything is sent, a secret in the model's own words, an empty answer, an HTTP error, a timeout), `prepare` attaching the assistant excerpt only in model mode, and the end-to-end child posting the model's text with `metadata.summary_model` while `source` stays the harness. The server's own `capture_thought` `metadata` argument — a caller key stored, a reserved key refused — is covered by `server-portable/test-e2e-sql.ts`. The write fan-out (SMD-3314) runs against a second fake brain that keeps `client_key` as the server since migration 112 does: what is copied and what is not, every result shape, the order under a brain away or busy, the skipped, dropped and kept cases, `--check`, `--print-hook --fan-out` and the detached child. It runs in CI's repo-consistency job.
+Both parsers, the summary's shape and caps, every secret pattern's probe and the clean probes (uuids, digests in their spellings, paths, URLs, data URIs, identifiers, prose) with each threshold pinned alone, the redaction (SMD-2127) — a SINGLE-LINE secret blanked (the value's span, quotes of every kind, three rules at one site as one marker, the fingerprint the blanked text's, provenance untouched, the marker in what reaches the endpoint and the key not, `redactions=N` in the log) and a MULTI-LINE key blob refused (PGP armor, a footer-less body, a name-split block, a word-shaped line, found on the raw sources), a misspelt `OB1_CAPTURE_ON_SECRET` refused on every path, `metadata.redactions` sent as the count and dropped-and-reposted when the server refuses the key (SMD-2168), and under `refuse` the refusal as it was — a key past a prompt's clip included — the payload, posting, supersession, refused and unreachable pointers, the queue under two children and after a dead one, a session's end stepping aside for its checkpoint's child and posted by it once the checkpoint has landed, superseding it, obsolete and landed payloads, wrong urls and busy endpoints, the SSE shapes, the detached hand-off inside the budget against a slow endpoint, `--check`, `--dry-run`, `--print-hook` (the default pair, one event alone, Codex refused a compaction hook, an unknown event refused), a compaction checkpoint's line and its supersession by the session's end; the segmenter's boundaries rule by rule and a session of four episodes — two compactions, a move, three tickets — captured one thought each with its own provenance, a re-ending superseding only the episode that changed, a secret in one episode refusing that episode alone, the newest five of seven handed to the run's child and the rest to a later run, the segmentation `--dry-run` prints (SMD-2013); and the opt-in model summary (SMD-2014) — the egress rule (local declared, never guessed; deny/allow/off), the config knobs read from the file and the environment, `modelSummary` returning the model's text on the happy path and the derived text on every fallback (off, unconfigured, egress-refused before anything is sent, a secret in the model's own words, an empty answer, an HTTP error, a timeout), `prepare` attaching the assistant excerpt only in model mode, and the end-to-end child posting the model's text with `metadata.summary_model` while `source` stays the harness. The server's own `capture_thought` `metadata` argument — a caller key stored, a reserved key refused — is covered by `server-portable/test-e2e-sql.ts`. The write fan-out (SMD-3314) runs against a second fake brain that keeps `client_key` as the server since migration 112 does: what is copied and what is not, every result shape, the order under a brain away or busy, the skipped, dropped and kept cases, `--check`, `--print-hook --fan-out` and the detached child. The claims renewal (SMD-3602) runs against a fake brain answering `renew_claim` as migration 115 does. It covers:
+
+- the worktree walk (a worktree nested in a checkout is its own; a symlinked directory resolves), and the token-file reads, names, ids and unreadable files;
+- the quarter-lease interval, a file's own lease, and two runs at once in one process renewing once;
+- checkpoints, Stop turns when due and not, events the hook does not capture on, and `--claims` on a session hook;
+- released and taken-over claims ending their files without the token, and a planted symlink replaced rather than followed;
+- `WORK_CLAIMED` writing `<id>.blocked.json` and holding renewals until it is deleted, from the hook's renewal or the agent's own call (an own-piece claim named); the agent's renewal recorded; a claim the hook knows lapsed checked against the claims made since (blocked, renewed, renewed when live, unchecked without a ticket, kept when unlisted); each kept case (`CLAIM_UNATTRIBUTED`, `REFUSED_CLAIM_INPUT`, a brain echoing the token, masked, a JSON-RPC -32602 envelope read as a key that cannot renew), an ended file that cannot be rewritten, and symlinked token files and directories skipped;
+- a token file or directory others can read (644, 640, 755) closed to 600 or 700 and named, a file or the directory swapped for a symlink mid-run left alone, a FIFO swapped in mid-run not holding the run, a symlink at the ended file's temporary name refused, a token file that is a hardlink skipped and one swapped in mid-run left alone, and no claim key or no worktree;
+- the brain chosen by `server` against each brain's `connector`, one brain or several: a file with no `server`, one naming another brain's or an unkeyed brain's connector, and `OB1_BRAIN_URL`'s brain renewing nothing;
+- the detached child at a tool and at a checkpoint, `--renew-claims` and `--claim` in either case and for an id with a bad file or none, `OB1_CLAIM_KEY` and its warnings, a `--claim` that is no uuid refused unshown, the claims hook under a mistyped `OB1_CAPTURE_ON_SECRET`, `--print-hook --claims`, `--check` (the key's source and connector, a key with no connector failed, a key file others can read, one `OB1_BRAIN_URL` leaves unused), a missing, `~` or empty claim key turning claims off while the capture runs, and the config's refusals;
+- tokens masked in a brain's words, as markdown escapes them, in an error the call throws on, and in a ticket.
+
+It runs in CI's repo-consistency job.

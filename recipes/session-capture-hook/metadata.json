@@ -1,24 +1,24 @@
 {
   "name": "Session Capture Hook",
-  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan that blanks a single-line secret and refuses a multi-line key blob. The summary is derived by default; an opt-in `summary: \"model\"` has a local model — through the egress gate — rewrite it into what was decided, falling back to the derived text. With several brains it can also copy each write made through one connector to the others (an async PostToolUse hook, each copy under the first brain's id as its client_key, in order). Off until you paste the hooks it prints.",
+  "description": "A session hook for Claude Code and Codex that captures one summary thought per episode of a session into Open Brain — a piece of work, cut at compactions, moves to another branch or checkout, and new tickets — at each compaction and at session end: what was asked, what came out, what changed, with the thoughts that piece retrieved as its provenance, through a capture-only key, after a secret scan that blanks a single-line secret and refuses a multi-line key blob. The summary is derived by default; an opt-in `summary: \"model\"` has a local model — through the egress gate — rewrite it into what was decided, falling back to the derived text. With several brains it can also copy each write made through one connector to the others (an async PostToolUse hook, each copy under the first brain's id as its client_key, in order). Through a claim key it renews the work claims whose tokens a session's worktree keeps in `.work-claims/`, at each checkpoint and, with the claims hook, at most hourly while the session works; it never claims or releases. Off until you paste the hooks it prints.",
   "category": "recipes",
   "author": {
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.6.0",
+  "version": "1.7.0",
   "requires": {
     "open_brain": true,
     "services": [],
     "tools": ["Claude Code or Codex CLI", "Bun 1.4+ or Node.js 18+"],
     "env": {
-      "optional": ["OB1_SESSION_CAPTURE_CONFIG", "OB1_SESSION_CAPTURE_STATE", "OB1_BRAIN_URL", "OB1_CAPTURE_KEY", "OB1_SESSION_CAPTURE_SYNC", "OB1_CAPTURE_ON_SECRET", "OB1_SESSION_CAPTURE_SUMMARY", "OB1_SESSION_CAPTURE_MODEL_URL", "OB1_SESSION_CAPTURE_MODEL", "OB1_SESSION_CAPTURE_MODEL_KEY", "OB1_SESSION_CAPTURE_MODEL_TIMEOUT", "OB1_EGRESS_POLICY"]
+      "optional": ["OB1_SESSION_CAPTURE_CONFIG", "OB1_SESSION_CAPTURE_STATE", "OB1_BRAIN_URL", "OB1_CAPTURE_KEY", "OB1_CLAIM_KEY", "OB1_SESSION_CAPTURE_SYNC", "OB1_CAPTURE_ON_SECRET", "OB1_SESSION_CAPTURE_SUMMARY", "OB1_SESSION_CAPTURE_MODEL_URL", "OB1_SESSION_CAPTURE_MODEL", "OB1_SESSION_CAPTURE_MODEL_KEY", "OB1_SESSION_CAPTURE_MODEL_TIMEOUT", "OB1_EGRESS_POLICY"]
     }
   },
   "requires_skills": ["session-summary"],
-  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress", "several-brains", "write-fan-out"],
+  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress", "several-brains", "write-fan-out", "work-claims"],
   "difficulty": "beginner",
   "estimated_time": "10 minutes",
   "created": "2026-09-22",
-  "updated": "2026-10-25"
+  "updated": "2026-11-01"
 }
