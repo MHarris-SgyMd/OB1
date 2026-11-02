@@ -553,6 +553,12 @@
  *      runner's egress step failed at random); `grep … > /dev/null` reads to
  *      the end. Its probe pins what it refuses and passes, and it fails if
  *      it stops listing db/with-postgres.sh or .github/ci/held-cases.sh
+ *  47. every job of every workflow under .github/workflows/ sets
+ *      timeout-minutes, a whole number from 1 to 60: GitHub's default is 360,
+ *      and a hung job holds the required "Fork Checks passed" pending that
+ *      long (SMD-2094). A job that calls a reusable workflow is passed over,
+ *      since GitHub takes no limit there. Its probe pins what it refuses and
+ *      passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
@@ -10069,6 +10075,57 @@ function checkNoPipeIntoGrepQ() {
   }
 }
 checkNoPipeIntoGrepQ();
+
+// ── 47: every workflow job has a time limit (SMD-2094) ──
+/**
+ * 47: a job with no `timeout-minutes` runs to GitHub's default of 360 minutes. A hung lease, deadlock or container
+ * wait in one held "Fork Checks passed", the one required check, pending for six hours, and nothing said so, since
+ * pending reads as running (SMD-2094). So every job of every workflow sets one, a whole number from 1 to 60 that it
+ * states outright: no expression, which this check cannot read, and none over an hour, which no job here needs
+ * (release's 60 is the most). A job that calls a reusable workflow (`uses:`) is passed over, since GitHub takes no
+ * `timeout-minutes` there; the workflow it calls is read as any other. Its probe pins what it refuses and passes.
+ */
+function jobTimeoutProblems(file: string, text: string): [string, string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[file, `does not parse: ${(e as Error).message} — check 47 cannot read its jobs' time limits (SMD-2094)`]]; }
+  const jobs = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as { jobs?: unknown }).jobs : null;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return [[file, "has no `jobs:` map check 47 can read (SMD-2094)"]];
+  const problems: [string, string][] = [];
+  for (const [key, job] of Object.entries(jobs as Record<string, unknown>)) {
+    if (!job || typeof job !== "object" || "uses" in job) continue;
+    const limit = (job as { "timeout-minutes"?: unknown })["timeout-minutes"];
+    if (limit === undefined) problems.push([file, `job ${key} sets no timeout-minutes, so a hang in it runs to GitHub's 360 and holds the required check pending that long — give it a whole number of minutes, at least three times its longest run (check 47, SMD-2094)`]);
+    else if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 60) problems.push([file, `job ${key} sets timeout-minutes ${JSON.stringify(limit)} — a whole number of minutes from 1 to 60, written out, not an expression (check 47, SMD-2094)`]);
+  }
+  return problems;
+}
+function checkJobTimeouts() {
+  const job = (body: string) => `name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n${body}    steps:\n      - run: echo hi\n`;
+  // [why, text, what each problem it reports says]: none for a pass, one phrase per job refused.
+  const NONE = "sets no timeout-minutes", RANGE = "a whole number of minutes from 1 to 60";
+  const cases: [string, string, string[]][] = [
+    ["a job with a limit", job("    timeout-minutes: 15\n"), []],
+    ["the most a job may take", job("    timeout-minutes: 60\n"), []],
+    ["a job calling a reusable workflow, which takes no limit", "name: probe\non: push\njobs:\n  b:\n    uses: ./.github/workflows/other.yml\n", []],
+    ["a step's limit beside the job's", job("    timeout-minutes: 5\n").replace("      - run: echo hi\n", "      - run: echo hi\n        timeout-minutes: 2\n"), []],
+    ["a job with no limit", job(""), [NONE]],
+    ["a step's limit alone", job("").replace("      - run: echo hi\n", "      - run: echo hi\n        timeout-minutes: 2\n"), [NONE]],
+    ["a limit of 0", job("    timeout-minutes: 0\n"), [RANGE]],
+    ["GitHub's own 360", job("    timeout-minutes: 360\n"), [RANGE]],
+    ["a fraction of a minute", job("    timeout-minutes: 1.5\n"), [RANGE]],
+    ["a limit as a string", job("    timeout-minutes: \"15\"\n"), [RANGE]],
+    ["a limit by expression", job("    timeout-minutes: ${{ inputs.minutes }}\n"), [RANGE]],
+    ["two jobs with none", "name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n  b:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n", [NONE, NONE]],
+  ];
+  const wrong = cases.map(([why, text, says]) => ({ why, says, got: jobTimeoutProblems("probe.yml", text).map((p) => p[1]) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 47 no longer reads its probe as written (${JSON.stringify(wrong)}): a job with no timeout-minutes, or one that is not a whole number from 1 to 60 written out, fails, once per job; a limit from 1 to 60, a reusable-workflow call and a step's limit beside the job's pass (SMD-2094)`);
+  const dir = join(ROOT, WORKFLOWS_DIR);
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
+  if (!files.length) { fail(WORKFLOWS_DIR, "no workflow found — check 47 reads each one for its jobs' time limits (SMD-2094)"); return; }
+  for (const f of files) for (const [where, msg] of jobTimeoutProblems(`${WORKFLOWS_DIR}/${f}`, readFileSync(join(dir, f), "utf8"))) fail(where, msg);
+}
+checkJobTimeouts();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //

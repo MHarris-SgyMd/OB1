@@ -41,6 +41,15 @@ defaults:
 # reads history takes it at checkout, fetch-depth: 0), so the token has no
 # reason to stay in the workspace.
 
+# Every job has a time limit, where GitHub's default is 360 minutes: a hung
+# lease, deadlock or container wait would otherwise hold the one required
+# check, "Fork Checks passed", pending for six hours. Each is at least three
+# times the job's longest run in the 100 before 2026-11-02 (data-layer's
+# 292 s the longest): 15 minutes for each job that ran past a minute, 5 for
+# the rest. A job at its limit is cancelled with its step in hand, which
+# names where it hung, and the aggregate reads it as failed (check 47,
+# SMD-2094).
+
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -49,6 +58,7 @@ jobs:
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -161,6 +171,7 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -596,6 +607,7 @@ jobs:
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -718,6 +730,7 @@ jobs:
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -819,6 +832,7 @@ jobs:
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -929,6 +943,7 @@ jobs:
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1347,6 +1362,7 @@ jobs:
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2646,6 +2662,7 @@ jobs:
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3491,6 +3508,7 @@ jobs:
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4251,6 +4269,7 @@ jobs:
   deploy-stack-observability:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4617,6 +4636,7 @@ jobs:
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4673,6 +4693,7 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -4836,6 +4857,7 @@ jobs:
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
     # are the range, and commitlint ignores the merge commit the queue creates.
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -4862,6 +4884,7 @@ jobs:
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4899,6 +4922,7 @@ jobs:
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: always()
     needs:
       - repo-consistency
