@@ -299,7 +299,9 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3127 assertions: 3127 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
+wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
+page has N as main's last run counted it (SMD-3614).
 Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -2230,8 +2232,8 @@ the audit row names an agent and stamped it at the write; the rest stay NULL.
 Two CHECKs hold a kind to the registry's and to a row naming an agent, and an
 unreviewed row to no reviewer. `--list` prints `decided by:` on an accepted or
 rejected row, read beside the listing by the page's ids (the listing is not
-redefined, so the tool, `GET /v1/proposals` and the GUI do not show it yet:
-SMD-3338), with the kind the key had when it decided, else the registry's now
+redefined; the tool and `GET /v1/proposals` read it the same way since SMD-3338,
+the GUI not yet), with the kind the key had when it decided, else the registry's now
 ("classified after it decided"); `--accept`/`--reject` print it after deciding,
 read in the decision's transaction. Needs 008, 029, 046 and 050; a re-apply
 fills only rows with no reviewer. No grant moves: every role this README has
@@ -6010,15 +6012,18 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
 ## Testing
 
 Two suites cover most of it, because one of them cannot reach everything, and a
-third covers the one thing the test image cannot reproduce.
+third covers the one thing the test image cannot reproduce. Each suite's
+assertion total, and each shard's, as main's last run counted them, is on the
+wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
+page, which Fork Checks writes on every push to main (SMD-3614).
 
 ```bash
-bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1927 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1086 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 129 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 283 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 432 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+bun test-schema.ts                          # PGlite, no container
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
@@ -6189,6 +6194,18 @@ thought at a time under it unless `batch` says otherwise, so a closed gate
 holds a worker after the thought in hand. A run given none runs as before. The
 sleep scheduler is to close it while its brain is live (SMD-3379 PR 1c).
 
+Since SMD-3379 PR 1c-3a, a worker mid-thought also reads its claim again after
+a closure that opened again during its call or a provider pause. A gate that
+keeps `closedSince(t)` says whether it closed at any time from `t` on, and the
+window and pair gates ask it from the worker's last pass of the gate for the
+thought (its row's read first), kept across a provider pause's retries; an
+extraction retry asks the gate first, a thought sent in one call included.
+Before, only a closure still in force when asked was seen. `lease.ts`'
+`liveGate()` is such a gate, the one the scheduler is to close and open: it
+begins open, lets an ask through at once while open, and holds one while
+closed until `open()` or its signal aborts, its listener taken off either way.
+Nothing passes it yet.
+
 `onPass` hands the caller a second function beside the pass's stop:
 `abortInHand(olderThanMs)` (`lease.ts`'s `InHandAbort`, SMD-3379 PR 1b-2)
 aborts each worker's model call that has run at least that long — since the
@@ -6324,7 +6341,8 @@ docker. The host port is picked at random in 10000–19999, below the kernels'
 default ranges for port 0, so no process binding port 0 can take it before the
 container binds it, and a start that loses it anyway is retried on another, up
 to five starts; `OB1_PG_PORT=<port>` names the port instead (SMD-3592). CI does
-not use it — GitHub Actions supplies the database as a service container.
+not use it — each job that needs the database starts its own pgvector
+container with `docker run` as its first step (SMD-3474).
 
 `OB1_PG_KEEP=<name>` keeps the database instead: the container's data
 directory is a named volume, `ob1-pg-keep-<name>`, which the removal on exit

@@ -40,9 +40,9 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
-import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
+import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
@@ -113,8 +113,9 @@ if (!URL_) {
  * its sections (~25 s for the rest's, with test-search-path.ts), so a
  * section added to a cell adds to the run's length once that cell's job is
  * the run's longest.
- * db/README.md states each shard's assertion count beside the full run's,
- * and [doc] checks, on every run, that they add up.
+ * Each shard's count is published to the wiki's Test-counts page on a push to
+ * main (SMD-3614). An assertion outside every section would count in each
+ * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["10g", "17", "38"],
@@ -141,15 +142,19 @@ const begun = new Set<string>();
 const headed: string[] = [];
 /** Whether section `id` runs here: every section with no shard named, else the shard's. */
 const runsHere = (id: string): boolean => SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
-/** runsHere, noting the section begun: each section's header reads it. */
+const counted = createAssert();
+const { skip, docCheck, report } = counted;
+/** The assertions, each noted when made outside a section this run runs (trackSections, SMD-3614). */
+const sections = trackSections(counted.assert);
+const { assert } = sections;
+/** runsHere, noting the section begun, and the section the code after it is in: each section's header reads it. */
 function want(id: string): boolean {
   headed.push(id);
   const runs = runsHere(id);
   if (runs) begun.add(id);
+  sections.at(id, runs);
   return runs;
 }
-
-const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
 /**
  * Cut the pauses before a follower's provider outage to 100 ms in this
@@ -5260,8 +5265,9 @@ if (want("10")) {
                           RETURNS TABLE (thought_id uuid, attempt int) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'a lock not available, for the suite' USING ERRCODE = '55P03'; END $$`);
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await Bun.sleep(3000);
-      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int)");
-      await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      // One query, so one transaction: as two, a poll between them found no
+      // claim_thoughts at all and the follower ended on it (SMD-3614's ci-parity run).
+      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int); ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
       swapped = false;
       const ended = await pollUntil(async () => code !== -1, 15_000);
       ac.abort();
@@ -6253,6 +6259,44 @@ if (want("10")) {
   const goneSummary = goneLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
   assert(goneWaiting && calls - goneFrom === 1 && goneCode <= 1 && /, 1 deleted mid-pass/.test(goneSummary),
          `…a long note deleted while its worker waits before its second window has nothing more sent once the gate opens, and is counted deleted (${calls - goneFrom} call(s), exit ${goneCode}: ${goneSummary.trim().slice(0, 160)})`);
+  // A closure that opened again during a window's call (SMD-3379 PR 1c-3a):
+  // the note deleted then has nothing more sent either — the worker reads its
+  // claim again at the next window, which "waited" alone, seeing only a
+  // closure still in force, did not.
+  const blinkNote = await seed(ledgerOf("blinked", "blinked"));
+  const blink = liveGate();
+  const blinkFrom = calls;
+  const blinkLines: string[] = [];
+  slowMs = 1500;
+  const blinkRun = runExtract({ url: URL_!, env, workers: 1, admit: blink.admit, writer: { out: (l) => blinkLines.push(l), err: (l) => blinkLines.push(l) } });
+  const blinkInCall = await pollUntil(async () => calls > blinkFrom, 10_000);
+  blink.close();
+  await sql`SELECT delete_thought(${blinkNote}::uuid, NULL::jsonb)`;
+  blink.open();
+  const blinkCode = await blinkRun;
+  slowMs = 0;
+  const blinkSummary = blinkLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(blinkInCall && calls - blinkFrom === 1 && blinkCode <= 1 && /, 1 deleted mid-pass/.test(blinkSummary),
+         `…and one deleted while a closure began and ended during its first window's call has nothing more sent, counted deleted (${calls - blinkFrom} call(s), exit ${blinkCode}: ${blinkSummary.trim().slice(0, 160)})`);
+  // …and a note sent in one call, deleted while a closure began and ended in
+  // the worker's pause after a 503: the retry asks the gate first, reads the
+  // claim again and sends nothing more (review pass 1: the retry's own taking
+  // time passed over the closure, and a one-call note had no gate at all).
+  const retryNote = await seed("Priya mended the retried gate latch.");
+  const retryGate = liveGate();
+  const retryFrom = calls;
+  const retryLines: string[] = [];
+  unavailableCalls = 1;
+  const retryRun = runExtract({ url: URL_!, env, workers: 1, admit: retryGate.admit, writer: { out: (l) => retryLines.push(l), err: (l) => retryLines.push(l) } });
+  const retryPausing = await pollUntil(async () => retryLines.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  retryGate.close();
+  await sql`SELECT delete_thought(${retryNote}::uuid, NULL::jsonb)`;
+  retryGate.open();
+  const retryCode = await retryRun;
+  unavailableCalls = 0;
+  const retrySummary = retryLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(retryPausing && calls - retryFrom === 1 && retryCode <= 1 && /, 1 deleted mid-pass/.test(retrySummary),
+         `…and one sent in one call, deleted while a closure began and ended in its worker's pause after a 503, is not sent again (${calls - retryFrom} call(s), exit ${retryCode}: ${retrySummary.trim().slice(0, 160)})`);
   // A long note edited while its worker waits before its second window,
   // under a key the trigger does not requeue — ob1_config pointed elsewhere
   // for the edit alone — so the claim is still the worker's: nothing more of
@@ -10412,10 +10456,14 @@ if (want("16")) {
   await sql`ALTER TABLE supersession_proposals DROP COLUMN reviewed_by CASCADE, DROP COLUMN reviewed_by_agent_id CASCADE, DROP COLUMN reviewed_by_kind CASCADE`;
   let shortReject: Awaited<ReturnType<typeof consolidate>>, shortAccept: Awaited<ReturnType<typeof consolidate>>, shortList: Awaited<ReturnType<typeof consolidate>>;
   let shortStatus: string, shortPointer: string | null;
+  let shortPage: Awaited<ReturnType<SqlStore["listSupersessionProposals"]>> | undefined;
   try {
     shortReject = await consolidateKeyless("--reject", undirected.id, "--note", "short of 114");
     shortStatus = String((await sql`SELECT status FROM supersession_proposals WHERE id = ${undirected.id}::uuid`)[0].status);
     shortList = await consolidateKeyless("--list", "rejected");
+    // SMD-3338 PR 2: the store's listing (the tool's, REST's) lists the rows as before and says it read no reviewer.
+    const shortStore = new SqlStore(URL_!, { max: 1 });
+    try { shortPage = await shortStore.listSupersessionProposals({ status: "rejected" }); } finally { await shortStore.close(); }
     shortAccept = await consolidateKeyless("--accept", undirected.id, "--direction", "newer");
     shortPointer = await supersedesOf(green);
   } finally {
@@ -10426,6 +10474,8 @@ if (want("16")) {
     `on a brain short of 114 a reject and an accept each land and say the row records no reviewer (${shortReject.out.split("\n").filter((l) => /reviewer/.test(l)).map((l) => l.trim()).join(" | ")}; ${shortStatus}, pointer ${shortPointer === blue ? "back" : shortPointer})`);
   assert(shortList.code === 0 && shortList.out.split("Who decided each row is not shown: this brain is short of migration 114").length === 2 && !/decided by:/.test(shortList.out),
     `…--list says once that it cannot show who decided, and prints no decided-by line (${shortList.out.split("\n").find((l) => /Who decided/.test(l))?.trim()})`);
+  assert(shortPage !== undefined && shortPage.reviewersRead === false && shortPage.proposals.some((p) => p.id === undirected.id) && shortPage.proposals.every((p) => p.reviewer === null),
+    `…and the tool's listing lists the rejected row as before, its page saying it read no reviewer (${shortPage?.reviewersRead}, ${shortPage?.proposals.length} row(s))`);
   assert(JSON.stringify(await reviewerOf(undirected.id)) === JSON.stringify({ by: "consolidate", agent: null }),
     "…and 114 put back, its backfill names the keyless accept from its audit row");
 
@@ -11949,6 +11999,40 @@ if (want("16")) {
   const goneCodeC = await goneRunC;
   assert(goneWaitingC && calls - goneFromC === 1 && goneCodeC <= 1,
          `…a thought deleted while its worker waits before its second pair has nothing more judged once the gate opens (${calls - goneFromC} call(s), exit ${goneCodeC})`);
+  // A closure that opened again during a pair's call (SMD-3379 PR 1c-3a): the
+  // thought deleted then has nothing more judged either.
+  const blinkNewer = await seed("[16g] The gatehouse opens at one now.", 30, 0, ["gatehouse"]);
+  const blinkC = liveGate();
+  const blinkFromC = calls;
+  slowMs = 1500;
+  const blinkRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: blinkC.admit, writer: { out: () => {}, err: () => {} } });
+  const blinkInCallC = await pollUntil(async () => calls > blinkFromC, 10_000);
+  blinkC.close();
+  await sql`SELECT delete_thought(${blinkNewer}::uuid, NULL::jsonb)`;
+  blinkC.open();
+  const blinkCodeC = await blinkRunC;
+  slowMs = 0;
+  assert(blinkInCallC && calls - blinkFromC === 1 && blinkCodeC <= 1,
+         `…and one deleted while a closure began and ended during its first pair's call has nothing more judged (${calls - blinkFromC} call(s), exit ${blinkCodeC})`);
+  // …and one edited while a closure began and ended in its worker's pause
+  // after a 503: the retry's first pair asks the gate from before the pause,
+  // reads the thought again and sends its old text no more (review pass 2).
+  // An edit, not a delete: a deleted thought has no candidates to judge.
+  const retryNewer = await seed("[16g] The gatehouse opens at two now.", 30, 0, ["gatehouse"]);
+  const retryGateC = liveGate();
+  const retryLinesC: string[] = [];
+  judgeUnavailable = 1;
+  const retryRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: retryGateC.admit, writer: { out: (l) => retryLinesC.push(l), err: (l) => retryLinesC.push(l) } });
+  const retryPausingC = await pollUntil(async () => retryLinesC.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  const retrySeenFrom = seen.length;
+  retryGateC.close();
+  await sql`UPDATE thoughts SET content = '[16g] The gatehouse opens at three now.' WHERE id = ${retryNewer}::uuid`;
+  retryGateC.open();
+  const retryCodeC = await retryRunC;
+  judgeUnavailable = 0;
+  const retrySeen = seen.slice(retrySeenFrom).map((p) => (p.b.includes("at two now") ? "old" : p.b.includes("at three now") ? "new" : "other"));
+  assert(retryPausingC && !retrySeen.includes("old") && retrySeen.includes("new") && retryCodeC <= 1,
+         `…and one edited while a closure began and ended in its worker's pause after a 503: the judge sees its old text no more, its pairs judged at its new text (${retrySeen.join(",")}, exit ${retryCodeC})`);
   // The newer side edited while its worker waits before its second pair:
   // still its claim (063 requeues a judged thought only through its
   // proposals), so it goes back to the pool for its new text — the run, its
@@ -14785,10 +14869,6 @@ if (want("28")) {
   await sql`DELETE FROM thoughts`;
   await sql.close();
 }
-
-// db/README.md's Testing block quotes this suite's assertion total. The count
-// is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
-// run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
 
 if (want("27")) {
   console.log("\n[27] search_thoughts_current against a hand oracle on real Postgres: ties in score go to the current row, then to the hybrid's order, whichever order the join hands the rows over in (migration 059, SMD-2255)");
@@ -21352,6 +21432,8 @@ if (want("46")) {
 }
 
 console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
+// Every shard runs [end], on purpose: its assertion is no stray outside a section.
+sections.at("end", true);
 {
   // [33] and [35] check the projection after the sections before them, in the
   // rest; this checks it after a run's last section, so a section in another
@@ -21366,23 +21448,14 @@ console.log("\n[end] Every section this run ran left the node_state projection e
   }
 }
 
-console.log("\n[doc] db/README.md states this suite's assertion total, and each shard's");
+console.log("\n[doc] The sections: each header an id of its own, each section a shard lists run, no assertion outside a section");
 {
-  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
-  const n = total();
-  const lines = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)].map((m) => m[0]);
-  const counts = (ls: string[]) => ls.flatMap((l) => [...l.matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
-  const shardOf = (l: string) => /\bOB1_LIVE_SHARD=(\S+)/.exec(l)?.[1];
-  const full = counts(lines.filter((l) => shardOf(l) === undefined));
-  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
-  // On every run, the README's own sum: one count a shard, adding up to the
-  // full run's once [end], which every run has, is counted once. An
-  // assertion outside a want() section counts in every shard too, and shows
-  // here as the shards adding up to more than the full run.
-  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (SHARD_NAMES.length - 1);
-  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
-  docCheck(sumHolds,
-    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for a section or assertion with no want(), which runs in every shard"}`);
+  // An assertion outside every section runs, and counts, in every shard
+  // (trackSections). A shard sees one made after a section it skips; CI runs
+  // every shard, so one made after any section fails a cell.
+  const strays = sections.outside();
+  docCheck(strays.length === 0,
+    `no assertion was made outside a section this run runs (${strays.length ? `${strays.length}: ${strays.slice(0, 3).join("; ")} — put it inside its section's want() block` : "none"})`);
   // No two headers share an id: a copied header would take its section to the other's shard unseen.
   const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
   docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
@@ -21393,14 +21466,6 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
     const absent = listed.filter((id) => !begun.has(id));
     docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
   }
-  const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
-  const run = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
-  if (skipped() === 0) {
-    docCheck(claims.length > 0 && claims.every((c) => c === n),
-      `db/README.md quotes test-live.ts's ${n} assertions for ${run} (found ${[...new Set(claims)].join(", ") || "none"})`);
-  } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the count the README states for ${run}`);
-  }
 }
 
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);

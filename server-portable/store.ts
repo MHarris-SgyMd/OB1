@@ -10,7 +10,7 @@
  * meet, and the normalisers below keep each row shape in one place.
  */
 
-import type { ReviewResult } from "./proposal-review.ts";
+import type { Reviewer, ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
 
@@ -346,7 +346,11 @@ export type ProposalPosition = { confidence: string; judgedAt: string; id: strin
  * gave, before a row the writers' read drops (review pass 1: counted after the drop, a row gone in between was
  * counted as one still to come).
  */
-export type ProposalPage = { proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number };
+export type ProposalPage = {
+  proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number;
+  /** Whether the decided rows' reviewers were read (114, SMD-2608): false when the page lists a decided row on a brain short of 114, whose rows record none; a page with none reads no columns, and says true (SMD-3338). */
+  reviewersRead: boolean;
+};
 
 /** A page of list_thoughts: the thoughts, and the last one's place when more follow (else null). */
 export type ThoughtListPage = { thoughts: ThoughtListItem[]; next: ListPosition | null };
@@ -754,7 +758,24 @@ export type SupersessionProposal = {
   lineage: boolean;
   /** Since migration 094 (SMD-2707): one agent captured both sides (ob1_capturer_of); false on a brain short of 094. */
   sameCapturer: boolean;
+  /**
+   * Who decided an accepted or rejected row (114's columns, SMD-2608), with
+   * the registry's kind now beside the kind the key had when it decided
+   * (SMD-3338): null on a pending or stale row, on a decided row that records
+   * none (a raw call, or a decision before 114 that wrote no pointer), and on a
+   * brain short of 114 (the page's reviewersRead says which).
+   */
+  reviewer: ListedReviewer | null;
 };
+
+/**
+ * A decided proposal's reviewer as the listing gives it (SMD-3338 PR 2): the
+ * key's name and its kinds, and whether an agent was recorded — not which: no
+ * other read shows a key's agent id to another key, and it outlives a
+ * rotation, so it would tie one key's decisions together for any reader
+ * (review pass 3). The decision's own reply carries the caller's id.
+ */
+export type ListedReviewer = Omit<Reviewer, "agentId"> & { agentRecorded: boolean };
 
 /**
  * Who wrote a proposal's side (094, SMD-2707): the keys 050 and 073 stamp on
@@ -800,6 +821,7 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     newer: proposalSide(r, "newer"),
     lineage: r.lineage === true,
     sameCapturer: r.same_capturer === true,
+    reviewer: null,
   };
 }
 

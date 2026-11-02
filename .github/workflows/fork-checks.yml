@@ -24,7 +24,10 @@ permissions:
 # Every run: step under bash --noprofile --norc -eo pipefail {0} (GitHub's
 # documented `shell: bash`), so a `cmd | grep`/`cmd | jq` whose left side fails
 # fails the step instead of being masked. Before this the default was `bash -e`
-# with no pipefail (SMD-1808).
+# with no pipefail (SMD-1808). So no step pipes into `grep -q`: it exits at its
+# first match, and a producer still writing then dies of SIGPIPE, which
+# pipefail makes a 141 (`grep … > /dev/null` reads to the end; check 46,
+# SMD-3652).
 defaults:
   run:
     shell: bash
@@ -142,6 +145,11 @@ jobs:
         run: bun scripts/ci-step-times.ts --self-check
       - name: The suite-sections script's reading of a suite's output
         run: bun scripts/suite-sections.ts --self-check
+      # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
+      # fixtures — the rows, their order, the jobs that did not succeed or
+      # reported nothing. publish-test-counts writes it on a push to main.
+      - name: The Test-counts page from the jobs' count lines
+        run: bun .github/ci/test-counts-page.ts --self-check
       # SMD-2875: deploy/tier.sh against a stub runtime: one network and one
       # side's password per half, the target's settings by name, the source
       # container gone before the target starts, each refusal it tries
@@ -153,6 +161,10 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -569,9 +581,25 @@ jobs:
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-portable-server
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -675,9 +703,25 @@ jobs:
         working-directory: db
         run: bun bench-live.ts --self-check
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-db-schema
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -760,9 +804,25 @@ jobs:
         working-directory: db
         run: bun test-coordinator.ts
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-replay-gate
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     # The live suite in four shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
@@ -775,19 +835,31 @@ jobs:
       matrix:
         shard: [rest, sleep, long, extract]
 
-    # A service container, not with-postgres.sh — the runner provides the
-    # database, and "Wait for the service Postgres" below waits for it. The
-    # local script exists for developers, who mostly run podman.
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
-
     steps:
+      # The job's Postgres, started by its first step in the background
+      # (SMD-3474): a service container was pulled and started in "Initialize
+      # containers", 7-10 s before the first step, most of it the pull; this
+      # pull overlaps the checkout, Bun's setup and the installs. Not
+      # with-postgres.sh, which exists for developers, who mostly run podman.
+      # The same image, port and settings as the service it replaces, and no
+      # health check (SMD-3196); "Wait for Postgres" waits for the start and
+      # the server, and the job's last step shows its log and removes it. The
+      # subshell holds none of the step's output, so the step ends at once.
+      # The pull gets three tries, as the runner gave a service's (it waited a
+      # random 1-10 s between them; this waits 3 s, then 6 s), each failed one
+      # marked in the log for "Wait for Postgres" to warn of. The subshell runs
+      # under set +e: under the step's -e a failing last `docker run` ended it
+      # before its exit code was written, and the wait stalled for its whole
+      # deadline (review pass 1). The exit code is written whole, by a rename.
+      - name: Start Postgres in the background
+        run: |
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+        env:
+          IMAGE: pgvector/pgvector:0.8.6-pg16
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -808,29 +880,38 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
-      # The service carries no health check, so the runner starts these steps
-      # as soon as its container does — with the 5 s pg_isready check it
-      # carried before, it held them until the check first passed, about 6 s
-      # later — and the checkout and install overlap Postgres's start
-      # (SMD-3196). This waits for it before the first suite, as
-      # db/with-postgres.sh does: over TCP inside the container, since over the
-      # socket the entrypoint's initialising server, which listens on no TCP
-      # address, reads as ready for a moment before the real one is up; and a
-      # container that has exited ends the wait at once.
-      - name: Wait for the service Postgres
+      # First the start: its exit code within 180 s, which must be 0, else its
+      # output is shown; a pull that took more than one try is warned of, as
+      # the runner warned of a service's (review pass 2). Then the server,
+      # before the first suite, as db/with-postgres.sh waits: over TCP inside
+      # the container, since over the socket the entrypoint's initialising
+      # server, which listens on no TCP address, reads as ready for a moment
+      # before the real one is up; and a container that has exited ends the
+      # wait at once. (A service container's 5 s health check held the steps
+      # about 6 s, SMD-3196; this container has none.)
+      - name: Wait for Postgres
         run: |
+          started() {
+            local deadline=$((SECONDS + 180))
+            until [ -s "$RUNNER_TEMP/postgres-start.rc" ]; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "Postgres's pull and start did not end within 180 s:" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+              sleep 0.2
+            done
+            [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            failed=$(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log" || true)
+            if [ "$failed" -gt 0 ]; then echo "::warning::pgvector's pull took $((failed + 1)) tries"; cat "$RUNNER_TEMP/postgres-start.log"; fi
+          }
           ready() {
             local deadline=$((SECONDS + 60)) why
             until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
               if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
               elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
               else sleep 0.2; continue; fi
-              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+              echo "Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
-          ready "$PG"
-        env:
-          PG: ${{ job.services.postgres.id }}
+          started
+          ready postgres
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
@@ -854,46 +935,70 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-db-live-${{ matrix.shard }}
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # What the runner's teardown did for a service container (SMD-3474):
+      # each container's log, folded, then the container removed, after a
+      # failure or a cancel too. A start still running is given 10 s to end
+      # first, so a container it makes after this step is not left behind
+      # (review pass 1; it matters only off a hosted runner, whose machine
+      # goes with the job).
+      - name: Postgres's log, and its removal
+        if: always()
+        run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
+          for c in postgres; do
+            echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
+            docker rm -f "$c" > /dev/null 2>&1 || true
+          done
+
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
-
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
-      # The upgrade and preflight legs' own Postgres, which the start step's
-      # first two legs reach on 5433: its comment has why (SMD-3195). A
-      # /dev/shm of 1 GB, as db/with-postgres.sh gives (its comment has why):
-      # a parallel HNSW build takes maintenance_work_mem's 64 MB of it, all of
-      # Docker's default, and two suites building at once ran out ("could not
-      # resize shared memory segment": the first shard beside test-upgrade
-      # stopped on it in rehearsals at the default, and never at 1 GB;
-      # SMD-3468).
-      pair-postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1upgrade
-        ports:
-          - 5433:5432
-        options: --shm-size=1g
-      # test-preflight's second shard's, on 5434 (SMD-3468). The same /dev/shm:
-      # one suite alone builds here, but its build takes all of the default.
-      preflight-postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1preflight
-        ports:
-          - 5434:5432
-        options: --shm-size=1g
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     steps:
+      # Three Postgres, started by the job's first step in the background, as
+      # db-live's is (its comment has why, SMD-3474), from one pull:
+      # - postgres on 5432, the job's own;
+      # - pair-postgres on 5433, the upgrade and preflight legs' own, which
+      #   the start step's first two legs reach: its comment has why
+      #   (SMD-3195);
+      # - preflight-postgres on 5434, test-preflight's second shard's
+      #   (SMD-3468).
+      # The last two with a /dev/shm of 1 GB, as db/with-postgres.sh gives
+      # (its comment has why): a parallel HNSW build takes
+      # maintenance_work_mem's 64 MB of it, all of Docker's default, and two
+      # suites building at once ran out ("could not resize shared memory
+      # segment": the first shard beside test-upgrade stopped on it in
+      # rehearsals at the default, and never at 1 GB; SMD-3468). One suite
+      # alone builds on preflight-postgres, but its build takes all of the
+      # default too.
+      - name: Start Postgres in the background
+        run: |
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull \
+             && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE" \
+             && docker run -d --name pair-postgres -p 5433:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1upgrade "$IMAGE" \
+             && docker run -d --name preflight-postgres -p 5434:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1preflight "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+        env:
+          IMAGE: pgvector/pgvector:0.8.6-pg16
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -906,34 +1011,40 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
-      # The services carry no health check: db-live's "Wait for the service
-      # Postgres" has why (SMD-3196).
-      - name: Wait for the service Postgres
+      # db-live's "Wait for Postgres" has why (SMD-3196, SMD-3474).
+      - name: Wait for Postgres
         run: |
+          started() {
+            local deadline=$((SECONDS + 180))
+            until [ -s "$RUNNER_TEMP/postgres-start.rc" ]; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "Postgres's pull and start did not end within 180 s:" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+              sleep 0.2
+            done
+            [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            failed=$(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log" || true)
+            if [ "$failed" -gt 0 ]; then echo "::warning::pgvector's pull took $((failed + 1)) tries"; cat "$RUNNER_TEMP/postgres-start.log"; fi
+          }
           ready() {
             local deadline=$((SECONDS + 60)) why
             until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
               if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
               elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
               else sleep 0.2; continue; fi
-              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+              echo "Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
-          ready "$PG"; ready "$PAIR_PG"; ready "$PREFLIGHT_PG"
-        env:
-          PG: ${{ job.services.postgres.id }}
-          PAIR_PG: ${{ job.services.pair-postgres.id }}
-          PREFLIGHT_PG: ${{ job.services.preflight-postgres.id }}
+          started
+          ready postgres; ready pair-postgres; ready preflight-postgres
 
       # Two suites side by side, each against its own database (SMD-2219), on
-      # the second service, pair-postgres, which they have to themselves:
+      # the second Postgres, pair-postgres, which they have to themselves:
       # started here and run in the background while the job's other suites run
       # on ob1test (SMD-3195). They were the job's last long step, a median 179
       # s after 106 s of suites, on the run's critical path. Then test-preflight
       # was the job's floor, the long leg of a pair whose median was ~219 s of
       # the job's 242 (inferred from test-upgrade's own stamps), so it runs as
       # its two shards (OB1_PREFLIGHT_SHARD, SMD-3468): first beside
-      # test-upgrade, rest on the third service, preflight-postgres, a Postgres
+      # test-upgrade, rest on the third, preflight-postgres, a Postgres
       # of its own. test-upgrade.ts applies migrations INCREMENTALLY, onto a
       # database that already holds data — the one situation every other suite
       # avoids by resetting first, and the only one a real deployment is ever
@@ -961,7 +1072,7 @@ jobs:
       - name: Start the incremental upgrade and preflight, in the background
         working-directory: db
         run: |
-          # The first shard's database; the services create test-upgrade's and the rest's.
+          # The first shard's database; their containers create test-upgrade's and the rest's.
           bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
           limit_s=600
           echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/data-layer.started"
@@ -1256,6 +1367,28 @@ jobs:
           printf '\n%s' "$summaries"
           [ "$failed" = 0 ]
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-data-layer
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # db-live's last step has why (SMD-3474).
+      - name: Postgres's log, and its removal
+        if: always()
+        run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
+          for c in postgres pair-postgres preflight-postgres; do
+            echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
+            docker rm -f "$c" > /dev/null 2>&1 || true
+          done
+
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
@@ -1386,7 +1519,7 @@ jobs:
           held_also unknown 'extract: OB1_WORKER_KEY is not set in deploy/.env'
           # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
           for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
-            printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
+            printf '%s\n' "$before" | grep -xF -- "$k" > /dev/null || q "DELETE FROM ob1_config WHERE key = '$k'"
           done
           # SMD-3476: the planted check, in the coordinator's own container as
           # root with its confinement — each child its own user, one unable to
@@ -1592,6 +1725,9 @@ jobs:
       # that could not connect at all would fail here rather than pass. Each
       # dial gives up after 4 s. The probe is the server's image, which has
       # Bun, read from compose as the later steps read it; nothing is pulled.
+      # The four probes run side by side, each into files of its own, and are
+      # read in the order they once ran in: in series, until SMD-3472, the
+      # two on egress waited out about 4.5 s each.
       - name: Postgres answers on the data network alone
         working-directory: deploy
         run: |
@@ -1600,10 +1736,20 @@ jobs:
           [ -n "$ip" ] || { echo "Postgres has no address on open-brain_data" >&2; exit 1; }
           # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
           dial='const [host, port] = process.argv.slice(-2); const s = (await import("node:net")).connect({ host, port: Number(port) }); setTimeout(() => { console.log(`${host}: no answer in 4 s`); process.exit(1); }, 4000); s.on("connect", () => { console.log(`${host}: connected`); process.exit(0); }); s.on("error", (e) => { console.log(`${host}: ${e.code}`); process.exit(1); });'
+          dir="$RUNNER_TEMP/postgres-probes"; mkdir -p "$dir"
+          # probe NETWORK TARGET: the dial's output in NETWORK.TARGET.out, its exit code in NETWORK.TARGET.rc.
+          probe() {
+            local rc=0
+            docker run --rm --network "open-brain_$1" --entrypoint bun "$IMAGE" -e "$dial" "$2" 5432 > "$dir/$1.$2.out" || rc=$?
+            echo "$rc" > "$dir/$1.$2.rc"
+          }
+          for target in postgres "$ip"; do probe data "$target" & probe egress "$target" & done
+          wait
           for target in postgres "$ip"; do
-            docker run --rm --network open-brain_data --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432 \
+            cat "$dir/data.$target.out"
+            [ "$(cat "$dir/data.$target.rc")" = 0 ] \
               || { echo "a container on open-brain_data could not reach Postgres as $target, so the refusal below proves nothing" >&2; exit 1; }
-            rc=0; out=$(docker run --rm --network open-brain_egress --entrypoint bun "$IMAGE" -e "$dial" "$target" 5432) || rc=$?
+            rc=$(cat "$dir/egress.$target.rc"); out=$(cat "$dir/egress.$target.out")
             [ "$rc" != 0 ] || { echo "a container on open-brain_egress alone opened a connection to Postgres as $target" >&2; exit 1; }
             # docker's own failure (125: no such network) is not a refusal.
             if [ "$rc" != 1 ] || ! grep -qE "^$target: (ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|no answer in 4 s)" <<<"$out"; then
@@ -1629,20 +1775,48 @@ jobs:
       # SMD-2583 PR 2, on the running stack. The proxy is on internal networks
       # alone, so it asks no resolver outside the stack: a public name does
       # not resolve there, where the same image on the forwarder's outward
-      # network resolves it (so a missing tool cannot pass). The forwarder's
-      # self-check runs from the copy compose.yaml mounts. The proxy logs a
-      # client by the PROXY line, as neither the forwarder nor itself. And with
-      # the proxy stopped, a decoy answering to the proxy's name on `edge` is
-      # what the forwarder resolves, and gets nothing: the forwarder dials only
-      # an address on `front`, refuses, and says so.
+      # network resolves it (so a missing tool cannot pass). Each lookup is
+      # given 2 s (SMD-3472): unbounded, 12 s passed before the self-check
+      # printed, most of it, inferred, the proxy's lookup waiting out its
+      # resolver. The control goes first and must resolve within its 2 s, so
+      # the resolver upstream of Docker's has just answered for the name and
+      # a proxy that could ask it would have its answer in that time too
+      # (review pass 1). It has three tries, since musl resends a lost query
+      # only after 2.5 s (review pass 3), and the proxy's lookup follows the
+      # one that resolved. That lookup must exit getent's "not found" (2) or
+      # a timeout's (busybox 143, coreutils 124): a `timeout` that cannot run
+      # (127, or 126 under some engines) is no refusal. The forwarder's
+      # self-check runs from the copy compose.yaml mounts, beside both
+      # lookups. The proxy logs a client by the PROXY line, as neither the
+      # forwarder nor itself. And with the proxy stopped, a decoy answering to
+      # the proxy's name on `edge` is what the forwarder resolves, and gets
+      # nothing: the forwarder dials only an address on `front`, refuses, and
+      # says so.
       - name: The proxy asks nothing outside the stack, and the forwarder dials it alone
         working-directory: deploy
         run: |
-          PROXY_IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)"
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
-          docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
-          if docker compose -f compose.yaml exec -T proxy getent hosts example.com; then echo "the proxy resolved an outside name" >&2; exit 1; fi
-          docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check
+          cfg="$(docker compose -f compose.yaml config --format json)"
+          PROXY_IMAGE="$(jq -r .services.proxy.image <<<"$cfg")"
+          IMAGE="$(jq -r .services.api.image <<<"$cfg")"
+          docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check > "$RUNNER_TEMP/forwarder-self-check" 2>&1 & selfcheck=$!
+          # Waited for and shown on an early exit too, until it is waited for below.
+          trap 'wait; echo "the forwarder self-check, waited for:"; cat "$RUNNER_TEMP/forwarder-self-check" 2>/dev/null || true' EXIT
+          # --init bounds the control: without it getent runs as PID 1, ignores
+          # the timeout's TERM, and the control waits as long as it likes
+          # (traefik's image, measured on podman: `timeout 2 sleep 5` exits 0
+          # once sleep ends; with --init, 143 after 2 s).
+          resolved=""
+          for _ in 1 2 3; do
+            if docker run --rm --init --network open-brain_edge --entrypoint timeout "$PROXY_IMAGE" 2 getent hosts example.com > /dev/null; then resolved=1; break; fi
+          done
+          [ -n "$resolved" ] || { echo "getent in the proxy's image resolves no outside name from open-brain_edge within 2 s, in three tries, so the refusal below proves nothing" >&2; exit 1; }
+          rc=0; docker compose -f compose.yaml exec -T proxy timeout 2 getent hosts example.com || rc=$?
+          [ "$rc" != 0 ] || { echo "the proxy resolved an outside name" >&2; exit 1; }
+          [ "$rc" = 2 ] || [ "$rc" = 143 ] || [ "$rc" = 124 ] || { echo "the proxy's lookup exited $rc, neither getent's not found (2) nor a 2 s timeout's (143, 124), so it refused nothing" >&2; exit 1; }
+          rc=0; wait "$selfcheck" || rc=$?
+          trap - EXIT
+          cat "$RUNNER_TEMP/forwarder-self-check"
+          [ "$rc" = 0 ] || { echo "the forwarder's self-check, in its container, exited $rc" >&2; exit 1; }
           fwd=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_front").IPAddress}}' "$(docker compose -f compose.yaml ps -q forwarder)")
           [ -n "$fwd" ] || { echo "the forwarder has no address on open-brain_front" >&2; exit 1; }
           for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] && break; sleep 2; done
@@ -1654,7 +1828,10 @@ jobs:
           if [ -z "$client" ] || [ "$client" = null ] || [[ "$own" == *" $client "* ]]; then echo "the proxy logged /health from '$client', one of the forwarder's or the proxy's own addresses ($own): no PROXY line naming the client" >&2; exit 1; fi
           stopped=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose -f compose.yaml stop proxy
-          trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy' EXIT
+          # --no-deps: the proxy alone comes back, so migrate does not run again
+          # and only the proxy's health is waited for (SMD-3472); nothing else
+          # was stopped.
+          trap 'docker rm -f ob1-ci-decoy > /dev/null 2>&1 || true; docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy' EXIT
           # A raw TCP listener, so it counts a connection whatever its first bytes:
           # the forwarder opens with the PROXY line, which an HTTP server refuses
           # unlogged (a forwarder that dialled it went uncounted, measured).
@@ -1663,8 +1840,8 @@ jobs:
           # (SMD-3194, 5 s before) it counted as a connection here.
           docker run -d --name ob1-ci-decoy --no-healthcheck --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
           decoy=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_edge").IPAddress}}' ob1-ci-decoy)
-          for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" && break; sleep 0.5; done
-          docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }
+          for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -F "$decoy" > /dev/null && break; sleep 0.5; done
+          docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -F "$decoy" > /dev/null || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }
           if [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ]; then echo "/health answered ok with the proxy stopped" >&2; exit 1; fi
           sleep 1
           [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
@@ -1734,10 +1911,8 @@ jobs:
             esac
           }
           # proxy_loads WANT ARGS...: WANT is [{source, target, label, file}].
-          # Each file named with -f is kept in `rendered`, held to the
-          # directory's compose files at the end.
-          rendered=()
-          trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
+          # Each runs in the background by loads(), below.
+          dir="$RUNNER_TEMP/proxy-loads"; mkdir -p "$dir"
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
           # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
@@ -1763,19 +1938,15 @@ jobs:
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
           proxy_loads() {
-            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=()
+            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=() alone release=""
             shift
+            alone="$(mktemp "$dir/alone.XXXXXX")"
             paths=""
             for a in "$@"; do
               if [ "$prev" = -f ]; then
-                rendered+=("$a")
                 paths+="$(declared "$a")"$'\n'
                 if [ -z "$first" ]; then first="$a"; fi
-                # Bun.YAML's reading of the file, which check 28 holds; the release's overlay is read by none.
-                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else
-                  bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
-                  twins+=(".bun-view.$a.json")
-                fi
+                if [ "$a" = compose.release.yaml ]; then twins+=("$a"); release=1; else twins+=(".bun-view.$a.json"); fi
               else twins+=("$a"); fi
               if [ "$prev" = -p ]; then project=(-p "$a"); fi
               case "$a" in --profile=*) only+=("$a") ;; esac
@@ -1792,15 +1963,15 @@ jobs:
             # argument (MAX_ARG_STRLEN) since the dashboard's inline (SMD-1849 PR 3c
             # review pass 1: compose.yaml's every-profile render 148 KB, measured),
             # and macOS has no such limit.
-            docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json > .bun-view.alone.json
-            jq -e --argjson want "$want" --argjson base "$base" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $labelled" <<<"$render" >/dev/null \
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json > "$alone"
+            jq -e --argjson want "$want" --argjson base "$base" --slurpfile alones "$alone" --argjson declared "$paths" "\$alones[0] as \$alone | $labelled" <<<"$render" >/dev/null \
               || { echo "$*: the render is not compose.yaml's alone but for what its overlays declare, or its proxy and tables are not the held ones" >&2; return 1; }
             # The same, with no variable substituted: a value that matched under
             # CI's settings and moved under an operator's (pass 6) differs here.
             raw="$(docker compose "$@" config --no-interpolate --format json)"
             [ "$(docker compose "${twins[@]}" config --no-interpolate --format json)" = "$raw" ] || { echo "compose reads $* otherwise than Bun.YAML does, with no variable substituted" >&2; return 1; }
-            docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json > .bun-view.alone.json
-            jq -e --argjson want "$want" --argjson base "$base_raw" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $held" <<<"$raw" >/dev/null \
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json > "$alone"
+            jq -e --argjson want "$want" --argjson base "$base_raw" --slurpfile alones "$alone" --argjson declared "$paths" "\$alones[0] as \$alone | $held" <<<"$raw" >/dev/null \
               || { echo "$*: the same, with no variable substituted" >&2; return 1; }
             while read -r row; do
               for r in "$render" "$raw"; do
@@ -1808,38 +1979,95 @@ jobs:
                   <(bun -e 'process.stdout.write(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text()).configs[process.argv.at(-1)].content)' "$(jq -r .file <<<"$row")" "$(jq -r .source <<<"$row")")
               done
             done < <(jq -c '.[]' <<<"$want")
+            # The overlay this render read is the one its mode wrote (review
+            # pass 1: a mode's renders left running read the next mode's file,
+            # and passed). Last, after every read of the file: checked
+            # earlier, a rewrite after it passes.
+            if [ -n "$release" ] && [ "$(cksum < compose.release.yaml)" != "$release_sum" ]; then
+              echo "$*: compose.release.yaml was rewritten under this render — settle a mode's renders before the next mode writes it" >&2; return 1
+            fi
           }
+          # loads WANT ARGS...: proxy_loads in the background, its output in a
+          # file of its own, so the renders run side by side (in series, until
+          # SMD-3472, about 30 s). Each file named with -f is kept in
+          # `rendered`, held to the directory's compose files at the end, and
+          # read by Bun.YAML here, once in this run for every render naming it
+          # (check 28 holds that reading; the release's overlay is read by none).
+          rendered=() pids=() calls=() settled=() viewed=" "
+          loads() {
+            local a prev=""
+            for a in "${@:2}"; do
+              if [ "$prev" = -f ]; then
+                rendered+=("$a")
+                if [ "$a" != compose.release.yaml ] && [[ "$viewed" != *" $a "* ]]; then
+                  bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
+                  viewed+="$a "
+                fi
+              fi
+              prev="$a"
+            done
+            proxy_loads "$@" > "$dir/${#pids[@]}.log" 2>&1 &
+            pids+=("$!"); calls+=("${*:2}")
+          }
+          # settle FROM TO: wait for each call FROM to TO-1 not yet settled,
+          # printing its output, then its exit code if it failed, in call order
+          # within the range, and fail if any failed. The release modes settle
+          # as they end, so the 12 calls before them print last. A log that
+          # cannot be read fails too: in the trap's `||` errexit is off.
+          settle() {
+            local i rc failed=0
+            for ((i = $1; i < $2; i++)); do
+              if [ -n "${settled[$i]:-}" ]; then continue; fi
+              rc=0; wait "${pids[$i]}" || rc=$?
+              settled[i]=1
+              cat "$dir/$i.log" || failed=1
+              if [ "$rc" != 0 ]; then failed=1; echo "proxy_loads ${calls[$i]}: exit $rc" >&2; fi
+            done
+            return "$failed"
+          }
+          # On any exit, every call not yet settled is waited for and its
+          # output printed, so a failure leaves no render running and hides
+          # none, and the step fails if any of them failed, wherever a later
+          # edit adds one (review pass 2: `|| true` here passed a failing call
+          # made after the last settle). An exit's own code is kept.
+          trap 'st=$?; settle 0 "${#pids[@]}" || [ "$st" != 0 ] || st=1; rm -f compose.release.yaml .bun-view.*.json; exit "$st"' EXIT
           routes='{"source": "proxy-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.yaml"}'
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
-          proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
-          proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-          proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml "${profiles[@]}"
+          loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml -f compose.host-ports.yaml "${profiles[@]}"
+          loads "[$routes, $hooks]" -f compose.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          loads "[$routes, $api, $hooks]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+          loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes, $grafana]" -f compose.yaml -f compose.grafana-public.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+          loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+          loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
-          # cut). release.yml holds the overlay a release actually ships.
+          # cut). release.yml holds the overlay a release actually ships. Each
+          # mode's renders end before the next mode rewrites the file, and each
+          # render checks it read its own mode's (release_sum); the renders
+          # above read no release overlay, and run on beside both.
           for mode in rehearsal tag; do
+            from=${#pids[@]}
             if [ "$mode" = rehearsal ]; then
               bun ../scripts/release-artifacts.ts compose --rehearsal --owner "$GITHUB_REPOSITORY_OWNER" --ollama-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 > compose.release.yaml
             else
               bun -e 'import { renderComposeOverlay } from "../scripts/release-artifacts.ts"; const z = "sha256:" + "0".repeat(64); process.stdout.write(renderComposeOverlay({ version: "9.9.9", tag: "v9.9.9", rendered: "ci", images: { server: { ref: "ghcr.io/example/ob1-server:v9.9.9", digest: z }, migrate: { ref: "ghcr.io/example/ob1-migrate:v9.9.9", digest: z } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: z }))' > compose.release.yaml
             fi
-            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
-            proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            release_sum="$(cksum < compose.release.yaml)"
+            loads "[$routes]" -f compose.yaml -f compose.release.yaml "${profiles[@]}"
+            loads "[$routes, $api]" -f compose.yaml -f compose.release.yaml -f compose.api-public.yaml "${profiles[@]}"
+            loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
+            loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
+            loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            settle "$from" "${#pids[@]}"
             # Every service compose.yaml runs on a local build's image (the
             # server's, the migrator's, by the project's name) runs the
             # release's instead, so a service added there is pinned here too
@@ -1847,6 +2075,9 @@ jobs:
             left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
             [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
+          # Every call made above (review pass 1: one left unsettled was killed
+          # unread, and passed); one made below is settled by the trap.
+          settle 0 "${#pids[@]}"
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
           [ "$files" = "$named" ] || { echo "compose files here: $files; rendered above: $named — give a new file its combination" >&2; exit 1; }
@@ -1958,7 +2189,10 @@ jobs:
       # key and source, changes nothing and writes none),
       # each labelled with the GUI's source, `dashboard`, each a direct call
       # to the REST core with no carrier, as the GUI makes them, all under the
-      # smoke key's name, as Verify asks. The smoke reads its
+      # smoke key's name, as Verify asks. The planted proposal it rejects,
+      # accepts and rejects again on the proposals page (PR 4) is read here
+      # too: rejected, recording the smoke key as who decided, its pointer
+      # written and cleared under that key. The smoke reads its
       # keys from this job's environment, off its command line. Here, not after the
       # next step: that one configures the authorization server, and the GUI
       # then offers no key sign-in (review pass 1). The smoke imports only
@@ -1984,6 +2218,10 @@ jobs:
           # lease (claimed for a second), for the smoke's write arm to retry and release (SMD-3322 PR 3).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts)); SELECT release_thought(c.thought_id, 'extract:gui-smoke@ci', 'ci-gui-smoke-fails', 'failed', 'The operator GUI smoke''s failed row (SMD-3322).') FROM claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-fails', 1) c; SELECT claim_thoughts('extract:gui-smoke@ci', 'ci-gui-smoke-gone', 1, 1);") > /dev/null
+          # The proposal marked edited since judged — its older side's recorded fingerprint no text's — so the smoke's accept
+          # is refused as edited and taken through the page's "Accept anyway" (SMD-3322 PR 4). No thought is touched.
+          (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
+            "UPDATE supersession_proposals SET older_fingerprint = 'ci-gui-smoke: no text has this fingerprint' WHERE judge_key = 'ci-gui-smoke'")
           bun smoke.ts --url http://127.0.0.1:8010/dashboard --require-thought --require-ingested --require-pages --require-rows --notes off --writes | tee /tmp/gui-smoke.out
           written=$(sed -n 's/^  ·  the write arm.s thought: \([0-9a-f-]*\)$/\1/p' /tmp/gui-smoke.out)
           [ -n "$written" ] || { echo "the smoke named no thought its write arm wrote"; exit 1; }
@@ -1995,6 +2233,12 @@ jobs:
           acts=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
             "SELECT string_agg(tool || ' ' || n, ', ' ORDER BY tool) FROM (SELECT tool, count(*) AS n FROM query_log WHERE kind = 'action' AND tool IN ('retry_failed', 'release_stale_leases') AND agent_id = (SELECT canonical_agent_id FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture') GROUP BY tool) t")
           [ "$acts" = "release_stale_leases 1, retry_failed 1" ] || { echo "the worker actions' rows read \"$acts\", not one release and one retry under the smoke key"; exit 1; }
+          # The proposal decisions (SMD-3322 PR 4): the planted proposal rejected, accepted, rejected again on the page — the
+          # row left rejected and recording the smoke key as who decided (114), and its superseding side's two pointer
+          # writes (the accept's, the reject's clearing) made directly to the REST core under that key, as Verify asks.
+          decided=$(cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -qAtc \
+            "SELECT p.status || ' ' || (p.reviewed_by = (SELECT actor_name FROM thought_audit WHERE thought_id = '$written'::uuid AND action = 'capture'))::text || ' ' || (SELECT count(*) FROM thought_audit a WHERE a.thought_id = p.newer_id AND a.action = 'update' AND a.diff ? 'supersedes' AND a.origin = 'open-brain-api' AND a.actor_name = p.reviewed_by AND a.actor_context->'act' IS NULL) FROM supersession_proposals p WHERE p.judge_key = 'ci-gui-smoke'")
+          [ "$decided" = "rejected true 2" ] || { echo "the planted proposal reads \"$decided\", not rejected, decided by the smoke key, its pointer written and cleared under that key directly to the REST core"; exit 1; }
 
       # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
       # operator GUI. The step before held the plugin-free stack (--notes off):
@@ -2078,7 +2322,10 @@ jobs:
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
           carried=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" --header "x-brain-forwarder: $OB1_SMOKE_FORWARD_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.name == "ci" and .act.name == "ci-forwarder"' <<<"$carried" >/dev/null || { echo "a forwarded whoami on the mesh named no act: ${carried:0:200}" >&2; exit 1; }
-          docker compose -f compose.yaml -f compose.api-public.yaml up -d --wait --wait-timeout 120 proxy
+          # --no-deps: the overlay changes the proxy alone (check 28's
+          # OVERLAYS); without it each up ran migrate again and waited on every
+          # dependency's health, none of which this step touches (SMD-3472).
+          docker compose -f compose.yaml -f compose.api-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           if ! { [ "$c" = 200 ] && jq -e '.scope == "write"' /tmp/api-body >/dev/null; }; then echo "/api/v1/whoami with the overlay answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; fi
           # From outside, the proxy deletes the forwarder slot: no act, however sound the forwarder key.
@@ -2089,7 +2336,7 @@ jobs:
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"limit":5}' "$B/api/v1/scans")
           if ! { [ "$c" = 202 ] && jq -e '.poll | startswith("/api/v1/jobs/")' /tmp/api-body >/dev/null; }; then echo "a scan through /api answered $c or a link without the prefix: $(head -c 200 /tmp/api-body)" >&2; exit 1; fi
           [ "$(code "$B/api/openapi.json")" = 200 ] || { echo "/api/openapi.json is not served through the overlay" >&2; exit 1; }
-          docker compose -f compose.yaml up -d --wait --wait-timeout 120 proxy
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
           [ "$c" = 404 ] || { echo "/api still answered $c after the overlay was dropped: compose did not recreate the proxy" >&2; exit 1; }
           sleep 1
@@ -2891,7 +3138,7 @@ jobs:
           coord() { docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator | head -n 1; }
           board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(coord)"; }
           [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "the canary's up left no coordinator running" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=' || { echo "the canary's coordinator runs passes its env file does not name: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=' > /dev/null || { echo "the canary's coordinator runs passes its env file does not name: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
@@ -2909,7 +3156,7 @@ jobs:
           # operator GUI holds an empty one, and a key sign-in at its loopback
           # port is taken — with stable's origin it was refused as cross-site.
           if grep -q '^OB1_PUBLIC_ORIGIN=' .env.canary.local; then echo "the canary's env file carries OB1_PUBLIC_ORIGIN" >&2; exit 1; fi
-          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -qx 'OB1_PUBLIC_ORIGIN=' \
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -x 'OB1_PUBLIC_ORIGIN=' > /dev/null \
             || { echo "the canary's operator GUI holds a public origin" >&2; exit 1; }
           gui=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' \
             -H 'origin: http://127.0.0.1:8011' --data-urlencode "key=$CANARY_KEY" http://127.0.0.1:8011/dashboard/signin)
@@ -3029,9 +3276,9 @@ jobs:
           if grep -qE '^(LINEAR_COMMENT_API_KEY|linear_other_key)=.' .env.canary.local || grep -qF ci-pasted- .env.canary.local; then echo "the canary's env file still holds a pasted Linear key" >&2; exit 1; fi
           grep -qxF 'LINEAR_API_KEY=ci-canary-own-linear-key' .env.canary.local || { echo "the canary's env file lost its own read key" >&2; exit 1; }
           grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
-          board_env | grep -qx 'OB1_PASSES=board-sync' || { echo "the canary's coordinator does not run its file's passes alone (the shell's beat the file's?): $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=board-sync' > /dev/null || { echo "the canary's coordinator does not run its file's passes alone (the shell's beat the file's?): $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_API_KEY=ci-canary-own-linear-key' > /dev/null || { echo "the canary's board-sync does not run on the canary's own read key (the shell's beat the file's?)" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_COMMENT_API_KEY=' > /dev/null || { echo "the canary's board-sync holds a comment key (the shell's?)" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run up --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
@@ -3182,7 +3429,7 @@ jobs:
           done
           grep -qF "wrote to the canary's env file, $PWD/.env.canary.local: OB1_PASSES=\"sleep,board-sync\"" /tmp/canary-nokey.out || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh did not carry the retired containers' passes to OB1_PASSES" >&2; exit 1; }
           [ "$(grep -c '^OB1_PASSES=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds other than one OB1_PASSES line" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=sleep' || { echo "the canary's coordinator runs other than sleep with no key of its own for board-sync: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
+          board_env | grep -x 'OB1_PASSES=sleep' > /dev/null || { echo "the canary's coordinator runs other than sleep with no key of its own for board-sync: $(board_env | grep '^OB1_PASSES=')" >&2; exit 1; }
           { [ "$rc" = 1 ] && grep -qF 'canary sleep held by the coordinator, running nothing' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with sleep named and no OB1_WORKER_KEY exited $rc, not 1 with sleep held" >&2; exit 1; }
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
           # SMD-3312: the canary's own read key back, so board-sync comes back.
@@ -3221,11 +3468,11 @@ jobs:
           grep -F 'canary coordinator, on the new build (OB1_PASSES: sleep,board-sync;' /tmp/canary-norefresh.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
           [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=coordinator)" ] || { echo "up --no-refresh did not bring the coordinator back running" >&2; exit 1; }
-          board_env | grep -qx 'OB1_PASSES=sleep,board-sync' || { echo "up --no-refresh did not bring the coordinator back on the file's passes" >&2; exit 1; }
-          for _ in $(seq 1 15); do docker logs "$(coord)" 2>&1 | grep -qF 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' && break; sleep 1; done
+          board_env | grep -x 'OB1_PASSES=sleep,board-sync' > /dev/null || { echo "up --no-refresh did not bring the coordinator back on the file's passes" >&2; exit 1; }
+          for _ in $(seq 1 15); do docker logs "$(coord)" 2>&1 | grep -F 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' > /dev/null && break; sleep 1; done
           docker logs "$(coord)" 2>&1 | grep -F 'coordinator: runs board-sync (uid 1101) and sleep (uid 1104)' || { docker logs "$(coord)" >&2; echo "the canary's coordinator does not run board-sync and sleep, each as its own user" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_API_KEY=ci-canary-own-linear-key' > /dev/null || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
+          board_env | grep -x 'LINEAR_COMMENT_API_KEY=' > /dev/null || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
@@ -3545,10 +3792,11 @@ jobs:
           OB1_RUNNER_DB_PASSWORD: ci-stand-in-runner-db-password-0123456789
         run: |
           docker compose -f compose.yaml --profile orchestration run -d --no-deps --name ob1-runner-egress orchestration-runner
-          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening" && break; sleep 1; done
+          for _ in $(seq 30); do docker logs ob1-runner-egress 2>&1 | grep "runner: listening" > /dev/null && break; sleep 1; done
           docker logs ob1-runner-egress 2>&1
-          docker logs ob1-runner-egress 2>&1 | grep -q "runner: listening"
-          pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ] && basename "$p"; done' | head -1)
+          docker logs ob1-runner-egress 2>&1 | grep "runner: listening" > /dev/null
+          pid=$(docker exec ob1-runner-egress sh -c 'for p in /proc/[0-9]*; do if [ "$(tr "\0" " " < "$p/cmdline")" = "bun deploy/orchestration/runner.ts " ]; then basename "$p"; break; fi; done')
+          [ -n "$pid" ] || { echo "no process in ob1-runner-egress runs bun deploy/orchestration/runner.ts" >&2; exit 1; }
           eff=$(docker exec ob1-runner-egress awk '/^CapEff/ {print $2}' "/proc/$pid/status")
           echo "runner pid $pid CapEff $eff"
           [ "$eff" = "00000000000000e0" ]
@@ -3611,7 +3859,7 @@ jobs:
           # Read once, and it must name a resolver, so an empty read cannot pass.
           resolv=$(docker compose -f compose.yaml exec -T proxy cat /etc/resolv.conf)
           grep -q '^nameserver ' <<<"$resolv" || { echo "the proxy's resolv.conf names no resolver: \"$resolv\""; exit 1; }
-          if grep -E '^search' <<<"$resolv" | grep -qv -E '^search[[:space:]]+\.?[[:space:]]*$'; then
+          if grep -E '^search' <<<"$resolv" | grep -v -E '^search[[:space:]]+\.?[[:space:]]*$' > /dev/null; then
             echo "the proxy resolves under search domains:"; echo "$resolv"; exit 1
           fi
           # The settings and secrets (.github/ci/auth-settings.sh, which the
@@ -4483,17 +4731,22 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
-
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
+    # Where report() appends each suite run's counts (db/test-support.ts's
+    # recordCount): publish-test-counts has why (SMD-3614).
+    env:
+      OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
     steps:
+      # db-live's "Start Postgres in the background" has why (SMD-3474).
+      - name: Start Postgres in the background
+        run: |
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; echo "pull try $try failed"; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+        env:
+          IMAGE: pgvector/pgvector:0.8.6-pg16
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -4510,22 +4763,30 @@ jobs:
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
 
-      # The service carries no health check: db-live's "Wait for the service
-      # Postgres" has why (SMD-3196).
-      - name: Wait for the service Postgres
+      # db-live's "Wait for Postgres" has why (SMD-3196, SMD-3474).
+      - name: Wait for Postgres
         run: |
+          started() {
+            local deadline=$((SECONDS + 180))
+            until [ -s "$RUNNER_TEMP/postgres-start.rc" ]; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "Postgres's pull and start did not end within 180 s:" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+              sleep 0.2
+            done
+            [ "$(cat "$RUNNER_TEMP/postgres-start.rc")" = 0 ] || { echo "Postgres's pull or start failed (exit $(cat "$RUNNER_TEMP/postgres-start.rc")):" >&2; cat "$RUNNER_TEMP/postgres-start.log" >&2; exit 1; }
+            failed=$(grep -c '^pull try [0-9] failed' "$RUNNER_TEMP/postgres-start.log" || true)
+            if [ "$failed" -gt 0 ]; then echo "::warning::pgvector's pull took $((failed + 1)) tries"; cat "$RUNNER_TEMP/postgres-start.log"; fi
+          }
           ready() {
             local deadline=$((SECONDS + 60)) why
             until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
               if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
               elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
               else sleep 0.2; continue; fi
-              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+              echo "Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
-          ready "$PG"
-        env:
-          PG: ${{ job.services.postgres.id }}
+          started
+          ready postgres
 
       # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
@@ -4562,9 +4823,93 @@ jobs:
           fi
           echo "round-trip clean"
 
+      # This job's suite counts, for publish-test-counts (SMD-3614): on a push
+      # to main alone, the one run that publishes them, and after a failed
+      # step too, so the page shows what ran.
+      - name: Keep the suites' counts
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-counts-compat-shim
+          path: /tmp/ob1-test-counts/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # db-live's last step has why (SMD-3474).
+      - name: Postgres's log, and its removal
+        if: always()
+        run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
+          for c in postgres; do
+            echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
+            docker rm -f "$c" > /dev/null 2>&1 || true
+          done
+
+  # ── The suites' counts, published (SMD-3614) ────────────────────────────────
+  # A suite's assertion total is a fact about a commit's run, so it is written
+  # where the run is: the wiki's Test-counts page, not a doc that every PR
+  # adding an assertion edits, and two such PRs conflict on. report() in
+  # db/test-support.ts appends one line a run to OB1_TEST_COUNTS, which each
+  # job that runs suites sets; each uploads its file on a push to main, and
+  # this job gathers them, writes the page (.github/ci/test-counts-page.ts)
+  # and commits it to the wiki. It runs on a push to main alone, when a job it
+  # needs failed too (the page names the jobs that did not succeed), so it is
+  # the second job MAY_SKIP lets skip. A pull request, the merge queue and a
+  # push to another branch publish nothing. contents: write, on this job
+  # alone, is what pushes to the wiki's repository; the token stays out of the
+  # clone's config (an extraheader on each git call) and out of the checkout.
+  publish-test-counts:
+    name: Publish the suites' counts to the wiki
+    runs-on: ubuntu-24.04
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [portable-server, db-schema, replay-gate, db-live, data-layer, compat-shim]
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: test-counts-*
+          path: ${{ runner.temp }}/test-counts
+
+      - name: Write the page and commit it to the wiki
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-counts"
+          COUNTS_DIR="$RUNNER_TEMP/test-counts" bun .github/ci/test-counts-page.ts > "$RUNNER_TEMP/Test-counts.md"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth#AUTHORIZATION: basic }"
+          wiki="$RUNNER_TEMP/wiki"
+          # The wiki's repository exists once its first page does (SMD-3614).
+          git -c http.extraheader="$auth" clone --depth 1 "https://github.com/$REPO.wiki.git" "$wiki"
+          cp "$RUNNER_TEMP/Test-counts.md" "$wiki/Test-counts.md"
+          cd "$wiki"
+          git add Test-counts.md
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Test counts at ${SHA:0:12}" -m "$RUN_URL"
+          # A page edited meanwhile: once more on top of it.
+          git -c http.extraheader="$auth" push -q origin HEAD \
+            || { git -c http.extraheader="$auth" pull -q --rebase origin HEAD && git -c http.extraheader="$auth" push -q origin HEAD; }
+          echo "Published $(grep -c '^| `' Test-counts.md) rows at ${SHA:0:12}: $(git rev-parse --short HEAD) on the wiki"
+          cat Test-counts.md >> "$GITHUB_STEP_SUMMARY"
+
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
   # Both are required, as every job is, through "Fork Checks passed"
-  # (SMD-3168); commit-lint is the one job MAY_SKIP lets skip.
+  # (SMD-3168); commit-lint is the one lint job MAY_SKIP lets skip, beside
+  # publish-test-counts.
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
@@ -4625,8 +4970,9 @@ jobs:
   # `if: always()` because a job whose needs failed is otherwise skipped, and
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
-  # own `if:` runs it on pull requests and the merge queue alone. The step is
-  # held verbatim by check 20, which runs it against its own cases.
+  # own `if:` runs it on pull requests and the merge queue alone, and
+  # publish-test-counts, whose own runs it on a push to main alone. The step
+  # is held verbatim by check 20, which runs it against its own cases.
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
@@ -4646,11 +4992,12 @@ jobs:
       - compat-shim
       - commit-lint
       - workflow-lint
+      - publish-test-counts
     steps:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: commit-lint
+          MAY_SKIP: commit-lint publish-test-counts
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
