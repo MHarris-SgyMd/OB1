@@ -348,18 +348,21 @@ if (want("2")) {
   // written, so a run killed here leaves nothing changed, a second run from the same tree sees no drift, and a
   // read-only checkout runs it (SMD-3639).
   const copy = mkdtempSync(join(tmpdir(), "ob1-live-migrations-"));
+  /** A spawned run's environment: this one's, with OB1_TEST_MIGRATIONS_DIR set to `dir`. */
+  const envWith = (dir: string) => {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries({ ...process.env, OB1_TEST_MIGRATIONS_DIR: dir })) if (v !== undefined) env[k] = v;
+    return env;
+  };
   try {
     cpSync(join(HERE, "migrations"), copy, { recursive: true });
     const target = join(copy, "002_match_thoughts.sql");
     writeFileSync(target, readFileSync(target, "utf8") + "\n-- edited after being applied\n");
-    // The spawned run's environment is this one's, with the copy named.
-    const copyEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries({ ...process.env, OB1_TEST_MIGRATIONS_DIR: copy })) if (v !== undefined) copyEnv[k] = v;
-    const drifted = await runMigrator(URL_!, copyEnv);
+    const drifted = await runMigrator(URL_!, envWith(copy));
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
-    assert(drifted.stderr.includes(`Migrations read from ${copy}, not db/migrations`), "…reading the suite's copy, which it names, not db/migrations");
+    assert(drifted.stderr.split(`Migrations read from ${copy}, not db/migrations`).length === 2, "…reading the suite's copy, which it names once, not db/migrations");
     // Which stream each goes to, as main's migrator wrote them: the warning and
     // the rule to stderr, the summary to stdout. The in-process comparison
     // below cannot see this — both runs are this migrate.ts (review pass 4).
@@ -375,7 +378,12 @@ if (want("2")) {
     rmSync(copy, { recursive: true, force: true });
   }
   const restored = await migrate();
-  assert(restored.code === 0, "the tree's own migrations, never written, show no drift");
+  assert(restored.code === 0 && !restored.stderr.includes("Migrations read from"), "the tree's own migrations, never written, show no drift, and a run given no directory names none");
+  // A blank setting is unset; a directory that is not there is refused by name, exit 2, as an empty one is (review pass 1).
+  const blank = await runMigrator(URL_!, envWith(" "));
+  assert(blank.code === 0 && !blank.stderr.includes("Migrations read from"), `a blank OB1_TEST_MIGRATIONS_DIR reads the tree's migrations and names no directory (exit ${blank.code})`);
+  const gone = await runMigrator(URL_!, envWith(copy));
+  assert(gone.code === 2 && gone.stderr.includes(`${copy} is not a directory`) && !/\n\s+at /.test(gone.stderr), `a directory that is gone is refused by name, exit 2, with no stack (exit ${gone.code}: ${gone.stderr.trim().split("\n").pop()})`);
 }
 
 // ── 3. Driver-level binding — the class PGlite cannot reach ──────────────────

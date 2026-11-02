@@ -70,8 +70,8 @@
  */
 
 import type { SQL } from "bun";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
@@ -157,7 +157,8 @@ export interface MigrateOptions {
   pluginsDir?: string;
   /**
    * Where the core migrations live; the tree's db/migrations unless a suite
-   * names another, a copy it may edit (SMD-3639). The CLI reads it from
+   * names another, a copy it may edit (SMD-3639); blank is unset, a relative
+   * path is resolved against the working directory. The CLI reads it from
    * OB1_TEST_MIGRATIONS_DIR, so a spawned run can be pointed there too; a run
    * given one says so on stderr before it reads a file.
    */
@@ -593,10 +594,15 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   }
 
   /** The core migrations' directory: the tree's, or a suite's copy (SMD-3639). */
-  const coreDir = opts.migrationsDir ?? MIGRATIONS_DIR;
+  const coreDir = opts.migrationsDir?.trim() ? resolve(opts.migrationsDir.trim()) : MIGRATIONS_DIR;
 
   /** The migration files, read and hashed now; null (the problem printed) when their names collide. */
   function loadMigrations(): Migration[] | null {
+    // A suite's directory that is not one is refused as "No .sql files" is, not thrown (review pass 1).
+    if (coreDir !== MIGRATIONS_DIR && !statSync(coreDir, { throwIfNoEntry: false })?.isDirectory()) {
+      err(`${coreDir} is not a directory: the migrations directory a suite named (OB1_TEST_MIGRATIONS_DIR).`);
+      return null;
+    }
     const names = readdirSync(coreDir)
       .filter((f) => f.endsWith(".sql"))
       .sort(); // 001_, 002_, … lexical order is the intended order
@@ -683,7 +689,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
   }
 
-  if (opts.migrationsDir !== undefined) err(`Migrations read from ${coreDir}, not db/migrations: a suite's directory (OB1_TEST_MIGRATIONS_DIR).`);
+  if (coreDir !== MIGRATIONS_DIR) err(`Migrations read from ${coreDir}, not db/migrations: a suite's directory (OB1_TEST_MIGRATIONS_DIR).`);
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
@@ -1474,7 +1480,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // The file applied by hand, into this database, from the repository's root or into the compose stack's Postgres (review pass 3: a psql with no database named created it in another).
     // The database's name in a shell's single quotes, so a name with `$`, a backquote or a double quote pastes as itself (review pass 4: an identifier's double quotes ran a command substitution).
     const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
-    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f db/migrations/${file.name}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < db/migrations/${file.name}`;
+    // A suite's copy named as read (SMD-3639).
+    const path = opts.migrationsDir?.trim() ? join(resolve(opts.migrationsDir.trim()), file.name) : `db/migrations/${file.name}`;
+    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f ${path}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < ${path}`;
     try {
       const before = await state();
       if (!before.installed) {
@@ -1788,8 +1796,8 @@ if (import.meta.main) {
       // which that role's connection is built from.
       plugins: process.env.OB1_PLUGINS,
       pluginPassword: process.env.OB1_PLUGIN_DB_PASSWORD,
-      // A suite's copy of the migrations, for a spawned run (SMD-3639); blank is unset.
-      migrationsDir: process.env.OB1_TEST_MIGRATIONS_DIR || undefined,
+      // A suite's copy of the migrations, for a spawned run (SMD-3639); run() takes blank as unset.
+      migrationsDir: process.env.OB1_TEST_MIGRATIONS_DIR,
       url,
     });
   });
