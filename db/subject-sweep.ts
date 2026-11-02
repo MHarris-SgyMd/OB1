@@ -392,10 +392,10 @@ export interface SubjectSweepOptions {
    */
   admit?: Admit;
   /**
-   * A following run's word through its caller's row (db/pass-stamp.ts; sleep.ts's `through`): `ok` after each poll of
-   * the pool, and as the run ends, `failed` for an end of its own — a refusal, its own options' among them, the
-   * provider or the database not answering, the judge's alarm, a throw — else `stopped`. It beats no row while it works
-   * through a pool: a scheduler's row is the scheduler's to keep stamped. Unused without `follow`.
+   * A following run's word through its caller's row (db/pass-stamp.ts; sleep.ts's `through`): `ok` at each poll that
+   * finds the pool empty, and as the run ends, `failed` for an end of its own — a refusal, its own options' among them,
+   * the provider or the database not answering, the judge's alarm, a throw — else `stopped`. It beats no row while it
+   * works through a pool: a scheduler's row is the scheduler's to keep stamped. Unused without `follow`.
    */
   stamper?: PassStamper | null;
   /**
@@ -702,7 +702,10 @@ async function sweep(
    * passes 2 to 4).
    */
   let heldAtStart: string | null = null, namedAtStart: string | null = null;
-  /** A stop's code, before the thoughts begin as after: a following run's stop is its end, 0 (review pass 1, cold read and run-it: 130 in the naming's waits). */
+  /**
+   * A stop's code, before the thoughts begin as after: a following run's stop is its end, 0 (review pass 1, cold read
+   * and run-it: 130 in the naming's waits).
+   */
   const stoppedCode = FOLLOW_S > 0 ? 0 : 130;
   /**
    * A statement past a scheduler's statement_timeout (`session`; sleep.ts's statementTimedOut, its rule): at the run's
@@ -1185,7 +1188,7 @@ async function sweep(
    * cast keeps the declared type (SMD-1932's way, as extract-entities.ts's configError).
    */
   let endedBy = null as { code: number; line: string } | null;
-  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollLost: false };
+  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollsLost: false };
   /**
    * The judge's answer on the claim in hand, null until it answers (PR 5b): appended to the pool's window once the
    * claim is released (`judgedAlone`), or, for a claim this run finishes as named nothing, in the finish's own
@@ -1248,7 +1251,7 @@ async function sweep(
 
   /**
    * The line of a run another run's trip stops: when, on whose answers, and the claim in hand handed back with them. The
-   * window's strings shown clean, as the held line's are (review pass 8, mutation tester: printed raw, as the trip line's
+   * window's strings shown clean, as the held line's are (review pass 8, cold read: printed raw, as the trip line's
    * models were).
    */
   const stampLine = (w: JudgeWindow, inHand: WindowAnswer | null) =>
@@ -1501,11 +1504,11 @@ async function sweep(
   const lostPoll = async (e: unknown, what: string, inHand: boolean): Promise<boolean> => {
     n.pollsLost++;
     const why = `${what} passed the scheduler's statement_timeout (${String((e as Error)?.message ?? e).slice(0, 200)})`;
-    const stopped = () => {
-      sayOnce("pollLost", `  ${why}: the run loses this poll, and its stop ends it there`);
+    const endAtStop = () => {
+      sayOnce("pollsLost", `  ${why}: the run loses this poll, and its stop ends it there`);
       return false;
     };
-    if (stop.signal.aborted) return stopped();
+    if (stop.signal.aborted) return endAtStop();
     let back: number | null = null;
     try {
       back = await releaseHeld();
@@ -1516,14 +1519,14 @@ async function sweep(
       }
     }
     if (inHand && back) taken--;
-    if (stop.signal.aborted) return stopped();
+    if (stop.signal.aborted) return endAtStop();
     if (!FOLLOW_S) {
       endedBy = { code: 1, line: `\n  The sweep stops here: ${why}. Run it again.` };
       return false;
     }
     pauseMs = Math.max(pauseMs, FOLLOW_S * 1000);
     const held = back === null ? "what it held goes back as each lease runs out, or as the run ends" : back ? "what it held is back in the pool" : "it held no claim";
-    sayOnce("pollLost", `  ${why}: the run loses this poll, not its end; ${held}, and ${LIMIT && taken >= LIMIT ? "it ends at its limit" : `it claims again in ${Math.round(pauseMs / 1000)} s`}`);
+    sayOnce("pollsLost", `  ${why}: the run loses this poll, not its end; ${held}, and ${LIMIT && taken >= LIMIT ? "it ends at its limit" : `it claims again in ${Math.round(pauseMs / 1000)} s`}`);
     return true;
   };
 
@@ -1583,8 +1586,7 @@ async function sweep(
             if (await setBack(sql, POOL, workerId, row.id)) {
               n.setBack++;
               taken--;
-            }
-            else if (((await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${row.id}::uuid) AS there`) as { there: boolean }[])[0].there) {
+            } else if (((await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${row.id}::uuid) AS there`) as { there: boolean }[])[0].there) {
               n.setBack++;
               n.lost++;
             } else n.gone++;

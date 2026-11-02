@@ -7094,7 +7094,10 @@ if (want("10h")) {
   let onOwn: ((thought: string) => void | Promise<unknown>) | null = null;
   /** Each own question's word in turn, ahead of judgeMode: "503", "slow" (past a one-second limit) or "answer". */
   const judgeScript: string[] = [];
-  /** The "flaky-judge" thoughts whose first question the stub has failed with a 503: each is answered when asked again (PR 6a, review pass 1). */
+  /**
+   * The "flaky-judge" thoughts whose first question the stub has failed with a 503: each is answered when asked again
+   * (PR 6a, review pass 1).
+   */
   const flaked = new Set<string>();
   const stub = Bun.serve({
     port: 0,
@@ -7664,7 +7667,10 @@ if (want("10h")) {
     judgeMode = "503";
     const downAsked: string[] = [];
     let freshLeases = 0;
-    /** Each call's claim time: four, distinct and rising, one claim each (review pass 6: a lease kept whole read fresh too). */
+    /**
+     * Each call's claim time: four, distinct and rising, one claim each (PR 6a's review pass 6, cold read: a lease kept
+     * whole read fresh too).
+     */
     const claimedAts: string[] = [];
     onOwn = async (t) => {
       const id = t.includes("passing remark") ? none : t.includes("garbled") ? garbled : utf;
@@ -7674,7 +7680,7 @@ if (want("10h")) {
       if (c?.status === "claimed" && Math.abs(c.s) < 1) freshLeases++;
       if (c?.at) claimedAts.push(c.at);
     };
-    // Bounded, so a run that never ends fails here rather than holding the shard (review pass 4, run-it).
+    // Bounded, so a run that never ends fails here rather than holding the shard (PR 6a's review pass 4, mutant).
     const down = await sweep({ signal: AbortSignal.timeout(60_000) }).finally(() => { restore(); judgeMode = "answer"; onOwn = null; });
     const [lastRow] = (await sql`SELECT thought_id::text AS last FROM thought_work_claims WHERE work_type = ${POOL} AND status = 'pending' ORDER BY enqueued_at DESC LIMIT 1`) as { last: string }[];
     const last = lastRow?.last ?? "";
@@ -8828,13 +8834,13 @@ if (want("10h")) {
      * A run that waits on the subject pool's lock, held by the case on a client of its own: once the run says it waits,
      * having read the window's last trip, `meanwhile` runs, and the lock is let go.
      */
-    const runPastPoolLock = async (meanwhile: () => Promise<unknown>, opts: Omit<SubjectSweepOptions, "writer"> = {}, e = env) => {
+    const runPastPoolLock = async (meanwhile: () => Promise<unknown>, opts: Omit<SubjectSweepOptions, "writer"> = {}) => {
       const holder = new SQL({ url: URL_!, max: 1 });
       try {
         await holder`SELECT pg_advisory_lock(hashtextextended('ob1:subject-pool', 0))`;
         let sawWait = () => {};
         const waiting = new Promise<void>((r) => { sawWait = r; });
-        const running = caught((writer) => sweepSubjects({ url: URL_!, env: e, limit: 12, ...opts, writer: { out: (l) => { if (l.includes("waiting for another run holding the subject pool's lock")) sawWait(); writer.out(l); }, err: writer.err } }));
+        const running = caught((writer) => sweepSubjects({ url: URL_!, env, limit: 12, ...opts, writer: { out: (l) => { if (l.includes("waiting for another run holding the subject pool's lock")) sawWait(); writer.out(l); }, err: writer.err } }));
         await Promise.race([waiting, running]);
         await meanwhile();
         await holder`SELECT pg_advisory_unlock(hashtextextended('ob1:subject-pool', 0))`;
@@ -9608,7 +9614,6 @@ if (want("10h")) {
       const polled = await pollUntil(async () => stamped.includes("stamp:ok"), 20_000);
       return { stop, running, polled };
     };
-    const savedGarbledHere = garbledAnswers;
     const savedPauses = [...TRANSIENT_PAUSES_MS];
     try {
       await sql`DELETE FROM thoughts`;
@@ -9628,13 +9633,14 @@ if (want("10h")) {
       const gateDeaf = await orHung(sweep({ admit: heldGate(0).admit }), 10_000);
       // A dry run waits at no gate, so its admit needs no signal (review pass 8, mutant: refused lived).
       const dryGate = await orHung(sweep({ admit: heldGate(0).admit, dryRun: true }), 10_000);
+      const refusals = [followDry, followChecked, followHalf, sessionLent, gateDeaf];
       assert(followDry.code === 2 && /^follow is a scheduler's run of the sweep, and a dry run writes, pools and asks nothing to follow: drop one of them\.$/m.test(followDry.stderr)
           && followChecked.code === 2 && /^follow is a scheduler's run of the sweep, and --judge-checked is a hand run's word that the judge was checked, which no scheduler can give: drop one of them\.$/m.test(followChecked.stderr)
           && followHalf.code === 2 && /^follow must be a decimal integer >= 0$/m.test(followHalf.stderr) && refusedWords === "end:failed,end:failed,end:failed"
           && sessionLent.code === 2 && /^session settings reach a client the sweep opens itself: pass url without sql, or set them on your client\.$/m.test(sessionLent.stderr)
           && gateDeaf?.code === 2 && /^admit needs signal: the gate is awaited before the pool, and only the caller's signal stops a run waiting there\.$/m.test(gateDeaf.stderr)
           && dryGate?.code === 0,
-        `a scheduler's options are refused where they do not apply, each following one saying failed (exits ${[followDry, followChecked, followHalf, sessionLent, gateDeaf].map((r) => r?.code ?? "still running at 10 s").join(", ")}; words ${refusedWords}): ${[followDry, followChecked, followHalf, sessionLent, gateDeaf].map((r) => (r?.stderr ?? "").trim().split("\n")[0].slice(0, 70)).join(" | ")}`);
+        `a scheduler's options are refused where they do not apply, each following one saying failed (exits ${refusals.map((r) => r?.code ?? "still running at 10 s").join(", ")}; words ${refusedWords}): ${refusals.map((r) => (r?.stderr ?? "").trim().split("\n")[0].slice(0, 70)).join(" | ")}`);
 
       // A following run waits at the empty pool, its word ok through its caller's row at each poll, claims a thought
       // 113's trigger pools meanwhile, and ends at its stop, a follower's end, exit 0, its word stopped; banner false
@@ -9706,7 +9712,7 @@ if (want("10h")) {
       stamped.length = 0;
       garbledAnswers = true;
       const [garbledT] = await seedAll(["Follow note 6: garbled on purpose."]);
-      const garbledRun = await sweep({ follow: 1, limit: 1, stamper: throughRow, signal: backstop() }).finally(() => { garbledAnswers = savedGarbledHere; });
+      const garbledRun = await sweep({ follow: 1, limit: 1, stamper: throughRow, signal: backstop() }).finally(() => { garbledAnswers = savedGarbled; });
       const garbledWords = stamped.join(",");
       const garbledClaim = (await claimOf(garbledT))?.status;
       assert(tripped.polled && trippedRun.code === 3 && /Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00/.test(trippedRun.stderr) && trippedWords.endsWith("stamp:ok,end:failed")
@@ -9736,17 +9742,17 @@ if (want("10h")) {
       const atClaim = orHung(sweep({ admit: claimGate.admit, signal: AbortSignal.any([claimStop.signal, backstop()]) }));
       // …and one not following stopped at the pool's gate, 130 (review pass 8, mutant: its 0 lived).
       const atPlain = orHung(sweep({ admit: plainGate.admit, signal: AbortSignal.any([plainStop.signal, backstop()]) }));
-      const bothWait = await pollUntil(async () => poolGate.waiting === 1 && claimGate.waiting === 1 && plainGate.waiting === 1, 20_000);
+      const allWait = await pollUntil(async () => poolGate.waiting === 1 && claimGate.waiting === 1 && plainGate.waiting === 1, 20_000);
       poolStop.abort();
       claimStop.abort();
       plainStop.abort();
       const [atPoolRun, atClaimRun, atPlainRun] = await Promise.all([atPool, atClaim, atPlain]);
       const stillClaim = (await claimOf(stillT))?.status;
       assert(gateHeld && heldClaims === "pending" && heldAsked === 0 && gateRun.code === 0 && gate.asked === 3 && (await statusOf(gateIds)).join(",") === "succeeded"
-          && bothWait && atPoolRun?.code === 0 && /\n {2}stopped at the admit gate: the caller's signal was aborted; nothing was named, pooled or claimed\n/.test(atPoolRun.stderr) && poolGate.asked === 1
+          && allWait && atPoolRun?.code === 0 && /\n {2}stopped at the admit gate: the caller's signal was aborted; nothing was named, pooled or claimed\n/.test(atPoolRun.stderr) && poolGate.asked === 1
           && atClaimRun?.code === 130 && /stopped after 0 thought\(s\)/.test(atClaimRun.stderr) && stillClaim === "pending" && ownCalls === stopsAsked
           && atPlainRun?.code === 130 && /stopped at the admit gate: the caller's signal was aborted; nothing was named, pooled or claimed/.test(atPlainRun.stderr),
-        `the admit gate before the pool and each claim holds the run with nothing claimed or asked, and a stop there ends it, 0 following, 130 not, a pending thought left so (held ${gateHeld}: claims ${heldClaims}, ${heldAsked} asked; exit ${gateRun.code}, the gate asked ${gate.asked} times; stops: both waiting ${bothWait}, exits ${atPoolRun?.code ?? "still running at 30 s"} at the pool's gate, asked ${poolGate.asked}, and ${atClaimRun?.code ?? "still running at 30 s"} at the claim's, the thought ${stillClaim}, ${ownCalls - stopsAsked} asked): ${atPoolRun?.stderr.trim().slice(0, 200)}`);
+        `the admit gate before the pool and each claim holds the run with nothing claimed or asked, and a stop there ends it, 0 following, 130 not, a pending thought left so (held ${gateHeld}: claims ${heldClaims}, ${heldAsked} asked; exit ${gateRun.code}, the gate asked ${gate.asked} times; stops: all waiting ${allWait}, exits ${atPoolRun?.code ?? "still running at 30 s"} at the pool's gate, asked ${poolGate.asked}, and ${atClaimRun?.code ?? "still running at 30 s"} at the claim's, the thought ${stillClaim}, ${ownCalls - stopsAsked} asked): ${atPoolRun?.stderr.trim().slice(0, 200)}`);
       await drop([stillT]);
 
       // A trip that lands while a following run waits at the gate before the pool is another run's, read at its first
@@ -9754,10 +9760,10 @@ if (want("10h")) {
       // (review pass 8, mutant: the trip's base read after that gate lived, the run taking the trip as its start's and
       // following on).
       await alarmAt(48, 1);
-      const [tripGateT] = await seedAll(["Gate note 20: sweep-pass-good work, pending as another run's trip lands."]);
+      const [tripGateT] = await seedAll(["Gate note 22: sweep-pass-good work, pending as another run's trip lands."]);
       const tripGate = heldGate(0);
       const tripGateStop = new AbortController();
-      const ctl = String.fromCharCode(7);
+      const bell = String.fromCharCode(7);
       stamped.length = 0;
       const tripGateAsked = ownCalls;
       let tripGateRun: SweepRun | null = null;
@@ -9765,7 +9771,7 @@ if (want("10h")) {
       try {
         const tripGateRunning = orHung(sweep({ follow: 1, admit: tripGate.admit, stamper: throughRow, signal: AbortSignal.any([tripGateStop.signal, backstop()]) }));
         tripGateWaited = await pollUntil(async () => tripGate.waiting === 1, 20_000);
-        await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, ${JSON.stringify({ pool: POOL, answers: [], tripped: `2000-01-01 00:00:00+00${ctl}`, by: [`gate${ctl}judge`] })})
+        await sql`INSERT INTO ob1_config (key, value) VALUES (${JUDGE_WINDOW_KEY}, ${JSON.stringify({ pool: POOL, answers: [], tripped: `2000-01-01 00:00:00+00${bell}`, by: [`gate${bell}judge`] })})
                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
         tripGate.open();
         tripGateRun = await tripGateRunning;
@@ -9774,8 +9780,8 @@ if (want("10h")) {
       }
       await alarmAt(48, 1);
       assert(tripGateWaited && tripGateRun?.code === 3 && ownCalls === tripGateAsked && (await claimOf(tripGateT))?.status === "pending" && stamped.join(",") === "end:failed"
-          && /Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, on answers from gatejudge, after this run began/.test(tripGateRun.stderr) && !tripGateRun.stderr.includes(ctl),
-        `a trip landing as a following run waits at the gate before the pool ends it at its first claim, 3, nothing asked, failed, shown clean (waited ${tripGateWaited}, exit ${tripGateRun?.code ?? "still running at 30 s"}, ${ownCalls - tripGateAsked} asked, words ${stamped.join(",")}): ${tripGateRun?.stderr.trim().slice(0, 200).replaceAll(ctl, "<BEL>")}`);
+          && /Another run's garbage-judge alarm tripped at 2000-01-01 00:00:00\+00, on answers from gatejudge, after this run began/.test(tripGateRun.stderr) && !tripGateRun.stderr.includes(bell),
+        `a trip landing as a following run waits at the gate before the pool ends it at its first claim, 3, nothing asked, failed, shown clean (waited ${tripGateWaited}, exit ${tripGateRun?.code ?? "still running at 30 s"}, ${ownCalls - tripGateAsked} asked, words ${stamped.join(",")}): ${tripGateRun?.stderr.trim().slice(0, 200).replaceAll(bell, "<BEL>")}`);
       await drop([tripGateT]);
 
       // …and a thought a provider error put back (review pass 3, cold read: a gate of its own before the call asked again,
@@ -9785,7 +9791,7 @@ if (want("10h")) {
       // one another worker took left to it, a stop there or a gate answering past it ending the run, the gate's own error
       // thrown, a trip or the pool named away found as it opens ending the run, 3 or 2, and an abort there finding no call.
       const restorePutBackPauses = shortenPauses();
-      let putBackHeld = false, heldPutBack = { asked: -1, claim: "" as string | undefined };
+      let putBackHeld = false, putBackWhileHeld = { asked: -1, claim: "" as string | undefined };
       let putBackRun: SweepRun | null = null, putBackAsked = 0, putBackGateAsked = 0, putBackClaim: { status: string; attempt_count: number } | undefined;
       let editHeld = false, editRun: SweepRun | null = null, editAsked = 0, editClaim: string | undefined;
       const editTexts: string[] = [];
@@ -9806,7 +9812,7 @@ if (want("10h")) {
         putBackAsked = ownCalls;
         const puttingBack = orHung(sweep({ admit: putBackGate.admit, limit: 1, signal: backstop() }));
         putBackHeld = await pollUntil(async () => putBackGate.waiting === 1, 20_000);
-        heldPutBack = { asked: ownCalls - putBackAsked, claim: (await claimOf(putBackT))?.status };
+        putBackWhileHeld = { asked: ownCalls - putBackAsked, claim: (await claimOf(putBackT))?.status };
         putBackGate.open();
         putBackRun = await puttingBack;
         putBackAsked = ownCalls - putBackAsked;
@@ -9963,11 +9969,11 @@ if (want("10h")) {
           && loop.code === 1 && loop.asked === 4
           && onceGaps.length === 4 && onceGaps[0] >= 1400 && onceGaps.slice(1).every((g) => g < 1250),
         `the pauses count the provider's errors since its last answer: four thoughts each failing once, answered ones between, all answered; a thought edited or deleted during the call that fails is counted as the write would find it, one another run took as unanswered and lost; an outage editing each failing thought still ends after four calls; one error pauses once (mixed ${JSON.stringify(mixed)}; during ${JSON.stringify(during)}; loop ${JSON.stringify(loop)}; gaps ${onceGaps.join(",")} ms)`);
-      assert(putBackHeld && heldPutBack.asked === 1 && heldPutBack.claim === "pending" && putBackRun?.code === 0 && putBackAsked === 2 && putBackGateAsked === 3
+      assert(putBackHeld && putBackWhileHeld.asked === 1 && putBackWhileHeld.claim === "pending" && putBackRun?.code === 0 && putBackAsked === 2 && putBackGateAsked === 3
           && putBackClaim?.status === "succeeded" && putBackClaim.attempt_count === 1 && /^ {2}1 thought\(s\) in [^:]*: 1 subject\(s\) recorded \(1 by stub-judge\)$/m.test(putBackRun.stdout)
           && editHeld && editRun?.code === 0 && editAsked === 2 && editClaim === "succeeded" && editTexts.length === 2 && editTexts[1].includes("edited while it waited in the pool")
           && /^ {2}1 thought\(s\) in [^:]*: 1 subject\(s\) recorded \(1 by stub-judge\)$/m.test(editRun.stdout),
-        `a thought a provider error put back waits in the pool, pending, its attempt not counted, while the next claim's gate holds the run, then is asked again, its place under --limit given back; one edited meanwhile is asked at its new text alone (retry: held ${putBackHeld}, ${heldPutBack.asked} asked while held, claim ${heldPutBack.claim}; exit ${putBackRun?.code ?? "still running at 30 s"}, ${putBackAsked} asked, the gate asked ${putBackGateAsked} times, claim ${JSON.stringify(putBackClaim)}; edit: held ${editHeld}, exit ${editRun?.code ?? "still running at 30 s"}, ${editAsked} asked, claim ${editClaim}, texts asked ${editTexts.length}): ${putBackRun?.stdout.trim().slice(-160)} | ${editRun?.stdout.trim().slice(-160)}`);
+        `a thought a provider error put back waits in the pool, pending, its attempt not counted, while the next claim's gate holds the run, then is asked again, its place under --limit given back; one edited meanwhile is asked at its new text alone (retry: held ${putBackHeld}, ${putBackWhileHeld.asked} asked while held, claim ${putBackWhileHeld.claim}; exit ${putBackRun?.code ?? "still running at 30 s"}, ${putBackAsked} asked, the gate asked ${putBackGateAsked} times, claim ${JSON.stringify(putBackClaim)}; edit: held ${editHeld}, exit ${editRun?.code ?? "still running at 30 s"}, ${editAsked} asked, claim ${editClaim}, texts asked ${editTexts.length}): ${putBackRun?.stdout.trim().slice(-160)} | ${editRun?.stdout.trim().slice(-160)}`);
       const takenTally = takenRun ? tally(takenRun) : "";
       assert(stopHeld && stopRun?.code === 130 && stopAsked === 1 && stopClaim === "pending" && /stopped after 0 thought\(s\)/.test(stopRun.stderr)
           && rejectThrown === "the case's gate refuses" && rejectWords === "end:failed" && rejectClaim === "pending"
@@ -10028,11 +10034,6 @@ if (want("10h")) {
           && handBacks.past.code === 130 && handBacks.past.claim === "claimed" && handBacks.past.said && handBacks.past.stopLine === "goes back as each lease runs out" && handBacks.past.hard === "null",
         `the run's hand-back waits out a short budget on a claim's held row, the claim back, but no longer than its own bound, said, the claim left to its lease (${JSON.stringify(handBacks)})`);
 
-      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's is, not the
-      // run's, which sleep read as its budget's (review pass 6, run-it). A thought's own write — the door's write of a
-      // key, the finish of one named nothing, each waiting on the door's lock on the thought, which the case holds —
-      // fails that thought, said once, and the run goes on, each answer judged as a failed one's is.
-      await alarmAt(48, 1);
       /** A run's rejection as a run of its own, so a regression fails its case rather than the suite. */
       const settled = (run: Promise<SweepRun>) => run.catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
       /** Whether another backend runs a statement holding `fragment`, waiting on a lock (`event`, its kind, when given). */
@@ -10040,6 +10041,12 @@ if (want("10h")) {
         SELECT count(*)::int AS n FROM pg_stat_activity
          WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}
            AND (${event}::text IS NULL OR wait_event = ${event}::text)`) as { n: number }[])[0].n > 0;
+
+      // A statement past a scheduler's budget over a thought is the thought's or the poll's, as a claim pass's is, not the
+      // run's, which sleep read as its budget's (review pass 6, run-it). A thought's own write — the door's write of a
+      // key, the finish of one named nothing, each waiting on the door's lock on the thought, which the case holds —
+      // fails that thought, said once, and the run goes on, each answer judged as a failed one's is.
+      await alarmAt(48, 1);
       const ownIds = await seedAll(["Budget note 1: sweep-pass-good work, its door held past the budget.", "Budget note 2: nothing to name here, its finish held past the budget.", "Budget note 3: sweep-pass-good work, its door free."]);
       const doorHolder = new SQL({ url: URL_!, max: 1 });
       const dh = await doorHolder.reserve();
@@ -10134,7 +10141,7 @@ if (want("10h")) {
       await drop([claimT]);
 
       /** The claim's row of `id` held from the judge's question on, for `ms`: the answer waits for the lock, not its hold. */
-      const holdClaimRow = (text: string, id: () => string, ms: number) => {
+      const holdClaimRow = (text: string, id: string, ms: number) => {
         const holder = new SQL({ url: URL_!, max: 1 });
         let held: Promise<void> | null = null;
         onOwn = (t) => {
@@ -10142,7 +10149,7 @@ if (want("10h")) {
           const locked = (async () => {
             const c = await holder.reserve();
             await c`BEGIN`;
-            await c`SELECT 1 FROM thought_work_claims WHERE thought_id = ${id()}::uuid AND work_type = ${POOL} FOR UPDATE`;
+            await c`SELECT 1 FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${POOL} FOR UPDATE`;
             return c;
           })();
           held = locked.then(async (c) => {
@@ -10163,10 +10170,10 @@ if (want("10h")) {
       // failure left out of the run's count, and the run ends at its limit, 0.
       garbledAnswers = true;
       const [releaseT] = await seedAll(["Budget note 5: garbled sweep-pass-good work, its release held past the budget."]);
-      const releaseFree = holdClaimRow("Budget note 5", () => releaseT, 2500);
+      const releaseFree = holdClaimRow("Budget note 5", releaseT, 2500);
       const releaseRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
         await releaseFree();
-        garbledAnswers = savedGarbledHere;
+        garbledAnswers = savedGarbled;
       });
       const releaseClaim = await claimOf(releaseT);
       assert(releaseRun?.code === 0 && releaseClaim?.status === "pending" && !/claim\(s\) failed/.test(releaseRun.stderr)
@@ -10207,7 +10214,7 @@ if (want("10h")) {
       // under the limit, asked again after the provider's pause, the longer than the follow, and answered.
       TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 3000, 100, 100);
       const [putT] = await seedAll(["Budget note 7: flaky-judge sweep-pass-good work, its put-back held past the budget."]);
-      const putFree = holdClaimRow("Budget note 7", () => putT, 2500);
+      const putFree = holdClaimRow("Budget note 7", putT, 2500);
       /** When each question about the thought came: the second the pause's length after the hand-back. */
       const putCalls: number[] = [];
       const putHold = onOwn;
@@ -10283,7 +10290,7 @@ if (want("10h")) {
       // …and one while the lost poll's hand-back waits, the claim's row held past the budget and then the stop: the claim
       // back once the row is let go, the poll said lost to the stop, not as a poll to come (review pass 7, cold read).
       const [handT] = await seedAll(["Budget note 17: sweep-pass-good work, its release and hand-back held as the run stops."]);
-      const handFree = holdClaimRow("Budget note 17", () => handT, 4500);
+      const handFree = holdClaimRow("Budget note 17", handT, 4500);
       const handStop = new AbortController();
       const handRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([handStop.signal, backstop()]) }));
       const handWaited = await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000);
@@ -10302,12 +10309,12 @@ if (want("10h")) {
       // neither failed nor counted nor said as a write past the budget.
       const [hardT] = await seedAll(["Budget note 11: sweep-pass-good work, its door held as the run stops twice."]);
       const hardHolder = new SQL({ url: URL_!, max: 1 });
-      const hc2 = await hardHolder.reserve();
+      const hh = await hardHolder.reserve();
       let hardStopOf: PassStop | null = null;
       let hardRun: SweepRun | null = null;
       let doorWaited = false;
       try {
-        await hc2`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardT}::uuid::text, 0))`;
+        await hh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardT}::uuid::text, 0))`;
         const hardRunning = settled(sweep({ session: { statement_timeout: "1500" }, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
         // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
         // slow answer let the stops land before the write, which the case then never met).
@@ -10316,8 +10323,8 @@ if (want("10h")) {
         (hardStopOf as PassStop | null)?.();
         hardRun = await orHung(hardRunning);
       } finally {
-        await hc2`SELECT pg_advisory_unlock_all()`.catch(() => {});
-        hc2.release();
+        await hh`SELECT pg_advisory_unlock_all()`.catch(() => {});
+        hh.release();
         await hardHolder.close({ timeout: 5 });
       }
       assert(doorWaited && hardRun?.code === 130 && (await claimOf(hardT))?.status === "pending" && !/its write passed/.test(hardRun.stderr) && tally(hardRun) === "0 subject(s) recorded",
@@ -10394,7 +10401,7 @@ if (want("10h")) {
       const [mixUnread, mixDoor, mixLease] = await seedAll(["Budget note 14a: garbled sweep-pass-good work, unread.", "Budget note 14b: sweep-pass-good work, its door held past the budget.", "Budget note 14c: sweep-pass-good work, its release and hand-back held past both."]);
       const mixHolder = new SQL({ url: URL_!, max: 1 });
       const mh = await mixHolder.reserve();
-      const mixFree = holdClaimRow("Budget note 14c", () => mixLease, 4000);
+      const mixFree = holdClaimRow("Budget note 14c", mixLease, 4000);
       let mixRun: SweepRun | null = null;
       try {
         await mh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${mixDoor}::uuid::text, 0))`;
@@ -10402,7 +10409,7 @@ if (want("10h")) {
         mixRun = await orHung(settled(sweep({ follow: 1, limit: 3, session: { statement_timeout: "1500" }, signal: backstop() })));
       } finally {
         RELEASE_WAIT.ms = 30_000;
-        garbledAnswers = savedGarbledHere;
+        garbledAnswers = savedGarbled;
         await mixFree();
         await mh`SELECT pg_advisory_unlock_all()`.catch(() => {});
         mh.release();
@@ -10516,7 +10523,7 @@ if (want("10h")) {
         aborted = abortInHand(0);
       };
       const abortAsked = ownCalls;
-      const abortRun = await sweep({ limit: 1, onPass: (_stop, a) => { abortInHand = a; atBegin = a(0); }, signal: backstop() }).finally(() => { onOwn = null; });
+      const abortRun = await sweep({ limit: 1, onPass: (_st, a) => { abortInHand = a; atBegin = a(0); }, signal: backstop() }).finally(() => { onOwn = null; });
       const abortWindow = await windowOf();
       const abortClaim = (await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${slowT}::uuid AND work_type = ${POOL}`)[0] as { status: string; attempt_count: number };
       assert(atBegin === 0 && younger === 0 && aborted === 1 && abortRun.code === 0 && ownCalls - abortAsked === 2 && abortClaim.status === "succeeded" && abortClaim.attempt_count === 1
@@ -10534,7 +10541,7 @@ if (want("10h")) {
           if (setOrder.filter((o) => o === "first").length === 1) setAbort(0);
         } else if (thought.includes("Abort note 7")) setOrder.push("second");
       };
-      const setRun = await sweep({ onPass: (_stop, a) => { setAbort = a; }, signal: backstop() }).finally(() => { onOwn = null; });
+      const setRun = await sweep({ onPass: (_st, a) => { setAbort = a; }, signal: backstop() }).finally(() => { onOwn = null; });
       const setClaims = (await statusOf([setFirst, setSecond])).join(",");
       assert(setRun.code === 0 && setOrder.join(",") === "first,second,first" && setClaims === "succeeded,succeeded" && /1 set back unanswered, the call in hand aborted by the caller/.test(tally(setRun)),
         `a thought set back goes behind one queued before it, asked again after it (asks ${setOrder.join(",")}, claims ${setClaims}, exit ${setRun.code}): ${tally(setRun)}`);
@@ -10571,7 +10578,7 @@ if (want("10h")) {
         setTimeout(() => { inPause = pauseAbort(0); }, 1500);
       };
       const pauseAsked = ownCalls;
-      const pauseRun = await sweep({ onPass: (_stop, a) => { pauseAbort = a; }, signal: backstop() }).finally(() => {
+      const pauseRun = await sweep({ onPass: (_st, a) => { pauseAbort = a; }, signal: backstop() }).finally(() => {
         onOwn = null;
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
@@ -10774,7 +10781,7 @@ if (want("10h")) {
       const mixedTrip = await sweep({ limit: 10 });
       const mixedHeld = heldSaid(await sweep({ dryRun: true }));
       const mixedWindow = await windowOf();
-      garbledAnswers = savedGarbledHere;
+      garbledAnswers = savedGarbled;
       await drop(mixedTripIds);
       await alarmAt(48, 1);
       assert(mixedTrip.code === 3 && mixedWindow?.nothing === false && mixedWindow.back.length === 2 && !/If it is right already/.test(mixedTrip.stderr)
@@ -11010,10 +11017,9 @@ if (want("10h")) {
 
       // …and a model's name a hand edit put in the window is shown without its control characters (review pass 5, cold
       // read: printed raw, as the window's other strings were).
-      const bell = String.fromCharCode(7);
       await keepWindow(`2000-01-20 00:00:00+00${bell}`, [`bell${bell}model`], [`bell${bell}model`]);
       const bellRun = await sweep({ dryRun: true });
-      // …and the trip line's earlier hold too (review pass 8, mutation tester: printed raw).
+      // …and the trip line's earlier hold too (review pass 8, cold read: printed raw).
       await alarmAt(2, 1 / 5);
       await keepWindow("2000-01-21 00:00:00+00", [`bell${bell}model`], [`bell${bell}model`]);
       const bellTripIds = await seedAll(["Bell note 1: the judge names nothing here.", "Bell note 2: nor here."]);
@@ -11077,7 +11083,7 @@ if (want("10h")) {
           else await lk`SELECT 1 FROM thought_work_claims WHERE thought_id = ${stageT}::uuid AND work_type = ${POOL} FOR UPDATE`;
           const stageStop = new AbortController();
           const stopping = orHung(sweep({ follow: 1, signal: AbortSignal.any([stageStop.signal, backstop()]) }), 20_000);
-          await pollUntil(async () => ((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND wait_event_type = 'Lock'`) as { n: number }[])[0].n > 0, 10_000);
+          await lockWaiting();
           stageStop.abort();
           const stopped = await stopping;
           watchedStops[stage] = `${stopped?.code ?? "still running at 20 s"}: ${stopped?.stderr.trim().split("\n").slice(-1)[0] ?? ""}`;
@@ -11116,8 +11122,8 @@ if (want("10h")) {
       await drop([poolingT]);
       await sweep({ limit: 1 });
 
-      // A following run's stop is its end wherever it lands: at the pool's lock, 0 (review pass 1, cold read and run-it: 130 there,
-      // and in the naming's other waits).
+      // A following run's stop is its end wherever it lands: at the pool's lock, 0 (review pass 1, cold read and
+      // run-it: 130 there, and in the naming's other waits).
       await alarmAt(48, 1);
       const lockStop = new AbortController();
       const lockRun = await runPastPoolLock(async () => { lockStop.abort(); await Bun.sleep(400); }, { follow: 1, signal: lockStop.signal });
@@ -11143,16 +11149,16 @@ if (want("10h")) {
       // names, another pool's holding nothing; each held model's stamp and the hand-back's ids beside a trip's stamp too,
       // heldSince falling back to the trip's.
       const windowHolding = (h: string[]) => ({ pool: POOL, answers: [], tripped: "2000-01-01 00:00:00+00", by: h, held: h, namedAt: {}, back: [], nothing: false });
-      const kept = (w: Record<string, unknown>) => readJudgeWindow(JSON.stringify({ pool: POOL, answers: [], ...w }), POOL).held.join(",");
       const read = (w: Record<string, unknown>) => readJudgeWindow(JSON.stringify({ pool: POOL, answers: [], ...w }), POOL);
+      const kept = (w: Record<string, unknown>) => read(w).held.join(",");
       const [u1, u2] = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"];
-      const stamped2 = read({ tripped: "t", held: ["a", "b"], namedAt: { a: "t0", b: 3, c: "t1", "": "t2", d: "" } });
+      const withStamps = read({ tripped: "t", held: ["a", "b"], namedAt: { a: "t0", b: 3, c: "t1", "": "t2", d: "" } });
       assert(judgeHeld(windowHolding(["stub-judge"]), "stub-judge") && !judgeHeld(windowHolding(["stub-judge"]), "stub-judge-2") && !judgeHeld(windowHolding([]), "stub-judge")
           && kept({ tripped: "t", held: ["a", "b"] }) === "a,b" && kept({ tripped: null, held: ["a"] }) === "" && kept({ tripped: "t", held: "a" }) === ""
           && kept({ tripped: "t", held: [1, "a", "", "a"] }) === "a" && kept({ tripped: "t" }) === ""
-          && readJudgeWindow(JSON.stringify({ pool: "another", answers: [], tripped: "t", held: ["a"] }), POOL).held.length === 0
-          && JSON.stringify(stamped2.namedAt) === JSON.stringify({ a: "t0", c: "t1" }) && heldSince(stamped2, "a") === "t0" && heldSince(stamped2, "b") === "t" && heldSince(stamped2, "c") === null
-          && namedSince(stamped2, "c") === "t1" && namedSince(stamped2, "b") === "t" && namedSince(stamped2, "d") === null
+          && read({ pool: "another", tripped: "t", held: ["a"] }).held.length === 0
+          && JSON.stringify(withStamps.namedAt) === JSON.stringify({ a: "t0", c: "t1" }) && heldSince(withStamps, "a") === "t0" && heldSince(withStamps, "b") === "t" && heldSince(withStamps, "c") === null
+          && namedSince(withStamps, "c") === "t1" && namedSince(withStamps, "b") === "t" && namedSince(withStamps, "d") === null
           && namedSince(read({ tripped: "t", held: ["toString"] }), "toString") === "t" && namedSince(read({ tripped: "t", held: [] }), "constructor") === null && heldSince(read({ tripped: "t", held: [] }), "toString") === null
           && Object.keys(read({ tripped: null, held: ["a"], namedAt: { a: "t0" } }).namedAt).length === 0
           && JSON.stringify(["t", null].map((tripped) => { const w = read({ tripped, back: [u1, "x", 3, u1, u2], nothing: true }); return `${w.back.join("+")}/${w.nothing}`; })) === JSON.stringify([`${u1}+${u2}/true`, "/false"]),
@@ -11161,7 +11167,7 @@ if (want("10h")) {
       Object.assign(JUDGE_ALARM, { window: alarmDefaults.window, share: 1 });
       onOwn = null;
       judgeMode = "answer";
-      garbledAnswers = savedGarbledHere;
+      garbledAnswers = savedGarbled;
       TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       owns.splice(owns.findIndex(([w]) => w === "sweep-pass-good"), 1);
       await sql`DELETE FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY}`;
