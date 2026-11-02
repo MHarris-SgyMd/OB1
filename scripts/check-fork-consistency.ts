@@ -574,6 +574,14 @@
  *      fork-checks.yml holding the required "Fork Checks passed" pending
  *      (SMD-2094). A job that calls a reusable workflow is passed over, since
  *      GitHub takes no limit there. Its probe pins what it refuses and passes
+ *  49. this file's own check numbers hold together: no number listed here
+ *      twice; every check's header (a `// ──` or `// ---- Check` separator,
+ *      or a docblock opening ` * N: `) names a listed check, a lettered
+ *      sub-check by its listed base, and every listed check has one; one
+ *      check's headers sit together, so a number with headers at two places
+ *      is two checks; and every check this file cites (`check N`, `checks N,
+ *      M and K`) is listed (SMD-3658: two PRs took 45, then two took 47, in
+ *      one day). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44 and 48 parse YAML with Bun.YAML,
@@ -10494,6 +10502,85 @@ function checkJobTimeouts() {
   for (const f of files) for (const [where, msg] of jobTimeoutProblems(`${WORKFLOWS_DIR}/${f}`, readFileSync(join(dir, f), "utf8"))) fail(where, msg);
 }
 checkJobTimeouts();
+
+// ── 49: the checks' numbers are unique, and every check cited exists (SMD-3658) ──
+/**
+ * 49: this file numbers its checks three ways — the list above ` * Run:` (` *  N. `), each check's header (a `// ──`
+ * or `// ---- Check` separator, or a docblock that opens ` * N: `) and each place it cites one (`check N`, `checks N,
+ * M and K`) — and nothing held the numbers apart. On 2026-11-02 two PRs each added a check 45, then two more each a
+ * check 47; each pair was caught only because both list entries landed on one line and conflicted (SMD-3658), and
+ * placed elsewhere they would have merged clean. So no number is listed twice; a header names listed checks (`1 + 2`
+ * and `16–17` name two), a lettered sub-check (5b, 17c) counting by its listed base; each listed check has a header;
+ * one check's headers sit within HEADER_SITE lines of each other (a separator and the docblock under it, five apart
+ * at the most today), so headers for one number further apart are two checks; and each number cited is listed, by
+ * its base. It reads this file's own text; its probe runs on small texts in the same shape.
+ */
+const HEADER_SITE = 10;
+const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
+const checkBase = (n: string) => n.replace(/[a-z]$/, "");
+function checkNumberProblems(text: string): [number, string][] {
+  const lines = text.split("\n");
+  const problems: [number, string][] = [];
+  const isListed = (n: string, listed: Map<string, number>) => listed.has(n) || listed.has(checkBase(n));
+  const listEnd = lines.findIndex((l) => /^ \* Run: /.test(l));
+  const listed = new Map<string, number>();
+  lines.slice(0, Math.max(listEnd, 0)).forEach((l, i) => {
+    const m = l.match(/^ \*\s+(\d+[a-z]?)\. /);
+    if (!m) return;
+    if (listed.has(m[1])) problems.push([i + 1, `the list holds check ${m[1]} twice, here and at line ${listed.get(m[1])} — two checks took one number; give the newer the next free one (SMD-3658)`]);
+    else listed.set(m[1], i + 1);
+  });
+  if (!listed.size) return [[1, "no numbered list of checks above ` * Run:` to read the numbers from (SMD-3658)"]];
+  const sites = new Map<string, number[]>();
+  lines.forEach((l, i) => {
+    const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*[+–-]\s*\d+[a-z]?)*)\s*[:.]/i);
+    const docblock = i > 0 && /^\/\*\*\s*$/.test(lines[i - 1]) ? l.match(/^ \* (\d+[a-z]?(?:\s*[+–]\s*\d+[a-z]?)*): /) : null;
+    const spec = separator?.[1] ?? docblock?.[1];
+    if (!spec) return;
+    for (const n of spec.split(/\s*[+–-]\s*/).filter((t) => CHECK_NUMBER_WORD.test(t))) (sites.get(n) ?? sites.set(n, []).get(n)!).push(i + 1);
+  });
+  for (const [n, at] of sites) {
+    if (!isListed(n, listed)) problems.push([at[0], `a header names check ${n}, which the list above \` * Run:\` does not hold — list it, or give it a listed number (SMD-3658)`]);
+    const elsewhere = at.find((l) => l - at[0] > HEADER_SITE);
+    if (elsewhere !== undefined) problems.push([elsewhere, `check ${n} has a header here and another at line ${at[0]} — two checks took one number; give the newer the next free one (SMD-3658)`]);
+  }
+  for (const [n, at] of listed) {
+    if (![...sites.keys()].some((h) => h === n || checkBase(h) === n)) problems.push([at, `the list holds check ${n}, but no header names it — open its section with a \`// ── ${n}: …\` separator or a docblock opening \` * ${n}: …\` (SMD-3658)`]);
+  }
+  lines.forEach((l, i) => {
+    for (const m of l.matchAll(/\bchecks? (\d+[a-z]?(?:(?:, | and | or | to |–)\d+[a-z]?)*)\b/gi)) {
+      for (const n of m[1].split(/, | and | or | to |–/)) {
+        if (!isListed(n, listed)) problems.push([i + 1, `cites check ${n}, which the list above \` * Run:\` does not hold — a renumbered or mistyped check (SMD-3658)`]);
+      }
+    }
+  });
+  return problems;
+}
+function checkCheckNumbers() {
+  const list = (...ns: string[]) => `/**\n${ns.map((n) => ` *  ${n}. a check\n`).join("")} *\n * Run: bun probe.ts\n */\n`;
+  const section = (n: string) => `\n// ── ${n}: a check ──\n/**\n * ${n}: what it holds\n */\nfunction f() {}\n`;
+  const far = "\n".repeat(HEADER_SITE + 2);
+  // [why, text, what each problem it reports says]: none for a pass.
+  const TWICE = "the list holds check", SITES = "has a header here and another", UNLISTED_HEADER = "which the list above", NO_HEADER = "but no header names it", UNLISTED_CITE = "a renumbered or mistyped check";
+  const cases: [string, string, string[]][] = [
+    ["a list, a section for each, and citations of each", `${list("1", "2", "2b")}${section("1")}${section("2")}${section("2b")}// cites check ${1}, checks ${1} and ${2}, and check ${"2b"}\n`, []],
+    ["a docblock alone as a check's header", `${list("3")}/**\n * 3: what it holds\n */\n`, []],
+    ["one separator naming two checks, and a range", `${list("1", "2", "16", "17")}// ── 1 + 2: both ──\n// ── 16–17: both ──\n`, []],
+    ["a lettered sub-check under a listed base, cited", `${list("17")}// ── 17: it ──\n/**\n * 17a: a part\n */\n// cites check ${"17c"}\n`, []],
+    ["a separator in another shape", `${list("47", "35")}// ---- Check ${47}: it\n// ── ${35}. it\n`, []],
+    ["a number listed twice", `${list("1", "1")}${section("1")}`, [TWICE]],
+    ["a number with headers at two places", `${list("1")}${section("1")}${far}${section("1")}`, [SITES]],
+    ["a header naming a check the list lacks", `${list("1")}${section("1")}${section("2")}`, [UNLISTED_HEADER]],
+    ["a listed check with no header", `${list("1", "2")}${section("1")}`, [NO_HEADER]],
+    ["a citation of a check the list lacks", `${list("1")}${section("1")}// see check ${99}\n`, [UNLISTED_CITE]],
+    ["a citation of one listed and one not", `${list("1")}${section("1")}// see checks ${1} and ${98}\n`, [UNLISTED_CITE]],
+  ];
+  const wrong = cases.map(([why, text, says]) => ({ why, says, got: checkNumberProblems(text).map((p) => p[1]) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 49 no longer reads its probe as written (${JSON.stringify(wrong)}): a number listed twice, a number with headers at two places, a header or citation naming an unlisted check, and a listed check with no header fail; a separator or docblock header, a combined or ranged one, a lettered sub-check and its citation pass (SMD-3658)`);
+  for (const [line, msg] of checkNumberProblems(readFileSync(join(ROOT, SELF), "utf8"))) fail(`${SELF}:${line}`, `${msg.replace(/ \(SMD-3658\)$/, "")} (check 49, SMD-3658)`);
+}
+checkCheckNumbers();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
