@@ -156,7 +156,7 @@
  *
  * ── Pausing ─────────────────────────────────────────────────────────────────
  * Every --poll seconds while asleep the logs are read for a live event newer
- * than any seen — from 30 s before the last read on, within the quiet at the
+ * than any seen — from 30 s before the last read that reached the wake, within the quiet at the
  * sleep's start: an audit row is dated at its transaction's start, so a
  * capture begun before a read and committed after it is dated before it, and
  * read as landing at that read (one blocked longer is missed). On one, the
@@ -462,6 +462,8 @@ export interface SleepOptions {
   abortAfterMs?: number;
   /** The most of consolidation's calls N12 aborts in one sleep, in place of CONSOLIDATE_ABORTS, when a test reaches the cap sooner. */
   consolidateAborts?: number;
+  /** The live read's slack in ms, in place of WAKE_SLACK_S, when a test reaches past it sooner. */
+  wakeSlackMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -905,6 +907,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** N12's bound (SMD-3379 PR 1c-3b). */
   const ABORT_AFTER_MS = opts.abortAfterMs ?? DEFAULT_ABORT_AFTER_S * 1000;
   const CONSOLIDATE_CAP = opts.consolidateAborts ?? CONSOLIDATE_ABORTS;
+  /** How far before a read the next reads back (WAKE_SLACK_S). */
+  const WAKE_SLACK = opts.wakeSlackMs !== undefined ? opts.wakeSlackMs / 1000 : WAKE_SLACK_S;
   /**
    * The admit gate every pass of the current sleep waits at (SMD-3379 PR
    * 1c-3b, lease.ts' liveGate): closed by a live write, open again after
@@ -1042,7 +1046,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const CUTS = progressRead.cuts;
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
-  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
+  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought its stops hold back goes unnamed; a running scheduler takes it up once restarted`);
   // The re-derive sweep's function (063) and this role's EXECUTE on it, read
   // once as the rest are (SMD-2679): without either the sleeps sweep nothing,
   // said once.
@@ -1226,7 +1230,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       saidHeld = false;
     } catch (e) {
       // After a migration seen, its own cancel of the read: no news (review pass 6).
-      if (!saidHeld && !seen.migration) err(`  could not read the thoughts the wakes hold back (${(e as Error).message}) — the row keeps its last word on them`);
+      if (!saidHeld && !seen.migration) err(`  could not read the thoughts its stops hold back (${(e as Error).message}) — the row keeps its last word on them`);
       saidHeld = true;
     }
   };
@@ -1717,7 +1721,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Asleep from `since`: re-embed alone while it has work, then extraction
    * alone until its pool drains, then consolidation beside it. Returns one
-   * of: "woken" on a live event; "done" when one sleep (no --follow) drained
+   * of: "woken" on a live write during the sweep, or one that finds the pools
+   * drained under --follow (any other pauses it); "done" when one sleep (no --follow) drained
    * its pools; "stopped" on a stop, the passes
    * stopped before it returns, inside the heartbeat's `during`; or, for a pass
    * that ended by itself (a refusal), its name, its code and whether it had
@@ -1744,7 +1749,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // sleep and committed after it was not visible when the brain fell asleep,
     // and is dated before. The wake reads that far back — within the quiet
     // just read, where nothing visible then can stand.
-    const from = new Date(since.getTime() - Math.min(QUIET, WAKE_SLACK_S) * 1000);
+    const from = new Date(since.getTime() - Math.min(QUIET, WAKE_SLACK) * 1000);
     /** The sleep's clock (SMD-2679): when it began — the sweep inside it — and when it was spent, the passes soft-stopped then, or 0. */
     const began = Date.now();
     let spentAt = 0;
@@ -2078,11 +2083,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         landedAt = Math.max(lastWrite, lastNowBefore ?? nowMs);
       }
       // The read's window moves here too, so a write left new reads again however old (review pass 4).
-      readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK_S * 1000));
+      readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK * 1000));
       // Read without the work this poll's new writes queued themselves — a
       // capture's extraction, an edit's again — work for the next sleep; a
       // claim queued before, or in hand, is the sleep's own (review pass 2).
-      const idle = wrote && FOLLOW && !spentAt && !gate.closed
+      // The gate closes first, so no pass claims while the pools are read (review pass 5).
+      const meets = wrote && !gate.closed;
+      if (meets && FOLLOW && !spentAt) gate.close();
+      const idle = meets && FOLLOW && !spentAt
         ? await reading(async () => {
           const touched = await liveTouched(sql, seenBefore === null ? readAt : new Date(Math.max(readAt.getTime(), seenBefore + 1)));
           return (!reembedRuns() || drained(await reembedPool())) && drained(await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt, touched))
@@ -2109,7 +2117,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         if (spentAt) budgetWoke = true;
         return spentAt ? "budget" : "woken";
       }
-      if (wrote && !gate.closed) {
+      if (meets) {
         gate.close();
         closedAt = Date.now();
         abortedNow = 0;

@@ -4349,8 +4349,8 @@ start line counts only rows not yet claimed, so follow the `re-embed pass`
 row), and `reembed.ts --dry-run` before
 upgrading says how many. Then extraction alone until its
 pool drains, then consolidation beside it — the order "Start `extract` alone
-on a backlog" asks of an operator. A live write pauses the passes (below),
-a call in hand past a minute of the pause aborted and its thought set back; a
+on a backlog" asks of an operator. A live write pauses the passes (above),
+a call in hand a minute old aborted while paused and its thought set back; a
 sleep's end hard-stops them: every lease returned, the model call in hand
 aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (093, [Long thoughts

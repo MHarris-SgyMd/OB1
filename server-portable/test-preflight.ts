@@ -4472,7 +4472,7 @@ else {
         await beat("heartbeat:sleep", v({ every_s: 60, ...(reads ? { reads } : {}), slept: { from: await at(400), to: await at(60) } }), 20);
         const out = await run(env);
         assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
-          `${label}: the row is ok, a live write waking it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
+          `${label}: the row is ok, a live write pausing it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
       }
 
       // Fresh, its last pass failed: a warning with the scheduler's remedy.

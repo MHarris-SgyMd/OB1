@@ -222,7 +222,7 @@ export interface WorkerHeartbeat {
    */
   restart?: { inS: number | null; code: number; tries: number };
   /**
-   * The thoughts extraction holds back across the sleep scheduler's wakes —
+   * The thoughts extraction holds back across the sleep scheduler's stops (a wake's, a paused sleep's abort) —
    * pending or in flight with a hard stop counted on them (migration 093,
    * SMD-2694): how many, and up to three, the most stalled first, each with
    * its stops, the latest of them in a row that gained no window, its
@@ -433,7 +433,7 @@ function parseBudget(b: unknown): SleepBudget | undefined {
   return { minutes, statementTimeoutS, workMemMb, maintenanceWorkMemMb, stops } as SleepBudget;
 }
 
-/** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
+/** A thought the sleep scheduler's stops hold back (WorkerHeartbeat.held). */
 export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null; cuts?: number };
 export type SleepHeld = { total: number; thoughts: HeldThought[] };
 

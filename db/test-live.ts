@@ -17796,7 +17796,7 @@ if (want("38")) {
     const drainedFirst = await sleepRun({ quiet: 1 });
     lines.length = 0;
     const inHandNote = await capture("A note whose call is in hand when a live write touches it.", "sync-sleep", 0, 44);
-    sw.slow = 8000;
+    sw.slow = 5000;
     const acOwn = new AbortController();
     const ownRun = sleepRun({ follow: true, quiet: 2, passFollowS: 30, minStampEveryS: 1, signal: acOwn.signal });
     let touchedPaused = false, touchedEnded = true, ownEnded = false, ownClaim: string | undefined, earlierPaused = false, earlierEnded = false, earlierRan = false;
@@ -17814,7 +17814,7 @@ if (want("38")) {
         return r.busy === 0 && r.unpooled === 0 && lines.some((l) => /^  resumed:/.test(l));
       };
       if (await pollUntil(drainedNow, 30_000)) {
-        await Bun.sleep(1500);
+        await Bun.sleep(1000);
         const ownAt = lines.length;
         const ownNote = await capture("One operator's capture that ends the drained sleep.", "op-sleep", 0, 45);
         ownEnded = await pollUntil(async () => lines.slice(ownAt).some((l) => /^  awake: a live write at .*, the pools drained/.test(l)), 8_000);
@@ -17824,7 +17824,7 @@ if (want("38")) {
         if (ownEnded && await pollUntil(drainedNow, 30_000)) {
           earlierRan = true;
           const earlier = await capture("A sync's note a live write touches while it waits.", "sync-sleep", 0, 47);
-          await Bun.sleep(1500);
+          await Bun.sleep(1000);
           const earlierAt = lines.length;
           await sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (${earlier}::uuid, 'update', 'op-sleep', ${{ note: "a live write on a waiting thought" }}::jsonb)`;
           earlierPaused = await pollUntil(async () => lines.slice(earlierAt).some((l) => /^  paused: a live write/.test(l)), 8_000);
@@ -17858,9 +17858,9 @@ if (want("38")) {
       await Bun.sleep(800);
       await liveWrite(sql, "a live write inside the clock");
       await pollUntil(async () => lines.some((l) => /the sleep's budget is spent \(4000 ms\)|the sleep's clock is spent \(4000 ms\)/.test(l)) && (clockSpentAt = Date.now()) > 0, 20_000);
-      // The write that paused it is no wake: past the 3 s quiet and two polls, no sleep begins again (review pass 1).
+      // The write that paused it is no wake: past the 3 s quiet and a poll, no sleep begins again (review pass 1).
       const spentLine = lines.length;
-      await Bun.sleep(5000);
+      await Bun.sleep(4000);
       sleptAgain = lines.slice(spentLine).some((l) => /asleep:/.test(l));
     } finally {
       sw.slow = 0;
@@ -17882,7 +17882,7 @@ if (want("38")) {
     sw.slow = 9000;
     const acWakeGrace = new AbortController();
     // A 3 s clock: the sweep and the pass's start inside it leave a claim in hand when it is spent (review pass 4).
-    const wakeGraceRun = sleepRun({ follow: true, quiet: 3, budgetMs: 3000, budgetGraceMs: 20_000, minStampEveryS: 1, signal: acWakeGrace.signal });
+    const wakeGraceRun = sleepRun({ follow: true, quiet: 1, budgetMs: 3000, budgetGraceMs: 20_000, minStampEveryS: 1, signal: acWakeGrace.signal });
     let graceHand: { id: string } | undefined, graceWoke = false, graceOrder: string[] = [], graceLeft = -1;
     try {
       // The clock spent with a call in hand: read once the line says so, the claim still held.
@@ -19561,12 +19561,16 @@ if (want("38r")) {
     // stays new for the next (review pass 3: it was marked seen, and the
     // claim passes ran beside the live call until another write). A 60 s
     // poll, so the only read after the write is the one the set-down wakes;
-    // the call in hand held 35 s, so the write is past the read's 30 s window
-    // by then, which moves only where a write is acted on (review pass 4).
+    // the read's slack 3 s and the call in hand held 6 s, so the write is past
+    // the window by then, which moves only where a write is acted on (review
+    // pass 4). A 1 s quiet, so the sleep begins at the first read, not the
+    // poll's minute later (review pass 5).
     const setDownOld = [await reCapture("A note re-embedding as a live write lands, one.", 33), await reCapture("A note re-embedding as a live write lands, two.", 34), await reCapture("A note re-embedding as a live write lands, three.", 35)];
     await capture("A note extraction waits on past the set-down.", "sync-sleep", 0, 36);
-    sw.embedSlowMs = 35_000;
-    const setDownRun = follow({ quiet: 10, captureMs: 8000, poll: 60 });
+    sw.embedSlowMs = 6000;
+    // Past the quiet of the case before's deletes, live writes as the test client's: else the awake read waits the poll's minute.
+    await Bun.sleep(1500);
+    const setDownRun = follow({ quiet: 1, poll: 60, wakeSlackMs: 3000 });
     let setDownSaid = false, setDownActed = false, setDownCode = -9, setDownFrom = 0;
     try {
       // A second past the claim, so the sleep's first read, made as its passes start, is behind it.
@@ -19575,7 +19579,7 @@ if (want("38r")) {
       setDownFrom = lines.length;
       await liveWrite(sql, "a live write as re-embed is refused");
       sw.embedKeyRefused = true;
-      setDownSaid = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — the embedding provider refused it/.test(l)), 60_000);
+      setDownSaid = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — the embedding provider refused it/.test(l)), 20_000);
       setDownActed = setDownSaid && await pollUntil(async () => lines.slice(setDownFrom).some((l) => /^  (paused|awake): a live write/.test(l)), 12_000);
     } finally {
       sw.embedKeyRefused = false;
