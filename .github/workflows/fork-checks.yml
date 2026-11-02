@@ -499,6 +499,16 @@ jobs:
         working-directory: evals
         run: bun eval-stated-status.ts --self-check
 
+      # The "what matters now" eval's rules (SMD-3662): the seeded corpus
+      # against its registered hash, the stub embedder, top-1, top-3 and
+      # tau-b, the shuffled-gold mutant beside chance, the pre-registered bar
+      # at its edges, the reads' knobs read from the tools' own source, and
+      # the dogfood rows' shape. No database, no model; the seeded run is the
+      # data-layer job's.
+      - name: Priority eval rules
+        working-directory: evals
+        run: bun eval-priority.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key
@@ -1308,6 +1318,27 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
+      # The "what matters now" eval, seeded (SMD-3662): the schema reset, a
+      # personal brain and a small board planted with the stub embedder's
+      # vectors, and seven prompts through the search tools themselves,
+      # called over MCP on the server in-process, its embedder on a stub
+      # provider (plain, prefer_current, and the priority filter
+      # workaround), then any priority read under measurement. Prints the
+      # baseline table and each measured read's verdict, and fails when the
+      # corpus is not the registered one, a baseline read errors or moves from
+      # the recorded baseline (a change to search moves the bar), the bar is
+      # out of the gold's reach, a measured read answers differently with the
+      # answer moved, or the shuffled-gold mutant does not score chance.
+      # Keyless. It DROPS the schema, as the check above does, so it refuses a
+      # database holding thoughts unless told (test-support's
+      # refuseHeldDatabase).
+      - name: Priority eval, seeded
+        working-directory: evals
+        run: bun eval-priority.ts --seeded
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"

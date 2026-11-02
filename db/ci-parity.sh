@@ -242,6 +242,7 @@ free_rows() {
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
+  nodb evals              eval-priority.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check
@@ -401,6 +402,7 @@ main() {
   # The check drops the schema and refuses a database holding thoughts unless
   # told; this one is the throwaway with-postgres.sh started, as CI's is.
   OB1_FIXTURE_RESET=1 run evals eval-projection-replay.ts --fixture-check
+  OB1_FIXTURE_RESET=1 run evals eval-priority.ts --seeded
   run server-portable    test-egress.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts
