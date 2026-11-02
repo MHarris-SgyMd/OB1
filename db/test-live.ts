@@ -108,19 +108,20 @@ if (!URL_) {
  * under; the short sections even the others out to it, by the section times
  * main's CI logs stamp in its runs from 7301d0f5 to e7220bd5 (SMD-3469):
  * sleep has [17] beside [38] and [10g], and the rest takes [10e], [37] and
- * [43] from extract. The rest's sections wait on the CPU, not on timers, so
- * its time moves most with the runner's speed. A cell's job runs ~18 s past
- * its sections (~25 s for the rest's, with test-search-path.ts), so a
- * section added to a cell adds to the run's length once that cell's job is
- * the run's longest.
+ * [43] from extract. [41] went to sleep too once [10] grew 6 s (SMD-3379
+ * PR 1c-3a), by the runs from 68ba1e13 to 6d613601 (SMD-3469 PR 2). The
+ * rest's sections wait on the CPU, not on timers, so its time moves most
+ * with the runner's speed. A cell's job runs ~18 s past its sections (~25 s
+ * for the rest's, with test-search-path.ts), so a section added to a cell
+ * adds to the run's length once that cell's job is the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["10g", "17", "38"],
+  sleep: ["10g", "17", "38", "41"],
   long: ["9", "38r", "38b"],
-  extract: ["9f", "10", "10f", "10h", "37b", "39", "41"],
+  extract: ["9f", "10", "10f", "10h", "37b", "39"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
