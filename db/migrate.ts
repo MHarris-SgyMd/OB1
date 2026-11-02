@@ -70,7 +70,7 @@
  */
 
 import type { SQL } from "bun";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -602,7 +602,6 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // file or not readable (review passes 1 and 2).
     let listed: string[];
     try {
-      if (coreDir !== MIGRATIONS_DIR && !statSync(coreDir).isDirectory()) throw Object.assign(new Error(), { code: "ENOTDIR" });
       listed = readdirSync(coreDir);
     } catch (e) {
       if (coreDir === MIGRATIONS_DIR) throw e;

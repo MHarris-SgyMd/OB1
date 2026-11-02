@@ -347,7 +347,7 @@ if (want("2")) {
   // The migrations copied, the copy's 002 edited, and both runs pointed at the copy: the tracked tree is never
   // written, so a run killed here leaves nothing changed, a second run from the same tree sees no drift, and a
   // read-only checkout runs it (SMD-3639).
-  // The tracked 002 as [2] found it, held unchanged at the end (review pass 2).
+  // The tracked 002 as [2] found it, held unchanged at the restored run (review pass 2).
   const tree002 = join(HERE, "migrations", "002_match_thoughts.sql");
   const treeBefore = readFileSync(tree002, "utf8");
   const copy = mkdtempSync(join(tmpdir(), "ob1-live-migrations-"));
