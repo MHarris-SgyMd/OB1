@@ -3021,7 +3021,7 @@ bun extract-entities.ts --url … --subjects --dry-run    # how many each would 
 bun extract-entities.ts --url … --subjects --retry-failed  # the pool's failed claims (unread, unanswered or refused) back in it first
 bun extract-entities.ts --url … --subjects --switch-key    # required when another pool is named: --subjects rules, or a rule's, the question's or the reasoning's change
 bun extract-entities.ts --url … --subjects --judge-checked # the garbage-judge alarm off, for a judge model checked and found right; lifts a trip's hold on a scheduler's runs of that model (--limit 1: one thought asked)
-#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a scheduler's following run a trip holds, or a --judge-checked run whose model a trip named after it began (PR 6a) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits or at the admit gate; a scheduler's following run stopped by its first exits 0
+#   with --limit N and --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off) alone · exits 0 clean · 1 claims failed (unanswered, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, or the provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (PR 5b; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a scheduler's following run a trip holds, or a --judge-checked run whose model a trip named after it began, before its lift (PR 6a) · 130 a signal (the first after the call in hand, which can run to the limit a call; a second at once), or a caller's stop during the naming's waits or at the admit gate; a scheduler's following run stopped by its first exits 0, unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3483,7 +3483,9 @@ can run it (PR 6b); none is the CLI's, and it reports no start (`onStart`) and
 runs no start check yet, 6b's. `follow` (whole seconds): at an empty pool the
 run waits that long and claims again, reading the pool's name and another run's
 trip at each claim, until its stop, which ends it as a follower's does wherever
-it lands, exit 0 (130 at once on the second), or its `--limit`; a dry run, or
+it lands, exit 0 (130 at once on the second), unless the thought in hand it lets
+finish ends the run otherwise (the alarm's 3, the pool named away's 2, the
+database's 1), or its `--limit`; a dry run, or
 one with `--judge-checked`, refuses it. Unlike a claim pass, which waits out an
 outage, the provider's or the database's ends a following run as it ends any,
 exit 1, for its caller to start it again. `admit`, SMD-3379 PR 1b's gate, is
@@ -3503,22 +3505,35 @@ own start, goes back behind the pool, unanswered and so unjudged, its attempt
 not counted and, when it went back, its place under `--limit` given back, and
 the run goes on; a thought the rules key, a provider pause and the writes after
 an answer hold no call to abort. A caller's `stamper` hears a following run's
-word, `ok` at each poll of the pool and, as it ends, `failed` for an end of its
+word, `ok` at each poll that finds the pool empty and, as it ends, `failed` for
+an end of its
 own (a refusal, its own options' among them, the provider or the database, the
 alarm, a throw) or `stopped`; it beats no row while it works through a pool, a
 scheduler's row being the scheduler's to keep. `session` opens the run's own
 client and its watching connection with the scheduler's per-pass settings
 (refused beside a caller's client; the worker key's lookup opens its one
-connection without them, as the claim passes' does), and a statement past its
-statement_timeout is thrown, as a claim pass's is, the naming's write and its
-pooling among them, whose waits have no other end, while the run's hand-back of
-what it holds, at its end or a second stop, waits up to 30 s whatever the
-budget, so a row held past a short budget leaves no claim leased to its end and
-one held longer does not hold the scheduler's stop (whatever the run, a
-hand-back that fails is said, unless the run's end says the database already,
-and its stop line says the claims go back as their leases run out); an answer
-judged after its claim's release (unread, or keyed) whose window write passes it
-is not in the window, the claim as released; a pooling, a scan of every thought,
+connection without them, as the claim passes' does). A statement past its
+statement_timeout at the run's start is thrown, as a claim pass's start-of-pass
+scan's is, for the scheduler to read as its budget's, the naming's write and its
+pooling among them, whose waits have no other end. One over a thought is the
+thought's or the poll's, as a claim pass's is (review pass 6): its own write
+past it fails the thought, for `--retry-failed`; its claim, its read, a put-back
+or set-back, its release or its answer's window costs the run its poll, counted
+and said once, naming the statement, what it holds going back, and a following
+run claims again after its follow or the provider's pause, whichever is longer,
+or ends at its limit, where one not following ends there, 1; a stop before or
+during that hand-back ends the run there, said so. Only the budget's timeout is
+handled so: another error there, an operator's cancel among them, is thrown. The
+run's hand-back of what it holds, at its end, a lost poll or a second stop,
+waits up to 30 s whatever the budget, so a row held past a short budget leaves
+no claim leased to its end, and one held longer holds the scheduler's stop no
+longer than 30 s, or 60 s when the stop lands during a lost poll's hand-back
+(whatever the run, a hand-back that fails at its end is said, unless the run's
+end says the database already, a claim that landed after a second stop's
+hand-back keeping it said, and its stop line says the claims go back as their
+leases run out); an answer judged after its claim's release (unread, or keyed)
+whose window write passes it is not in the window, the claim as released, the
+run losing its poll; a pooling, a scan of every thought,
 can outlast it on a large brain, and would end each period on its budget, never
 marking its pool filled (6b's to exempt). `banner: false` leaves the start's
 lines out. No one is there to pass `--judge-checked` to a scheduler's run, so a
@@ -3538,8 +3553,9 @@ naming its model since that run began refuses it, its hold standing or lifted by
 another run since, said, the run ending there, exit 3, nothing claimed; a hold
 another run lifted since, on the trip it read, is said so, and the run goes on.
 A run of another judge model is not held, and lifts nothing; the pool's key
-changing starts a window of the new pool's at its first answer, so a switch back
-finds no hold. A run by hand is told of the hold, and asks; its answers,
+changing starts a window of the new pool's at its first answer judged with the
+alarm on, so a switch back finds no hold. A run by hand is told of the hold, and
+asks; its answers,
 tripping nothing, lift nothing; a run whose judge model the hold does not hold
 is told whose it is, `--judge-checked`'s lifting none of it, with its start's
 lines. Every answer counts in a following run as in a hand run (the maintainer's

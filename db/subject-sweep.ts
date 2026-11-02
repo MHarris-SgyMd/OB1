@@ -21,10 +21,11 @@
  *   without the door's or the pool's grants or the provider's refusal · 3 the judge model likely at fault: 10 of its
  *   last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run began (JUDGE_ALARM;
  *   ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a following run a trip holds
- *   (judgeHeld), or a --judge-checked run whose model a trip named after it began · 130 a signal (the first after the
- *   call in hand, which can run to the limit a call; a second at once, the claim in hand handed back, unjudged, unless
- *   its finish holds the window's lock: that lands, judged, a trip it made said or not), or a caller's stop during the
- *   naming's waits or at the admit gate; a following run, a scheduler's, stopped by its first exits 0
+ *   (judgeHeld), or a --judge-checked run whose model a trip named after it began, before its lift · 130 a signal (the
+ *   first after the call in hand, which can run to the limit a call; a second at once, the claim in hand handed back,
+ *   unjudged, unless its finish holds the window's lock: that lands, judged, a trip it made said or not), or a caller's
+ *   stop during the naming's waits or at the admit gate; a following run, a scheduler's, stopped by its first exits 0,
+ *   unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
@@ -107,10 +108,10 @@
  * with --limit the count of the last trip's hand-back still pending, which the held line offers the models that trip
  * named when its answers naming nothing tripped it alone; a trip naming the model since the run began refuses the lift,
  * exit 3, nothing claimed. A run of another judge model is not held, and lifts nothing; the pool's key changing starts
- * a window of the new pool's at its first answer, so a switch back finds no hold. Every answer counts as in a hand run
- * (the maintainer's choice, 2026-10-31): a pooling again — a rules version changed, the reasoning turned off, a pooling
- * broken off or its mark blanked by hand — asks again together each thought the judge named nothing for, and ten of
- * them trip a judge that is right, a trip whose hold waits for that hand run.
+ * a window of the new pool's at its first answer judged with the alarm on, so a switch back finds no hold. Every answer
+ * counts as in a hand run (the maintainer's choice, 2026-10-31): a pooling again — a rules version changed, the
+ * reasoning turned off, a pooling broken off or its mark blanked by hand — asks again together each thought the judge
+ * named nothing for, and ten of them trip a judge that is right, a trip whose hold waits for that hand run.
  *
  * The question is asked with the judge model's reasoning on unless OB1_SUBJECT_REASONING says off (PR 4: Verify item 1
  * was met that way and missed without, though the difference alone was not significant), at about 8x the time a call,
@@ -337,13 +338,13 @@ const databaseDown = (e: unknown) => `\n  The database stopped answering (${Stri
  * model call (left out, 900 with the judge model's reasoning on and 300 off); `switchKey` to name this run's pool in
  * place of another named; `retryFailed` to put the pool's failed claims back in it first; `judgeChecked` for a judge
  * model checked and found right, the garbage-judge alarm off for the run (JUDGE_ALARM), a trip's hold on its judge
- * model's following runs lifted, or the run ended, exit 3, when a trip named the model since it began (heldSince,
- * namedSince). `sql` is the caller's client in place of `url`, never closed here; `env` what the run reads, process.env
- * when absent; `url` and `sql` name one database. `signal` stops the sweep after the thought in hand, as the CLI's
- * first signal does, and ends a wait of the naming's at once, 130 (0 for a following run), its pooling left to the next
- * run (a statement's once it ends when the run has no url to watch it from), where the CLI's signal ends the process;
- * `onPass` is handed the sweep's stop as its thoughts begin, whose second call aborts the model call in hand too, and
- * beside it the call's own abort (db/lease.ts's InHandAbort). A dry run hears neither: it reads on.
+ * model's following runs lifted, or the run ended, exit 3, when a trip named the model since it began, before its lift
+ * (heldSince, namedSince). `sql` is the caller's client in place of `url`, never closed here; `env` what the run reads,
+ * process.env when absent; `url` and `sql` name one database. `signal` stops the sweep after the thought in hand, as
+ * the CLI's first signal does, and ends a wait of the naming's at once, 130 (0 for a following run), its pooling left
+ * to the next run (a statement's once it ends when the run has no url to watch it from), where the CLI's signal ends
+ * the process; `onPass` is handed the sweep's stop as its thoughts begin, whose second call aborts the model call in
+ * hand too, and beside it the call's own abort (db/lease.ts's InHandAbort). A dry run hears neither: it reads on.
  *
  * The options a scheduler drives the sweep with, as it drives the claim passes (PR 6a, for sleep's PR 6b): `follow`,
  * `admit`, the abort beside the stop, `stamper`, `session` and `banner`, each below. None is the CLI's.
@@ -373,10 +374,11 @@ export interface SubjectSweepOptions {
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
    * Whole seconds between a following run's claims at an empty pool: it waits that long and claims again, until its
-   * stop or its --limit, where a run without it ends at the empty pool. A following run is a scheduler's: it is
-   * stopped as a follower is, exit 0 (130 at once on the second stop), and it does not start while a trip's hold on
-   * its judge model stands (judgeHeld): exit 3. Neither a dry run's nor beside --judge-checked, which no scheduler passes.
-   * The provider's or the database's outage ends it as it ends a run, exit 1, for its caller to start it again.
+   * stop or its --limit, where a run without it ends at the empty pool. A following run is a scheduler's: it is stopped
+   * as a follower is, exit 0 (130 at once on the second stop; the thought in hand a first stop lets finish can end it
+   * as 1, 2 or 3 do), and it does not start while a trip's hold on its judge model stands (judgeHeld): exit 3. Neither
+   * a dry run's nor beside --judge-checked, which no scheduler passes. The provider's or the database's outage ends it
+   * as it ends a run, exit 1, for its caller to start it again.
    */
   follow?: number;
   /**
@@ -417,8 +419,8 @@ export interface SubjectSweepOptions {
   session?: SessionSettings;
   /**
    * False leaves out the start's lines — the rules and the judge, the egress line, the worker key's agent line or its
-   * no-key warning — for a run a scheduler starts at every period, which says them once. A refusal still says what it
-   * refuses.
+   * no-key warning, another judge model's held line — for a run a scheduler starts at every period, which says them
+   * once. A refusal still says what it refuses.
    */
   banner?: boolean;
 }
@@ -1244,9 +1246,13 @@ async function sweep(
      WHERE c.work_type = ${POOL} AND c.thought_id = s.thought_id
     RETURNING c.thought_id::text AS id`) as { id: string }[]).map((r) => r.id);
 
-  /** The line of a run another run's trip stops: when, on whose answers, and the claim in hand handed back with them. */
+  /**
+   * The line of a run another run's trip stops: when, on whose answers, and the claim in hand handed back with them. The
+   * window's strings shown clean, as the held line's are (review pass 8, mutation tester: printed raw, as the trip line's
+   * models were).
+   */
   const stampLine = (w: JudgeWindow, inHand: WindowAnswer | null) =>
-    `\n  Another run's garbage-judge alarm tripped at ${w.tripped}${w.by.length ? `, on answers from ${andList(w.by)}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, ${w.by.length === 0 || w.by.includes(cfg.judgeModel) ? "whose judge model is likely the same" : `of the same pool though its judge model, ${cfg.judgeModel}, gave none of those answers`}, stops here too` +
+    `\n  Another run's garbage-judge alarm tripped at ${cleanForDisplay(w.tripped)}${w.by.length ? `, on answers from ${andList(w.by.map(cleanForDisplay))}` : ""}, after this run began (db/subject-sweep.ts, JUDGE_ALARM), so this run, ${w.by.length === 0 || w.by.includes(cfg.judgeModel) ? "whose judge model is likely the same" : `of the same pool though its judge model, ${cfg.judgeModel}, gave none of those answers`}, stops here too` +
     (inHand ? `, the claim in hand, which it named nothing for, back in the pool with that run's${inHand.c ? ` (the out-of-date subject it closed stays closed until it is asked again)` : ""}` : "") + "." +
     `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; ${runAgain("once the model is right,")}`;
 
@@ -1320,7 +1326,7 @@ async function sweep(
     const earlier = w.held.filter((m) => !tripModels.includes(m));
     await save({ pool: POOL, answers: [], tripped: stamp, by, held: heldNow, namedAt, back: [...back], nothing: judgeTrips(nothing) });
     const gave = [unread ? `${unread} not JSON of the expected shape` : "", nothing ? `${nothing} naming nothing a key holds` : ""].filter(Boolean).join(", ");
-    const models = by.length === 0 || (by.length === 1 && by[0] === cfg.judgeModel) ? cfg.judgeModel : `the answers giving no subject came from ${andList(by)}; this run's is ${cfg.judgeModel}`;
+    const models = by.length === 0 || (by.length === 1 && by[0] === cfg.judgeModel) ? cfg.judgeModel : `the answers giving no subject came from ${andList(by.map(cleanForDisplay))}; this run's is ${cfg.judgeModel}`;
     return {
       code: 3,
       line: `\n  ${unread + nothing} of the judge model's last ${w.answers.length} answers, across runs, gave no subject (${gave}), more than ${Math.round(JUDGE_ALARM.share * 100)}% of the ${window} the alarm reads (db/subject-sweep.ts, JUDGE_ALARM): the model, not the thoughts, is likely at fault, so the sweep stops here.` +
@@ -1331,7 +1337,7 @@ async function sweep(
         // The hold's two ways out, whatever tripped it: a judge fixed but kept, a run of one thought checks it in, the
         // pool's backlog never asked with the alarm off (PR 6a, review pass 1). The way past a false alarm is the offer
         // after, made only on answers naming nothing.
-        ` The trip holds the pool's following runs, a scheduler's, of ${andList(tripModels)}${earlier.length ? ` (an earlier trip's hold on ${andList(earlier)} stands)` : ""}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing).` +
+        ` The trip holds the pool's following runs, a scheduler's, of ${andList(tripModels.map(cleanForDisplay))}${earlier.length ? ` (an earlier trip's hold on ${andList(earlier.map(cleanForDisplay))} stands)` : ""}: once the model is checked, a run of it with --judge-checked --limit 1 lifts its hold (a run of another judge model is not held, and lifts nothing).` +
         // Offered only when the answers naming nothing trip it by themselves, an unread answer being the judge's
         // failure whatever the thought, and with a limit, the thoughts handed back first in the pool (review pass 4:
         // offered after unread answers alone, cold read, or with no limit, run-it, it ran a judge through the pool's
@@ -1875,7 +1881,8 @@ async function sweep(
       for (;;) {
         if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break;
         // The pause after the provider's transient error (TRANSIENT_PAUSES_MS), the thought it failed back in the pool,
-        // or after a poll lost to the statement_timeout (lostPoll): no claim held, a stop heard at once.
+        // or after a poll lost to the statement_timeout (lostPoll): no claim held but one a failed hand-back left
+        // leased, a stop heard at once.
         if (pauseMs > 0) {
           await sleepUnless(pauseMs, stop.signal);
           pauseMs = 0;
