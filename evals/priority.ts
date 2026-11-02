@@ -347,7 +347,7 @@ export function idsOfAnswer(tool: SearchTool, value: unknown): string[] {
 // ── The score ───────────────────────────────────────────────────────────────
 
 /** How many hits a read returns: the `search` tool's fixed ten. */
-export const READ_K = 9;
+export const READ_K = 10;
 
 export type PromptScore = { top1: boolean; top3: boolean; tau: number | null };
 
