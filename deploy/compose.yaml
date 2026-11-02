@@ -65,8 +65,9 @@ x-plugin-env: &plugin-env
   # comma-separated; unset, none. Both servers serve the same set; preflight
   # refuses a name that is no plugin.
   OB1_PLUGINS: ${OB1_PLUGINS:-}
-  # The password of ob1_plugins, the login role every plugin's SQL runs on:
-  # the plugins' pools log in with it, never as postgres.
+  # The secret each plugin's login role's password is derived from
+  # (ob1_plugins_<name>, SMD-2756): each plugin's pool logs in as its own,
+  # never as postgres.
   OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
 
 # The plugins' webhooks (SMD-2310), merged by the REST core alone, which
@@ -728,8 +729,9 @@ services:
       # applies their migrations after the core's, each in its own schema as
       # its own role. A plugin not named is left as it is.
       OB1_PLUGINS: ${OB1_PLUGINS:-}
-      # The password the migrator makes ob1_plugins with, the login role the
-      # plugins' migrations and the servers' plugin pools run on.
+      # The secret the migrator derives each plugin's login role's password
+      # from (ob1_plugins_<name>, SMD-2756), the role that plugin's migrations
+      # and the servers' pool for it run on.
       OB1_PLUGIN_DB_PASSWORD: ${OB1_PLUGIN_DB_PASSWORD:-}
     depends_on:
       postgres:

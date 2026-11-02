@@ -218,21 +218,24 @@ named in `OB1_PLUGINS`, which the compose migrator reads from `deploy/.env` as
 the servers do. A plain run applies their migrations **after the core's**, and
 only when the core's are clean:
 
-- **The login role.** Every plugin's SQL runs on a connection logged in as
-  `ob1_plugins`: LOGIN, NOINHERIT, no superuser, holding `SET` on each plugin's
-  role and nothing on the core. A run makes it with `OB1_PLUGIN_DB_PASSWORD`
-  when it is missing, and never changes an existing role's password: the
-  servers log in with the one it was made with. A run that would apply a
-  plugin's file, or make the role, without the password is refused before
+- **The login role (SMD-2756).** Each plugin's SQL runs on a connection
+  logged in as a login role of its own, `ob1_plugins_<name>`: LOGIN,
+  NOINHERIT, no superuser, holding `SET` on its own plugin's role and nothing
+  else. Its password is derived from `OB1_PLUGIN_DB_PASSWORD`, the one secret
+  in `deploy/.env`: the hex HMAC-SHA256 of the role's name under it,
+  trimmed as the servers read it (`db/config.mjs`'s `pluginLoginPassword`). A run makes the role with that
+  password when it is missing, and never changes an existing role's password:
+  the servers log in with the one it was made with. A run that would apply a
+  plugin's file, or make its login role, without the secret is refused before
   anything runs (exit 2); one with nothing of the plugins' to do asks for it
   not at all.
 - **The role and the schema.** Each plugin gets its own Postgres role,
   `ob1_plugin_<name>` (NOLOGIN), and a schema it owns, `plugin_<name>` (a
   hyphen in the name reads as `_`).
   - **When they are made.** Any run that names the plugin and finds the role,
-    the schema or the login role's `SET` on it missing makes them, even with
-    nothing pending. A run with all three in place and nothing pending asks
-    the migrator no privilege. None is ever dropped.
+    the schema, its login role or the login role's `SET` on it missing makes
+    them, even with nothing pending. A run with all four in place and nothing
+    pending asks the migrator no privilege. None is ever dropped.
   - **A migrator that is no superuser** takes `SET` on a role it made
     (`WITH SET TRUE, INHERIT FALSE` on PG 16), so it may hand the role its
     schema.
@@ -251,9 +254,9 @@ only when the core's are clean:
   Neither role holds anything on the core's tables, so a migration that reads
   or writes one is refused by Postgres (`permission denied`). That holds even
   for SQL that undoes the plugin's role (`END;`, `RESET ROLE`): it lands on
-  `ob1_plugins`, not on the migrator. From there it could `SET ROLE` to
-  another plugin's role, but not reach the core. After each file the login
-  connection's temp tables are discarded.
+  the plugin's own login role, not on the migrator, and from there Postgres
+  refuses it `SET ROLE` to any other plugin's role as well as the core's
+  tables. After each file the login connection's temp tables are discarded.
 - **The ledger.** Each applied file is recorded in `plugin_migrations (plugin,
   name, sha256, applied_at)`, a ledger of its own beside `schema_migrations`,
   by the migrator's own connection once the file has committed. Nothing that
@@ -263,9 +266,27 @@ only when the core's are clean:
   core file does.
 - **A plugin not named** is not read. Its schema, tables and ledger rows stay
   as they are.
+- **The shared login, retired.** Before SMD-2756 every plugin's SQL logged in
+  as one role, `ob1_plugins`, holding `SET` on every plugin's role: SQL that
+  undid one plugin's role could `SET ROLE` to another's. A plain run whose
+  core is clean, whether or not it names a plugin, retires it once each named
+  plugin has its own login: under the run's lock it is dropped, which takes
+  every plugin role it holds with it, whoever granted it, and needs
+  `CREATEROLE` and `ADMIN` on it alone. A role something else still depends
+  on cannot be dropped: every plugin role it holds is revoked from it, each
+  grant by its own grantor (`GRANTED BY` on PG 16, which needs a migrator
+  that is no superuser to hold `ADMIN` on the plugin role and that grantor's
+  privileges), and it can no longer log in, in one transaction; it is kept,
+  and the run says so, naming what depends on it. A later run finds it so,
+  says so in a line, and takes no lock. A drop refused for anything else (a
+  lock held on the role, a privilege the migrator lacks) fails the run and
+  changes nothing, so the next run tries again. The plugins' schemas and rows
+  are not touched, and a plugin not named gets its own login when a run names
+  it. `--dry-run` says it would retire it.
 
 `--dry-run` lists each plugin's pending files under its own heading: the sha,
-and the role and schema each would run as. It makes nothing. `--reapply`
+and the role and schema each would run as, and the login role it would make.
+It makes nothing. `--reapply`
 leaves plugins to a plain run, and says so. A name that is no plugin,
 or one given twice, is refused before anything runs (exit 2).
 
@@ -274,23 +295,28 @@ OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_U
 ```
 
 The migrating role must be able to `CREATE ROLE` and `CREATE SCHEMA`, and to
-grant a plugin's role to `ob1_plugins`; the compose stack's `postgres` can.
+grant a plugin's role to its login role; the compose stack's `postgres` can.
 
-**Preflight.** The servers' plugin pools log in as `ob1_plugins` too, one small
-pool per plugin, so what a plugin's SQL leaves on a session never meets a core
-query. A temp table, for one, is searched before any schema. Preflight's
-`plugin tables` row checks:
+**Preflight.** The servers' plugin pools log in as each plugin's login role
+too, one small pool per plugin, so what a plugin's SQL leaves on a session
+never meets a core query or another plugin's. A temp table, for one, is
+searched before any schema. Preflight's `plugin tables` row checks, for each
+enabled plugin with migrations:
 
-- that `ob1_plugins` exists, can log in with the server's
-  `OB1_PLUGIN_DB_PASSWORD` (and is who the connection is: a database URL with
-  no host cannot have its user replaced, and is refused), is no superuser and
-  NOINHERIT, is a member of no role but the plugins' and inherits none by a
-  grant's own option, and holds no `SELECT`, `INSERT`, `UPDATE`, `DELETE`
-  or `TRUNCATE` on a core table or view;
-- that it holds `SET` on each plugin's role;
+- that its login role exists, can log in with the password derived from the
+  server's `OB1_PLUGIN_DB_PASSWORD` (and is who the connection is: a database
+  URL with no host cannot have its user replaced, and is refused), is no
+  superuser and NOINHERIT, is a member of no role but its own plugin's and
+  inherits none by a grant's own option, and holds no `SELECT`, `INSERT`,
+  `UPDATE`, `DELETE` or `TRUNCATE` on a core table or view or on another
+  plugin's;
+- that it holds `SET` on the plugin's role;
 - the plugin's role and schema, and that the schema and every object in it
   are the plugin role's, by the migrator's own list;
-- every file recorded at its sha.
+- every file recorded at its sha;
+
+and that the shared `ob1_plugins`, where it is still there, holds no plugin's
+role.
 
 The server's own role needs no membership. What holds hostile plugin code is
 curation: a plugin's TypeScript runs in the server's process. The database's
