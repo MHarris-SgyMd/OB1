@@ -16475,4 +16475,4 @@ console.log("\n[doc] db/README.md states this suite's own assertion total");
     `every assertion count db/README.md gives for test-schema.ts is this run's ${n} (found ${[...new Set(claims)].join(", ") || "none"})`);
 }
 
-report();
+report(`width ${EMBEDDING_DIM}`);
