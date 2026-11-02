@@ -4926,8 +4926,10 @@ const CHANGES_ENV = { EVENT: "${{ github.event_name }}", BASE_REF: "${{ github.b
 const CHANGES_RUN = `if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
   bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
 else
-  echo "code=true: a $EVENT run, or a base with no .github/ci/changes.sh, runs every job"
+  if [ "$EVENT" = pull_request ]; then why="the base has no .github/ci/changes.sh, or it could not be read"; else why="a $EVENT run runs every job"; fi
+  echo "code=true: $why"
   echo "code=true" >> "$GITHUB_OUTPUT"
+  echo "**What the change can affect:** code=true — $why" >> "$GITHUB_STEP_SUMMARY"
 fi`;
 /** The always-run job that runs the classifier's own cases, and the step that does. */
 const CHANGES_SELF_CHECK_JOB = "repo-consistency";

@@ -9,9 +9,9 @@
 # A pull request's checkout is its merge commit, so HEAD^1..HEAD is what it
 # changes, read with --raw -z --no-renames: no path is quoted, a rename lists
 # its old path too, and each path's modes come with it, so a symlink or a
-# submodule at a docs path is code (review pass 2: a symlink looped the walks). code=false only for a pull request into the
-# default branch whose every changed path is not_code's. Anything else is
-# code=true, and every job runs:
+# submodule at a docs path is code (review pass 2: a symlink looped the walks).
+# code=false only for a pull request into the default branch whose every
+# changed path is not_code's. Anything else is code=true, and every job runs:
 # - another event (a push to main always runs everything);
 # - a pull request into another branch: stacked on one whose code has not run
 #   here, it would keep this green once retargeted (review pass 1);
@@ -86,12 +86,12 @@ self_check() {
   local dir fails=0 expect event got
   dir=$(mktemp -d)
   # check EXPECT EVENT PATH...: decide on the paths as a pull request's
-  # change, each a regular file's edit (MODE=… sets the new mode).
+  # change, each a regular file's edit (OLDMODE=… and MODE=… set its modes).
   check() {
     local p
     expect=$1 event=$2; shift 2
     : > "$dir/c"
-    for p in "$@"; do printf ':100644 %s 0000000 0000000 M\0%s\0' "${MODE:-100644}" "$p" >> "$dir/c"; done
+    for p in "$@"; do printf ':%s %s 0000000 0000000 M\0%s\0' "${OLDMODE:-100644}" "${MODE:-100644}" "$p" >> "$dir/c"; done
     got=$(decide "$event" "$dir/c"); got=${got%%$'\t'*}
     if [ "$got" != "$expect" ]; then echo "changes.sh: $event $* is code=$got, not $expect" >&2; fails=$((fails + 1)); fi
   }
@@ -120,6 +120,12 @@ self_check() {
   check true workflow_dispatch docs/a.md
   MODE=120000 check true pull_request docs/loop.md
   MODE=160000 check true pull_request docs/vendored.md
+  OLDMODE=120000 check true pull_request docs/was-a-link.md
+  OLDMODE=120000 MODE=000000 check true pull_request docs/link-gone.md
+  OLDMODE=160000 MODE=000000 check true pull_request docs/vendored-gone.md
+  OLDMODE=000000 check false pull_request docs/new.md
+  OLDMODE=100644 MODE=000000 check false pull_request docs/gone.md
+  MODE=100755 check false pull_request docs/now-executable.md
   # Two names where a record and its path should be (--name-only's shape, or a rename's third field): code.
   printf 'docs/a.md\0docs/b.md\0' > "$dir/c"; got=$(decide pull_request "$dir/c"); got=${got%%$'\t'*}
   if [ "$got" != true ]; then echo "changes.sh: a record not in --raw form is code=$got, not true" >&2; fails=$((fails + 1)); fi
@@ -134,7 +140,7 @@ self_check() {
     expect=$1 event=$2 base=$3 ops=$4
     rm -rf "$repo"; mkdir -p "$repo"
     if ! (cd "$repo" && g init -q && mkdir -p docs server-portable && echo b > docs/a.md && echo b > server-portable/api.ts \
-        && g add -A && g commit -qm base && g switch -qc pr && eval "$ops" && g add -A && g commit -qm pr \
+        && eval "${BASE_OPS:-:}" && g add -A && g commit -qm base && g switch -qc pr && eval "$ops" && g add -A && g commit -qm pr \
         && g switch -q main && echo m > docs/main.md && g add -A && g commit -qm main && g merge -q --no-ff -m merge pr) > /dev/null 2>&1; then
       echo "changes.sh: could not make the scratch repository for: $ops" >&2; fails=$((fails + 1)); return
     fi
@@ -157,6 +163,8 @@ self_check() {
     run true pull_request main "printf x > \"\$(printf 'server-portable/x\ncode=false')\""
     run false pull_request main "printf x > \"\$(printf 'docs/a\nb.md')\""
     run true pull_request main 'ln -s .. docs/loop.md'
+    BASE_OPS='ln -s .. docs/l.md' run true pull_request main 'rm docs/l.md; echo x > docs/l.md'
+    BASE_OPS='ln -s .. docs/l.md' run true pull_request main 'git rm -q docs/l.md'
     # A HEAD with no second parent: the pull request's head itself.
     rm -rf "$repo"; mkdir -p "$repo"; : > "$out"
     (cd "$repo" && g init -q && mkdir docs && echo b > docs/a.md && g add -A && g commit -qm base && echo x >> docs/a.md && g add -A && g commit -qm docs \
@@ -188,4 +196,5 @@ why=${why//[[:cntrl:]]/?}
 echo "code=$code: $why"
 { echo "code=$code"; echo "why=$why"; } >> "$out"
 # On the run's page too, so a run that stops skipping docs-only PRs says why (review pass 2).
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "**What the change can affect:** code=$code — $why" >> "$GITHUB_STEP_SUMMARY"; fi
+# In a code span, so a path's own <, [ or * is shown, not read (review pass 3).
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "**What the change can affect:** code=$code — \`${why//\`/\'}\`" >> "$GITHUB_STEP_SUMMARY"; fi
