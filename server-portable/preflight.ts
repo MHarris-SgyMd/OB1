@@ -4808,10 +4808,11 @@ if (configFailed) {
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
 
-        // An enabled plugin's tables (SMD-2310): the login role the plugins'
-        // SQL runs on, its role, its schema, the login role's right to SET
-        // ROLE to it, and each of its migration files
-        // recorded in plugin_migrations at the file's sha. Failed, not warned:
+        // An enabled plugin's tables (SMD-2310): its role, its schema, the
+        // login role its SQL runs on and that login's right to SET ROLE to it
+        // (SMD-2756), and each of its migration files recorded in
+        // plugin_migrations at the file's sha; and the shared login, while it
+        // holds a plugin's role. Failed, not warned:
         // the server would list operations that fail at their first call.
         // Silent with no plugin enabled, or one with no migrations; an
         // unknown name is the plugins row's.
@@ -4820,7 +4821,7 @@ if (configFailed) {
             const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS), conn.url, env.OB1_PLUGIN_DB_PASSWORD);
             if (problems.length)
               add("plugin tables", "fail", problems.join("; "),
-                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same password> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same secret> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
             else add("plugin tables", "ok", `${pluginNames(env.OB1_PLUGINS).join(", ")} — each plugin's role, schema and migrations in place`);
           } catch (e) {
             add("plugin tables", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_roles, pg_namespace and plugin_migrations.");

@@ -883,6 +883,33 @@ console.log("\n[13] A brain migrated under the one shared login moves over (SMD-
     const kept = await runMigrate({});
     const left = await shared();
     assert(kept.code === 0 && kept.out.includes("  ·  ob1_plugins kept, NOLOGIN and holding no plugin role: ") && left.present && left.can_login === false && left.holds === null, `something depending on it: kept, NOLOGIN, holding no plugin role (${kept.code}, ${JSON.stringify(left)})`);
+    // Kept, it needs nothing more: a later run says so in a line, and takes no lock (review pass 1: every run took it and wrote again).
+    const again = new SQL({ url: URL_, max: 1 });
+    try {
+      await again`SELECT pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`;
+      const later = await runMigrate({});
+      assert(later.code === 0 && later.out.includes("plugins: the shared login role ob1_plugins is kept from an earlier run, NOLOGIN and holding no plugin role") && !later.out.includes("retiring"),
+        `a later run beside a held lock: exit 0, one line, no retirement attempted (${later.code}: ${later.err.slice(0, 160)})`);
+    } finally {
+      await again.close();
+    }
+    await sql.unsafe(`REVOKE SELECT ON "plugin_${moved}".kept FROM ob1_plugins; DROP ROLE ob1_plugins`);
+    // A plugin role granted to it by another role, as a migrator that is no superuser grants it: on PG 16 a REVOKE
+    // without GRANTED BY leaves that grant, so the run revokes each by its own grantor (review pass 1).
+    const grantor = `smd2756_grantor_${RUN}`;
+    madeRoles.push(grantor);
+    await asBefore(true);
+    await sql.unsafe(`CREATE ROLE ${grantor} NOLOGIN; GRANT ${role} TO ${grantor} WITH ADMIN TRUE`);
+    await sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL ROLE ${grantor}`);
+      await tx.unsafe(`GRANT ${role} TO ob1_plugins WITH SET TRUE, INHERIT FALSE`);
+    });
+    const grants = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = 'ob1_plugins') AND roleid = (SELECT oid FROM pg_roles WHERE rolname = ${role})`);
+    await sql.unsafe(`GRANT SELECT ON "plugin_${moved}".kept TO ob1_plugins`);
+    const byOther = await runMigrate({});
+    const afterOther = await shared();
+    assert(grants.n === 2 && byOther.code === 0 && afterOther.present && afterOther.can_login === false && afterOther.holds === null,
+      `two grants of the plugin's role, one by another grantor, both revoked before the role is kept (${grants.n} grant(s), exit ${byOther.code}, ${JSON.stringify(afterOther)}: ${byOther.err.slice(0, 200)})`);
     await sql.unsafe(`REVOKE SELECT ON "plugin_${moved}".kept FROM ob1_plugins; DROP ROLE ob1_plugins`);
   } finally {
     await store.close();

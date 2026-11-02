@@ -1439,30 +1439,57 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
    * is dropped. Its plugins' schemas and rows are not touched; a plugin not
    * named gets its own login when a run names it. Read first, so a brain
    * without it takes no lock. A role something else still depends on is
-   * kept, NOLOGIN and holding no plugin role, and said. 0, 1 where the
-   * revoke failed, or 2 refused for the lock.
+   * kept, NOLOGIN and holding no plugin role, and said; a later run finds it
+   * so and says so in a line, taking no lock and writing nothing (review
+   * pass 1). 0, 1 where the revoke failed, or 2 refused for the lock.
    */
   async function retireSharedLogin(): Promise<number> {
-    const present = async () => ((await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AS present`) as { present: boolean }[])[0].present;
-    if (!(await present())) return 0;
+    /** Whether it is there, and whether it still needs retiring: it can log in, or holds a plugin's role. */
+    const readShared = async () =>
+      ((await sql`
+        SELECT r.oid IS NOT NULL AS present,
+               coalesce(r.rolcanlogin, false) OR EXISTS (
+                 SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+                  WHERE m.member = r.oid AND starts_with(g.rolname, 'ob1_plugin_')) AS live
+          FROM (SELECT 1) one LEFT JOIN pg_roles r ON r.rolname = ${SHARED_PLUGIN_LOGIN}`) as { present: boolean; live: boolean }[])[0];
+    let shared = await readShared();
+    if (!shared.present) return 0;
+    if (!shared.live) {
+      out(`\nplugins: the shared login role ${SHARED_PLUGIN_LOGIN} is kept from an earlier run, NOLOGIN and holding no plugin role: what depends on it holds its drop back (SMD-2756)`);
+      return 0;
+    }
     if (dryRun) {
       out(`\nplugins: the shared login role ${SHARED_PLUGIN_LOGIN} would be retired (SMD-2756): each plugin logs in as its own`);
       return 0;
     }
     const taken = await takeLock();
     if (!taken) return 2;
-    if (taken === "took" && !(await present())) return 0;
+    if (taken === "took") {
+      shared = await readShared();
+      if (!shared.present || !shared.live) return 0;
+    }
     out(`\nplugins: retiring the shared login role ${SHARED_PLUGIN_LOGIN} (SMD-2756): each plugin logs in as its own`);
     let revoked: string[] = [];
     try {
       await begin(async (tx: SQL) => {
-        const held = (await tx`
-          SELECT r.rolname FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-           WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AND starts_with(r.rolname, 'ob1_plugin_')
-           ORDER BY r.rolname`) as { rolname: string }[];
-        for (const { rolname } of held) await tx.unsafe(`REVOKE ${quoteIdent(rolname)} FROM ${quoteIdent(SHARED_PLUGIN_LOGIN)}`);
+        /** The plugin roles it holds, one row a grant: on PG 16 a role may hold one from each grantor. */
+        const holds = async () =>
+          (await tx`
+            SELECT r.rolname, pg_get_userbyid(m.grantor) AS grantor FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+             WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AND starts_with(r.rolname, 'ob1_plugin_')
+             ORDER BY r.rolname`) as { rolname: string; grantor: string }[];
+        const held = await holds();
+        // GRANTED BY each grant's own grantor: on PG 16 a REVOKE without it
+        // removes only the grants its own role made, warns of the rest and
+        // revokes nothing — a grant a non-superuser migrator made stayed
+        // (review pass 1). Read again after, so one left fails the run.
+        const [{ version }] = (await tx`SELECT current_setting('server_version_num')::int AS version`) as { version: number }[];
+        for (const { rolname, grantor } of held)
+          await tx.unsafe(`REVOKE ${quoteIdent(rolname)} FROM ${quoteIdent(SHARED_PLUGIN_LOGIN)}${version >= 160000 ? ` GRANTED BY ${quoteIdent(grantor)}` : ""}`);
+        const left = await holds();
+        if (left.length > 0) throw new Error(`it still holds ${[...new Set(left.map((l) => l.rolname))].join(", ")} after the revoke`);
         await tx.unsafe(`ALTER ROLE ${quoteIdent(SHARED_PLUGIN_LOGIN)} NOLOGIN`);
-        revoked = held.map((h) => h.rolname);
+        revoked = [...new Set(held.map((h) => h.rolname))];
       });
     } catch (caught) {
       err(`  ✗  ${SHARED_PLUGIN_LOGIN} could not be retired: ${(caught as Error).message}`);

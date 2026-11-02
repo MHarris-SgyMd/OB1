@@ -270,10 +270,13 @@ only when the core's are clean:
   as one role, `ob1_plugins`, holding `SET` on every plugin's role: SQL that
   undid one plugin's role could `SET ROLE` to another's. A plain run whose
   core is clean, whether or not it names a plugin, retires it once each named
-  plugin has its own login: every plugin role it holds is revoked from it and
-  it can no longer log in, in one transaction under the run's lock, and then
-  it is dropped. A role something else still depends on is kept, NOLOGIN and
-  holding no plugin role, and the run says so. The plugins' schemas and rows
+  plugin has its own login: every plugin role it holds is revoked from it,
+  each grant by its own grantor (`GRANTED BY` on PG 16, where a revoke
+  without it leaves another role's grant), and it can no longer log in, in
+  one transaction under the run's lock, and then it is dropped. A role
+  something else still depends on is kept, NOLOGIN and holding no plugin
+  role, and the run says so; a later run finds it so, says so in a line,
+  and takes no lock. The plugins' schemas and rows
   are not touched, and a plugin not named gets its own login when a run names
   it. `--dry-run` says it would retire it.
 
