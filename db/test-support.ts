@@ -628,6 +628,38 @@ export async function updatedAtTriggerState(sql: SQL): Promise<string> {
   return String((await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`)[0].e);
 }
 
+/**
+ * Refuse, exit 2, a database at `url` that already holds thoughts unless
+ * OB1_FIXTURE_RESET=1 says so: a check that drops the schema must not take a
+ * live brain on a published loopback port, which resetSchema's own guard
+ * (loopback, or OB1_ALLOW_REMOTE_DB=1) lets through. `command` names the
+ * caller in the refusal. evals/eval-projection-replay.ts's --fixture-check and
+ * evals/eval-priority.ts's --seeded call it before resetSchema. heldRefusal is
+ * the decision alone, for a check with no database.
+ */
+export function heldRefusal(held: number, flag: string | undefined, command: string): string | null {
+  return held > 0 && flag !== "1"
+    ? `the database at DATABASE_URL holds ${held} thought(s) and ${command} DROPS the schema. Point it at a throwaway (../db/with-postgres.sh), or set OB1_FIXTURE_RESET=1 if you mean it.`
+    : null;
+}
+
+export async function refuseHeldDatabase(url: string, command: string): Promise<void> {
+  const probe = new SQL({ url, max: 1 });
+  let held = 0;
+  try {
+    // Two statements: a subquery over a table that does not exist fails at parse time, CASE or no CASE.
+    const exists = ((await probe`SELECT (to_regclass('thoughts') IS NOT NULL) AS present`)[0] as { present: boolean }).present;
+    held = exists ? Number(((await probe`SELECT count(*)::int AS n FROM thoughts`)[0] as { n: number }).n) : 0;
+  } finally {
+    await probe.end();
+  }
+  const refusal = heldRefusal(held, process.env.OB1_FIXTURE_RESET, command);
+  if (refusal) {
+    console.error(refusal);
+    process.exit(2);
+  }
+}
+
 /** The common case: drop everything, then apply from scratch. */
 export async function resetSchema(url: string, opts: SchemaOptions): Promise<void> {
   await dropSchema(url);
