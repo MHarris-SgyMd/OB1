@@ -39,9 +39,10 @@
  * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Fork Checks run on
  * main.
  *
- * With --shift, a gh call that fails all three tries gets a late try, three more, LATE_MS (60 s) on: the list's at
- * once, and a run's after the window's other runs are read, for the runs a gap among fails it (the newest 26 and the
- * run reported on, one pause for them all). The runs read on their late try are said, and in the report's summary.
+ * With --shift, the list's call, and a run's read among those a gap fails it for (the newest 26 and the run reported
+ * on), get a late try when gh fails all three tries or the run comes back with no status: three more tries, LATE_MS
+ * (60 s) on, the list's at once and the runs' after the window's other runs are read, one pause for them all. The
+ * runs read on their late try are said, and in the report's summary.
  *
  * Options:
  *   --job <name>          the job, by its exact name (required unless --shift or --self-check)
@@ -64,9 +65,9 @@
  *
  * Exits 0 with the report, warnings or none; 1 when `gh` is missing or cannot list the runs, there are none, none can
  * be read, --through's run is not among them, or no run read has the job (the job names the runs do have are
- * listed), and with --shift when fewer than 20 runs are left to read, the run reported on could not be read, or one of
- * the newest 26 could not or was being re-run (the report still printed), each after its late try; 2 for a refused
- * option. The per-job report reads a re-run's latest attempt, and marks it. Needs `gh` signed in. Reads only; writes
+ * listed), and with --shift when fewer than 20 runs are left to read, the run reported on could not be read after its
+ * late try, or one of the newest 26 could not be read after its late try or was being re-run (the report still
+ * printed); 2 for a refused option. The per-job report reads a re-run's latest attempt, and marks it. Needs `gh` signed in. Reads only; writes
  * nothing but the step summary.
  */
 
@@ -345,7 +346,11 @@ export function reportedOn(through: string | undefined, ids: string[], named: bo
 /** How many of a window's newest runs a gap among fails it: 26, or all of a shorter window (gapVerdict says why). */
 export const newestCounted = (ids: string[]) => Math.min(2 * (SHIFT.before + SHIFT.after), ids.length);
 
-/** The runs a gap among fails the job, so the runs a late try is for: the window's newest 26 and the run reported on. */
+/**
+ * The runs a gap among fails the job, so the runs a late try is for: the window's newest 26 and the run reported on.
+ * The run reported on is the window's newest today (shiftWindow ends it there), so already among them; it is named so
+ * the set holds gapVerdict's early check whatever a window's end becomes.
+ */
 export function lateTried(ids: string[], at?: string): Set<string> {
   return new Set([...ids.slice(-newestCounted(ids)), ...(at === undefined ? [] : [at])]);
 }
@@ -460,10 +465,10 @@ export async function readRuns(ids: string[], view: (id: string) => Promise<Got>
 }
 
 /** `call` (gh) with args, and when its three tries fail, its late try after `pause`, said: for the list, which nothing waits beside. */
-export async function ghLate(args: string[], call: (args: string[]) => Promise<Got> = gh, pause: () => Promise<unknown> = () => Bun.sleep(LATE_MS)): Promise<Got> {
+export async function ghLate(args: string[], call: (args: string[]) => Promise<Got> = gh, pause: () => Promise<unknown> = () => Bun.sleep(LATE_MS), say: (line: string) => void = console.log): Promise<Got> {
   const got = await call(args);
   if (got.ok) return got;
-  console.log(`gh ${args.slice(0, 2).join(" ")} failed (${got.error.split("\n")[0].slice(0, 120)}): its late try in ${LATE_MS / 1000} s`);
+  say(`gh ${args.slice(0, 2).join(" ")} failed (${got.error.split("\n")[0].slice(0, 120)}): its late try in ${LATE_MS / 1000} s`);
   await pause();
   return call(args);
 }
@@ -754,13 +759,13 @@ async function selfCheck(): Promise<number> {
     return listCalls.filter((c) => c !== "pause").length <= fails ? { ok: false, error: "HTTP 502: Server Error" } : { ok: true, json: [] };
   };
   const listPause = async () => void listCalls.push("pause");
-  const listed1 = await ghLate(["self-check", "case"], listing(1), listPause);
+  const listed1 = await ghLate(["self-check", "case"], listing(1), listPause, () => {});
   const once = listCalls.join();
   listCalls.length = 0;
-  const listed0 = await ghLate(["self-check", "case"], listing(0), listPause);
+  const listed0 = await ghLate(["self-check", "case"], listing(0), listPause, () => {});
   const never = listCalls.join();
   listCalls.length = 0;
-  const listed2 = await ghLate(["self-check", "case"], listing(2), listPause);
+  const listed2 = await ghLate(["self-check", "case"], listing(2), listPause, () => {});
   ok(listed1.ok && once === "self-check,pause,self-check" && listed0.ok && never === "self-check" && !listed2.ok && listCalls.join() === "self-check,pause,self-check",
     "the list's late try: after a pause when its first call fails, never when it succeeds, and a second failure is the answer");
   console.log(failed ? `${failed} failed` : "all passed");
@@ -907,7 +912,7 @@ if (import.meta.main) {
     const job = run.jobs.find((j) => j.name === jobName);
     read.push({ id, run, job, row: job ? jobRow(job) : undefined });
   }
-  if (ids.length > 0 && read.length === 0) stop(`none of the ${ids.length} runs could be read`);
+  if (ids.length > 0 && read.length === 0) stop(`none of the ${ids.length} runs could be read${tried.size ? `, the newest ${tried.size} on a late try too` : ""}`);
   const unread = unreadIds.length;
   if (shift) {
     // A run not read, or being re-run, takes a point out of its series and can move a shift off the run that makes
