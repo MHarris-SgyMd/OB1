@@ -17,7 +17,7 @@
  * The brain is awake while it is written: a write the audit recorded
  * (thought_audit, 008) through a key whose kind is not `ingested`
  * (set_agent_kind, 046). It falls asleep after --quiet seconds with none, and
- * wakes on the first. Every comparison is on the database's clock, now().
+ * pauses on the first (Pausing). Every comparison is on the database's clock, now().
  *  - A search neither wakes it nor holds it awake (SMD-3315): a running pass
  *    costs a search 24–33 ms (SMD-3024's paired medians), so the passes go on
  *    through one. It reads no query_log; before 2.0.0 a logged search woke it,
@@ -107,7 +107,7 @@
  * every long sleep — or a stop
  * that keeps landing past the last window, in the decider's call or the
  * write — which would otherwise hold consolidation back for as long as the
- * brain keeps waking. The cost is consolidate.ts's for an unextracted
+ * brain keeps pausing it. The cost is consolidate.ts's for an unextracted
  * neighbour: a newer thought judged meanwhile misses its pair with such a
  * thought, which is reached from its newer side only and not revisited.
  * Once taken, the decision holds for the rest of the sleep. Stalled thoughts
@@ -171,7 +171,8 @@
  * is aborted (N12, lease.ts' abortInHand), its thought set back in the queue —
  * extraction keeping its answered windows and counting the stop on 093,
  * which stalls a window longer than every pause as a wake's stop did —
- * consolidation's at most CONSOLIDATE_ABORTS a sleep. As the gate opens, the
+ * consolidation's none once CONSOLIDATE_ABORTS are made in a sleep (one poll
+ * with more workers may pass it). As the gate opens, the
  * stopped thoughts are moved behind the newer work first (stoppedLast).
  * Paused time is not the clock's (Budget). Under --follow a live write that
  * finds the pools drained — re-embed's while it runs, extraction's claims and
@@ -180,7 +181,7 @@
  * during the sweep ends the sleep, the passes not yet started. The first live
  * call is not spared: it is recorded after the model work it does, so on a
  * one-slot model it can queue behind the call in hand, at most until the
- * abort's bound. Awake, it reads again when the brain could first fall
+ * abort's bound (consolidation's past its cap, to the call's end). Awake, it reads again when the brain could first fall
  * asleep — --quiet seconds after the newest live event — at most a minute
  * apart.
  *
@@ -347,7 +348,7 @@ const HINTS = { url: "<postgres://…>", quiet: "<SECONDS>", capture: "<SECONDS>
 
 /** The quiet before a sleep, from the stable brain's logs replayed (the header): 93% of the time asleep, a median sleep of 16.6 min. */
 const DEFAULT_QUIET_S = 300;
-/** How often the logs are read while asleep: the most a pass runs beside a live call before it pauses. */
+/** How often the logs are read while asleep: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound. */
 const DEFAULT_POLL_S = 5;
 /**
  * The quiet after the newest live write before paused passes go on
@@ -562,7 +563,7 @@ const currentProgress = (sql: SQL, sig: string) => sql`e.windowing = ${sig} AND 
  * every thought (enqueue_thoughts adds those with no row under the key);
  * consolidation's is migration 029's consolidation_pool.
  */
-async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date): Promise<Pool> {
+async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date, except: string[] = []): Promise<Pool> {
   // Re-embed's is its own backlog read (reembed.ts): the rows pending or in
   // flight, and what a first pool would add — the thoughts not at the model,
   // and the finished rows whose thought has moved (SMD-2679 PR 4b).
@@ -583,16 +584,19 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   // `claimsOnly` skips the thoughts not yet in the pool, a scan of every
   // thought for extraction: read every poll while consolidation waits on its
   // provider, where the capture trigger keeps it near nought (SMD-3008).
+  // `except`, the thoughts a live write just touched: the idle end reads the
+  // pools without the work that write added itself (SMD-3379 PR 1c-3b).
+  const ids = except.length > 0 ? sql`${sql.array(except, "TEXT")}::uuid[]` : null;
   const unpooled = claimsOnly
     ? sql`SELECT 0`
     : pass === "extract"
-    ? sql`SELECT count(*)::int FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})`
-    : sql`SELECT count(*)::int FROM consolidation_pool(${job})`;
+    ? sql`SELECT count(*)::int FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})${ids ? sql` AND t.id <> ALL(${ids})` : sql``}`
+    : sql`SELECT count(*)::int FROM consolidation_pool(${job}) p(id)${ids ? sql` WHERE p.id <> ALL(${ids})` : sql``}`;
   const [by] = (await sql`
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
            count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n,
            count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}) AND claimed_at >= ${since})::int AS mine
-      FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number; mine: number }[];
+      FROM thought_work_claims WHERE work_type = ${job}${ids ? sql` AND thought_id <> ALL(${ids})` : sql``}`) as { pending: number; claimed: number; failed: number; n: number; mine: number }[];
   // Read only where the start found 093's table readable (stalledUnder, the
   // windowing). One gone or refused since reads none stalled, said by the
   // caller, so the scheduler joins once extraction drains rather than ends
@@ -668,6 +672,14 @@ async function newestLive(sql: SQL, after: Date | number): Promise<{ now: Date; 
            (SELECT max(created_at) FROM thought_audit WHERE created_at > ${since} AND actor_kind IS DISTINCT FROM 'ingested'
               AND (actor_context->>'background') IS NULL) AS write`;
   return { now: new Date(r.now), write: r.write ? new Date(r.write) : null };
+}
+
+/** The thoughts the live writes since `after` touched, as newestLive reads them: the work they added is theirs, not the sleep's (SMD-3379 PR 1c-3b). */
+async function liveTouched(sql: SQL, after: Date): Promise<string[]> {
+  const rows = (await sql`
+    SELECT DISTINCT thought_id::text AS id FROM thought_audit WHERE created_at > ${after}::timestamptz AND actor_kind IS DISTINCT FROM 'ingested'
+       AND (actor_context->>'background') IS NULL AND thought_id IS NOT NULL`) as { id: string }[];
+  return rows.map((r) => r.id);
 }
 
 /**
@@ -1768,6 +1780,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let abortedExtract = 0;
     let consolidateAborts = 0;
     let saidAbortCap = false;
+    /** The rest after a budget stop waits for a live write newer than any this sleep saw: one that only paused it is no wake (review pass 1). */
+    const restFrom = () => (lastWrite === null ? from : new Date(Math.max(from.getTime(), lastWrite + 1)));
     /** Whether the stopped thoughts can be moved behind newer work: a restart for it is no use otherwise. */
     let reorders = await stoppedLast();
     let consolidating = false;
@@ -1975,16 +1989,18 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (!reembedding && !(await startClaims())) return stopped();
     for (;;) {
       if (stopping) return stopped();
-      const live = await reading(() => newestLive(sql, readFrom));
+      const readAt = readFrom;
+      const live = await reading(() => newestLive(sql, readAt));
       if (live === null) return stopped();
       sleptUntil = live.now;
       const nowMs = live.now.getTime();
       // A write newer than any seen landed now, or — one committed late, dated
-      // before the last read's now — at that read: the capture counts from there.
+      // before the last read's now — at that read: the capture counts from
+      // there, and from this read on the sleep's first, whose last read was the sweep's.
       const wrote = live.write !== null && (lastWrite === null || live.write.getTime() > lastWrite);
       if (wrote) {
         lastWrite = live.write!.getTime();
-        landedAt = Math.max(lastWrite, lastNow ?? lastWrite);
+        landedAt = Math.max(lastWrite, lastNow ?? nowMs);
       }
       lastNow = nowMs;
       readFrom = new Date(Math.max(from.getTime(), nowMs - WAKE_SLACK_S * 1000));
@@ -2008,7 +2024,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         await stopPasses(true, true);
         err(`  the sleep stops on its budget: a pass's statement timed out${FOLLOW ? " — the next sleep begins after a live call" : ""}`);
         budgetKind = "statement";
-        budgetFrom = from;
+        budgetFrom = restFrom();
         return "budget";
       }
       // A pass that ended by itself before the wake is read first: a refusal
@@ -2046,8 +2062,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       }
       // A live write in the clock's grace ends the sleep as before; one that
       // finds nothing left to do (--follow) ends it too; any other pauses it.
+      // Read without the thoughts the writes touched: a capture queues its own
+      // extraction, an edit its thought's again — work for the next sleep.
       const idle = wrote && FOLLOW && !spentAt && !gate.closed
-        ? await reading(async () => (!reembedRuns() || drained(await reembedPool())) && drained(await extractPool(true)) && drained(await poolOf(sql, "consolidate", JOBS.consolidate)))
+        ? await reading(async () => {
+          const touched = await liveTouched(sql, readAt);
+          return (!reembedRuns() || drained(await reembedPool())) && drained(await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt, touched))
+            && drained(await poolOf(sql, "consolidate", JOBS.consolidate, undefined, undefined, false, undefined, touched));
+        })
         : false;
       if (idle === null) return stopped();
       const woke = wrote && (spentAt || idle) ? live.write : null;
@@ -2095,6 +2117,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           out(`  resumed: no live write for ${CAPTURE} s — the passes go on (paused ${Math.round(pausedFor / 1000)} s${abortedNow ? `, ${abortedNow} call(s) in hand aborted` : ""})`);
           stamper.paused?.(null);
           await sayHeld();
+          if (Object.keys(words).length) await stamper.alive(sleepOutcome(), malformed ?? undefined);
+          else await stamper.alive();
           gate.open();
         } else {
           // N12: a call in hand past the bound aborted, the thought set back
@@ -2129,7 +2153,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (BUDGET_MS > 0 && !spentAt && Date.now() - began - pausedMs >= BUDGET_MS) {
         spentAt = Date.now();
         budgetKind = "clock";
-        budgetFrom = from;
+        budgetFrom = restFrom();
         // Work left is the pools as the drain reads them — consolidation's
         // not yet enqueued included, which its pass adds only as it begins —
         // or a pass waiting for its provider, whose work is waiting too: a
@@ -2272,7 +2296,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           // poll's to report, not the join's to swallow: review pass 6.)
           // Only thoughts no stop has gained a window on lately are left:
           // waiting for them would hold consolidation back for as long as the
-          // brain keeps waking (SMD-2694). A newer thought judged meanwhile
+          // brain keeps pausing it (SMD-2694). A newer thought judged meanwhile
           // misses its pair with one of them, as consolidate.ts's header says
           // of an unextracted neighbour. Extraction, in hand with one of them,
           // is stopped and set aside until consolidation drains (review pass

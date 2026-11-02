@@ -5206,7 +5206,7 @@ if (configFailed) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
               // Each its own reason: every window kept puts the stops past the last (review pass 2).
-              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps");
+              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand");
               // The remedy as an operator runs it (review pass 4): stopped
               // asleep, the scheduler finishes the window in hand first, up
               // to its 120 s grace, and may leave the lease; and a checkout

@@ -4294,10 +4294,11 @@ and the row `paused { since }`. While paused, a model call in hand longer than
 answered windows and counting the stop (093); consolidation's at most three a
 sleep. As the passes go on, the thoughts stopped that way are moved behind
 the newer work. A pause is not the clock's: the budget counts the passes'
-time. Under `--follow`, a live write that finds the pools drained ends the
-sleep as a wake did, so the next one reads re-embed's backlog and sweeps
-again; a live write during the sweep ends it too. A one-shot run pauses and
-drains, ending 0.
+time. Under `--follow`, a live write that finds the pools drained — the work
+it added itself aside, a capture's extraction — ends the sleep as a wake did,
+so the next one reads re-embed's backlog and sweeps again; a live write
+during the sweep ends it too. A one-shot run pauses and drains, ending 0, or
+1 for a live write during its sweep.
 
 **What it does asleep.** First the re-derive pass (SMD-1794's order,
 SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
@@ -4348,11 +4349,13 @@ start line counts only rows not yet claimed, so follow the `re-embed pass`
 row), and `reembed.ts --dry-run` before
 upgrading says how many. Then extraction alone until its
 pool drains, then consolidation beside it — the order "Start `extract` alone
-on a backlog" asks of an operator. A wake hard-stops the passes: every lease returned, the model call in
-hand aborted, the thoughts in hand moved to the back of the queue. A long
+on a backlog" asks of an operator. A live write pauses the passes (below),
+a call in hand past a minute of the pause aborted and its thought set back; a
+sleep's end hard-stops them: every lease returned, the model call in hand
+aborted, the thoughts in hand moved to the back of the queue. A long
 thought's answered windows are kept (093, [Long thoughts
-resume](#extract-entitiests)), so one longer than every sleep advances by the
-windows each sleep finishes, and is done once its last is. Consolidation also
+resume](#extract-entitiests)), so one longer than every sleep or pause advances
+by the windows answered before each stop, and is done once its last is. Consolidation also
 joins once extraction holds nothing but thoughts that three or more long hard
 stops in a row took with no window saved between, and none saved since (093's
 `stalled` and `gained`, SMD-2694; long: the thought held a minute, provider
@@ -4360,7 +4363,7 @@ pauses aside, so a busy day's short sleeps count none) — a single window
 longer than every long sleep,
 or a stop that keeps landing past the last window, in the decider's call or
 the write — which would otherwise hold it back for as long as the brain keeps
-waking. The cost is an unextracted neighbour's: a newer thought judged
+pausing it. The cost is an unextracted neighbour's: a newer thought judged
 meanwhile misses its pair with such a thought, which consolidation reaches
 from its newer side only and does not revisit. Once taken, the decision
 holds for the rest of the sleep. Stalled thoughts go last: as each sleep
@@ -4380,7 +4383,7 @@ one-slot model the judge does not wait behind the window, and a night still
 reaches the thought. It is tried in every sleep once consolidation's pool
 drains, and finished by the first sleep long enough for both — one its clock
 (`--budget`) allows. Limits stand:
-sleeps of about a minute, each under the stall floor, neither stall a slow
+sleeps of about a minute on their clock, each under the stall floor, neither stall a slow
 window nor let it finish, and consolidation waits on it until a longer
 sleep; and once consolidation has joined, a stalled thought in hand keeps
 its turn, and a capture made then waits for the next sleep, where it goes
@@ -4564,8 +4567,8 @@ by hand with the scheduler stopped. One whose windows are all kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
-Since SMD-3379 PR 1c-2 the readers take two fields that no scheduler writes
-yet; 1c-3 writes them. `paused { since }` is the scheduler paused by a live
+Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
+and 1c-4 will write `holds`. `paused { since }` is the scheduler paused by a live
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out
@@ -6032,9 +6035,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3127 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1938 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1942 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1089 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 133 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 137 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 285 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 434 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
