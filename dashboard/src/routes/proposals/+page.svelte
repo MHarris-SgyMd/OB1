@@ -28,15 +28,10 @@
 	const decided = (p: Proposal) => p.status === 'accepted' || p.status === 'rejected';
 	/** A row's reject in its state's words: an accepted row's undoes the accept, a rejected row's replaces the reject. */
 	const rejectWords = (p: Proposal) => (p.status === 'accepted' ? 'Reject (undo the accept)' : p.status === 'rejected' ? 'Reject again' : 'Reject');
-	/** A decision's action with the page's filters, so the page after it — a refusal's, or the redirect's — lists the same rows. */
-	const actionOf = (name: 'accept' | 'reject') => {
-		const q = new URLSearchParams();
-		if (data.q.status !== 'pending') q.set('status', data.q.status);
-		if (data.q.lineage !== 'any') q.set('lineage', data.q.lineage);
-		if (data.q.limit !== 25) q.set('limit', String(data.q.limit));
-		const s = q.toString();
-		return `?/${name}${s ? `&${s}` : ''}`;
-	};
+	/** A decision's action with the page's filters (the load's, defaults left out), so the page after it — a refusal's, or the redirect's — lists the same rows. */
+	const actionOf = (name: 'accept' | 'reject') => `?/${name}${data.filters ? `&${data.filters}` : ''}`;
+	/** A proposal as a button's label names it: its id's first eight characters, enough to tell the page's rows apart (review pass 3: the whole id read on every button). */
+	const short = (id: string) => id.slice(0, 8);
 	/** A refusal of a decision on this row: said beside it, with "Accept anyway" where force waives it. */
 	const refusalOf = (p: Proposal) => (form?.id === p.id ? form : null);
 	/**
@@ -66,7 +61,7 @@
 				{#if unplaced.direction}<input type="hidden" name="direction" value={unplaced.direction} />{/if}
 				<input type="hidden" name="note" value={unplaced.note ?? ''} />
 				<input type="hidden" name="force" value="1" />
-				<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {unplaced.id}">Accept anyway</button>
+				<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {short(unplaced.id)}">Accept anyway</button>
 			</form>
 		{/if}
 	{/if}
@@ -129,29 +124,31 @@
 								     button, Accept, writing a pointer under a note typed for a reject (review pass 1). -->
 								<button type="submit" disabled hidden aria-hidden="true" tabindex="-1"></button>
 								<input type="hidden" name="id" value={p.id} />
-								{#if p.status !== 'accepted'}
-									{#if p.undirected}
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs" aria-label="Accept: newer stands, proposal {p.id}">Accept: newer stands</button>
-										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs" aria-label="Accept: older stands, proposal {p.id}">Accept: older stands</button>
-									{:else}
-										<button type="submit" formaction={actionOf('accept')} class="button text-xs" aria-label="Accept, proposal {p.id}">Accept</button>
-									{/if}
-								{/if}
-								<button type="submit" formaction={actionOf('reject')} class="button text-xs" aria-label="{rejectWords(p)}, proposal {p.id}">{rejectWords(p)}</button>
+								<!-- The note before the decisions, so the keyboard's order is type, then decide (review pass 3). -->
 								<label class="flex flex-col gap-1 text-xs grow">Note (optional)
 									<input name="note" maxlength="2000" class="field" value={refused?.note ?? ''} />
 								</label>
+								{#if p.status !== 'accepted'}
+									{#if p.undirected}
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="newer" class="button text-xs" aria-label="Accept: newer stands, proposal {short(p.id)}" aria-describedby={refused ? `refusal-${p.id}` : undefined}>Accept: newer stands</button>
+										<button type="submit" formaction={actionOf('accept')} name="direction" value="older" class="button text-xs" aria-label="Accept: older stands, proposal {short(p.id)}" aria-describedby={refused ? `refusal-${p.id}` : undefined}>Accept: older stands</button>
+									{:else}
+										<button type="submit" formaction={actionOf('accept')} class="button text-xs" aria-label="Accept, proposal {short(p.id)}" aria-describedby={refused ? `refusal-${p.id}` : undefined}>Accept</button>
+									{/if}
+								{/if}
+								<button type="submit" formaction={actionOf('reject')} class="button text-xs" aria-label="{rejectWords(p)}, proposal {short(p.id)}" aria-describedby={refused ? `refusal-${p.id}` : undefined}>{rejectWords(p)}</button>
 							</form>
 						{/if}
 						{#if refused}
-							<p class="text-sm text-amber-300 [overflow-wrap:anywhere]" role="alert" data-testid="review-error">{refused.error}</p>
+							<!-- Described on the row's buttons too, so a reader Tabbing back to them hears why (review pass 3). -->
+							<p class="text-sm text-amber-300 [overflow-wrap:anywhere]" role="alert" data-testid="review-error" id="refusal-{p.id}">{refused.error}</p>
 							{#if refused.forceable}
 								<form method="POST" action={actionOf('accept')} data-testid="force">
 									<input type="hidden" name="id" value={p.id} />
 									{#if refused.direction}<input type="hidden" name="direction" value={refused.direction} />{/if}
 									<input type="hidden" name="note" value={refused.note ?? ''} />
 									<input type="hidden" name="force" value="1" />
-									<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {p.id}">Accept anyway</button>
+									<button type="submit" class="button text-xs" aria-label="Accept anyway, proposal {short(p.id)}" aria-describedby="refusal-{p.id}">Accept anyway</button>
 								</form>
 							{/if}
 						{/if}

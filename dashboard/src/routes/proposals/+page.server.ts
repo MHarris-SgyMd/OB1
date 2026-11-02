@@ -95,6 +95,8 @@ export const load: PageServerLoad = async (event) => {
 	});
 	return {
 		q,
+		// The filters as the address carries them, defaults left out: a decision's action takes them after `?/<action>`.
+		filters: addressOf('', q, DEFAULTS).slice(1),
 		canReview: may(session, 'review_supersession_proposal'),
 		done: said ? doneFrom(said) : null,
 		// SMD-3338: false when a decided row was listed on a brain short of 114, which records no reviewer; absent from a core before it.
