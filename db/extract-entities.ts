@@ -360,7 +360,7 @@ export interface ExtractOptions {
  * extraction on the stable brain (32 s, 2026-10-13), so a stop that long with
  * nothing saved is a slow window, not a short sleep.
  */
-const STALL_FLOOR_MS = 60_000;
+export const STALL_FLOOR_MS = 60_000;
 /** How long the hard stop waits for its count before it returns the lease anyway: the CLI exits 3 s after a second signal, and the release must be sent (review pass 2). 093's note gives up a lock wait after a second, so a count blocked on a lock drops its own and the release is not queued behind it (review pass 3). */
 const STOP_NOTE_WAIT_MS = 1_500;
 /** Resolves after `ms`, holding no host open: the stop's bound, which a fast count leaves pending (review pass 3). */
@@ -1303,7 +1303,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
-  async function processRow(row: Row, workerId: string): Promise<Outcome> {
+  /**
+   * One attempt at a thought. `asked`: the worker's last pass of the admit gate
+   * for it, its row's read the first, kept across attempts and moved on by each
+   * pass (SMD-3379 PR 1c-3a): a closure since — one that opened again during a
+   * call or a provider pause — reads the claim again. `retry`: an attempt after
+   * a provider pause asks the gate first, a thought sent in one call included,
+   * since the row was read before the pause (review pass 1).
+   */
+  async function processRow(row: Row, workerId: string, asked: { at: number }, retry = false): Promise<Outcome> {
     const t0 = Date.now();
     // The admit gate between windows (SMD-3379 PR 1b): its wait is neither
     // the model's time nor the thought's held, and a stop while it waits ends
@@ -1320,7 +1328,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (held) held.pausedAt = at;
       let through: false | "open" | "waited" = false;
       try {
-        through = await idleWhile(call, admitted(ADMIT, gate));
+        through = await idleWhile(call, admitted(ADMIT, gate, asked.at));
       } catch (e) {
         throw new AdmitThrow(e);
       } finally {
@@ -1332,6 +1340,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
       }
       if (!through) throw new StoppedBetweenWindows();
+      asked.at = performance.now();
       // After the gate held it the claim is read again: the live write that
       // closed the gate may be a delete or an edit of this thought, whose text
       // must not go to the provider after it (review passes 3 and 4). A read
@@ -1343,6 +1352,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     } : undefined;
     let extraction: Extraction;
     try {
+      if (retry && admitWindow) await admitWindow();
       const progress = await progressFor(row, workerId);
       // The row's own metadata is what the gate reads (SMD-1903); a refusal
       // throws out of here as a failed claim naming the rule. The timeout is per
@@ -1506,6 +1516,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
+        /** When the batch's rows were read (performance.now()): each thought's first `asked` (SMD-3379 PR 1c-3a, review pass 1). */
+        let readAt = 0;
         try {
           const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
@@ -1522,6 +1534,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
+          readAt = performance.now();
           const rows = (await sql`
             SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint, metadata, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
@@ -1554,9 +1567,10 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
             let stopAfter = false;
             if (row.fingerprint !== null) inHand.set(workerId, { id: row.id, fingerprint: row.fingerprint, since: Date.now() });
             inCall.begin(workerId);
+            const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId);
+                outcome = await processRow(row, workerId, asked, attempt > 0);
               } catch (e) {
                 // The calls a thrown thought made — its fourth window timing out
                 // is four calls — count too (second review pass).
