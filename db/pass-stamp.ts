@@ -195,6 +195,15 @@ export interface PassStamper {
    */
   resting?(on: boolean): void;
   /**
+   * The sleep scheduler paused by a live call (SMD-3379 PR 1c): its gate
+   * closed since `since` — the database's clock in toISOString()'s form
+   * (`2026-10-31T12:00:00.000Z`), the only one brain-info reads — its passes
+   * waiting between thoughts: `paused { since }` in the value, left out while
+   * open (null). Written at the next stamp, so a caller wanting it seen at
+   * once stamps then. Cleared by the row's end. Only the scheduler sets it.
+   */
+  paused?(since: string | null): void;
+  /**
    * The sleep scheduler's re-embed pass set aside on a model switch it will
    * not make, or down for the sleep with what set it down (`aside` in the
    * value, left out while neither is), carried by the row's next write and
@@ -330,13 +339,14 @@ export function passStamper(opts: {
   let held: SleepHeld | null = null;
   let budget: SleepBudget | null = null;
   let resting = false;
+  let paused: string | null = null;
   let aside: SleepAside | null = null;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(aside ? { aside } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -373,6 +383,7 @@ export function passStamper(opts: {
       waiting = [];
       waitingMidPass = [];
       resting = false;
+      paused = null;
       if (m !== undefined) malformed = m;
       await write(false);
     },
@@ -424,6 +435,9 @@ export function passStamper(opts: {
     },
     resting(on) {
       resting = on;
+    },
+    paused(since) {
+      paused = since;
     },
     aside(a) {
       aside = a;

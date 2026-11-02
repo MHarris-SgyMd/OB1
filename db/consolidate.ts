@@ -174,7 +174,7 @@ import { proposalRecipe } from "../server-portable/lineage.ts";
 import { reviewersOf, reviewProposal, type Reviewer } from "../server-portable/proposal-review.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
-import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
+import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, setBack, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
@@ -847,7 +847,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     : "one is out of date, which not stated";
 
   const SHORT_OF_114 = "this brain is short of migration 114 (cd db && bun migrate.ts --url <url>)";
-  const REVIEWERS_UNREAD = `Who decided each row is not shown: ${SHORT_OF_114}.`;
   /**
    * SMD-2608: a decided row's reviewer — the key's name and its kind (the
    * kind it had when it decided, else the registry's now, said so), a
@@ -1611,7 +1610,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return false;
   }
 
-  async function processRow(row: Row, workerId: string): Promise<Outcome> {
+  /**
+   * One attempt at a thought. `asked`: the worker's last pass of the admit gate
+   * for it, its row's read the first, kept across attempts and moved on by each
+   * pair's pass (SMD-3379 PR 1c-3a): a closure since — one that opened again
+   * during a call or a provider pause — reads both sides again at the next
+   * pair, the first pair of a retry included (review pass 1).
+   */
+  async function processRow(row: Row, workerId: string, asked: { at: number }): Promise<Outcome> {
     // 067: the stale rows on this thought — 063's rebuild set them stale when
     // a text moved under the verdict, and this pass replaces or settles each
     // (see the header). Read before the candidates so a stale pair the top-k
@@ -1669,11 +1675,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // first stop that follows it (review passes 3 and 4).
         if (call?.aborted) throw new AbortedInHand();
         try {
-          through = await idleWhile(call, admitted(ADMIT, gate));
+          through = await idleWhile(call, admitted(ADMIT, gate, asked.at));
         } catch (e) {
           throw new AdmitThrow(e);
         }
         if (!through) throw new StoppedBetweenPairs();
+        asked.at = performance.now();
         // After the gate held it both sides are read again: the live write
         // that closed the gate may be a delete or an edit of the thought or of
         // any older side still to judge, whose text must not go to the judge
@@ -2002,6 +2009,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         }
         let batch: { thought_id: string; attempt: number }[];
         let byId: Map<string, Row>;
+        /** When the batch's rows were read (performance.now()): each thought's first `asked` (SMD-3379 PR 1c-3a, review pass 1). */
+        let readAt = 0;
         try {
           const room = LIMIT > 0 ? LIMIT - taken.size - claiming : BATCH;
           if (room <= 0) return;
@@ -2018,6 +2027,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           if (batch.length === 0) return;
           const ids = batch.map((b) => b.thought_id);
           hb.claimed(ids);
+          readAt = performance.now();
           const rows = (await sql`
             SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint, metadata, (embedding IS NOT NULL) AS has_vector, md5(metadata::text) AS metadata_hash
               FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
@@ -2053,9 +2063,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // A report, never the pass's: a failed read counts 0 and is said, where a throw here would stop every worker (second review pass).
             const ticketCalls = HAS_079 ? await ticketCallsSaved("SELECT $1::uuid AS id", row.id).then((r) => r.n, () => null) : 0;
             inCall.begin(workerId);
+            const asked = { at: readAt };
             for (let attempt = 0; outcome === null; attempt++) {
               try {
-                outcome = await processRow(row, workerId);
+                outcome = await processRow(row, workerId, asked);
               } catch (e) {
                 if (e instanceof WriterThrow) throw e.error;
                 // The admit gate's own error, not the thought's: the pass ends with it.
