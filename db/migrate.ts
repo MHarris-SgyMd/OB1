@@ -156,6 +156,13 @@ export interface MigrateOptions {
   /** Where plugins live; the tree's plugins/ unless a suite names another. */
   pluginsDir?: string;
   /**
+   * Where the core migrations live; the tree's db/migrations unless a suite
+   * names another, a copy it may edit (SMD-3639). The CLI reads it from
+   * OB1_TEST_MIGRATIONS_DIR, so a spawned run can be pointed there too; a run
+   * given one says so on stderr before it reads a file.
+   */
+  migrationsDir?: string;
+  /**
    * OB1_PLUGIN_DB_PASSWORD (SMD-2310): the password of the login role plugin
    * migrations run on (PLUGIN_LOGIN_ROLE), which a run makes with it when the
    * role is missing. Required by a plain run that names a plugin with
@@ -585,9 +592,12 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return substituteMigration(sql, SUBSTITUTIONS, file);
   }
 
+  /** The core migrations' directory: the tree's, or a suite's copy (SMD-3639). */
+  const coreDir = opts.migrationsDir ?? MIGRATIONS_DIR;
+
   /** The migration files, read and hashed now; null (the problem printed) when their names collide. */
   function loadMigrations(): Migration[] | null {
-    const names = readdirSync(MIGRATIONS_DIR)
+    const names = readdirSync(coreDir)
       .filter((f) => f.endsWith(".sql"))
       .sort(); // 001_, 002_, … lexical order is the intended order
     // The number is the file's identity — the order, and how prose names a file
@@ -602,7 +612,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       return null;
     }
     return names.map((name) => {
-        const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+        const template = readFileSync(join(coreDir, name), "utf8");
         return {
           name,
           requiresPgvector: requiresPgvector(template),
@@ -673,12 +683,13 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
   }
 
+  if (opts.migrationsDir !== undefined) err(`Migrations read from ${coreDir}, not db/migrations: a suite's directory (OB1_TEST_MIGRATIONS_DIR).`);
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
   if (plugins === null) return 2;
   if (migrations.length === 0) {
-    err(`No .sql files in ${MIGRATIONS_DIR}`);
+    err(`No .sql files in ${coreDir}`);
     return 2;
   }
 
@@ -1777,6 +1788,8 @@ if (import.meta.main) {
       // which that role's connection is built from.
       plugins: process.env.OB1_PLUGINS,
       pluginPassword: process.env.OB1_PLUGIN_DB_PASSWORD,
+      // A suite's copy of the migrations, for a spawned run (SMD-3639); blank is unset.
+      migrationsDir: process.env.OB1_TEST_MIGRATIONS_DIR || undefined,
       url,
     });
   });

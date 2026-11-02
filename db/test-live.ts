@@ -30,8 +30,9 @@
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
  * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
  * every one on a database of its own (SMD-3048, SMD-3169). From one checkout,
- * run them one at a time: [2] edits a migration file while it runs, which
- * another shard's migrations would read.
+ * run them one at a time for now: [2] edits a copy of the migrations, no
+ * longer the tracked tree (SMD-3639), but side by side has not been tried
+ * (SMD-3688).
  */
 
 import { SQL } from "bun";
@@ -343,30 +344,38 @@ if (want("1")) {
 
 if (want("2")) {
   console.log("\n[2] Append-only enforcement");
-  const target = join(HERE, "migrations", "002_match_thoughts.sql");
-  const original = readFileSync(target, "utf8");
+  // The migrations copied, the copy's 002 edited, and both runs pointed at the copy: the tracked tree is never
+  // written, so a run killed here leaves nothing changed, a second run from the same tree sees no drift, and a
+  // read-only checkout runs it (SMD-3639).
+  const copy = mkdtempSync(join(tmpdir(), "ob1-live-migrations-"));
   try {
-    writeFileSync(target, original + "\n-- edited after being applied\n");
-    const drifted = await migrate();
+    cpSync(join(HERE, "migrations"), copy, { recursive: true });
+    const target = join(copy, "002_match_thoughts.sql");
+    writeFileSync(target, readFileSync(target, "utf8") + "\n-- edited after being applied\n");
+    // The spawned run's environment is this one's, with the copy named.
+    const copyEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries({ ...process.env, OB1_TEST_MIGRATIONS_DIR: copy })) if (v !== undefined) copyEnv[k] = v;
+    const drifted = await runMigrator(URL_!, copyEnv);
     assert(drifted.code === 1, "editing an applied migration exits 1");
     assert(/DRIFTED 1/.test(drifted.out), "…and reports which one drifted");
     assert(/append-only/.test(drifted.out), "…and explains the rule");
+    assert(drifted.stderr.includes(`Migrations read from ${copy}, not db/migrations`), "…reading the suite's copy, which it names, not db/migrations");
     // Which stream each goes to, as main's migrator wrote them: the warning and
     // the rule to stderr, the summary to stdout. The in-process comparison
     // below cannot see this — both runs are this migrate.ts (review pass 4).
     assert(/ALREADY APPLIED BUT FILE CHANGED/.test(drifted.stderr) && /append-only/.test(drifted.stderr) && /DRIFTED 1/.test(drifted.stdout) && !/ALREADY APPLIED BUT|append-only/.test(drifted.stdout), "…the drift warning and the rule on stderr, the summary on stdout");
-    // migrate.ts was imported before the edit: run() reads the files when it
-    // runs, not when the module loaded (SMD-2304).
-    const driftedIn = await migrateInProcess();
+    // migrate.ts was imported before the copy was made: run() reads the files
+    // when it runs, not when the module loaded (SMD-2304).
+    const driftedIn = await migrateInProcess({ migrationsDir: copy });
     // The drift report is the one run here that writes to both streams: the
     // ⚠ line and the append-only rule to stderr, the skipped lines and the
     // summary to stdout.
-    assert(driftedIn.stderr.length > 0 && driftedIn.stdout.length > 0 && same(driftedIn, drifted), "run() in-process, imported before the edit, sees the drift the same, byte for byte on each stream");
+    assert(driftedIn.stderr.length > 0 && driftedIn.stdout.length > 0 && same(driftedIn, drifted), "run() in-process, imported before the copy was made, sees the drift the same, byte for byte on each stream");
   } finally {
-    writeFileSync(target, original);
+    rmSync(copy, { recursive: true, force: true });
   }
   const restored = await migrate();
-  assert(restored.code === 0, "restoring the file clears the drift");
+  assert(restored.code === 0, "the tree's own migrations, never written, show no drift");
 }
 
 // ── 3. Driver-level binding — the class PGlite cannot reach ──────────────────
