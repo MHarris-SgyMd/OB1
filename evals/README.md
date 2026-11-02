@@ -4493,7 +4493,8 @@ These mutants are each refused:
 
 An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
 
-**The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`). On the
+**The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`), and the
+maintainer confirmed it, with the gold orders, the same day. On the
 seeded set, against the best baseline read on each measure, a read helps only if all four hold:
 * (a) it gets top-1 on at least 5 of the 7 prompts;
 * (b) it gets top-1 on at least 2 more prompts than the best baseline read;
@@ -4506,7 +4507,7 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `98e95ec8350599c7`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, registration `1da5a5e34964b73b`; deterministic, two runs identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |

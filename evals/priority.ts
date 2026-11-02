@@ -153,7 +153,8 @@ export type Prompt = {
 
 /**
  * The prompts and their gold, written by the operator's judgement (the
- * ticket: "the gold order is written per prompt"), not computed from
+ * ticket: "the gold order is written per prompt"; drafted in the session and
+ * confirmed by the maintainer, 2026-11-02), not computed from
  * docs/priority.md's weights — a read built on those weights must earn its
  * score here, not inherit it. Where they agree is the ADR's evidence; where
  * they differ, SMD-3667 tunes the weights against this.
@@ -187,7 +188,7 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "98e95ec8350599c7";
+export const REGISTERED_CORPUS = "1da5a5e34964b73b";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
@@ -497,7 +498,7 @@ export function meanTriple(xs: readonly Triple[], golds: readonly (readonly stri
 
 /**
  * PRE-REGISTERED (2026-11-02, before any priority read is measured; SMD-3662
- * Work 3). The bar a priority read (SMD-3668's `priority_weight`, SMD-3669's
+ * Work 3; confirmed by the maintainer the same day, with the gold orders). The bar a priority read (SMD-3668's `priority_weight`, SMD-3669's
  * agenda) must clear on the SEEDED set, at REGISTERED_CORPUS, against the
  * best of the baseline reads on each measure, to count as having helped:
  *   (a) top-1 on at least TOP1_MIN of the prompts (5 of 7);
