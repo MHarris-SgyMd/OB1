@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
-import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
+import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
@@ -5260,8 +5260,9 @@ if (want("10")) {
                           RETURNS TABLE (thought_id uuid, attempt int) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'a lock not available, for the suite' USING ERRCODE = '55P03'; END $$`);
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await Bun.sleep(3000);
-      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int)");
-      await sql.unsafe("ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
+      // One query, so one transaction: as two, a poll between them found no
+      // claim_thoughts at all and the follower ended on it (SMD-3614's ci-parity run).
+      await sql.unsafe("DROP FUNCTION claim_thoughts(text, text, int, int, int); ALTER FUNCTION claim_thoughts_hidden(text, text, int, int, int) RENAME TO claim_thoughts");
       swapped = false;
       const ended = await pollUntil(async () => code !== -1, 15_000);
       ac.abort();
@@ -6253,6 +6254,44 @@ if (want("10")) {
   const goneSummary = goneLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
   assert(goneWaiting && calls - goneFrom === 1 && goneCode <= 1 && /, 1 deleted mid-pass/.test(goneSummary),
          `…a long note deleted while its worker waits before its second window has nothing more sent once the gate opens, and is counted deleted (${calls - goneFrom} call(s), exit ${goneCode}: ${goneSummary.trim().slice(0, 160)})`);
+  // A closure that opened again during a window's call (SMD-3379 PR 1c-3a):
+  // the note deleted then has nothing more sent either — the worker reads its
+  // claim again at the next window, which "waited" alone, seeing only a
+  // closure still in force, did not.
+  const blinkNote = await seed(ledgerOf("blinked", "blinked"));
+  const blink = liveGate();
+  const blinkFrom = calls;
+  const blinkLines: string[] = [];
+  slowMs = 1500;
+  const blinkRun = runExtract({ url: URL_!, env, workers: 1, admit: blink.admit, writer: { out: (l) => blinkLines.push(l), err: (l) => blinkLines.push(l) } });
+  const blinkInCall = await pollUntil(async () => calls > blinkFrom, 10_000);
+  blink.close();
+  await sql`SELECT delete_thought(${blinkNote}::uuid, NULL::jsonb)`;
+  blink.open();
+  const blinkCode = await blinkRun;
+  slowMs = 0;
+  const blinkSummary = blinkLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(blinkInCall && calls - blinkFrom === 1 && blinkCode <= 1 && /, 1 deleted mid-pass/.test(blinkSummary),
+         `…and one deleted while a closure began and ended during its first window's call has nothing more sent, counted deleted (${calls - blinkFrom} call(s), exit ${blinkCode}: ${blinkSummary.trim().slice(0, 160)})`);
+  // …and a note sent in one call, deleted while a closure began and ended in
+  // the worker's pause after a 503: the retry asks the gate first, reads the
+  // claim again and sends nothing more (review pass 1: the retry's own taking
+  // time passed over the closure, and a one-call note had no gate at all).
+  const retryNote = await seed("Priya mended the retried gate latch.");
+  const retryGate = liveGate();
+  const retryFrom = calls;
+  const retryLines: string[] = [];
+  unavailableCalls = 1;
+  const retryRun = runExtract({ url: URL_!, env, workers: 1, admit: retryGate.admit, writer: { out: (l) => retryLines.push(l), err: (l) => retryLines.push(l) } });
+  const retryPausing = await pollUntil(async () => retryLines.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  retryGate.close();
+  await sql`SELECT delete_thought(${retryNote}::uuid, NULL::jsonb)`;
+  retryGate.open();
+  const retryCode = await retryRun;
+  unavailableCalls = 0;
+  const retrySummary = retryLines.find((l) => /deleted mid-pass/.test(l)) ?? "";
+  assert(retryPausing && calls - retryFrom === 1 && retryCode <= 1 && /, 1 deleted mid-pass/.test(retrySummary),
+         `…and one sent in one call, deleted while a closure began and ended in its worker's pause after a 503, is not sent again (${calls - retryFrom} call(s), exit ${retryCode}: ${retrySummary.trim().slice(0, 160)})`);
   // A long note edited while its worker waits before its second window,
   // under a key the trigger does not requeue — ob1_config pointed elsewhere
   // for the edit alone — so the claim is still the worker's: nothing more of
@@ -11955,6 +11994,40 @@ if (want("16")) {
   const goneCodeC = await goneRunC;
   assert(goneWaitingC && calls - goneFromC === 1 && goneCodeC <= 1,
          `…a thought deleted while its worker waits before its second pair has nothing more judged once the gate opens (${calls - goneFromC} call(s), exit ${goneCodeC})`);
+  // A closure that opened again during a pair's call (SMD-3379 PR 1c-3a): the
+  // thought deleted then has nothing more judged either.
+  const blinkNewer = await seed("[16g] The gatehouse opens at one now.", 30, 0, ["gatehouse"]);
+  const blinkC = liveGate();
+  const blinkFromC = calls;
+  slowMs = 1500;
+  const blinkRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: blinkC.admit, writer: { out: () => {}, err: () => {} } });
+  const blinkInCallC = await pollUntil(async () => calls > blinkFromC, 10_000);
+  blinkC.close();
+  await sql`SELECT delete_thought(${blinkNewer}::uuid, NULL::jsonb)`;
+  blinkC.open();
+  const blinkCodeC = await blinkRunC;
+  slowMs = 0;
+  assert(blinkInCallC && calls - blinkFromC === 1 && blinkCodeC <= 1,
+         `…and one deleted while a closure began and ended during its first pair's call has nothing more judged (${calls - blinkFromC} call(s), exit ${blinkCodeC})`);
+  // …and one edited while a closure began and ended in its worker's pause
+  // after a 503: the retry's first pair asks the gate from before the pause,
+  // reads the thought again and sends its old text no more (review pass 2).
+  // An edit, not a delete: a deleted thought has no candidates to judge.
+  const retryNewer = await seed("[16g] The gatehouse opens at two now.", 30, 0, ["gatehouse"]);
+  const retryGateC = liveGate();
+  const retryLinesC: string[] = [];
+  judgeUnavailable = 1;
+  const retryRunC = runConsolidate({ url: URL_!, env, workers: 1, admit: retryGateC.admit, writer: { out: (l) => retryLinesC.push(l), err: (l) => retryLinesC.push(l) } });
+  const retryPausingC = await pollUntil(async () => retryLinesC.some((l) => /provider unavailable .*; pausing/.test(l)), 10_000);
+  const retrySeenFrom = seen.length;
+  retryGateC.close();
+  await sql`UPDATE thoughts SET content = '[16g] The gatehouse opens at three now.' WHERE id = ${retryNewer}::uuid`;
+  retryGateC.open();
+  const retryCodeC = await retryRunC;
+  judgeUnavailable = 0;
+  const retrySeen = seen.slice(retrySeenFrom).map((p) => (p.b.includes("at two now") ? "old" : p.b.includes("at three now") ? "new" : "other"));
+  assert(retryPausingC && !retrySeen.includes("old") && retrySeen.includes("new") && retryCodeC <= 1,
+         `…and one edited while a closure began and ended in its worker's pause after a 503: the judge sees its old text no more, its pairs judged at its new text (${retrySeen.join(",")}, exit ${retryCodeC})`);
   // The newer side edited while its worker waits before its second pair:
   // still its claim (063 requeues a judged thought only through its
   // proposals), so it goes back to the pool for its new text — the run, its
@@ -21409,4 +21482,4 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   }
 }
 
-report();
+report(SHARD === undefined ? undefined : `shard ${SHARD}`);

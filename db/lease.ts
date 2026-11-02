@@ -319,9 +319,54 @@ export const MAX_TIMER_MS = 2147483647;
  * another worker's outage, the provider's refusal, a worker's throw — and a
  * rejection before it aborts ends the pass with the caller's error. The sleep
  * scheduler is to close it while its brain is live (SMD-3379 PR 1c). An engine
- * given none runs as before.
+ * given none runs as before. `closedSince(t)`, where a gate keeps it: whether
+ * it has been closed at any time from `t` on (performance.now()) — a
+ * closure that opened again before the next ask is one too (`admitted`'s
+ * `lastAsk`, SMD-3379 PR 1c-3a).
  */
-export type Admit = (signal: AbortSignal) => Promise<void>;
+export type Admit = ((signal: AbortSignal) => Promise<void>) & { closedSince?: (t: number) => boolean };
+
+/** A gate its caller closes and opens (liveGate). */
+export type LiveGate = { readonly admit: Admit; readonly closed: boolean; readonly waiting: number; close(): void; open(): void };
+
+/**
+ * An admit gate the caller closes and opens (SMD-3379 PR 1c-3a): the sleep
+ * scheduler's, closed while its brain is live. It begins open. Open, an ask is
+ * let through at once, a promise already settled; closed, it waits until
+ * open() — or its signal aborts, rejected then — its listener taken off the
+ * signal either way, as Admit's contract asks. `closedSince` is kept: closed
+ * now, or opened again at or after `t`, on `now` — performance.now(), a clock
+ * that never steps back, and the engines' `lastAsk` (review pass 1: a wall
+ * clock stepped back hid a closure); another `now` is a test's alone.
+ * `waiting`: the asks it holds now.
+ */
+export function liveGate(now: () => number = () => performance.now()): LiveGate {
+  let closed = false;
+  let openedAt = -Infinity;
+  const waiting = new Set<() => void>();
+  const admit: Admit = Object.assign((signal: AbortSignal): Promise<void> => {
+    if (!closed) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const stop = () => { waiting.delete(go); reject(new Error("stopped at the admit gate")); };
+      const go = () => { signal.removeEventListener("abort", stop); waiting.delete(go); resolve(); };
+      if (signal.aborted) return stop();
+      waiting.add(go);
+      signal.addEventListener("abort", stop, { once: true });
+    });
+  }, { closedSince: (t: number) => closed || openedAt >= t });
+  return {
+    admit,
+    get closed() { return closed; },
+    get waiting() { return waiting.size; },
+    close() { closed = true; },
+    open() {
+      if (!closed) return;
+      closed = false;
+      openedAt = now();
+      for (const go of [...waiting]) go();
+    },
+  };
+}
 
 /**
  * A rejection of the admit gate that was no stop, carried out of a thought in
@@ -382,12 +427,16 @@ const PENDING = Symbol("pending");
  * asked, which a worker mid-thought reads its claim again after
  * (claimAfterWait) — and false when it rejected after `signal` aborted: a stop
  * reaching a waiting worker, or the pass ending for a reason of its own. Any
- * other rejection is the caller's, and is thrown.
+ * other rejection is the caller's, and is thrown. `lastAsk`, the worker's last
+ * pass of the gate (performance.now()): an open answer from a gate that
+ * closed since — a closure that began and ended during the worker's call —
+ * is "waited" too, so the claim is read again (SMD-3379 PR 1c-3a; 1b-1's
+ * follow-up: "waited" saw only a closure still in force).
  */
-export async function admitted(admit: Admit, signal: AbortSignal): Promise<false | "open" | "waited"> {
+export async function admitted(admit: Admit, signal: AbortSignal, lastAsk?: number): Promise<false | "open" | "waited"> {
   try {
     const answer = admit(signal);
-    if ((await Promise.race([answer, Promise.resolve(PENDING)])) !== PENDING) return "open";
+    if ((await Promise.race([answer, Promise.resolve(PENDING)])) !== PENDING) return lastAsk !== undefined && admit.closedSince?.(lastAsk) ? "waited" : "open";
     await answer;
     return "waited";
   } catch (e) {

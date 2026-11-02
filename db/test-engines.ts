@@ -923,6 +923,86 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   ok(grew < 2_000_000, `20,000 sleeps on a signal that never aborts keep nothing (${(grew / 1e6).toFixed(2)} MB of heap after, under 2)`);
 }
 
+// The live gate (SMD-3379 PR 1c-3a): db/lease.ts' liveGate, the admit gate
+// the sleep scheduler closes while its brain is live, as Admit's contract
+// asks — an open ask settled at once, a closed one waiting until open() or
+// its signal aborts, its listener taken off either way — and closedSince,
+// which admitted's lastAsk reads a closure that opened again by.
+{
+  const { admitted, liveGate } = await import("./lease.ts");
+  const gate = liveGate();
+  const run = new AbortController();
+  const began = performance.now();
+  ok(!gate.closed && (await admitted(gate.admit, run.signal)) === "open" && gate.admit.closedSince?.(began) === false,
+    "a live gate begins open: an ask goes through at once, and it has not closed since");
+  /** A signal that counts the listeners on it, to see each taken off. */
+  const counted = () => {
+    const ac = new AbortController();
+    let live = 0;
+    const add = ac.signal.addEventListener.bind(ac.signal);
+    const remove = ac.signal.removeEventListener.bind(ac.signal);
+    ac.signal.addEventListener = ((...a: Parameters<typeof add>) => { live++; add(...a); }) as typeof add;
+    ac.signal.removeEventListener = ((...a: Parameters<typeof remove>) => { live--; remove(...a); }) as typeof remove;
+    return { ac, get live() { return live; } };
+  };
+  const waiter = counted();
+  gate.close();
+  const asked = admitted(gate.admit, waiter.ac.signal);
+  const early = await Promise.race([asked, Bun.sleep(50).then(() => "pending" as const)]);
+  const listening = waiter.live;
+  const held = gate.waiting;
+  gate.open();
+  ok(early === "pending" && listening === 1 && held === 1 && (await asked) === "waited" && waiter.live === 0 && gate.waiting === 0 && !gate.closed,
+    `closed, an ask waits until the gate opens and reads waited, held and let go, its listener taken off (${early}, ${listening} → ${waiter.live}, ${held} held)`);
+  await Bun.sleep(2);
+  const since = performance.now();
+  ok((await admitted(gate.admit, run.signal, began)) === "waited" && (await admitted(gate.admit, run.signal, since)) === "open"
+      && gate.admit.closedSince?.(began) === true && gate.admit.closedSince?.(since) === false,
+    "open again, an ask whose worker last passed before the closure reads waited — the closure opened again during its call — and one after it open");
+  const stopping = counted();
+  gate.close();
+  const stoppedAsk = admitted(gate.admit, stopping.ac.signal);
+  stopping.ac.abort();
+  // Its listener goes with the abort it heard (`once`), which the count does not see; the gate keeps no hold on it.
+  ok((await stoppedAsk) === false && gate.waiting === 0 && (await admitted(gate.admit, stopping.ac.signal)) === false && gate.waiting === 0 && gate.admit.closedSince?.(performance.now()) === true,
+    "a stop turns a waiting ask away, and an ask whose signal has already aborted at once, while closed, the gate holding neither");
+  gate.open();
+  gate.open();
+  ok(!gate.closed && (await admitted(gate.admit, stopping.ac.signal)) === "open", "opened twice, it stays open; an open gate lets an aborted signal's ask through, as Admit's contract has it");
+  // On its own clock (review pass 1): a closure that opened again at t counts
+  // from t itself; opening an open gate moves nothing.
+  let clock = 10;
+  const timed = liveGate(() => clock);
+  timed.close();
+  timed.open();
+  const atOpen = [timed.admit.closedSince?.(10), timed.admit.closedSince?.(11)];
+  clock = 20;
+  timed.open();
+  ok(atOpen[0] === true && atOpen[1] === false && timed.admit.closedSince?.(11) === false,
+    `a closure that opened again at t counts from t on, and opening an open gate moves nothing (${JSON.stringify(atOpen)}, ${timed.admit.closedSince?.(11)})`);
+}
+
+// The scheduler's pause on its heartbeat (SMD-3379 PR 1c-3a): db/pass-stamp.ts'
+// paused(), `paused { since }` while set, left out once cleared or ended.
+{
+  const { passStamper } = await import("./pass-stamp.ts");
+  const writes: string[] = [];
+  const fake = ((_s: TemplateStringsArray, ...v: unknown[]) => { writes.push(String(v[1])); return Promise.resolve([]); }) as never;
+  const st = passStamper({ sql: fake, worker: "sleep", intervalS: 60 });
+  const since = "2026-10-31T12:00:00.000Z";
+  st.paused?.(since);
+  await st.alive();
+  const pausedValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.paused?.(null);
+  await st.alive();
+  const clearedValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.paused?.(since);
+  await st.end("stopped");
+  const endedValue = JSON.parse(writes.at(-1) ?? "{}");
+  ok(pausedValue.paused?.since === since && !("paused" in clearedValue) && !("paused" in endedValue) && endedValue.ended === true,
+    `the stamper writes paused { since } while set, and leaves it out once cleared or the row ends (${JSON.stringify([pausedValue.paused, clearedValue.paused, endedValue.paused])})`);
+}
+
 listener.stop(true);
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

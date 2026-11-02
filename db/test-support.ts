@@ -15,9 +15,9 @@
 
 import { SQL } from "bun";
 import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE, SEARCH_THOUGHTS_CURRENT_SIGNATURE_7, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, grantedTables, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
-import { readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { connect, createServer, type AddressInfo, type Socket } from "node:net";
-import { basename, join, dirname } from "node:path";
+import { basename, join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { migrationSha } from "./version.mjs";
 import { LOOPBACK_HOSTS, REMOTE_DB_FLAG, RETIRED_REMOTE_DB_FLAG, identityRefusal, reachedDatabaseRefusal, resetRefusal, socketRefusal } from "./connect.ts";
@@ -710,6 +710,36 @@ export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
   "@modelcontextprotocol/server": "2.1.0",
 };
 
+/** The environment variable naming the file report() appends each run's counts to (recordCount). */
+export const TEST_COUNTS_ENV = "OB1_TEST_COUNTS";
+
+/**
+ * One run's counts, as report() records them: the suite by its path from the
+ * repo root, the variant its caller names, the CI job it ran in.
+ */
+export type CountLine = { suite: string; variant: string | null; job: string | null; assertions: number; passed: number; failed: number; skipped: number; docFailed: number };
+
+/**
+ * Append this run's counts to the file TEST_COUNTS_ENV names, one JSON line,
+ * when it is set: Fork Checks sets it in every job, uploads the file, and on a
+ * push to main publishes the lines to the wiki's Test-counts page (SMD-3614).
+ * Unset, as a run on a laptop leaves it, nothing is written. One
+ * appendFileSync of one short line, so legs that run side by side in one job
+ * do not interleave. A failed write is said and leaves the exit code alone:
+ * the page names a job whose suites did not report.
+ */
+function recordCount(counts: Omit<CountLine, "suite" | "job">): void {
+  const file = process.env[TEST_COUNTS_ENV];
+  if (!file) return;
+  try {
+    const line: CountLine = { suite: relative(join(import.meta.dir, ".."), Bun.main), job: process.env.GITHUB_JOB ?? null, ...counts };
+    mkdirSync(dirname(file), { recursive: true });
+    appendFileSync(file, `${JSON.stringify(line)}\n`);
+  } catch (e) {
+    console.error(`  could not record this run's counts in ${file}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /**
  * A counting assert. Returned as an object rather than module state so two suites
  * in one process cannot pollute each other's tally — and so `report()` owns the
@@ -735,7 +765,10 @@ export function createAssert(): {
    * README states — otherwise the check would move the target it reads.
    */
   docCheck: (cond: unknown, label: string) => void;
-  report: () => never;
+  /** Print the summary line and exit on it. `variant` names this run among a
+   *  suite's runs that count apart — a shard, a width — where its count is
+   *  published (recordCount, SMD-3614). */
+  report: (variant?: string) => never;
 } {
   let passed = 0;
   let failed = 0;
@@ -764,7 +797,9 @@ export function createAssert(): {
         docFailed++;
       }
     },
-    report(): never {
+    report(variant?: string): never {
+      // A suite that names no variant is told apart by its flags (eval-write-path.ts --gate).
+      recordCount({ variant: variant ?? (process.argv.slice(2).join(" ") || null), assertions: passed + failed, passed, failed, skipped, docFailed });
       console.log(`\n${"─".repeat(52)}`);
       // Fork Checks' schema step, its data-layer legs (behind a +<s>s stamp,
       // SMD-3468) and Portable server's background pair grep this line from
