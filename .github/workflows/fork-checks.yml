@@ -47,12 +47,17 @@ concurrency:
 
 jobs:
   # ── What the change can affect (SMD-2435) ─────────────────────────────────
-  # A pull request whose every changed path is docs runs none of the jobs that
-  # need this one: .github/ci/changes.sh says code=false only then, and each
-  # gated job runs unless this job succeeded and said so. It fails open: a
-  # failed or cancelled run of this job runs them all, and the aggregate lets
-  # them skip only when this job said code=false. A push to main runs every
-  # job. Blobs and all but .github/ci are left unfetched: the diff reads trees.
+  # A pull request into the default branch whose every changed path is docs
+  # runs none of the jobs that need this one: .github/ci/changes.sh says
+  # code=false only then, and each gated job runs on any other answer. It
+  # fails open: a failed or cancelled run of this job runs them all, and the
+  # aggregate lets them skip only when this job said code=false. Any other
+  # event runs every job, with no checkout. The classifier that decides is the
+  # BASE branch's copy (HEAD^1's), so a pull request that edits it is judged by
+  # the copy already on its base, which denies .github/ (review pass 1); a base
+  # with none, or a fetch that fails, runs every job. Blobs and all but
+  # .github/ci are left unfetched: the diff reads trees, and the base's
+  # classifier is one blob. Check 20 holds this job as written.
   changes:
     name: What the change can affect
     runs-on: ubuntu-24.04
@@ -61,6 +66,7 @@ jobs:
       code: ${{ steps.decide.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
         with:
           persist-credentials: false
           fetch-depth: 2
@@ -71,7 +77,15 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
-        run: bash .github/ci/changes.sh "$EVENT"
+          BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
+            bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+          else
+            echo "code=true: a $EVENT run, or a base with no .github/ci/changes.sh, runs every job"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
 
   repo-consistency:
     name: Repo consistency
@@ -194,7 +208,7 @@ jobs:
     name: Portable server
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -631,7 +645,7 @@ jobs:
     name: Schema migrations
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -755,7 +769,7 @@ jobs:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -858,7 +872,7 @@ jobs:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1006,7 +1020,7 @@ jobs:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1435,7 +1449,7 @@ jobs:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2736,7 +2750,7 @@ jobs:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3583,7 +3597,7 @@ jobs:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4345,7 +4359,7 @@ jobs:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4713,7 +4727,7 @@ jobs:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4771,7 +4785,7 @@ jobs:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:

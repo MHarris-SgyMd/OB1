@@ -4909,7 +4909,47 @@ const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
  */
 const CHANGES_JOB = "changes";
 const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
-const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code == 'true') }}`;
+const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code != 'false') }}`;
+/**
+ * The changes job as written (review pass 1): a checkout on pull requests
+ * alone, shallow and blobless; a decide step whose env reads the event and
+ * the branches and whose run runs the BASE's classifier, or answers
+ * code=true; its one output from that step. No other key, so no
+ * continue-on-error, no pinned EVENT, no output a literal can set.
+ */
+const CHANGES_JOB_KEYS = ["name", "runs-on", "timeout-minutes", "outputs", "steps"];
+const CHANGES_OUTPUTS = { code: "${{ steps.decide.outputs.code }}" };
+const CHANGES_CHECKOUT_IF = "github.event_name == 'pull_request'";
+const CHANGES_CHECKOUT_WITH = { "persist-credentials": false, "fetch-depth": 2, filter: "blob:none", "sparse-checkout": ".github/ci" };
+const CHANGES_ENV = { EVENT: "${{ github.event_name }}", BASE_REF: "${{ github.base_ref }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" };
+const CHANGES_RUN = `if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
+  bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+else
+  echo "code=true: a $EVENT run, or a base with no .github/ci/changes.sh, runs every job"
+  echo "code=true" >> "$GITHUB_OUTPUT"
+fi`;
+/** The always-run job that runs the classifier's own cases, and the step that does. */
+const CHANGES_SELF_CHECK_JOB = "repo-consistency";
+const CHANGES_SELF_CHECK_RUN = "bash .github/ci/changes.sh --self-check";
+/** Problems with the changes job's shape: each key, the checkout, the decide step, the output. */
+function changesJobProblems(job: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const canon = (v: unknown) => JSON.stringify(v, Object.keys((v && typeof v === "object" ? v : {}) as object).sort());
+  for (const key of Object.keys(job)) if (!CHANGES_JOB_KEYS.includes(key)) out.push(`job ${CHANGES_JOB} sets ${key}, which check 20 does not allow on it — the job carries ${CHANGES_JOB_KEYS.join(", ")} alone, since a key like continue-on-error turns its failure into an answer (SMD-2435)`);
+  if (canon(job.outputs) !== canon(CHANGES_OUTPUTS)) out.push(`job ${CHANGES_JOB}'s outputs are ${JSON.stringify(job.outputs ?? null)}, not ${JSON.stringify(CHANGES_OUTPUTS)} — the code the gated jobs read comes from the decide step alone (SMD-2435)`);
+  const steps = Array.isArray(job.steps) ? (job.steps as Record<string, unknown>[]) : [];
+  if (steps.length !== 2) { out.push(`job ${CHANGES_JOB} has ${steps.length} step(s), not its checkout and its decide step (SMD-2435)`); return out; }
+  const [co, decide] = steps.map((x) => (x && typeof x === "object" ? x : {}) as Record<string, unknown>);
+  for (const key of Object.keys(co)) if (!["uses", "if", "with"].includes(key)) out.push(`job ${CHANGES_JOB}'s checkout sets ${key} — uses, if and with alone (SMD-2435)`);
+  if (typeof co.uses !== "string" || !co.uses.startsWith("actions/checkout@")) out.push(`job ${CHANGES_JOB}'s first step uses ${JSON.stringify(co.uses ?? null)}, not actions/checkout (SMD-2435)`);
+  if (String(co.if ?? "").trim() !== CHANGES_CHECKOUT_IF) out.push(`job ${CHANGES_JOB}'s checkout runs if: ${JSON.stringify(co.if ?? null)}, not ${CHANGES_CHECKOUT_IF} — another event answers code=true with no tree (SMD-2435)`);
+  if (canon(co.with) !== canon(CHANGES_CHECKOUT_WITH)) out.push(`job ${CHANGES_JOB}'s checkout takes ${JSON.stringify(co.with ?? null)}, not ${JSON.stringify(CHANGES_CHECKOUT_WITH)} — the merge commit and both its parents, blobless, .github/ci alone (SMD-2435)`);
+  for (const key of Object.keys(decide)) if (!["name", "id", "env", "run"].includes(key)) out.push(`job ${CHANGES_JOB}'s decide step sets ${key} — name, id, env and run alone, since continue-on-error or an if: turns no answer into a skip (SMD-2435)`);
+  if (decide.id !== "decide") out.push(`job ${CHANGES_JOB}'s decide step has id ${JSON.stringify(decide.id ?? null)}, not "decide", which its output reads (SMD-2435)`);
+  if (canon(decide.env) !== canon(CHANGES_ENV)) out.push(`job ${CHANGES_JOB}'s decide step reads env ${JSON.stringify(decide.env ?? null)}, not ${JSON.stringify(CHANGES_ENV)} — a pinned EVENT, say, makes a push to main read a docs-only merge and skip (SMD-2435)`);
+  if (typeof decide.run !== "string" || decide.run.trimEnd() !== CHANGES_RUN) out.push(`job ${CHANGES_JOB}'s decide step is not CHANGES_RUN in ${SELF} verbatim — the base's classifier, or code=true; change both together (SMD-2435)`);
+  return out;
+}
 const GATED_DEPENDENT_IF = /^\$\{\{\s*!cancelled\(\)\s*&&/;
 /** The aggregate's MAY_SKIP: the gated jobs beside maySkip only when the changes job succeeded and said code=false. With nothing gated, maySkip as it is. */
 const gatedMaySkip = (maySkip: readonly string[], gated: readonly string[]): string =>
@@ -5043,6 +5083,9 @@ function aggregateProblems(doc: JobsDoc, maySkipList: readonly string[] = AGGREG
     const changes = jobs[CHANGES_JOB];
     if (!changes || typeof changes !== "object") problems.push([WORKFLOW, `has no job ${CHANGES_JOB}, which AGGREGATE_GATED's jobs need — without it every gated job's needs fail (SMD-2435)`]);
     else if (changes.if !== undefined) problems.push([WORKFLOW, `job ${CHANGES_JOB} has an if: of its own — every gated job needs it, and a skipped need would skip them all, a pass that ran nothing (SMD-2435)`]);
+    else for (const msg of changesJobProblems(changes as Record<string, unknown>)) problems.push([WORKFLOW, msg]);
+    const selfChecked = (jobs[CHANGES_SELF_CHECK_JOB] as { steps?: unknown } | null | undefined)?.steps;
+    if (!Array.isArray(selfChecked) || !selfChecked.some((st) => typeof (st as { run?: unknown })?.run === "string" && (st as { run: string }).run.trim() === CHANGES_SELF_CHECK_RUN)) problems.push([WORKFLOW, `job ${CHANGES_SELF_CHECK_JOB} has no step running ${CHANGES_SELF_CHECK_RUN} — the classifier's cases, its run in merge-commit repositories among them, run nowhere else (SMD-2435)`]);
     for (const key of gatedList) {
       const job = jobs[key];
       if (!others.includes(key) || !job) { problems.push([SELF, `AGGREGATE_GATED names ${key}, which is no job in ${WORKFLOW} — take it off (SMD-2435)`]); continue; }
@@ -5236,12 +5279,18 @@ const PROBE_GATED = ["g"];
 const PROBE_GATED_MAY_SKIP = ["commit-lint", "publish"];
 /** A workflow aggregateProblems accepts with a gate: the changes job, a gated job, a job skippable by its own if: that needs the gated one under !cancelled() (as publish-test-counts does), a lint job skippable by its own, and the aggregate needing every one with the conditional MAY_SKIP. */
 const GATED_PROBE = (): ProbeJobs => ({
-  [CHANGES_JOB]: { name: "What the change can affect", outputs: { code: "${{ steps.decide.outputs.code }}" } },
+  [CHANGES_JOB]: { name: "What the change can affect", "runs-on": "ubuntu-24.04", "timeout-minutes": 5, outputs: { ...CHANGES_OUTPUTS }, steps: [
+    { uses: "actions/checkout@0000000000000000000000000000000000000000", if: CHANGES_CHECKOUT_IF, with: { ...CHANGES_CHECKOUT_WITH } },
+    { name: "Whether it can affect the code jobs", id: "decide", env: { ...CHANGES_ENV }, run: `${CHANGES_RUN}\n` },
+  ] },
+  [CHANGES_SELF_CHECK_JOB]: { name: "Repo consistency", steps: [{ run: CHANGES_SELF_CHECK_RUN }] },
   g: { name: "Server tests", needs: CHANGES_JOB, if: GATED_IF },
   publish: { name: "Publish", needs: ["g"], if: "${{ !cancelled() && github.event_name == 'push' }}" },
   "commit-lint": { name: "Commit messages", if: "github.event_name == 'pull_request'" },
-  [AGGREGATE_JOB]: { name: AGGREGATE_NAME, "runs-on": "ubuntu-24.04", if: "always()", needs: [CHANGES_JOB, "g", "publish", "commit-lint"], steps: [{ name: "Every job succeeded", env: { NEEDS: AGGREGATE_NEEDS_ENV, MAY_SKIP: gatedMaySkip(PROBE_GATED_MAY_SKIP, PROBE_GATED) }, run: `${AGGREGATE_RUN}\n` }] },
+  [AGGREGATE_JOB]: { name: AGGREGATE_NAME, "runs-on": "ubuntu-24.04", if: "always()", needs: [CHANGES_JOB, CHANGES_SELF_CHECK_JOB, "g", "publish", "commit-lint"], steps: [{ name: "Every job succeeded", env: { NEEDS: AGGREGATE_NEEDS_ENV, MAY_SKIP: gatedMaySkip(PROBE_GATED_MAY_SKIP, PROBE_GATED) }, run: `${AGGREGATE_RUN}\n` }] },
 });
+/** The changes job of a gated probe, to mutate in place. */
+const changesOf = (j: ProbeJobs) => j[CHANGES_JOB] as Record<string, unknown> & { steps: Record<string, unknown>[] };
 /** [why, mutate]: gated workflows aggregateProblems must ACCEPT beyond the probe. */
 const GATED_ACCEPTED: [why: string, mutate: (j: ProbeJobs) => ProbeJobs][] = [
   ["a gated job's needs as a list", (j) => { (j.g as Record<string, unknown>).needs = [CHANGES_JOB]; return j; }],
@@ -5249,7 +5298,7 @@ const GATED_ACCEPTED: [why: string, mutate: (j: ProbeJobs) => ProbeJobs][] = [
 ];
 /** [why, mutate, a phrase the ONE problem must carry]: the gate's mutants. */
 const GATED_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says: string][] = [
-  ["no changes job", (j) => { delete j[CHANGES_JOB]; aggOf(j).needs = ["g", "publish", "commit-lint"]; return j; }, `has no job ${CHANGES_JOB}`],
+  ["no changes job", (j) => { delete j[CHANGES_JOB]; aggOf(j).needs = [CHANGES_SELF_CHECK_JOB, "g", "publish", "commit-lint"]; return j; }, `has no job ${CHANGES_JOB}`],
   ["the changes job given an if:", (j) => { (j[CHANGES_JOB] as Record<string, unknown>).if = "github.event_name == 'pull_request'"; return j; }, `job ${CHANGES_JOB} has an if: of its own`],
   ["a gated job that skips when the changes job failed (not fail-open)", (j) => { (j.g as Record<string, unknown>).if = "${{ needs.changes.outputs.code == 'true' }}"; return j; }, "job g runs if:"],
   ["a gated job without !cancelled()", (j) => { (j.g as Record<string, unknown>).if = "${{ needs.changes.result != 'success' || needs.changes.outputs.code == 'true' }}"; return j; }, "job g runs if:"],
@@ -5259,6 +5308,14 @@ const GATED_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says: st
   ["MAY_SKIP's condition dropped to the code output alone", (j) => { aggOf(j).steps[0].env.MAY_SKIP = `\${{ needs.changes.outputs.code == 'false' && 'commit-lint publish g' || 'commit-lint publish' }}`; return j; }, "sets MAY_SKIP to"],
   ["a job that needs a gated job without !cancelled()", (j) => { (j.publish as Record<string, unknown>).if = "github.event_name == 'push'"; return j; }, "job publish needs g, which the changes job may skip"],
   ["a gated job also in AGGREGATE_MAY_SKIP's list", (j) => j, "__runner_passes_g_in_may_skip__"],
+  ["the decide step's EVENT pinned", (j) => { (changesOf(j).steps[1].env as Record<string, string>).EVENT = "pull_request"; return j; }, "decide step reads env"],
+  ["the changes job's output a literal", (j) => { changesOf(j).outputs = { code: "false" }; return j; }, `job ${CHANGES_JOB}'s outputs are`],
+  ["the decide step continue-on-error", (j) => { changesOf(j).steps[1]["continue-on-error"] = true; return j; }, "decide step sets continue-on-error"],
+  ["the decide step's run ending in || true", (j) => { changesOf(j).steps[1].run = `${CHANGES_RUN} || true`; return j; }, "is not CHANGES_RUN"],
+  ["the decide step running the pull request's own classifier", (j) => { changesOf(j).steps[1].run = 'bash .github/ci/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"'; return j; }, "is not CHANGES_RUN"],
+  ["a checkout of depth 1", (j) => { (changesOf(j).steps[0].with as Record<string, unknown>)["fetch-depth"] = 1; return j; }, "checkout takes"],
+  ["the checkout on every event", (j) => { delete changesOf(j).steps[0].if; return j; }, "checkout runs if: null"],
+  ["the classifier's cases run nowhere", (j) => { (j[CHANGES_SELF_CHECK_JOB] as Record<string, unknown>).steps = [{ run: "true" }]; return j; }, `has no step running ${CHANGES_SELF_CHECK_RUN}`],
 ];
 /** AGGREGATE_RUN under bash with NEEDS and MAY_SKIP set: whether it exits 0, or why it could not be run. */
 function aggregateRunPasses(needs: string, maySkip: string): boolean | string {
@@ -5313,7 +5370,7 @@ function checkRulesetRecord() {
     const both = says === "__runner_passes_g_in_may_skip__";
     const jobs = mutate(GATED_PROBE());
     // Both lists naming g: publish, which needs g, goes, so the one problem is the double naming.
-    if (both) { delete jobs.publish; aggOf(jobs).needs = [CHANGES_JOB, "g", "commit-lint"]; aggOf(jobs).steps[0].env.MAY_SKIP = gatedMaySkip(["commit-lint", "g"], PROBE_GATED); }
+    if (both) { delete jobs.publish; aggOf(jobs).needs = [CHANGES_JOB, CHANGES_SELF_CHECK_JOB, "g", "commit-lint"]; aggOf(jobs).steps[0].env.MAY_SKIP = gatedMaySkip(["commit-lint", "g"], PROBE_GATED); }
     const got = aggregateProblems({ jobs } as JobsDoc, both ? ["commit-lint", "g"] : PROBE_GATED_MAY_SKIP, PROBE_GATED);
     const want = both ? "AGGREGATE_GATED names g, which AGGREGATE_MAY_SKIP names too" : says;
     if (got.length !== 1 || !got[0][1].includes(want)) fail(SELF, `check 20 reports ${JSON.stringify(got)} for ${why}, not one problem saying "${want}" (its own probe)`);
@@ -10169,29 +10226,32 @@ const SKIPPABLE_DOC = /\.(md|png|jpe?g|gif|webp|svg)$/i;
 const DOC_TOKEN = /[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-]\.(?:md|png|jpe?g|gif|webp|svg)(?![A-Za-z0-9_\-])/gi;
 /**
  * The files code names that the allowlist may still let skip the code jobs,
- * each with the reason no gated job reads it (SMD-2435's survey). A new
- * naming of an allowed file fails check 47 until it is read here, or denied in
- * CHANGES_SCRIPT; an entry no code names, or the allowlist denies, fails too.
+ * each with exactly the files that name it and the reason none of those reads
+ * it for a gated job (SMD-2435's survey). A new namer of a listed file, or a
+ * new allowed file named, fails check 47 until it is read here, or denied in
+ * CHANGES_SCRIPT (review pass 1: keyed by the file alone, a new suite reading
+ * a listed README passed); a namer gone, an entry no code names, or one the
+ * allowlist denies fails too.
  */
-const NAMED_NOT_READ: Record<string, string> = {
-  "AGENTS.md": "named by the session-capture hook's test, which repo-consistency runs, and in messages",
-  "CHANGELOG.md": "read by release-artifacts.ts's notes mode, which release.yml alone runs; check-landing.ts (repo-consistency) and assemble-release.ts name it",
-  "CLAUDE.md": "named in db/config.mjs's and test-schema.ts's messages",
-  "CONTRIBUTING.md": "named by check-landing.ts, which repo-consistency runs",
-  "FORK.md": "named in messages and comments; fork-index.ts and assemble-release.ts, which write it, no gated job runs",
-  "README.md": "named in messages, and by ingest-records.ts as the changes/ file it skips",
-  "SETUP.md": "named in preflight's messages and by the session-capture hook's test (repo-consistency)",
-  "db/README.md": "named in messages; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it",
-  "docs/01-getting-started.md": "named in test-schema [3]'s label (the columns are hard-coded) and by scripts no job runs",
-  "docs/connector-taxonomy.md": "read by connector-registry.ts, which the checker (repo-consistency) runs",
-  "docs/vendored-disposition.md": "read by connector-registry.ts, which the checker (repo-consistency) runs",
-  "evals/README.md": "named in the evals' messages",
-  "integrations/agent-memory-api/README.md": "named by a smoke seed script no job runs",
-  "jev/README.md": "named in test-jev.ts's and consolidate.ts's messages",
-  "jev/h2o/README.md": "named in preflight's messages",
-  "recipes/gmail-smart-pull/README.md": "named by the recipe's own script, which no job runs",
-  "recipes/openclaw-agent-memory/README.md": "named by a smoke seed script no job runs",
-  "recipes/session-capture-hook/README.md": "named by the hook's test, which repo-consistency runs",
+const NAMED_NOT_READ: Record<string, { by: string[]; why: string }> = {
+  "AGENTS.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the session-capture hook's test, which repo-consistency runs" },
+  "CHANGELOG.md": { by: ["scripts/assemble-release.ts", "scripts/check-landing.ts", "scripts/fragments.ts", "scripts/release-artifacts.ts"], why: "read by release-artifacts.ts's notes mode, which release.yml alone runs; the rest are repo-consistency's or the cut's" },
+  "CLAUDE.md": { by: ["db/config.mjs", "db/test-schema.ts"], why: "named in messages" },
+  "CONTRIBUTING.md": { by: ["scripts/check-landing.ts"], why: "named by check-landing.ts, which repo-consistency runs" },
+  "FORK.md": { by: [".github/workflows/fork-checks.yml", "deploy/smoke.sh", "evals/eval-graphrag.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "recipes/readwise-import/import-readwise.py", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/assemble-release.ts", "scripts/fork-index.ts"], why: "named in messages; written by fork-index.ts and assemble-release.ts, which no gated job runs" },
+  "README.md": { by: ["db/ingest-records.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/session-capture-hook/test-session-capture.mjs", "scripts/fork-index.ts", "scripts/update-readme-contributions.ts"], why: "named in messages, and by ingest-records.ts as the changes/ file it skips" },
+  "SETUP.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs", "server-portable/preflight.ts"], why: "named in preflight's messages and by the hook's test (repo-consistency)" },
+  "db/README.md": { by: ["db/bench-hnsw.ts", "db/ingest-records.ts", "db/test-schema.ts", "deploy/tier.sh", "evals/eval-jev-gate.ts", "scripts/assemble-release.ts", "scripts/check-landing.ts", "server-portable/preflight.ts", "server-portable/render.ts", "server-portable/test-server.ts", "server-portable/test-thoughts.ts"], why: "named in messages and as test data; its suites' counts moved to the wiki (SMD-3614), and no [doc] section reads it" },
+  "docs/01-getting-started.md": { by: ["db/test-schema.ts", "integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs", "recipes/entity-wiki/generate-wiki.mjs"], why: "named in test-schema [3]'s label (its columns hard-coded) and by scripts no job runs" },
+  "docs/connector-taxonomy.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
+  "docs/vendored-disposition.md": { by: ["scripts/connector-registry.ts"], why: "read by connector-registry.ts, which the checker (repo-consistency) runs" },
+  "evals/README.md": { by: ["db/config.mjs", "evals/eval-orchestration.ts", "evals/rerank-crossencoder.py", "evals/rerank-llm-reranker.py", "scripts/check-landing.ts", "server-portable/entities.ts", "server-portable/preflight.ts", "server-portable/test-local-provider.ts", "server-portable/test-thoughts.ts"], why: "named in messages and assertion text" },
+  "integrations/agent-memory-api/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
+  "jev/README.md": { by: ["db/consolidate.ts", "jev/test-jev.ts"], why: "named in messages" },
+  "jev/h2o/README.md": { by: ["server-portable/preflight.ts"], why: "named in preflight's messages" },
+  "recipes/gmail-smart-pull/README.md": { by: ["recipes/gmail-smart-pull/scripts/pull-gmail.mjs"], why: "named by the recipe's own script, which no job runs" },
+  "recipes/openclaw-agent-memory/README.md": { by: ["integrations/agent-memory-api/smoke/seed-nate-continuity-demo.mjs"], why: "named by a smoke seed script no job runs" },
+  "recipes/session-capture-hook/README.md": { by: ["recipes/session-capture-hook/test-session-capture.mjs"], why: "named by the hook's test, which repo-consistency runs" },
 };
 /** The tracked files a token in a code file can name: the token from the root, its leading ./, ../ and / taken off, and the token from the file's own directory. */
 function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<string> {
@@ -10203,7 +10263,16 @@ function docsNamed(text: string, file: string, docs: ReadonlySet<string>): Set<s
   }
   return named;
 }
+/** Whether check 47 reads a tracked file as code that can name a doc: a script, a workflow or compose file, a Dockerfile — not the checker or the classifier, whose lists name them on purpose. */
+const namesDocs = (f: string): boolean => (/\.(ts|mjs|js|sh|py|ya?ml|svelte)$/.test(f) || /(^|\/)[^/]*Dockerfile[^/]*$/.test(f)) && f !== SELF && f !== CHANGES_SCRIPT;
 function checkChangesAllowlist() {
+  const fileProbes: [string, boolean][] = [
+    [".github/workflows/fork-checks.yml", true], ["deploy/compose.yaml", true], ["deploy/smoke.sh", true], ["server-portable/Dockerfile", true],
+    ["deploy/orchestration/runner.Dockerfile", true], ["dashboard/src/routes/+page.svelte", true], ["evals/rerank-crossencoder.py", true],
+    ["db/config.mjs", true], [SELF, false], [CHANGES_SCRIPT, false], ["docs/a.md", false], ["db/migrations/001_x.sql", false],
+  ];
+  const wrongFiles = fileProbes.filter(([f, want]) => namesDocs(f) !== want);
+  if (wrongFiles.length) fail(SELF, `check 47 no longer reads these files as it should (${JSON.stringify(wrongFiles)}): scripts, workflows, compose files and Dockerfiles name docs; the checker, the classifier and the docs themselves do not (review pass 1)`);
   const docsProbe = new Set(["README.md", "deploy/README.md", "docs/a.md", "recipes/x/README.md", "docs/img/shot.png"]);
   const probes: [string, string, string[]][] = [
     ['readFileSync(new URL("../docs/a.md", import.meta.url))', "evals/x.ts", ["docs/a.md"]],
@@ -10223,7 +10292,7 @@ function checkChangesAllowlist() {
   let allowed: Set<string>;
   try { allowed = new Set(execFileSync("bash", [join(ROOT, CHANGES_SCRIPT), "--not-code"], { input: [...docs].join("\n") + "\n", encoding: "utf8" }).split("\n").filter(Boolean)); }
   catch (e) { fail(CHANGES_SCRIPT, `--not-code did not run under bash (${(e as Error).message.split("\n")[0]}), so check 47 cannot read its allowlist (SMD-2435)`); return; }
-  const code = tracked.filter((f) => (/\.(ts|mjs|js|sh|py|ya?ml|svelte)$/.test(f) || /(^|\/)[^/]*Dockerfile[^/]*$/.test(f)) && f !== SELF && f !== CHANGES_SCRIPT);
+  const code = tracked.filter(namesDocs);
   const namedBy = new Map<string, string[]>();
   for (const f of code) {
     let text: string;
@@ -10234,9 +10303,17 @@ function checkChangesAllowlist() {
   const adr = "docs/subject-anchored-claims.md";
   if (docs.has(adr) && (!namedBy.has(adr) || allowed.has(adr))) fail(SELF, `check 47 does not read ${adr} as named by code and denied by ${CHANGES_SCRIPT} — the reading is broken, not the tree clean (SMD-2435)`);
   for (const [d, by] of [...namedBy].sort()) {
-    if (allowed.has(d) && !(d in NAMED_NOT_READ)) fail(d, `is named by ${by.slice(0, 3).join(", ")}${by.length > 3 ? ` and ${by.length - 3} more` : ""}, and ${CHANGES_SCRIPT} lets a change to it alone skip Fork Checks' code jobs — deny it there if a gated job reads it, or add it to NAMED_NOT_READ in ${SELF} with the reason none does (check 47, SMD-2435)`);
+    const listed = NAMED_NOT_READ[d];
+    if (allowed.has(d) && listed) {
+      const fresh = by.filter((f) => !listed.by.includes(f));
+      const gone = listed.by.filter((f) => !by.includes(f));
+      if (fresh.length) fail(d, `is named by ${fresh.join(", ")} too, beside what NAMED_NOT_READ in ${SELF} lists, and ${CHANGES_SCRIPT} lets a change to it alone skip Fork Checks' code jobs — deny it there if that file reads it for a gated job, or add the file to its entry with the reason it does not (check 47, SMD-2435)`);
+      if (gone.length) fail(SELF, `NAMED_NOT_READ lists ${gone.join(", ")} as naming ${d}, which no longer ${gone.length === 1 ? "does" : "do"} — take ${gone.length === 1 ? "it" : "them"} off the entry (check 47, SMD-2435)`);
+      continue;
+    }
+    if (allowed.has(d) && !listed) fail(d, `is named by ${by.slice(0, 3).join(", ")}${by.length > 3 ? ` and ${by.length - 3} more` : ""}, and ${CHANGES_SCRIPT} lets a change to it alone skip Fork Checks' code jobs — deny it there if a gated job reads it, or add it to NAMED_NOT_READ in ${SELF} with the reason none does (check 47, SMD-2435)`);
   }
-  for (const [d, why] of Object.entries(NAMED_NOT_READ)) {
+  for (const [d, { why }] of Object.entries(NAMED_NOT_READ)) {
     if (!namedBy.has(d)) fail(SELF, `NAMED_NOT_READ lists ${d}, which no tracked code names now — take it off (check 47, SMD-2435)`);
     else if (!allowed.has(d)) fail(SELF, `NAMED_NOT_READ lists ${d}, which ${CHANGES_SCRIPT} denies anyway — take it off (check 47, SMD-2435)`);
     else if (!why.trim()) fail(SELF, `NAMED_NOT_READ lists ${d} with no reason (check 47, SMD-2435)`);
