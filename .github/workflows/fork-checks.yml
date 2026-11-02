@@ -45,13 +45,15 @@ defaults:
 # lease, deadlock or container wait would otherwise hold the one required
 # check, "Fork Checks passed", pending for six hours. Each is at least three
 # times the job's longest successful run in the newest 400 Fork Checks runs
-# on any branch as of 2026-11-02 (back to 10-22), rounded up to five minutes:
-# deploy-stack's 505 s the longest. That leaves out a registry slowdown on
-# 10-28, when portable-server took 29 minutes, 19 of them one bun install;
-# its 20 would cut that and a re-run would follow, as for a hang. A job at
-# its limit is cancelled with its step in hand, which names where it hung,
-# and the aggregate fails; the run then reads "cancelled", as a superseded
-# one does, and the job's annotation says it hit its limit (check 47,
+# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
+# on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
+# 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
+# them one bun install, and auth-poc 302 s; portable-server's 20 would cut
+# that run and a re-run would follow, as for a hang, and auth-poc's 10 holds
+# it. A job at its limit is cancelled with its step in hand, which names
+# where it hung, and the aggregate fails; the run then reads "cancelled", as
+# a superseded one does, and the job's annotation says it hit its limit. The
+# limits count a job's own run, not its wait for a runner (check 47,
 # SMD-2094).
 
 concurrency:

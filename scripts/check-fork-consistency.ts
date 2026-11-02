@@ -10081,29 +10081,51 @@ checkNoPipeIntoGrepQ();
  * 47: a job with no `timeout-minutes` runs to GitHub's default of 360 minutes. A hung lease, deadlock or container
  * wait in a fork-checks.yml job would hold "Fork Checks passed", the one required check, pending for six hours, and
  * nothing would say so, since pending reads as running (SMD-2094). So every job of every workflow sets one, a whole
- * number from 1 to 60 written in digits: no expression, which this check cannot read, no `15.0`, `0xF` or `+15`,
- * which YAML reads as 15 but GitHub's docs do not promise, and none over an hour, which no job here needs (release's
- * 60 is the most). A job that calls a reusable workflow (`uses:` a string) is passed over, since GitHub takes no
+ * number from 1 to 60 written in digits: no expression, which this check cannot read, none over an hour, which no
+ * job here needs (release's 60 is the most), and no `15.0`, `0xF`, `+15` or `015`, which YAML reads as 15 but
+ * GitHub's docs do not promise: a job's own `timeout-minutes` line, at its keys' indent under `jobs:`, is read as
+ * written, so a step's limit and a run body's text are not (a job in flow style has no such line and is held to its
+ * value alone). A job that calls a reusable workflow (`uses:` a string) is passed over, since GitHub takes no
  * `timeout-minutes` there; a local workflow it calls is read as any other. Its probe pins what it refuses and passes.
  */
+/** A job's own `timeout-minutes` line under `jobs:` — its number and the value as written — or null when it has none. */
+function ownLimitLine(lines: string[], key: string): { line: number; written: string } | null {
+  const indent = (l: string) => l.length - l.trimStart().length;
+  const blank = (l: string) => /^\s*(?:#.*)?$/.test(l);
+  const jobsAt = lines.findIndex((l) => /^jobs:\s*(?:#.*)?$/.test(l));
+  const firstJob = lines.findIndex((l, i) => i > jobsAt && !blank(l));
+  if (jobsAt < 0 || firstJob < 0) return null;
+  const jobIndent = indent(lines[firstJob]);
+  const at = lines.findIndex((l, i) => i > jobsAt && indent(l) === jobIndent && l.trim().replace(/^["']|["']?:\s*(?:#.*)?$/g, "") === key);
+  if (at < 0) return null;
+  let keysIndent = -1;
+  for (let i = at + 1; i < lines.length; i++) {
+    if (blank(lines[i])) continue;
+    if (indent(lines[i]) <= jobIndent) break;
+    if (keysIndent < 0) keysIndent = indent(lines[i]);
+    const m = indent(lines[i]) === keysIndent && lines[i].match(/^\s*timeout-minutes:\s*(.*?)\s*(?:#.*)?$/);
+    if (m) return { line: i + 1, written: m[1] };
+  }
+  return null;
+}
 function jobTimeoutProblems(file: string, text: string): [string, string][] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch (e) { return [[file, `does not parse: ${(e as Error).message} — check 47 cannot read its jobs' time limits (SMD-2094)`]]; }
   const jobs = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as { jobs?: unknown }).jobs : null;
   if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return [[file, "has no `jobs:` map check 47 can read (SMD-2094)"]];
   const problems: [string, string][] = [];
+  const lines = text.split(/\r?\n/);
   for (const [key, job] of Object.entries(jobs as Record<string, unknown>)) {
     if (!job || typeof job !== "object" || typeof (job as { uses?: unknown }).uses === "string") continue;
     const limit = (job as { "timeout-minutes"?: unknown })["timeout-minutes"];
     if (limit === undefined) problems.push([file, `job ${key} sets no timeout-minutes, so a hang in it runs to GitHub's 360 minutes (in fork-checks.yml, holding the required check pending that long) — give it a whole number of minutes, at least three times its longest run (check 47, SMD-2094)`]);
     else if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 60) problems.push([file, `job ${key} sets timeout-minutes ${JSON.stringify(limit)} — a whole number of minutes from 1 to 60, written in digits, not an expression (check 47, SMD-2094)`]);
+    else {
+      // The value passes; so must its writing, which YAML reads as 15 from 15.0, 0xF, +15 and 015 alike.
+      const own = ownLimitLine(lines, key);
+      if (own && own.written !== String(limit)) problems.push([`${file}:${own.line}`, `job ${key} writes timeout-minutes ${own.written}, which YAML reads as ${limit} — write ${limit}, in digits alone, as GitHub's docs give it (check 47, SMD-2094)`]);
+    }
   }
-  // YAML reads 15.0, 0xF and +15 as 15, which passes above: such a value, read on its own line, is written in digits.
-  text.split(/\r?\n/).forEach((line, i) => {
-    const m = line.match(/^\s*timeout-minutes:\s*([^\s#]+)/);
-    const n = m ? Number(m[1]) : NaN;
-    if (m && !/^[1-9][0-9]*$/.test(m[1]) && Number.isInteger(n) && n >= 1 && n <= 60) problems.push([`${file}:${i + 1}`, `timeout-minutes ${m[1]} — write the minutes in digits alone, as GitHub's docs give them (check 47, SMD-2094)`]);
-  });
   return problems;
 }
 function checkJobTimeouts() {
@@ -10126,11 +10148,17 @@ function checkJobTimeouts() {
     ["a limit in hex", job("    timeout-minutes: 0xF\n"), [DIGITS]],
     ["a limit with a plus sign", job("    timeout-minutes: +15\n"), [DIGITS]],
     ["a null uses beside a runner, which calls nothing", job("    uses: null\n"), [NONE]],
+    ["a limit written 015", job("    timeout-minutes: 015\n"), [DIGITS]],
+    ["a step's 2.0 beside the job's 15, which is not the job's line", job("    timeout-minutes: 15\n").replace("      - run: echo hi\n", "      - run: echo hi\n        timeout-minutes: 2.0\n"), []],
+    ["a step's 2.0 above the job's own 15, read at the job's keys' indent alone", "name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo hi\n        timeout-minutes: 2.0\n    timeout-minutes: 15\n", []],
+    ["a job named as an earlier job's matrix axis, its own line still read", "name: probe\non: push\njobs:\n  b:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    strategy:\n      matrix:\n        a:\n          - 1\n    steps: [{ run: x }]\n  a:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15.0\n    steps: [{ run: x }]\n", [DIGITS]],
+    ["a run body that prints a limit, which is text", job("    timeout-minutes: 15\n").replace("      - run: echo hi\n", "      - run: |\n          echo 'timeout-minutes: 15.0'\n"), []],
+    ["a string limit written as a sentence, reported once", job("    timeout-minutes: 15.0 minutes\n"), [RANGE]],
     ["two jobs with none", "name: probe\non: push\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n  b:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n", [NONE, NONE]],
   ];
   const wrong = cases.map(([why, text, says]) => ({ why, says, got: jobTimeoutProblems("probe.yml", text).map((p) => p[1]) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
-  if (wrong.length) fail(SELF, `check 47 no longer reads its probe as written (${JSON.stringify(wrong)}): a job with no timeout-minutes, or one that is not a whole number from 1 to 60 written out, fails, once per job; a limit from 1 to 60, a reusable-workflow call and a step's limit beside the job's pass (SMD-2094)`);
+  if (wrong.length) fail(SELF, `check 47 no longer reads its probe as written (${JSON.stringify(wrong)}): a job with no timeout-minutes (a null uses calls nothing), one that is not a whole number from 1 to 60, or one written other than in digits alone (15.0, 0xF, +15, 015), fails, once per job; a limit from 1 to 60 in digits, a reusable-workflow call (uses a string), and a step's limit or a run body's text beside the job's pass (SMD-2094)`);
   const dir = join(ROOT, WORKFLOWS_DIR);
   const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
   if (!files.length) { fail(WORKFLOWS_DIR, "no workflow found — check 47 reads each one for its jobs' time limits (SMD-2094)"); return; }
