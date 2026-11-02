@@ -42,7 +42,7 @@
  * With --shift, the list's call, and a run's read among those a gap fails it for (the newest 26 and the run reported
  * on), get a late try when gh fails all three tries or the run comes back with no status: three more tries, LATE_MS
  * (60 s) on, the list's at once and the runs' after the window's other runs are read, one pause for them all. The
- * runs read on their late try are said, and in the report's summary.
+ * runs read on their late try, and the list's late try, are a `::notice`, and the runs are in the report's summary.
  *
  * Options:
  *   --job <name>          the job, by its exact name (required unless --shift or --self-check)
@@ -437,7 +437,7 @@ type Got = Awaited<ReturnType<typeof gh>>;
 /**
  * The late try's pause, with --shift (SMD-3690). Twice a run's read among a window's newest 26 failed all three of
  * gh()'s tries and failed CI shift: GitHub's 502s came slowly, ~12 s a try, so each read failed for 36 s or more (the
- * step took 48 and 80 s, 11–20 s when green), and the same run read fine in the green runs 20 min before and 40 min
+ * step took 48 and 80 s, 9–20 s when green), and the same run read fine in the green runs 20 min before and 40 min
  * after. So a call that fails all three is tried again, three more, this long after: a run's once the window's other
  * runs are read, so one pause serves them all, and the list's at once, as nothing else can go on while it waits. A
  * run where every read succeeds pays nothing. Whether 60 s outlasts most such failures is the week's Verify to say.
@@ -531,7 +531,8 @@ async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | 
   const gapCount = [unread ? `${unread} not read` : "", rerun ? `${rerun} being re-run` : ""].filter(Boolean).join(", ");
   console.log(`\n${series.size} series over ${ordered.length} runs${gapCount ? ` (${gapCount})` : ""}; a line is the median of a series' ${SHIFT.before} runs before its last ${SHIFT.after}, plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%).`);
   const lateNote = late.length ? `${late.length} run${late.length === 1 ? "" : "s"} read on the late try, ${LATE_MS / 1000} s after the rest, the first read having failed or given no status: ${late.join(", ")}` : "";
-  if (lateNote) console.log(`${lateNote}.`);
+  // A notice too, so a run that recovered shows on its page, and in its annotations through the API.
+  if (lateNote) console.log(`::notice title=CI shift late try::${escapeCommand(lateNote)}.`);
   console.log(`Shifts in the window, as it reads them: ${found.length}`);
   for (const f of found) console.log(`  ${created.get(f.run)!.slice(0, 16)} run ${f.run}  ${text(f)}`);
   const now = found.filter((f) => f.run === at);
@@ -819,7 +820,7 @@ if (import.meta.main) {
     fail(msg);
   };
   // With --shift the list has a late try (LATE_MS), as the runs a gap among fails it do.
-  const listRuns = (args: string[]) => (shift ? ghLate(args) : gh(args));
+  const listRuns = (args: string[]) => (shift ? ghLate(args, gh, undefined, (line) => console.log(`::notice title=CI shift late try::${escapeCommand(line)}`)) : gh(args));
   let ids: string[] = [];
   let running: string[] = [];
   // Runs listed oldest first whatever their state, for shiftWindow: a run being re-run is in the window, as a gap.
