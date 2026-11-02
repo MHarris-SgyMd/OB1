@@ -220,8 +220,11 @@ function searchFilter(input: { filter?: unknown; said_by?: string; actor?: strin
 // a label moves no rank, and the maintainer's call is the title AND a field —
 // the title because it is what every ChatGPT surface hands the model, the
 // field for a reader that reads the shape (render.ts).
-const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
-const SEARCH_COMPAT_PREFER_CURRENT = false;
+// Exported so evals/priority.ts's baseline calls the store as this tool does (SMD-3662).
+export const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
+export const SEARCH_COMPAT_PREFER_CURRENT = false;
+export const SEARCH_COMPAT_LIMIT = 10;
+export const SEARCH_COMPAT_THRESHOLD = 0;
 
 /**
  * ChatGPT's search shape, with each result's trust (SMD-1724) and, where a
@@ -242,7 +245,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
   // threshold (0, not 0.5, SMD-1300: admission is relative to the top match
   // since 027, so a low absolute floor lets it govern), and the fixed
   // recency weight above. runSearch gates the query (SMD-1903) and logs.
-  const r = await runSearch(ctx, principal, { tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
+  const r = await runSearch(ctx, principal, { tool: "search", arm: "hybrid", query, limit: SEARCH_COMPAT_LIMIT, threshold: SEARCH_COMPAT_THRESHOLD, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
   if (r.refusal) return refuse(r.refusal);
   // Nothing answered without a vector: refused, as the outage was before
   // (review pass 4, the maintainer's call) — an empty list reads as "nothing

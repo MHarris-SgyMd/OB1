@@ -1,15 +1,17 @@
 /**
  * priority.ts — the "what matters now" eval's rules, pure (Linear SMD-3662).
  *
- * Everything here is a function of its arguments, so `eval-priority.ts
- * --self-check` probes each rule with a hand-known answer and no database:
+ * Every rule here but registeredSource (which reads this file's text) and
+ * plantRows (which writes the corpus) is a function of its arguments, so
+ * `eval-priority.ts --self-check` probes each with a hand-known answer and no
+ * database:
  * the seeded corpus and its gold, the stub embedder, the score, the
  * shuffled-gold mutant, the pre-registered bar and the dogfood rows' shape.
  * `eval-priority.ts --seeded` plants the corpus in a throwaway Postgres and
  * runs each read through the server's own store; the scorer never sees SQL.
  *
- * The question. Asked "what should I work on next?" on 2026-10-14 and
- * 2026-11-02, both brains picked a ticket whose words matched the question
+ * The question. Asked for the highest-value unstarted issue on 2026-10-14
+ * and 2026-11-02, both brains picked a ticket whose words matched the question
  * over the one the board said mattered (SMD-2540 over SMD-2888, SMD-1853 over
  * SMD-2908). SMD-3660's reads (`priority_weight`, the agenda) are meant to fix
  * that, and SMD-1737's rule says none ships default-on without a number. This
@@ -34,12 +36,15 @@
  * the real one. `chanceOf` is the exact expectation; `shuffledScore` the run.
  */
 
+import type { SQL } from "bun";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { issueFacets, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
 import type { SqlStore } from "../server-portable/store-sql.ts";
+import { SEARCH_COMPAT_LIMIT, SEARCH_COMPAT_PREFER_CURRENT, SEARCH_COMPAT_RECENCY_WEIGHT, SEARCH_COMPAT_THRESHOLD } from "../server-portable/core/reads.ts";
+import { SPECS } from "../server-portable/core/schemas.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
 
@@ -183,10 +188,13 @@ export const PROMPTS: readonly Prompt[] = [
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "163903542bba2260";
+export const REGISTERED_CORPUS = "5be922c31e975404";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
-  return createHash("sha256").update(JSON.stringify({ items, prompts, source: registeredSource() })).digest("hex").slice(0, 16);
+  // A board item is registered by its issue's fields, not by renderIssue's text: a change to board-sync's adapter
+  // moves no registration here. If it moves the baseline's numbers, BASELINE's drift check says so.
+  const registered = items.map((it) => (it.issue ? { ...it, text: null } : it));
+  return createHash("sha256").update(JSON.stringify({ items: registered, prompts, source: registeredSource() })).digest("hex").slice(0, 16);
 }
 
 /**
@@ -300,9 +308,46 @@ export function seedRow(it: Item, i: number): SeedRow {
   return { id: itemId(i), content: it.text, metadata: it.issue ? issueFacets(it.issue) : {}, ageDays: it.ageDays, actor: `priority-eval-${it.writer}` };
 }
 
-/** The store call a baseline read makes for a prompt: the tool's knobs (core/reads.ts, core/schemas.ts) at READ_K, on the query's stub vector. */
+/**
+ * Plant the rows: each writer's under its own ob1.actor, as a raw insert is
+ * stamped (050's ob1_stamp_actor), created_at the database's now() less the
+ * row's age, the vector the stub's for the row's content. Returns how many
+ * rows carry the eval's writers.
+ */
+export async function plantRows(sql: SQL, rows: readonly SeedRow[]): Promise<number> {
+  for (const actor of [...new Set(rows.map((r) => r.actor))]) {
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: actor })}, true)`;
+      for (const row of rows) {
+        if (row.actor !== actor) continue;
+        await tx`INSERT INTO thoughts (id, content, content_fingerprint, embedding, embedding_model, metadata, created_at)
+                 VALUES (${row.id}::uuid, ${row.content}, content_fingerprint_of(${row.content}), ${`[${stubVector(row.content).join(",")}]`}::vector, ${STUB_MODEL},
+                         ${row.metadata}::jsonb, now() - make_interval(days => ${row.ageDays}))`;
+      }
+    });
+  }
+  return Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
+}
+
+/**
+ * The store call a baseline read makes for a prompt, as its tool makes it:
+ * `search` with core/reads.ts's own knobs; `search_thoughts` with its input
+ * schema's defaults (core/schemas.ts), parsed, for every knob the read does
+ * not set. On the query's stub vector. A change to either tool's knobs
+ * reaches this call, and BASELINE's drift check says when it moved the
+ * numbers.
+ */
 export function baselineCall(r: Read, query: string) {
-  return { query, embedding: stubVector(query, STUB_DIM, "query"), threshold: 0, limit: READ_K, filter: r.filter, preferCurrent: r.preferCurrent, recencyWeight: 0 };
+  const embedding = stubVector(query, STUB_DIM, "query");
+  if (r.tool === "search") {
+    return { query, embedding, limit: SEARCH_COMPAT_LIMIT, threshold: SEARCH_COMPAT_THRESHOLD, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} };
+  }
+  const st = SPECS.search_thoughts.inputSchema;
+  return {
+    query, embedding,
+    limit: st.limit.parse(undefined), threshold: st.threshold.parse(undefined), recencyWeight: st.recency_weight.parse(undefined),
+    preferCurrent: st.prefer_current.parse(r.preferCurrent), filter: r.filter ?? {},
+  };
 }
 
 // ── The score ───────────────────────────────────────────────────────────────
@@ -493,20 +538,20 @@ export function verdict(read: readonly PromptScore[], baselines: readonly (reado
  * main. The bar is measured against them, so one that errors fails the run:
  * a baseline that never ran would set the bar.
  */
-export type Read = { name: string; filter: Record<string, unknown>; preferCurrent: boolean };
+export type Read = { name: string; tool: "search" | "search_thoughts"; filter?: Record<string, unknown>; preferCurrent?: boolean };
 
 /**
  * The baseline (Work 4):
- *   plain   — the `search` tool's knobs (core/reads.ts's search): limit 10,
- *             threshold 0, recency weight 0, prefer_current off, no filter;
- *   current — the same with prefer_current on (059's lifecycle demotion);
+ *   plain   — the `search` tool as it calls the store (core/reads.ts's search);
+ *   current — search_thoughts with prefer_current on (059's lifecycle
+ *             demotion), its other knobs at their defaults;
  *   filter  — search_thoughts with the workaround SMD-3660 measured on
  *             2026-11-02, {"status_type":"backlog","priority":"High"}.
  */
 export const READS: readonly Read[] = [
-  { name: "plain", filter: {}, preferCurrent: false },
-  { name: "current", filter: {}, preferCurrent: true },
-  { name: "filter", filter: { status_type: "backlog", priority: "High" }, preferCurrent: false },
+  { name: "plain", tool: "search" },
+  { name: "current", tool: "search_thoughts", preferCurrent: true },
+  { name: "filter", tool: "search_thoughts", filter: { status_type: "backlog", priority: "High" } },
 ];
 
 // ── The reads measured against the bar ──────────────────────────────────────
@@ -522,21 +567,40 @@ export type MeasureInput = { store: SqlStore; prompt: Pick<Prompt, "key" | "quer
  * the bar's edge case — and the run lists the error. Outside the registered
  * section: adding the read under test is not a change to what it is judged by.
  * It reads what a deployed read could: the database. Never PROMPTS' gold or
- * ITEMS' facts, which are the answer's side; the self-check refuses a
- * MEASURED entry naming either.
+ * ITEMS' facts, which are the answer's side: `--seeded` runs every measured
+ * read again with each gold reversed and the facts moved between items, and
+ * fails when its answer moves (the ceiling, which reads the gold, is the
+ * check's control). Its ids are deduplicated, first occurrence kept, before
+ * the top READ_K are scored.
  */
 export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureInput) => Promise<readonly string[]> };
 
 /** The reads under measurement. Empty until SMD-3668 or SMD-3669 lands one; each joins here with its ticket. */
 export const MEASURED: readonly MeasuredRead[] = [];
 
-/** This file's MEASURED entries, as source text: what the self-check reads for a reference to the answer's side. */
-export function measuredSource(text: string): string {
-  const src = text.replace(/\r\n/g, "\n");
-  const from = src.indexOf("\nexport const MEASURED:");
-  const to = src.indexOf("\n// ── ", from + 1);
-  return from < 0 ? "" : src.slice(from, to < 0 ? undefined : to);
+/** A measured read's ids as scored: each once, first occurrence kept, the top READ_K. */
+export function measuredIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)].slice(0, READ_K);
 }
+
+/**
+ * Run `run` with the answer's side moved — every prompt's gold reversed and
+ * each item's facts handed to the next item — and put it back, whatever `run`
+ * does. A read that answers differently under it reads the answer.
+ */
+export async function withAnswerMoved<T>(run: () => Promise<T>, prompts: readonly Prompt[] = PROMPTS, items: readonly Item[] = ITEMS): Promise<T> {
+  const golds = prompts.map((p) => [...p.gold]);
+  const facts = items.map((it) => it.facts);
+  try {
+    prompts.forEach((p) => (p.gold as string[]).reverse());
+    items.forEach((it, i) => ((it as { facts: Facts }).facts = facts[(i + 1) % facts.length]));
+    return await run();
+  } finally {
+    prompts.forEach((p, i) => (p.gold as string[]).splice(0, p.gold.length, ...golds[i]));
+    items.forEach((it, i) => ((it as { facts: Facts }).facts = facts[i]));
+  }
+}
+
 
 // ── The dogfood rows ────────────────────────────────────────────────────────
 

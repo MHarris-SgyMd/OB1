@@ -1309,12 +1309,15 @@ jobs:
       # personal brain and a small board planted with the stub embedder's
       # vectors, and seven prompts through the store's own hybrid search as
       # the search tools call it (plain, prefer_current, and the priority
-      # filter workaround). Prints the baseline table, and fails when a
-      # baseline read errors or moves from the recorded baseline (a change to
-      # search moves the bar), when the bar is out of the gold's reach, or
-      # when the shuffled-gold mutant does not score chance. Keyless. It
-      # DROPS the schema, as the check above does, so it refuses a database
-      # holding thoughts unless told.
+      # filter workaround), then any priority read under measurement. Prints
+      # the baseline table and each measured read's verdict, and fails when the
+      # corpus is not the registered one, a baseline read errors or moves from
+      # the recorded baseline (a change to search moves the bar), the bar is
+      # out of the gold's reach, a measured read answers differently with the
+      # answer moved, or the shuffled-gold mutant does not score chance.
+      # Keyless. It DROPS the schema, as the check above does, so it refuses a
+      # database holding thoughts unless told (test-support's
+      # refuseHeldDatabase).
       - name: Priority eval, seeded
         working-directory: evals
         run: bun eval-priority.ts --seeded

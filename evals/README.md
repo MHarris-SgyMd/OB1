@@ -4406,10 +4406,13 @@ facts its own store reads (SMD-3663's assertions, a claim in `work_claims`, Line
 board-sync's links) by extending the seeding. A read never takes them from `ITEMS`, which is the answer's side.
 
 A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
-line endings: the stub (noise weights included), the seeding, the baseline call, the score, the mutant, the bar and
-the baseline reads' knobs. Changing any of them, a comment included, is a new registration with its baseline re-run,
-never an edit. The bar's three numbers also have a pin of their own: changing them is a decision recorded on
-SMD-3662, never part of a re-registration.
+line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself), the baseline call,
+the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
+registration with its baseline re-run, never an edit. A board item is registered by its issue's fields, not by
+`renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the baseline's
+numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them is a
+decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
+registered one, so no verdict is printed on an unregistered corpus.
 
 **The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
 sit at a cosine of about 0.4, as unrelated texts do under a real model. A small hashed noise axis breaks ties
@@ -4417,21 +4420,23 @@ instead of the listing order. Plain search therefore ranks by word overlap. The 
 orders results on a fixed similarity, which is the part a priority read changes. The dogfood rows carry the real
 model's.
 
-**The reads** go through the server's own `SqlStore.hybridThoughts`, at the knobs the tools send:
-* `plain`: the `search` tool's knobs;
-* `current`: the same with `prefer_current` on;
+**The baseline reads** go through the server's own `SqlStore.hybridThoughts`, as their tools call it:
+* `plain`: the `search` tool, with the knobs `core/reads.ts` exports and its own call uses;
+* `current`: `search_thoughts` with `prefer_current` on;
 * `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
 
-The self-check reads the knobs from `core/reads.ts` and from `search_thoughts`' own block of `core/schemas.ts` (its
-`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift.
+`search_thoughts`' other knobs are its input schema's defaults, parsed from `core/schemas.ts`. A change to either
+tool's knobs reaches the baseline call itself, and the drift check says when it moved the numbers.
 
 **A priority read joins `MEASURED`** in `priority.ts`, outside the hashed section, so adding the read under test is
 not a new registration. It is any function from a prompt's key and words, plus the store and the query's vector, to
 thought ids best first. A search knob fits (SMD-3668's `priority_weight`), and so does a read that isn't a search
-(SMD-3669's agenda). It never sees the gold, and the self-check refuses a `MEASURED` entry that names the gold or
-the items' facts. The run prints each measured read's verdict against the baselines of the same run. A measured read
-that errors on a prompt scores it false, false, 0, as the bar says, and the run lists the error; its verdict doesn't
-fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
+(SMD-3669's agenda). It is handed the prompt's key and words, never its gold. `--seeded` also runs every measured
+read a second time with each gold reversed and each item's facts moved to the next item. A read whose answer moves
+reads the answer, wherever it is defined, and fails the run. The ceiling, which reads the gold, is that check's
+control. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
+verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
+the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
 read exists.
 
 **The score.** For each prompt:
@@ -4454,12 +4459,17 @@ The mutant's tau and chance's are averaged over the same prompts as "mean tau". 
 order-blind top-1 through the mutant and requires it to land far from chance.
 
 The seeded run exits 1 when any of these holds:
+* the corpus isn't the registered one;
 * a baseline read errors, since a baseline that never ran would set the bar;
 * a baseline read's scores differ from `priority.ts`'s recorded `BASELINE`, so a change to search on main that
   moves the bar is seen and re-recorded, not absorbed;
-* the gold ceiling can't clear the bar;
+* the gold ceiling errors or can't clear the bar;
+* a measured read answers differently when the answer moves;
 * the dogfood rows aren't sound;
-* the mutant sits more than 0.05 from chance.
+* the mutant sits more than 0.05 from chance for a baseline read or the ceiling.
+
+Before it resets the schema, `db/test-support.ts`'s `refuseHeldDatabase` refuses (exit 2) a database that already
+holds thoughts unless `OB1_FIXTURE_RESET=1`, the same guard `eval-projection-replay.ts --fixture-check` uses.
 
 These mutants are each refused:
 * an order-blind top-1, by the self-check and by the seeded run's own chance check;
@@ -4470,7 +4480,13 @@ These mutants are each refused:
 * a changed noise weight, bar, absent rank or read knob (the hash);
 * a `search_thoughts` default changed for `limit` or `prefer_current`;
 * a recorded baseline that differs from the run, a baseline read that throws, an unreachable bar, and a fixture
-  with no `rows` array (each fails the seeded run).
+  with no `rows` array (each fails the seeded run);
+* a measured read that looks up the gold, defined outside `MEASURED`, and one that ranks by the items' facts (each
+  fails the seeded run); a broken answer-moving check (the ceiling isn't seen); an edited gold (an unregistered
+  corpus);
+* a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2).
+
+An honest measured read returning duplicate ids leaves the run green.
 
 **The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`). On the
 seeded set, against the best baseline read on each measure, a read helps only if all four hold:
@@ -4485,7 +4501,7 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `163903542bba2260`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, registration `5be922c31e975404`; deterministic, two runs identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
@@ -4513,8 +4529,8 @@ before it stay as they were measured.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
-A row names its reads from `DOGFOOD_READS`: the seeded set's three, and `ticket_rows` (search filtered to board-sync's
-ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
+A row names its reads from `DOGFOOD_READS`: the seeded set's reads, baseline and measured, and `ticket_rows` (search
+filtered to board-sync's ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
 
 | date | pick | picked instead | read: rank of the pick |
 | --- | --- | --- | --- |

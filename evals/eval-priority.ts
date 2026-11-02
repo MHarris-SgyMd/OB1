@@ -10,18 +10,20 @@
  *       registered hash, the dogfood rows' shape. No database, no model.
  *
  *   ../db/with-postgres.sh bun eval-priority.ts --seeded
- *       Resets the schema at DATABASE_URL (test-support's throwaway guard:
- *       loopback only unless OB1_ALLOW_REMOTE_DB=1, and a database holding
- *       thoughts only with OB1_FIXTURE_RESET=1), plants the seeded corpus with
- *       the stub embedder's vectors under each writer's ob1.actor, and runs
- *       every prompt through each read — the server's own
- *       SqlStore.hybridThoughts, at the knobs its tool would send. Prints the
- *       per-prompt hits, the table, the shuffled-gold mutant beside chance,
- *       and the bar a priority read must clear against this baseline. Exits
- *       1 when a baseline read errors, when a baseline read's scores differ
- *       from priority.ts's BASELINE, when the gold ceiling cannot clear the
- *       bar, or when the mutant does not sit at chance. Keyless: no provider
- *       is called.
+ *       Refuses a corpus that is not the registered one. Resets the schema at
+ *       DATABASE_URL (test-support's guards: refuseHeldDatabase refuses a
+ *       database holding thoughts unless OB1_FIXTURE_RESET=1, and resetSchema
+ *       a non-loopback one unless OB1_ALLOW_REMOTE_DB=1), plants the seeded
+ *       corpus (priority.ts's plantRows), and runs every prompt through each
+ *       baseline read — the server's own SqlStore.hybridThoughts, as its tool
+ *       calls it — and each measured read. Prints the per-prompt hits, the
+ *       table, the shuffled-gold mutant beside chance, the bar a priority read
+ *       must clear against this baseline, and each measured read's verdict.
+ *       Exits 1 when a baseline read errors, when a baseline read's scores
+ *       differ from priority.ts's BASELINE, when the gold ceiling errors or
+ *       cannot clear the bar, when a measured read reads the answer, when the
+ *       dogfood rows are not sound, or when the mutant does not sit at chance
+ *       for a baseline read or the ceiling. Keyless: no provider is called.
  *
  * The reads are priority.ts's READS, today's main as the baseline (plain,
  * current, filter), and its MEASURED: a later read joins there (SMD-3668's
@@ -37,11 +39,13 @@ import { SQL } from "bun";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, refuseHeldDatabase, resetSchema } from "../db/test-support.ts";
+import { SEARCH_COMPAT_LIMIT } from "../server-portable/core/reads.ts";
+import { SPECS } from "../server-portable/core/schemas.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MEASURED, MUTANT_SEED, READS, baselineCall, itemId, measuredSource, seedRow, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  BASELINE, MEASURED, MUTANT_SEED, READS, baselineCall, itemId, measuredIds, plantRows, seedRow, withAnswerMoved, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
   type DogfoodRow, type Item, type MeasuredRead, type PromptScore,
 } from "./priority.ts";
 
@@ -74,11 +78,12 @@ function renderDogfood(rows: readonly DogfoodRow[]): string {
   return lines.join("\n");
 }
 
-function selfCheck(): void {
+async function selfCheck(): Promise<void> {
   const { assert, report } = createAssert();
 
   console.log("[1] The corpus");
   const corpus = corpusProblems();
+  // (withAnswerMoved is probed in [4b], below the mutant.)
   assert(corpus.length === 0, `the seeded corpus is sound${corpus.length ? `: ${corpus.join("; ")}` : ""}`);
   assert(BAR.top1Min === 5 / 7 && BAR.top1Gain === 2 && BAR.tauGain === 0.25, "the bar is the one pre-registered on 2026-11-02 (5 of 7, +2, +0.25): changing it is a decision recorded on SMD-3662, never part of a re-registration");
   assert(corpusHash() === REGISTERED_CORPUS, `the corpus and priority.ts's registered section are the ones registered (${corpusHash()} = ${REGISTERED_CORPUS}); a change is a new registration, with its baseline re-run`);
@@ -89,9 +94,9 @@ function selfCheck(): void {
   assert(registeredSection(fileText.replace(/\r?\n/g, "\r\n")) === registeredSection(fileText) && registeredSection(fileText) === reg, "a CRLF checkout of priority.ts yields the same registered section, so the same hash");
   assert(READS.every((r) => BASELINE[r.name] !== undefined) && Object.keys(BASELINE).every((n) => READS.some((r) => r.name === n)), "every baseline read has a recorded baseline, and every recorded baseline a read");
   const names = [...READS, ...MEASURED, CEILING].map((r) => r.name);
-  const measured = measuredSource(fileText);
-  assert(measured.includes("export const MEASURED") && !/\.gold\b|\.facts\b|\bPROMPTS\b|\bITEMS\b/.test(measured), "no measured read names the gold or the items' facts: a read reads the database, as a deployed one would");
-  assert(/\.gold\b/.test(measuredSource("\nexport const MEASURED: readonly MeasuredRead[] = [{ name: \"x\", ticket: \"t\", run: async ({ prompt }) => PROMPTS.find((q) => q.key === prompt.key)!.gold }];\n// ── next")), "the probe sees a measured read that looks the gold up");
+  const boardRetext = ITEMS.map((it) => (it.issue ? { ...it, text: `${it.text} (rendered another way)` } : it));
+  assert(corpusHash(boardRetext) === corpusHash(), "a board row's rendered text is not registered: a change to board-sync's adapter moves no registration (BASELINE's drift check says if it moved the numbers)");
+  assert(corpusHash(ITEMS.map((it, i) => (i === 0 ? { ...it, text: `${it.text} Again.` } : it))) !== corpusHash(), "a personal item's text is registered");
   const zq = seedRow(ITEMS.find((i) => i.key === "zq-urgent")!, 0);
   assert(zq.metadata.source === "linear" && zq.metadata.issue === "ZQ-101" && zq.metadata.status_type === "unstarted" && zq.metadata.priority === "Urgent" && zq.metadata.genre !== undefined && zq.content.startsWith("ZQ-101 — "), "a board row is planted as board-sync writes it: issueFacets' metadata (source, issue, status, priority, genre) and renderIssue's text");
   assert(Object.keys(seedRow(ITEMS[0], 0).metadata).length === 0, "a personal row carries no tracker facets");
@@ -149,6 +154,14 @@ function selfCheck(): void {
   const junk = shuffledScore(["x", "y", "z"], gold);
   assert(junk.top1 === 0 && junk.top3 === 0, "a read that retrieves no gold item scores 0 shuffled or not");
 
+  console.log("[4b] The answer moved, and put back");
+  const before = JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) });
+  const inside = await withAnswerMoved(async () => ({ all: JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }), first: PROMPTS[0].gold[0], facts0: ITEMS[0].facts, facts1: ITEMS[1].facts }));
+  assert(inside.all !== before && inside.first === "zq-low" && inside.facts0 === ITEMS[1].facts && inside.facts1 === ITEMS[2].facts, "inside withAnswerMoved every gold is reversed and each item holds the next item's facts");
+  assert(JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }) === before, "after it, every gold and fact is back as registered");
+  await withAnswerMoved(async () => { throw new Error("x"); }).catch(() => undefined);
+  assert(JSON.stringify({ g: PROMPTS.map((p) => p.gold), f: ITEMS.map((i) => i.facts) }) === before && corpusHash() === REGISTERED_CORPUS, "a read that throws inside it still leaves the answer put back");
+
   console.log("[5] The bar");
   const golds = PROMPTS.map((p) => p.gold);
   const none: PromptScore[] = PROMPTS.map(() => ({ top1: false, top3: false, tau: 0 }));
@@ -165,20 +178,15 @@ function selfCheck(): void {
   assert(verdict(regress, [baseKeeps], golds).failed.some((f) => f.startsWith("(d) prompt 7")), "a prompt a baseline kept in the top 3 and the read lost fails (d)");
   assert(verdict(all, [none, all], golds).failed.some((f) => f.startsWith("(b)")), "the bar reads the BEST baseline: one strong baseline read is enough to fail (b)");
 
-  console.log("[6] The reads' knobs are the tools'");
-  const reads = readFileSync(join(HERE, "..", "server-portable", "core", "reads.ts"), "utf8");
-  const call = reads.match(/tool: "search", arm: "hybrid", query, limit: (\d+), threshold: (\d+), recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: \{\} \}/);
-  assert(call !== null && Number(call[1]) === READ_K && Number(call[2]) === 0, `the search tool sends limit ${READ_K} and threshold 0, as the plain read does`);
-  assert(/const SEARCH_COMPAT_RECENCY_WEIGHT = 0;/.test(reads) && /const SEARCH_COMPAT_PREFER_CURRENT = false;/.test(reads), "the search tool's recency weight is 0 and prefer_current off, as the plain read's");
-  const schemas = readFileSync(join(HERE, "..", "server-portable", "core", "schemas.ts"), "utf8");
-  // search_thoughts' own block: from its key to the next tool's.
-  const from = schemas.indexOf("\n  search_thoughts: {");
-  const to = schemas.indexOf("\n  search_thoughts_keyword: {");
-  const block = from >= 0 && to > from ? schemas.slice(from, to) : "";
-  assert(block.length > 0, "search_thoughts' schema block is found, between its key and search_thoughts_keyword's");
-  assert(new RegExp(`limit: z\\.number\\(\\)\\.optional\\(\\)\\.default\\(${READ_K}\\)`).test(block), `search_thoughts' limit default is ${READ_K}, the filter read's`);
-  assert(/threshold: z\.number\(\)\.optional\(\)\.default\(0\)/.test(block) && /recency_weight: z\.number\(\)\.optional\(\)\.default\(0\)/.test(block), "search_thoughts' threshold and recency weight default to 0, the filter read's");
-  assert(/prefer_current: z\.boolean\(\)\.optional\(\)\.default\(false\)/.test(block), "search_thoughts' prefer_current defaults off, as the filter read sends it");
+  console.log("[6] The baseline reads call the store as their tools do");
+  const plain = baselineCall(READS.find((r) => r.name === "plain")!, "q");
+  const filter = baselineCall(READS.find((r) => r.name === "filter")!, "q");
+  const current = baselineCall(READS.find((r) => r.name === "current")!, "q");
+  assert(plain.limit === SEARCH_COMPAT_LIMIT && Object.keys(plain.filter).length === 0, "plain is the search tool's call: its own limit, no filter");
+  assert(filter.limit === SPECS.search_thoughts.inputSchema.limit.parse(undefined) && filter.preferCurrent === false && (filter.filter as Record<string, unknown>).priority === "High", "filter is search_thoughts' call: its schema's defaults, the workaround's filter");
+  assert(current.preferCurrent === true && Object.keys(current.filter).length === 0, "current is search_thoughts' call with prefer_current on and no filter");
+  assert(READ_K === SEARCH_COMPAT_LIMIT && READ_K === SPECS.search_thoughts.inputSchema.limit.parse(undefined), `the score reads ${READ_K} hits, what both tools return by default`);
+  assert(JSON.stringify(measuredIds(["a", "b", "a", "c"])) === JSON.stringify(["a", "b", "c"]) && measuredIds(Array.from({ length: 15 }, (_, i) => `x${i}`)).length === READ_K, "a measured read's ids are scored once each, first occurrence kept, the top READ_K");
 
   console.log("[7] The dogfood rows");
   const raw = loadDogfood();
@@ -206,36 +214,20 @@ async function seeded(): Promise<void> {
   if (!url) { console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun eval-priority.ts --seeded"); process.exit(2); }
   const problems = corpusProblems();
   if (problems.length) { console.error(`the corpus is not sound: ${problems.join("; ")}`); process.exit(2); }
-  const probe = new SQL({ url, max: 1 });
-  const exists = ((await probe`SELECT (to_regclass('thoughts') IS NOT NULL) AS present`)[0] as { present: boolean }).present;
-  const held = exists ? Number(((await probe`SELECT count(*)::int AS n FROM thoughts`)[0] as { n: number }).n) : 0;
-  await probe.end();
-  if (held > 0 && process.env.OB1_FIXTURE_RESET !== "1") {
-    console.error(`the database at DATABASE_URL holds ${held} thought(s) and --seeded DROPS the schema. Point it at a throwaway (../db/with-postgres.sh), or set OB1_FIXTURE_RESET=1 if you mean it.`);
-    process.exit(2);
+  if (corpusHash() !== REGISTERED_CORPUS) {
+    console.error(`the corpus is ${corpusHash()}, not the registered ${REGISTERED_CORPUS}: a verdict holds only at the registration (re-register, and re-run the baseline, as --self-check says)`);
+    process.exit(1);
   }
+  await refuseHeldDatabase(url, "--seeded");
   // resetSchema refuses a non-loopback database unless OB1_ALLOW_REMOTE_DB=1 (test-support's guard).
   await resetSchema(url, { dim: STUB_DIM, model: STUB_MODEL });
 
   const sql = new SQL({ url, max: 1 });
-  const keyOf = new Map<string, string>();
-  const seeds = ITEMS.map((it, i) => ({ key: it.key, row: seedRow(it, i) }));
+  const seeds = ITEMS.map((it, i) => seedRow(it, i));
+  const keyOf = new Map(seeds.map((row, i) => [row.id, ITEMS[i].key] as const));
   let planted = 0;
   try {
-    for (const actor of [...new Set(seeds.map((s) => s.row.actor))]) {
-      // Each writer's rows under its own ob1.actor, as a raw insert is stamped (050's ob1_stamp_actor).
-      await sql.begin(async (tx) => {
-        await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: actor })}, true)`;
-        for (const { key, row } of seeds) {
-          if (row.actor !== actor) continue;
-          await tx`INSERT INTO thoughts (id, content, content_fingerprint, embedding, embedding_model, metadata, created_at)
-                   VALUES (${row.id}::uuid, ${row.content}, content_fingerprint_of(${row.content}), ${`[${stubVector(row.content).join(",")}]`}::vector, ${STUB_MODEL},
-                           ${row.metadata}::jsonb, now() - make_interval(days => ${row.ageDays}))`;
-          keyOf.set(row.id, key);
-        }
-      });
-    }
-    planted = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
+    planted = await plantRows(sql, seeds);
   } finally {
     await sql.close();
   }
@@ -244,6 +236,7 @@ async function seeded(): Promise<void> {
   const store = new SqlStore(url, { max: 1 });
   const results = new Map<string, { hits: string[][]; scores: PromptScore[] }>();
   const errors: string[] = [];
+  const answerReaders: string[] = [];
   try {
     for (const r of READS) {
       const hits: string[][] = [];
@@ -266,14 +259,29 @@ async function seeded(): Promise<void> {
       for (const p of PROMPTS) {
         try {
           const ids = await r.run({ store, prompt: { key: p.key, query: p.query }, embedding: stubVector(p.query, STUB_DIM, "query") });
-          // The top READ_K are what the score reads, and all the table shows.
-          hits.push(ids.slice(0, READ_K).map((id) => keyOf.get(id) ?? `?${id}`));
+          // Each id once, the top READ_K: what the score reads, and all the table shows.
+          hits.push(measuredIds(ids).map((id) => keyOf.get(id) ?? `?${id}`));
         } catch (e) {
           errors.push(`measured read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
           hits.push([]);
         }
       }
       results.set(r.name, { hits, scores: hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
+    }
+    // Each measured read again with the answer moved: one whose ids move with it reads the answer. The ceiling is the control.
+    for (const r of [...MEASURED, CEILING]) {
+      const again = await withAnswerMoved(async () => {
+        const out: string[][] = [];
+        for (const p of PROMPTS) {
+          try {
+            out.push(measuredIds(await r.run({ store, prompt: { key: p.key, query: p.query }, embedding: stubVector(p.query, STUB_DIM, "query") })).map((id) => keyOf.get(id) ?? `?${id}`));
+          } catch {
+            out.push([]);
+          }
+        }
+        return out;
+      });
+      if (JSON.stringify(again) !== JSON.stringify(results.get(r.name)!.hits)) answerReaders.push(r.name);
     }
   } finally {
     await store.close();
@@ -298,7 +306,9 @@ async function seeded(): Promise<void> {
   }));
   console.log(`\n${renderTable(table)}\n`);
 
-  const off = table.filter((t) => Math.abs(t.mutant.top1 - t.chance.top1) > CHANCE_TOLERANCE || Math.abs(t.mutant.top3 - t.chance.top3) > CHANCE_TOLERANCE || Math.abs(t.mutant.tau - t.chance.tau) > CHANCE_TOLERANCE);
+  // The chance gate holds the score; it reads the baselines and the ceiling, whose ids are each once. A measured read's verdict never fails the run.
+  const gated = new Set([...READS.map((r) => r.name), CEILING.name]);
+  const off = table.filter((t) => gated.has(t.read)) .filter((t) => Math.abs(t.mutant.top1 - t.chance.top1) > CHANCE_TOLERANCE || Math.abs(t.mutant.top3 - t.chance.top3) > CHANCE_TOLERANCE || Math.abs(t.mutant.tau - t.chance.tau) > CHANCE_TOLERANCE);
   const bases = READS.map((r) => results.get(r.name)!.scores);
   const t = barOn(bases, golds);
   const kept = t.keepTop3.map((i) => PROMPTS[i].key);
@@ -321,6 +331,9 @@ async function seeded(): Promise<void> {
   if (drift.length) failures.push(`the baseline moved from priority.ts's BASELINE (${drift.join("; ")}): re-record it with the main it was measured on, since the bar moves with it`);
   if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
   if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} `))) failures.push("the gold ceiling errored, so the measured reads' path is broken");
+  const cheats = answerReaders.filter((n) => n !== CEILING.name);
+  if (cheats.length) failures.push(`measured read(s) ${cheats.join(", ")} answer differently when the gold and facts move: a read must read the database, not the answer`);
+  if (!answerReaders.includes(CEILING.name)) failures.push("the answer-moved check did not see the ceiling, which reads the gold: the check is broken");
   if (off.length) failures.push(`the shuffled-gold mutant is not at chance for ${off.map((t) => t.read).join(", ")}: the score reads something other than the gold's order`);
   if (dogfood.length) failures.push(`the dogfood rows are not sound: ${dogfood.join("; ")}`);
   if (failures.length) {
@@ -332,7 +345,7 @@ async function seeded(): Promise<void> {
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  if (args.includes("--self-check")) selfCheck();
+  if (args.includes("--self-check")) await selfCheck();
   else if (args.includes("--seeded")) await seeded();
   else { console.error("usage: bun eval-priority.ts --self-check | --seeded"); process.exit(2); }
 }
