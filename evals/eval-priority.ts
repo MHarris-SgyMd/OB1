@@ -23,9 +23,11 @@
  *       bar, or when the mutant does not sit at chance. Keyless: no provider
  *       is called.
  *
- * The reads are priority.ts's READS: today's main as the baseline (plain,
- * current, filter). A later read joins them as `measured` (SMD-3668's
- * priority_weight, SMD-3669's agenda) and is held to the BAR against them.
+ * The reads are priority.ts's READS, today's main as the baseline (plain,
+ * current, filter), and its MEASURED: a later read joins there (SMD-3668's
+ * priority_weight, SMD-3669's agenda), and the run prints its verdict against
+ * the baselines of the same run. A measured read's verdict does not fail the
+ * run; the gold ceiling's, which runs the same path, does.
  *
  * The dogfood rows (fixtures/priority-dogfood.json) are recorded by hand in
  * the session that asked, and printed beside the seeded table.
@@ -39,18 +41,27 @@ import { createAssert, resetSchema } from "../db/test-support.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import {
   BACKGROUND, BAR, CHANCE_TOLERANCE, NOISE_AXES, ITEMS, PROMPTS, READ_K, REGISTERED_CORPUS, STUB_DIM, STUB_MODEL,
-  BASELINE, MUTANT_SEED, READS, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
-  type DogfoodRow, type Item, type PromptScore,
+  BASELINE, MEASURED, MUTANT_SEED, READS, baselineCall, itemId, measuredSource, seedRow, barOn, baselineDrift, chanceOf, corpusHash, registeredSection, registeredSource, corpusProblems, dogfoodProblems, goldRanks, kendallTauB, meanScore, meanTriple, renderTable, scorePrompt, shuffledScore, stubVector, verdict, wordsOf,
+  type DogfoodRow, type Item, type MeasuredRead, type PromptScore,
 } from "./priority.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DOGFOOD_PATH = join(HERE, "fixtures", "priority-dogfood.json");
 
+/**
+ * The gold order itself, run as a measured read: the bar's reachability (the
+ * run fails when it cannot clear the bar) and the measured path's control,
+ * exercised on every seeded run before a priority read exists. The one read
+ * that sees the gold, so it lives here, not in priority.ts's MEASURED.
+ */
+const CEILING: MeasuredRead = {
+  name: "gold (ceiling)", ticket: "SMD-3662",
+  run: async ({ prompt }) => PROMPTS.find((q) => q.key === prompt.key)!.gold.map((k) => itemId(ITEMS.findIndex((it) => it.key === k))),
+};
+
 /** The fixture's rows as written, unchecked: dogfoodProblems says what is wrong with them. */
 const loadDogfood = (): unknown => (JSON.parse(readFileSync(DOGFOOD_PATH, "utf8")) as { rows?: unknown }).rows;
 
-/** A fixed id per item, so the reads' tie-break by id is the same every run. */
-const itemId = (i: number): string => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`;
 
 function renderDogfood(rows: readonly DogfoodRow[]): string {
   const day = (d: number) => `${Math.floor(d / 10000)}-${String(Math.floor(d / 100) % 100).padStart(2, "0")}-${String(d % 100).padStart(2, "0")}`;
@@ -67,14 +78,24 @@ function selfCheck(): void {
   const { assert, report } = createAssert();
 
   console.log("[1] The corpus");
-  assert(corpusProblems().length === 0, `the seeded corpus is sound${corpusProblems().length ? `: ${corpusProblems().join("; ")}` : ""}`);
+  const corpus = corpusProblems();
+  assert(corpus.length === 0, `the seeded corpus is sound${corpus.length ? `: ${corpus.join("; ")}` : ""}`);
+  assert(BAR.top1Min === 5 / 7 && BAR.top1Gain === 2 && BAR.tauGain === 0.25, "the bar is the one pre-registered on 2026-11-02 (5 of 7, +2, +0.25): changing it is a decision recorded on SMD-3662, never part of a re-registration");
   assert(corpusHash() === REGISTERED_CORPUS, `the corpus and priority.ts's registered section are the ones registered (${corpusHash()} = ${REGISTERED_CORPUS}); a change is a new registration, with its baseline re-run`);
   const reg = registeredSource();
-  assert(["export const STUB_DIM", "export function stubVector(", "export function kendallTauB(", "export function scorePrompt(", "export function barOn(", "export function verdict(", "export const BAR ", "export const READ_K", "export const READS"].every((x) => reg.includes(x)) && !reg.includes("export function dogfoodProblems(") && !reg.includes("export const BASELINE"),
-    "the registration hashes the stub, the score, the mutant, the bar and the reads' knobs, and not the dogfood rows or the recorded baseline");
   const fileText = readFileSync(join(HERE, "priority.ts"), "utf8");
+  assert(["export const STUB_DIM", "export function stubVector(", "export function kendallTauB(", "export function scorePrompt(", "export function barOn(", "export function verdict(", "export const BAR ", "export const READ_K", "export const READS"].every((x) => reg.includes(x)) && !reg.includes("export function dogfoodProblems(") && !reg.includes("export const BASELINE") && !reg.includes("export const MEASURED"),
+    "the registration hashes the stub, the score, the mutant, the bar and the baseline reads' knobs, and not the measured reads, the dogfood rows or the recorded baseline");
   assert(registeredSection(fileText.replace(/\r?\n/g, "\r\n")) === registeredSection(fileText) && registeredSection(fileText) === reg, "a CRLF checkout of priority.ts yields the same registered section, so the same hash");
-  assert(READS.every((r) => BASELINE[r.name] !== undefined || r.role === "measured"), "every baseline read has a recorded baseline");
+  assert(READS.every((r) => BASELINE[r.name] !== undefined) && Object.keys(BASELINE).every((n) => READS.some((r) => r.name === n)), "every baseline read has a recorded baseline, and every recorded baseline a read");
+  const names = [...READS, ...MEASURED, CEILING].map((r) => r.name);
+  const measured = measuredSource(fileText);
+  assert(measured.includes("export const MEASURED") && !/\.gold\b|\.facts\b|\bPROMPTS\b|\bITEMS\b/.test(measured), "no measured read names the gold or the items' facts: a read reads the database, as a deployed one would");
+  assert(/\.gold\b/.test(measuredSource("\nexport const MEASURED: readonly MeasuredRead[] = [{ name: \"x\", ticket: \"t\", run: async ({ prompt }) => PROMPTS.find((q) => q.key === prompt.key)!.gold }];\n// ── next")), "the probe sees a measured read that looks the gold up");
+  const zq = seedRow(ITEMS.find((i) => i.key === "zq-urgent")!, 0);
+  assert(zq.metadata.source === "linear" && zq.metadata.issue === "ZQ-101" && zq.metadata.status_type === "unstarted" && zq.metadata.priority === "Urgent" && zq.metadata.genre !== undefined && zq.content.startsWith("ZQ-101 — "), "a board row is planted as board-sync writes it: issueFacets' metadata (source, issue, status, priority, genre) and renderIssue's text");
+  assert(Object.keys(seedRow(ITEMS[0], 0).metadata).length === 0, "a personal row carries no tracker facets");
+  assert(new Set(names).size === names.length, "no two reads, baseline or measured, share a name");
   const dup: Item[] = [...ITEMS, ITEMS[0]];
   assert(corpusProblems(dup).some((p) => p.includes("listed twice")), "a repeated item key is refused");
   assert(corpusProblems(ITEMS, [{ key: "x", query: "q", gold: ["nope"] }]).some((p) => p.includes("names nope")), "a gold naming no item is refused");
@@ -161,9 +182,11 @@ function selfCheck(): void {
 
   console.log("[7] The dogfood rows");
   const raw = loadDogfood();
-  assert(dogfoodProblems(raw).length === 0, `the committed rows are sound${dogfoodProblems(raw).length ? `: ${dogfoodProblems(raw).join("; ")}` : ""}`);
+  const sound = dogfoodProblems(raw);
+  assert(sound.length === 0, `the committed rows are sound${sound.length ? `: ${sound.join("; ")}` : ""}`);
   const rows = raw as DogfoodRow[];
   assert(dogfoodProblems(undefined).some((p) => p.includes("not an array")) && dogfoodProblems({ 0: rows[0] }).some((p) => p.includes("not an array")), "a fixture with no rows array is reported, not thrown on");
+  assert(dogfoodProblems([null, rows[0]]).some((p) => p.includes("not an object")), "a row that is not an object, before another, is reported, not thrown on");
   assert(dogfoodProblems([{ ...rows[0], reads: { plian: { rank: 0 } } }]).some((p) => p.includes("plian")), "a read name outside DOGFOOD_READS is refused, so rows stay comparable read by read");
   assert(rows.length >= 2 && rows[0].pick === 2888 && rows[0].picked_instead === 2540 && rows[1].pick === 2908 && rows[1].picked_instead === 1853, "the ticket's two cases are its first rows: SMD-2888 over SMD-2540 (10-14), SMD-2908 over SMD-1853 (11-02)");
   assert(dogfoodProblems([{ ...rows[0], date: 20261314 }]).some((p) => p.includes("date")), "a row's date must be a real YYYYMMDD day");
@@ -196,26 +219,27 @@ async function seeded(): Promise<void> {
 
   const sql = new SQL({ url, max: 1 });
   const keyOf = new Map<string, string>();
+  const seeds = ITEMS.map((it, i) => ({ key: it.key, row: seedRow(it, i) }));
+  let planted = 0;
   try {
-    for (const writer of [...new Set(ITEMS.map((i) => i.writer))]) {
+    for (const actor of [...new Set(seeds.map((s) => s.row.actor))]) {
       // Each writer's rows under its own ob1.actor, as a raw insert is stamped (050's ob1_stamp_actor).
       await sql.begin(async (tx) => {
-        await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: `priority-eval-${writer}` })}, true)`;
-        for (const [i, it] of ITEMS.entries()) {
-          if (it.writer !== writer) continue;
-          const meta = it.board ? { type: "task", ...it.board } : { type: "observation" };
+        await tx`SELECT set_config('ob1.actor', ${JSON.stringify({ name: actor })}, true)`;
+        for (const { key, row } of seeds) {
+          if (row.actor !== actor) continue;
           await tx`INSERT INTO thoughts (id, content, content_fingerprint, embedding, embedding_model, metadata, created_at)
-                   VALUES (${itemId(i)}::uuid, ${it.text}, content_fingerprint_of(${it.text}), ${`[${stubVector(it.text).join(",")}]`}::vector, ${STUB_MODEL},
-                           ${meta}::jsonb, now() - make_interval(days => ${it.ageDays}))`;
-          keyOf.set(itemId(i), it.key);
+                   VALUES (${row.id}::uuid, ${row.content}, content_fingerprint_of(${row.content}), ${`[${stubVector(row.content).join(",")}]`}::vector, ${STUB_MODEL},
+                           ${row.metadata}::jsonb, now() - make_interval(days => ${row.ageDays}))`;
+          keyOf.set(row.id, key);
         }
       });
     }
-    const planted = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
-    if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
+    planted = Number(((await sql`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'actor_name' LIKE 'priority-eval-%'`)[0] as { n: number }).n);
   } finally {
     await sql.close();
   }
+  if (planted !== ITEMS.length) { console.error(`planted ${planted} of ${ITEMS.length} rows under the eval's writers`); process.exit(1); }
 
   const store = new SqlStore(url, { max: 1 });
   const results = new Map<string, { hits: string[][]; scores: PromptScore[] }>();
@@ -224,13 +248,28 @@ async function seeded(): Promise<void> {
     for (const r of READS) {
       const hits: string[][] = [];
       for (const p of PROMPTS) {
-        // A read that errors on a prompt scores it false, false, 0 (the bar's edge case): no hits, every gold item absent.
-        // A baseline read's error also fails the run, below: a baseline that never ran would set the bar.
+        // A baseline read that errors fails the run, below: a baseline that never ran would set the bar.
+        // Its prompt is scored as no hits meanwhile, so the table still prints.
         try {
-          const rows = await store.hybridThoughts({ query: p.query, embedding: stubVector(p.query, STUB_DIM, "query"), threshold: 0, limit: READ_K, filter: r.filter, preferCurrent: r.preferCurrent, recencyWeight: 0 });
+          const rows = await store.hybridThoughts(baselineCall(r, p.query));
           hits.push(rows.map((row) => keyOf.get(row.id) ?? `?${row.id}`));
         } catch (e) {
-          errors.push(`${r.role} read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
+          errors.push(`baseline read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
+          hits.push([]);
+        }
+      }
+      results.set(r.name, { hits, scores: hits.map((h, i) => scorePrompt(h, PROMPTS[i].gold)) });
+    }
+    // The reads measured against the bar, the gold ceiling last: one that errors on a prompt scores it false, false, 0.
+    for (const r of [...MEASURED, CEILING]) {
+      const hits: string[][] = [];
+      for (const p of PROMPTS) {
+        try {
+          const ids = await r.run({ store, prompt: { key: p.key, query: p.query }, embedding: stubVector(p.query, STUB_DIM, "query") });
+          // The top READ_K are what the score reads, and all the table shows.
+          hits.push(ids.slice(0, READ_K).map((id) => keyOf.get(id) ?? `?${id}`));
+        } catch (e) {
+          errors.push(`measured read ${r.name} on ${p.key}: ${e instanceof Error ? e.message : String(e)}`);
           hits.push([]);
         }
       }
@@ -244,16 +283,14 @@ async function seeded(): Promise<void> {
   console.log(`priority eval, seeded: ${ITEMS.length} items, ${PROMPTS.length} prompts, corpus ${corpusHash()}, stub ${STUB_MODEL} @ ${STUB_DIM}\n`);
   for (const [i, p] of PROMPTS.entries()) {
     console.log(`${p.key}: "${p.query}"\n  gold     ${p.gold.join(" > ")}`);
-    for (const r of READS) {
+    for (const r of [...READS, ...MEASURED]) {
       const { hits, scores } = results.get(r.name)!;
       const sc = scores[i];
       console.log(`  ${r.name.padEnd(8)} ${hits[i].join(", ") || "(nothing)"}  [top-1 ${sc.top1 ? "yes" : "no"}, top-3 ${sc.top3 ? "yes" : "no"}, tau ${sc.tau === null ? "–" : sc.tau.toFixed(3)}]`);
     }
   }
 
-  // The gold itself as a read: the ceiling, and the mutant's own control.
-  const oracle = { hits: golds.map((g) => [...g]), scores: golds.map((g) => scorePrompt(g, g)) };
-  const table = [...READS.map((r) => ({ name: r.name, ...results.get(r.name)! })), { name: "gold (ceiling)", ...oracle }].map((r) => ({
+  const table = [...READS, ...MEASURED, CEILING].map((r) => ({ name: r.name, ...results.get(r.name)! })).map((r) => ({
     read: r.name,
     score: meanScore(r.scores, golds),
     mutant: meanTriple(r.hits.map((h, i) => shuffledScore(h, golds[i], scorePrompt, MUTANT_SEED + i)), golds),
@@ -262,11 +299,15 @@ async function seeded(): Promise<void> {
   console.log(`\n${renderTable(table)}\n`);
 
   const off = table.filter((t) => Math.abs(t.mutant.top1 - t.chance.top1) > CHANCE_TOLERANCE || Math.abs(t.mutant.top3 - t.chance.top3) > CHANCE_TOLERANCE || Math.abs(t.mutant.tau - t.chance.tau) > CHANCE_TOLERANCE);
-  const bases = READS.filter((r) => r.role === "baseline").map((r) => results.get(r.name)!.scores);
+  const bases = READS.map((r) => results.get(r.name)!.scores);
   const t = barOn(bases, golds);
   const kept = t.keepTop3.map((i) => PROMPTS[i].key);
   console.log(`The bar a priority read must clear on this corpus (priority.ts's BAR, pre-registered): top-1 on at least ${t.top1Need} of ${t.prompts} (at least ${t.top1Floor}, and the best baseline's ${t.bestTop1} + ${BAR.top1Gain}); mean tau at least ${t.tauNeed.toFixed(3)} (the best baseline's ${t.bestTau.toFixed(3)} + ${BAR.tauGain}); top-3 kept on ${kept.length ? kept.join(", ") : "no prompt (no baseline read had any)"}.`);
-  const ceiling = verdict(oracle.scores, bases, golds);
+  for (const r of MEASURED) {
+    const v = verdict(results.get(r.name)!.scores, bases, golds);
+    console.log(`Measured read ${r.name} (${r.ticket}) against the baselines: ${v.helped ? "HELPS: it clears the pre-registered bar" : `does not clear the bar: ${v.failed.join("; ")}`}.`);
+  }
+  const ceiling = verdict(results.get(CEILING.name)!.scores, bases, golds);
   console.log(`The gold ceiling against the baselines: ${ceiling.helped ? "helps (the bar is reachable)" : `fails: ${ceiling.failed.join("; ")}`}.`);
   if (errors.length) console.error(`\n${errors.length} read(s) errored, each scored false, false, 0 on its prompt:\n  ${errors.join("\n  ")}`);
   const raw = loadDogfood();
@@ -276,9 +317,10 @@ async function seeded(): Promise<void> {
   const failures: string[] = [];
   const baselineErrors = errors.filter((e) => e.startsWith("baseline "));
   if (baselineErrors.length) failures.push(`${baselineErrors.length} baseline read(s) errored, and a baseline that never ran would set the bar`);
-  const drift = READS.filter((r) => r.role === "baseline").flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores, golds));
+  const drift = READS.flatMap((r) => baselineDrift(r.name, results.get(r.name)!.scores, golds));
   if (drift.length) failures.push(`the baseline moved from priority.ts's BASELINE (${drift.join("; ")}): re-record it with the main it was measured on, since the bar moves with it`);
   if (!ceiling.helped) failures.push("the gold ceiling cannot clear the bar, so no read can: the registration needs fixing");
+  if (errors.some((e) => e.startsWith(`measured read ${CEILING.name} `))) failures.push("the gold ceiling errored, so the measured reads' path is broken");
   if (off.length) failures.push(`the shuffled-gold mutant is not at chance for ${off.map((t) => t.read).join(", ")}: the score reads something other than the gold's order`);
   if (dogfood.length) failures.push(`the dogfood rows are not sound: ${dogfood.join("; ")}`);
   if (failures.length) {

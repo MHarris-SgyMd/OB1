@@ -37,23 +37,29 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { issueFacets, renderIssue, type LinearIssue } from "../db/ingest-linear.ts";
 import { seededRandom } from "../db/test-support.ts";
+import type { SqlStore } from "../server-portable/store-sql.ts";
 
 // ── The seeded corpus ───────────────────────────────────────────────────────
 
 /** Who wrote an item: the seeding plants each writer's rows under its own ob1.actor name. */
 export type Writer = "operator" | "meeting-notes" | "board-sync";
 
-/** A board item's tracker fields, as board-sync writes them into metadata (db/ingest-linear.ts's issueFacets). */
+/** A board item's tracker fields: the Linear issue board-sync would fetch, cut to what the board needs. */
 export type BoardMeta = { issue: string; status: string; status_type: "backlog" | "unstarted" | "started" | "completed" | "canceled"; priority: "Urgent" | "High" | "Medium" | "Low" | "No priority" };
 
 /**
- * What a later read may know of an item that search cannot: the facts
- * SMD-3663's assertions, SMD-3665's open items and SMD-3666's sources will
- * carry. Nothing on main reads them; they are here so a later read is seeded
- * from the same corpus the baseline was measured on, not a re-written one.
- * `level` is docs/priority.md's scale (0–5) as the item's writer states it,
- * absent where nobody states one (unknown).
+ * What the gold rests on that search cannot see: a due time, a stated level
+ * (docs/priority.md's 0–5, absent where nobody states one: unknown), done,
+ * the blocks links, a claim. Today's rows carry only what main's reads read —
+ * the text, and a board row's facets as board-sync writes them — and none of
+ * main's reads reads these. A later read's PR plants the facts its own store
+ * reads (SMD-3663's assertions, a claim in work_claims, Linear's blocks
+ * relations through board-sync's links) by extending the seeding below: a
+ * new registration, with the baseline re-run in that PR and BAR held by its
+ * own pin, so the bar a read is judged by never moves with it. A read never
+ * reads these from ITEMS: that is the answer's side.
  */
 export type Facts = { dueInDays?: number; level?: number; done?: boolean; blocks?: string[]; blockedBy?: string[]; claimed?: boolean };
 
@@ -64,15 +70,28 @@ export type Item = {
   writer: Writer;
   /** created_at is the run's now() minus this many days. */
   ageDays: number;
-  board?: BoardMeta;
+  /** A board item's issue, as board-sync's fetch returns it: its text is renderIssue's and its metadata issueFacets', so a read finds it as it finds a synced ticket. */
+  issue?: LinearIssue;
   facts: Facts;
 };
 
-const boardText = (b: BoardMeta, title: string, body: string): string =>
-  `${b.issue} — ${title}\nProject: Zephyr · Status: ${b.status} (${b.status_type}) · Priority: ${b.priority}\n\n${body}`;
+/** A fixed instant for the issues' own clocks (metadata only: the rows' created_at is relative, the text has no date). */
+const ISSUE_CLOCK = "2026-11-02T00:00:00.000Z";
 
-const board = (key: string, b: BoardMeta, title: string, body: string, ageDays: number, facts: Facts): Item =>
-  ({ key, text: boardText(b, title, body), writer: "board-sync", ageDays, board: b, facts });
+function linearIssue(b: BoardMeta, title: string, body: string, blocks: string[]): LinearIssue {
+  return {
+    identifier: b.issue, title, description: body, url: `https://linear.app/zephyr/issue/${b.issue}`,
+    createdAt: ISSUE_CLOCK, updatedAt: ISSUE_CLOCK, archivedAt: null, priorityLabel: b.priority,
+    state: { name: b.status, type: b.status_type }, project: { id: "zephyr", name: "Zephyr" }, parent: null, labels: { nodes: [] },
+    relations: { nodes: blocks.map((identifier) => ({ type: "blocks", relatedIssue: { identifier } })) },
+    inverseRelations: { nodes: [] },
+  };
+}
+
+const board = (key: string, b: BoardMeta, title: string, body: string, ageDays: number, facts: Facts, blocks: string[] = []): Item => {
+  const issue = linearIssue(b, title, body, blocks);
+  return { key, text: renderIssue(issue), writer: "board-sync", ageDays, issue, facts };
+};
 
 /**
  * A personal brain with no tracker behind it, and a small board beside it.
@@ -104,7 +123,7 @@ export const ITEMS: readonly Item[] = [
   { key: "bookshelf", writer: "operator", ageDays: 1, facts: { level: 0 },
     text: "Someday I might rearrange the bookshelf by colour, no rush." },
   board("zq-urgent", { issue: "ZQ-101", status: "Todo", status_type: "unstarted", priority: "Urgent" }, "Sign-in fails for every user after the certificate rotation",
-    "Nobody can sign in since this morning's rotation. Blocks ZQ-104.", 1, { level: 4, blocks: ["zq-blocked"] }),
+    "Nobody can sign in since this morning's rotation. Blocks ZQ-104.", 1, { level: 4, blocks: ["zq-blocked"] }, ["ZQ-104"]),
   board("zq-high", { issue: "ZQ-102", status: "Backlog", status_type: "backlog", priority: "High" }, "Exports time out on large workspaces",
     "A workspace over a few thousand records never finishes its export.", 10, { level: 3 }),
   board("zq-claimed", { issue: "ZQ-103", status: "In Progress", status_type: "started", priority: "High" }, "The rate limiter drops short bursts",
@@ -154,16 +173,17 @@ export const PROMPTS: readonly Prompt[] = [
 
 /**
  * The registration: a hash of ITEMS, PROMPTS and registeredSource() — this
- * file from the stub embedder to the reads, verbatim: the stub (its
+ * file from the stub embedder to the baseline reads, verbatim: the stub (its
  * constants and code, noise weights included), the score, the mutant, the
- * bar and the reads' knobs, everything that sets the baseline or the bar a
- * read is judged by. Pinned so neither can change under a measured read: a
+ * bar and the baseline reads' knobs, everything that sets the baseline or
+ * the bar a read is judged by. The reads measured against the bar sit after
+ * it, so adding one is not a new registration. Pinned so neither can change under a measured read: a
  * change to any of it is a new registration — the baseline re-run on it, and
  * recorded — never an edit (the self-check fails until this line moves with
  * it). A comment edit there counts too, on purpose: the rule is "nothing in
  * the section moved", which a reader can check without judging the edit.
  */
-export const REGISTERED_CORPUS = "5ba651be0fd4f447";
+export const REGISTERED_CORPUS = "163903542bba2260";
 
 export function corpusHash(items: readonly Item[] = ITEMS, prompts: readonly Prompt[] = PROMPTS): string {
   return createHash("sha256").update(JSON.stringify({ items, prompts, source: registeredSource() })).digest("hex").slice(0, 16);
@@ -184,7 +204,7 @@ export function registeredSection(text: string): string {
   const src = text.replace(/\r\n/g, "\n");
   // At a line's start, so the markers this function names inside its own quotes are not them.
   const from = src.indexOf("\n// ── The stub embedder ─");
-  const to = src.indexOf("\n// ── The dogfood rows ─");
+  const to = src.indexOf("\n// ── The reads measured against the bar ─");
   if (from < 0 || to < from) throw new Error("priority.ts: the registered section's markers are missing");
   return src.slice(from, to);
 }
@@ -266,6 +286,23 @@ export function stubVector(text: string, dim = STUB_DIM, kind: "text" | "query" 
   }
   const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
   return v.map((x) => x / norm);
+}
+
+// ── The seeding and the baseline call ───────────────────────────────────────
+
+/** A fixed id per item, so the reads' tie-break by id is the same every run. */
+export const itemId = (i: number): string => `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`;
+
+/** What `--seeded` inserts for an item: its id, text, metadata, age and the ob1.actor name its writer's rows are stamped under. */
+export type SeedRow = { id: string; content: string; metadata: Record<string, unknown>; ageDays: number; actor: string };
+
+export function seedRow(it: Item, i: number): SeedRow {
+  return { id: itemId(i), content: it.text, metadata: it.issue ? issueFacets(it.issue) : {}, ageDays: it.ageDays, actor: `priority-eval-${it.writer}` };
+}
+
+/** The store call a baseline read makes for a prompt: the tool's knobs (core/reads.ts, core/schemas.ts) at READ_K, on the query's stub vector. */
+export function baselineCall(r: Read, query: string) {
+  return { query, embedding: stubVector(query, STUB_DIM, "query"), threshold: 0, limit: READ_K, filter: r.filter, preferCurrent: r.preferCurrent, recencyWeight: 0 };
 }
 
 // ── The score ───────────────────────────────────────────────────────────────
@@ -452,14 +489,11 @@ export function verdict(read: readonly PromptScore[], baselines: readonly (reado
 // ── The reads ───────────────────────────────────────────────────────────────
 
 /**
- * A read the eval runs: the store's hybrid search at a tool's knobs.
- * `baseline` reads are today's main, and the bar is measured against them:
- * one that errors fails the run, since a baseline that never ran would set
- * the bar. A `measured` read (SMD-3668's priority_weight, SMD-3669's agenda,
- * when they land) that errors on a prompt scores it false, false, 0 — the
- * bar's edge case.
+ * A baseline read: the store's hybrid search at a tool's knobs, today's
+ * main. The bar is measured against them, so one that errors fails the run:
+ * a baseline that never ran would set the bar.
  */
-export type Read = { name: string; role: "baseline" | "measured"; filter: Record<string, unknown>; preferCurrent: boolean };
+export type Read = { name: string; filter: Record<string, unknown>; preferCurrent: boolean };
 
 /**
  * The baseline (Work 4):
@@ -470,10 +504,39 @@ export type Read = { name: string; role: "baseline" | "measured"; filter: Record
  *             2026-11-02, {"status_type":"backlog","priority":"High"}.
  */
 export const READS: readonly Read[] = [
-  { name: "plain", role: "baseline", filter: {}, preferCurrent: false },
-  { name: "current", role: "baseline", filter: {}, preferCurrent: true },
-  { name: "filter", role: "baseline", filter: { status_type: "backlog", priority: "High" }, preferCurrent: false },
+  { name: "plain", filter: {}, preferCurrent: false },
+  { name: "current", filter: {}, preferCurrent: true },
+  { name: "filter", filter: { status_type: "backlog", priority: "High" }, preferCurrent: false },
 ];
+
+// ── The reads measured against the bar ──────────────────────────────────────
+
+/** What a measured read is handed for one prompt: the store, the prompt's key and words (never its gold), and its stub vector. */
+export type MeasureInput = { store: SqlStore; prompt: Pick<Prompt, "key" | "query">; embedding: number[] };
+
+/**
+ * A read measured against the bar: any function from a prompt to thought ids,
+ * best first (the top READ_K are scored), so a read that is not a hybrid
+ * search (SMD-3669's agenda) fits as well as one that is (SMD-3668's
+ * priority_weight). One that errors on a prompt scores it false, false, 0 —
+ * the bar's edge case — and the run lists the error. Outside the registered
+ * section: adding the read under test is not a change to what it is judged by.
+ * It reads what a deployed read could: the database. Never PROMPTS' gold or
+ * ITEMS' facts, which are the answer's side; the self-check refuses a
+ * MEASURED entry naming either.
+ */
+export type MeasuredRead = { name: string; ticket: string; run: (input: MeasureInput) => Promise<readonly string[]> };
+
+/** The reads under measurement. Empty until SMD-3668 or SMD-3669 lands one; each joins here with its ticket. */
+export const MEASURED: readonly MeasuredRead[] = [];
+
+/** This file's MEASURED entries, as source text: what the self-check reads for a reference to the answer's side. */
+export function measuredSource(text: string): string {
+  const src = text.replace(/\r\n/g, "\n");
+  const from = src.indexOf("\nexport const MEASURED:");
+  const to = src.indexOf("\n// ── ", from + 1);
+  return from < 0 ? "" : src.slice(from, to < 0 ? undefined : to);
+}
 
 // ── The dogfood rows ────────────────────────────────────────────────────────
 
@@ -508,12 +571,13 @@ export function isDay(n: unknown): boolean {
 }
 
 /**
- * The read names a dogfood row may use: the seeded set's reads, and
+ * The read names a dogfood row may use: the seeded set's reads (baseline and
+ * measured), and
  * `ticket_rows` — search filtered to board-sync's ticket rows alone, the
  * 2026-10-14 session's second read. A new name is added here with what it
  * is, so rows stay comparable read by read.
  */
-export const DOGFOOD_READS: readonly string[] = [...READS.map((r) => r.name), "ticket_rows"];
+export const DOGFOOD_READS: readonly string[] = [...READS.map((r) => r.name), ...MEASURED.map((r) => r.name), "ticket_rows"];
 
 /** What is wrong with the fixture's rows, as read from the file: not an array, or a row's problems. Never throws. */
 export function dogfoodProblems(raw: unknown): string[] {
@@ -524,7 +588,8 @@ export function dogfoodProblems(raw: unknown): string[] {
     if (!r || typeof r !== "object") { out.push(`row ${i + 1}: not an object`); return; }
     const at = `row ${i + 1} (${r.date ?? "?"})`;
     if (!isDay(r.date)) out.push(`${at}: date is not a YYYYMMDD day`);
-    if (i > 0 && r.date < rows[i - 1].date) out.push(`${at}: rows are not in date order`);
+    const prev = i > 0 ? rows[i - 1] : null;
+    if (prev && typeof prev === "object" && typeof prev.date === "number" && r.date < prev.date) out.push(`${at}: rows are not in date order`);
     if (!ticketNumber(r.pick)) out.push(`${at}: pick is not a ticket number`);
     if (r.picked_instead !== null && !ticketNumber(r.picked_instead)) out.push(`${at}: picked_instead is not a ticket number`);
     if (r.picked_instead === r.pick) out.push(`${at}: picked_instead is the pick itself`);
@@ -546,12 +611,19 @@ export function dogfoodProblems(raw: unknown): string[] {
  * What each baseline read scored at REGISTERED_CORPUS, recorded (main
  * 8aa855f1, 2026-11-02): top-1 and top-3 as prompt counts, mean tau to three
  * places. `--seeded` fails when a run differs, so a change to search on main
- * that moves the baseline — and with it the bar — is seen, and re-recorded
- * here with the main it was measured on, not absorbed.
+ * that moves the baseline is seen, not absorbed.
+ *
+ * A record of today's main, not part of the registration. The verdict always
+ * compares a measured read with the baselines measured in the same run, on
+ * the same main, so the bar's rule (BAR, pre-registered) holds whatever main
+ * search does; this record says when the numbers it is applied to moved. A
+ * re-record changes this line and appends a dated row to evals/README.md's
+ * baseline section, naming the main and the change that moved it; the rows
+ * before stay as they were measured.
  */
 export const BASELINE: Readonly<Record<string, { top1: number; top3: number; tau: number }>> = {
-  plain: { top1: 1, top3: 2, tau: 0.261 },
-  current: { top1: 1, top3: 2, tau: 0.3 },
+  plain: { top1: 1, top3: 2, tau: 0.252 },
+  current: { top1: 1, top3: 2, tau: 0.212 },
   filter: { top1: 0, top3: 0, tau: 0.055 },
 };
 

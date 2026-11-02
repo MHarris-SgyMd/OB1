@@ -4397,13 +4397,19 @@ computed from `docs/priority.md`'s weights.
   meeting, a home-maintenance task two weeks overdue, an action item done last week, and four pieces of chatter,
   which are the newest rows.
 * **A small board:** an Urgent ticket that blocks another, a High, a claimed High, a blocked High, a Medium, a Low, a
-  Done and a "No priority".
+  Done and a "No priority". Each is a Linear issue run through board-sync's own adapter (`db/ingest-linear.ts`'s
+  `renderIssue` for the text, `issueFacets` for the metadata), so a read finds it as it finds a synced ticket.
 
-Each item also carries the facts a later read will need (a due offset, a stated level, done, claimed, the blocks
-links), so SMD-3663 to SMD-3669 are seeded from the corpus the baseline was measured on. A hash pins the corpus and
-`priority.ts` from the stub embedder through the reads, as source text with LF line endings: the stub (noise weights
-included), the score, the mutant, the bar and the reads' knobs. Changing any of them, a comment included, is a new
-registration with its baseline re-run, never an edit.
+Each item also states the facts its gold rests on (a due offset, a stated level, done, claimed, the blocks links).
+Today's rows carry only what main's reads read: the text, and a board row's facets. A later read's PR plants the
+facts its own store reads (SMD-3663's assertions, a claim in `work_claims`, Linear's blocks relations through
+board-sync's links) by extending the seeding. A read never takes them from `ITEMS`, which is the answer's side.
+
+A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
+line endings: the stub (noise weights included), the seeding, the baseline call, the score, the mutant, the bar and
+the baseline reads' knobs. Changing any of them, a comment included, is a new registration with its baseline re-run,
+never an edit. The bar's three numbers also have a pin of their own: changing them is a decision recorded on
+SMD-3662, never part of a re-registration.
 
 **The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
 sit at a cosine of about 0.4, as unrelated texts do under a real model. A small hashed noise axis breaks ties
@@ -4417,9 +4423,16 @@ model's.
 * `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
 
 The self-check reads the knobs from `core/reads.ts` and from `search_thoughts`' own block of `core/schemas.ts` (its
-`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift. A measured read (a
-priority read, once one lands) that errors on a prompt scores it false, false, 0, as the bar says, and the run lists
-the error.
+`limit`, `threshold`, `recency_weight` and `prefer_current` defaults), so neither can drift.
+
+**A priority read joins `MEASURED`** in `priority.ts`, outside the hashed section, so adding the read under test is
+not a new registration. It is any function from a prompt's key and words, plus the store and the query's vector, to
+thought ids best first. A search knob fits (SMD-3668's `priority_weight`), and so does a read that isn't a search
+(SMD-3669's agenda). It never sees the gold, and the self-check refuses a `MEASURED` entry that names the gold or
+the items' facts. The run prints each measured read's verdict against the baselines of the same run. A measured read
+that errors on a prompt scores it false, false, 0, as the bar says, and the run lists the error; its verdict doesn't
+fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
+read exists.
 
 **The score.** For each prompt:
 * **top-1:** the gold's first item is the read's first hit;
@@ -4472,17 +4485,17 @@ These edge cases are fixed in advance:
 * a read with a weight is measured once, at the value it would ship with;
 * the dogfood rows are reported beside the verdict and don't gate it.
 
-**Baseline, 2026-11-02** (main 8aa855f1, registration `5ba651be0fd4f447`; deterministic, two runs identical; the
+**Baseline, 2026-11-02** (main 8aa855f1, registration `163903542bba2260`; deterministic, two runs identical; the
 program's output, verbatim):
 
 | read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
 | --- | --- | --- | --- | --- | --- |
-| plain | 0.143 | 0.286 | 0.261 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
-| current | 0.143 | 0.286 | 0.300 | 0.085 / 0.147 / -0.003 | 0.085 / 0.149 / 0.000 |
-| filter | 0.000 | 0.000 | 0.055 | 0.000 / 0.075 / -0.005 | 0.000 / 0.078 / 0.000 |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
 | gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
 
-So a priority read must get top-1 on at least 5 of 7 prompts and a mean tau of at least 0.550, and keep
+So a priority read must get top-1 on at least 5 of 7 prompts and a mean tau of at least 0.502, and keep
 `highest-value` and `due-soon` in the top 3.
 
 What the baseline gets wrong:
@@ -4491,7 +4504,12 @@ What the baseline gets wrong:
   attention this week?" it puts a documentary first and the insurance claim, done last week, second.
 * **`prefer_current`** moves only the Done ticket down. The insurance claim's note says it's done but has no lifecycle
   of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
-* **The filter** returns the two High backlog tickets for every prompt, the blocked one first, and nothing personal.
+* **The filter** returns the two High backlog tickets for every prompt, one of them blocked, and nothing personal.
+
+`priority.ts`'s `BASELINE` records these numbers, and the run fails when one moves. That is a record of today's main,
+not part of the registration: the verdict always compares a measured read with the baselines of the same run. A
+re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
+before it stay as they were measured.
 
 **The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
 numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
