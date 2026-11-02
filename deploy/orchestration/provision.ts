@@ -826,7 +826,7 @@ function fakeN8n() {
  *   - a mint whose env write fails;
  *   - a rate-limited sign-in, a custom email, and an over-long password.
  */
-async function selfCheck(): Promise<number> {
+async function selfCheckIn(scratch: string): Promise<number> {
   const fails: string[] = [];
   const expect = (what: string, ok: boolean) => { if (!ok) fails.push(what); };
   const throws = (fn: () => unknown, re: RegExp) => { try { fn(); return false; } catch (e) { return re.test(String((e as Error).message)); } };
@@ -873,9 +873,6 @@ async function selfCheck(): Promise<number> {
   expect("keyExpiry reads exp", keyExpiry(jwt({ exp: 1_900_000_000 })) === 1_900_000_000);
   expect("keyExpiry is null without exp, or for a non-JWT", keyExpiry(jwt({ sub: "x" })) === null && keyExpiry("not-a-jwt") === null);
 
-  // The env files the checks below write go in a directory of their own, not this one in the checkout: a run
-  // killed midway leaves nothing in the tree, and a read-only checkout runs it (SMD-3639).
-  const scratch = mkdtempSync(join(tmpdir(), "ob1-provision-check-"));
   const file = join(scratch, "check.env");
   const fresh = join(scratch, "check.new.env");
   try {
@@ -1180,10 +1177,22 @@ async function selfCheck(): Promise<number> {
     rmSync(keyFile, { force: true });
   }
 
-  rmSync(scratch, { recursive: true, force: true });
   for (const x of fails) console.error(`FAIL ${x}`);
   console.log(fails.length ? `provision self-check: ${fails.length} failed` : "provision self-check: OK");
   return fails.length ? 1 : 0;
+}
+
+/**
+ * The self-check, its env files in a directory of their own, not this one in the checkout: a run killed midway
+ * leaves nothing in the tree, and a read-only checkout runs it. The directory goes on every path (SMD-3639).
+ */
+async function selfCheck(): Promise<number> {
+  const scratch = mkdtempSync(join(tmpdir(), "ob1-provision-check-"));
+  try {
+    return await selfCheckIn(scratch);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 if (import.meta.main && process.argv.includes("--self-check")) process.exit(await selfCheck());

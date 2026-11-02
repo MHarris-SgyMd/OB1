@@ -598,12 +598,18 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
 
   /** The migration files, read and hashed now; null (the problem printed) when their names collide. */
   function loadMigrations(): Migration[] | null {
-    // A suite's directory that is not one is refused as "No .sql files" is, not thrown (review pass 1).
-    if (coreDir !== MIGRATIONS_DIR && !statSync(coreDir, { throwIfNoEntry: false })?.isDirectory()) {
-      err(`${coreDir} is not a directory: the migrations directory a suite named (OB1_TEST_MIGRATIONS_DIR).`);
+    // A suite's directory it cannot list is refused as "No .sql files" is, not thrown: missing, a file, under a
+    // file or not readable (review passes 1 and 2).
+    let listed: string[];
+    try {
+      if (coreDir !== MIGRATIONS_DIR && !statSync(coreDir).isDirectory()) throw Object.assign(new Error(), { code: "ENOTDIR" });
+      listed = readdirSync(coreDir);
+    } catch (e) {
+      if (coreDir === MIGRATIONS_DIR) throw e;
+      err(`${coreDir} is not a directory this run can read (${(e as { code?: string }).code ?? "error"}): the migrations directory a suite named (OB1_TEST_MIGRATIONS_DIR).`);
       return null;
     }
-    const names = readdirSync(coreDir)
+    const names = listed
       .filter((f) => f.endsWith(".sql"))
       .sort(); // 001_, 002_, … lexical order is the intended order
     // The number is the file's identity — the order, and how prose names a file
@@ -1481,7 +1487,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // The database's name in a shell's single quotes, so a name with `$`, a backquote or a double quote pastes as itself (review pass 4: an identifier's double quotes ran a command substitution).
     const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
     // A suite's copy named as read (SMD-3639).
-    const path = opts.migrationsDir?.trim() ? join(resolve(opts.migrationsDir.trim()), file.name) : `db/migrations/${file.name}`;
+    const path = coreDir === MIGRATIONS_DIR ? `db/migrations/${file.name}` : join(coreDir, file.name);
     const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f ${path}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < ${path}`;
     try {
       const before = await state();

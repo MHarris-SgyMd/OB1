@@ -347,6 +347,9 @@ if (want("2")) {
   // The migrations copied, the copy's 002 edited, and both runs pointed at the copy: the tracked tree is never
   // written, so a run killed here leaves nothing changed, a second run from the same tree sees no drift, and a
   // read-only checkout runs it (SMD-3639).
+  // The tracked 002 as [2] found it, held unchanged at the end (review pass 2).
+  const tree002 = join(HERE, "migrations", "002_match_thoughts.sql");
+  const treeBefore = readFileSync(tree002, "utf8");
   const copy = mkdtempSync(join(tmpdir(), "ob1-live-migrations-"));
   /** A spawned run's environment: this one's, with OB1_TEST_MIGRATIONS_DIR set to `dir`. */
   const envWith = (dir: string) => {
@@ -357,6 +360,8 @@ if (want("2")) {
   try {
     cpSync(join(HERE, "migrations"), copy, { recursive: true });
     const target = join(copy, "002_match_thoughts.sql");
+    // cpSync keeps a read-only checkout's file modes; the copy is the suite's to edit.
+    chmodSync(target, 0o644);
     writeFileSync(target, readFileSync(target, "utf8") + "\n-- edited after being applied\n");
     const drifted = await runMigrator(URL_!, envWith(copy));
     assert(drifted.code === 1, "editing an applied migration exits 1");
@@ -378,7 +383,7 @@ if (want("2")) {
     rmSync(copy, { recursive: true, force: true });
   }
   const restored = await migrate();
-  assert(restored.code === 0 && !restored.stderr.includes("Migrations read from"), "the tree's own migrations, never written, show no drift, and a run given no directory names none");
+  assert(restored.code === 0 && !restored.stderr.includes("Migrations read from") && readFileSync(tree002, "utf8") === treeBefore, "the tree's own migrations, 002 as [2] found it, show no drift, and a run given no directory names none");
   // A blank setting is unset; a directory that is not there is refused by name, exit 2, as an empty one is (review pass 1).
   const blank = await runMigrator(URL_!, envWith(" "));
   assert(blank.code === 0 && !blank.stderr.includes("Migrations read from"), `a blank OB1_TEST_MIGRATIONS_DIR reads the tree's migrations and names no directory (exit ${blank.code})`);
