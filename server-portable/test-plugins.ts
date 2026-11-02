@@ -184,6 +184,9 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   const other = new URL(pluginLoginUrl("postgres://postgres:x@db:5432/openbrain", "other", secret));
   assert(other.username === "ob1_plugins_other" && other.password !== login.password && /^[0-9a-f]{64}$/.test(other.password) && pluginLoginPassword(`${secret}x`, "my-plugin") !== derived,
     "another plugin's login has a password of its own, and another secret gives another password");
+  // Trimmed, as the server's trimmedEnv reads it: the migrator and canary.sh read the variable untrimmed (review pass 4).
+  assert(pluginLoginPassword(` ${secret}\t\n`, "my-plugin") === derived && pluginLoginPassword(`${secret} `, "my-plugin") === pluginLoginPassword(secret, "my-plugin"),
+    "whitespace around the secret derives the same password, so a quoted value with a stray space still matches the servers'");
   let noHost = "";
   try { pluginLoginUrl("postgres:///brain?host=/var/run/postgresql", "p", "s"); } catch (e) { noHost = (e as Error).message; }
   assert(/names no host/.test(noHost), `a URL with no host is refused, not left as the server's own login (${noHost})`);

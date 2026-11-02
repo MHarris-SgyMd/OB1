@@ -222,8 +222,8 @@ only when the core's are clean:
   logged in as a login role of its own, `ob1_plugins_<name>`: LOGIN,
   NOINHERIT, no superuser, holding `SET` on its own plugin's role and nothing
   else. Its password is derived from `OB1_PLUGIN_DB_PASSWORD`, the one secret
-  in `deploy/.env`: the hex HMAC-SHA256 of the role's name under it
-  (`db/config.mjs`'s `pluginLoginPassword`). A run makes the role with that
+  in `deploy/.env`: the hex HMAC-SHA256 of the role's name under it,
+  trimmed as the servers read it (`db/config.mjs`'s `pluginLoginPassword`). A run makes the role with that
   password when it is missing, and never changes an existing role's password:
   the servers log in with the one it was made with. A run that would apply a
   plugin's file, or make its login role, without the secret is refused before

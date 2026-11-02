@@ -1438,13 +1438,16 @@ export const SHARED_PLUGIN_LOGIN = "ob1_plugins";
  * A plugin's login password (SMD-2756): the HMAC-SHA256 of its login role's
  * name under the operator's one secret, OB1_PLUGIN_DB_PASSWORD, in hex. One
  * secret in deploy/.env gives every plugin a password of its own, and none of
- * them gives another, or the secret.
+ * them gives another, or the secret. The secret is trimmed here, as the
+ * server trims every value it reads (trimmedEnv, SMD-1843): the migrator,
+ * deploy/canary.sh and CI read it untrimmed, and a quoted `"…secret "` would
+ * otherwise make every login under a password the servers never derive.
  * @param {string} secret
  * @param {string} name
  * @returns {string}
  */
 export function pluginLoginPassword(secret, name) {
-  return createHmac("sha256", secret).update(pluginIdents(name).login).digest("hex");
+  return createHmac("sha256", secret.trim()).update(pluginIdents(name).login).digest("hex");
 }
 
 /**
