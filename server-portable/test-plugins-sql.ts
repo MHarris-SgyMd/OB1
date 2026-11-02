@@ -917,9 +917,13 @@ console.log("\n[13] A brain migrated under the one shared login moves over (SMD-
     const locker = new SQL({ url: URL_, max: 1 });
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });
-    const locking = locker.begin(async (tx: SQL) => { await tx.unsafe("COMMENT ON ROLE ob1_plugins IS 'held by an open transaction'"); await held; });
+    let locked: () => void = () => {};
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const locking = locker.begin(async (tx: SQL) => { await tx.unsafe("COMMENT ON ROLE ob1_plugins IS 'held by an open transaction'"); locked(); await held; });
     try {
-      await Bun.sleep(200);
+      // Waited for, not slept on: the drop must meet the lock, and a sleep races a slow runner (review pass 5).
+      // Raced with the transaction itself, so a COMMENT that fails ends the wait rather than hanging it.
+      await Promise.race([isLocked, locking]);
       const blocked = await runMigrate({});
       const still = await shared();
       assert(blocked.code === 1 && blocked.err.includes("  ✗  ob1_plugins could not be dropped: ") && still.present && still.can_login === true && still.holds === `ob1_plugin_example,${role}`,
