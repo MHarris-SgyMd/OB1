@@ -575,14 +575,14 @@
  *      (SMD-2094). A job that calls a reusable workflow is passed over, since
  *      GitHub takes no limit there. Its probe pins what it refuses and passes
  *  49. this file's own check numbers hold together: no number listed here
- *      twice; every check's header (a `// ──` or `// ---- Check` separator,
- *      or a docblock opening ` * N: `) names a listed check, a lettered
- *      sub-check by its listed base, and every listed check has one; one
- *      check's headers sit together, so a number with headers at two places
- *      is two checks; every check this file cites (`check N`, `checks N, M
- *      and K`, each number of `N to M`) is listed; and a message that speaks
- *      as a check — `(check N, SMD-…)`, a `fail(SELF, …)` opening `check N`,
- *      a line naming one that says "its own probe" — sits in that check's
+ *      twice; every check's header (a `// ──` or `// ---- Check` separator, or
+ *      a docblock opening ` * N: `) names a listed check, a lettered sub-check
+ *      by its listed base, and every listed check has one; one check's headers
+ *      sit together, so a number with headers at two places is two checks;
+ *      every check this file cites (`check N`, `checks N, M and K`, each number
+ *      of `N to M` or `N–M`) is listed; and a message that speaks as a check —
+ *      `(check N, SMD-…)`, a string opening `check N`, a line naming one that
+ *      says "its own probe" or "its own non-probe" — sits in that check's
  *      section, so a renumber that missed it fails; CROSS_SECTION_MESSAGES
  *      names the one that reports for another check, and a stale entry fails
  *      (SMD-3658: two PRs took 45, then two took 47, within a day). Its probe
@@ -10512,41 +10512,42 @@ checkJobTimeouts();
 /**
  * 49: this file numbers its checks three ways — the list above ` * Run:` (` *  N. `), each check's header (a `// ──`
  * or `// ---- Check` separator, or a docblock that opens ` * N: `) and each place it cites one (`check N`, `checks N,
- * M and K`, `N to M`) — and nothing held the numbers apart. Within a day (2026-11-01 and 11-02) two PRs each added a
- * check 45, then two more each a check 47; each pair was caught only because both PRs added at the same places (the
- * list's end, and for 47 after check 46's section too) and conflicted (SMD-3658), where placed apart they would have
- * merged clean. So no number is listed twice; a header names listed checks (`1 + 2` names two, `16–17` each from 16
- * to 17), a lettered sub-check (5b, 17a–17e) counting by its listed base; each listed check has a header; one check's
- * headers sit within HEADER_SITE lines of each other (a separator and the docblock under it, five apart at the most
- * today, for 16), so headers for one number further apart are two checks; each number cited is listed, by its base,
- * each in a range. And a message that speaks as a check sits in that check's section, so a renumber that moved the
- * headers and missed a message fails: `(check N, SMD-…)`, a `fail(SELF, …)` message opening `check N`, and a line
- * naming check N that says "its own probe" or "its own non-probe" — 201 messages today, all in their own section but
- * the one CROSS_SECTION_MESSAGES names with why (an entry there no message needs fails), and none outside every
- * section; one naming its check in other words is not read. It reads this file's own text, and not any other file
- * that cites a check by number; prose that reads as a citation or a header fails loudly and is reworded, as does a
- * numbered docblock that is no check's header. Its probe runs on small texts in the same shape.
+ * M and K`, `N to M`, `N–M`) — and nothing held the numbers apart. Within a day (2026-11-01 and 11-02) two PRs each
+ * added a check 45, then two more each a check 47; each pair was caught only because both PRs added at the same
+ * places (the list's end, and for 47 after check 46's section too) and conflicted (SMD-3658), where placed apart they
+ * would have merged clean. So no number is listed twice; a header names listed checks (`1 + 2` names two, `16–17`
+ * each number from 16 to 17), a lettered sub-check (5b, 17a–17e) counting by its listed base; each listed check has a
+ * header; one check's headers sit within HEADER_SITE lines of each other (a separator and the docblock under it, five
+ * apart at the most today, for 16), so headers for one number further apart are two checks; each number cited is
+ * listed, by its base, each in a range. And a message that speaks as a check sits in that check's section, so a
+ * renumber that moved the headers and missed a message fails: `(check N, SMD-…)`, a string opening `check N` (a
+ * fail()'s message, an Error's, a const's), and a line naming check N that says "its own probe" or "its own
+ * non-probe" — 216 messages today, all in their own section but the one CROSS_SECTION_MESSAGES names with why (an
+ * entry there no message needs fails), and none outside every section; one naming its check in other words is not
+ * read. It reads this file's own text, and not any other file that cites a check by number; prose that reads as a
+ * citation or a header fails loudly and is reworded, as does a numbered docblock that is no check's header. Its probe
+ * runs on small texts in the same shape.
  */
 const HEADER_SITE = 10;
 const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
 const checkBase = (n: string) => n.replace(/[a-z]$/, "");
 /** [the section, the check its message speaks as, why]: messages that report for a check other than their section's. */
 const CROSS_SECTION_MESSAGES: [string, string, string][] = [
-  ["37", "38", "check 37 holds lgtm's labels, the alert rules' sha among them, so it reports their file missing as check 38's"],
+  ["37", "38", "lgtm's labels, which check 37 holds, carry the alert rules' sha, so it reports their file missing as check 38's"],
 ];
 /** The checks a range or list names: `16–17` and `6 to 8` each number from one end to the other, `1 + 2` each named. */
 function namedChecks(spec: string): string[] {
-  return spec.split(/\s*(?:,|\+| and | or )\s*/).flatMap((part) => {
+  return spec.split(/\s*(?:,\s*(?:and|or)\s+|,|\+|\s+and\s+|\s+or\s+)\s*/).flatMap((part) => {
     const range = part.trim().match(/^(\d+)\s*(?:to|–|-)\s*(\d+)$/);
     const from = range ? Number(range[1]) : NaN, to = range ? Number(range[2]) : NaN;
     if (range && to >= from && to - from <= 100) return Array.from({ length: to - from + 1 }, (_, k) => String(from + k));
     return part.split(/\s*(?: to |–|-)\s*/).map((t) => t.trim()).filter((t) => CHECK_NUMBER_WORD.test(t));
   });
 }
-/** The checks a line's messages speak as: `(check N, SMD-…)`, a fail(SELF, …) opening `check N`, a probe-message line. */
+/** The checks a line's messages speak as: `(check N, SMD-…)`, a string opening `check N`, a probe-message line. */
 function speakingAs(line: string): string[] {
   const out = new Set<string>();
-  for (const m of line.matchAll(/\(check (\d+[a-z]?), SMD-|fail\(SELF, [`"']check (\d+[a-z]?)\b/g)) out.add(m[1] ?? m[2]);
+  for (const m of line.matchAll(/\(check (\d+[a-z]?), SMD-|[`"']check (\d+[a-z]?)\b/g)) out.add(m[1] ?? m[2]);
   const probe = /its own (?:non-)?probe/.test(line) ? line.match(/\bcheck (\d+[a-z]?)\b/) : null;
   if (probe) out.add(probe[1]);
   return [...out];
@@ -10568,7 +10569,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
   const used = new Set<string>();
   let section: string[] = [];
   lines.forEach((l, i) => {
-    const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*(?:[+–-]|to)\s*\d+[a-z]?)*)\s*[:.]/i);
+    const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*(?:[+–-]|to)\s*\d+[a-z]?)*)\s*[:.]/);
     const docblock = i > 0 && /^\/\*\*\s*$/.test(lines[i - 1]) ? l.match(/^ \* (\d+[a-z]?(?:\s*[+–-]\s*\d+[a-z]?)*): /) : null;
     const spec = separator?.[1] ?? docblock?.[1];
     if (spec) {
@@ -10576,14 +10577,15 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
       for (const n of section) (sites.get(n) ?? sites.set(n, []).get(n)!).push(i + 1);
     } else if (/^\/\/ (?:──|----)/.test(l)) section = []; // a separator naming no check ends the section
     for (const speaks of speakingAs(l)) {
-      if (!section.length) { problems.push([i + 1, `a message speaks as check ${speaks} outside any check's section — move it under its check's header (SMD-3658)`]); continue; }
+      if (!section.length) { problems.push([i + 1, `a message speaks as check ${speaks} outside any check's section — move it under its check's header, give its section a check header, or reword it (SMD-3658)`]); continue; }
       if (section.some((s) => checkBase(s) === checkBase(speaks))) continue;
       const allowed = crossSection.find(([s, c]) => section.some((x) => checkBase(x) === s) && checkBase(speaks) === c);
       if (allowed) used.add(`${allowed[0]}>${allowed[1]}`);
       else problems.push([i + 1, `a message in check ${section.join(" + ")}'s section speaks as check ${speaks} — a renumber that moved the headers and missed this message, or a message in the wrong section (SMD-3658)`]);
     }
   });
-  for (const [s, c] of crossSection) if (!used.has(`${s}>${c}`)) problems.push([1, `CROSS_SECTION_MESSAGES names a check ${s} message speaking as check ${c}, and none does now — take it off (SMD-3658)`]);
+  const crossAt = lines.findIndex((l) => /^const CROSS_SECTION_MESSAGES\b/.test(l)) + 1 || 1;
+  for (const [s, c] of crossSection) if (!used.has(`${s}>${c}`)) problems.push([crossAt, `CROSS_SECTION_MESSAGES names a check ${s} message speaking as check ${c}, and none does now — take it off (SMD-3658)`]);
   for (const [n, at] of sites) {
     if (!isListed(n, listed)) problems.push([at[0], `a header names check ${n}, which the list above \` * Run:\` does not hold — list it, or give it the number its list entry holds (SMD-3658)`]);
     const elsewhere = at.find((l) => l - at[0] > HEADER_SITE);
@@ -10593,7 +10595,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
     if (![...sites.keys()].some((h) => h === n || checkBase(h) === n)) problems.push([at, `the list holds check ${n}, but no header names it — open its section with a \`// ── ${n}: …\` separator or a docblock opening \` * ${n}: …\` (SMD-3658)`]);
   }
   lines.forEach((l, i) => {
-    for (const m of l.matchAll(/\bchecks? (\d+[a-z]?(?:(?:, | and | or | to |–)\d+[a-z]?)*)\b/gi)) {
+    for (const m of l.matchAll(/\bchecks? (\d+[a-z]?(?:(?:, and |, or |, | and | or | to |–|-)\d+[a-z]?)*)\b/gi)) {
       for (const n of namedChecks(m[1])) if (!isListed(n, listed)) problems.push([i + 1, `cites check ${n}, which the list above \` * Run:\` does not hold — a renumbered or mistyped check (SMD-3658)`]);
     }
   });
@@ -10603,7 +10605,8 @@ function checkCheckNumbers() {
   const list = (...ns: string[]) => `/**\n${ns.map((n) => ` *  ${n}. a check\n`).join("")} *\n * Run: bun probe.ts\n */\n`;
   const section = (n: string) => `\n// ── ${n}: a check ──\n/**\n * ${n}: what it holds\n */\nfunction f() {}\n`;
   const message = (n: string) => `fail(x, "it is wrong (check ${n}, SMD-1)");\n`;
-  // 30 blank lines put the two separators 38 apart: a HEADER_SITE of 38 or more passes this case and fails the probe.
+  // 30 blank lines put the second section's docblock 38 lines past the first separator (the separators 36 apart): a
+  // HEADER_SITE of 38 or more passes this case and fails the probe.
   const apart = "\n".repeat(30);
   const crossProbe: [string, string, string][] = [["37", "38", "the probe's own"]];
   // [why, text, what each problem it reports says, the CROSS_SECTION_MESSAGES the case reads]: none for a pass.
@@ -10630,11 +10633,14 @@ function checkCheckNumbers() {
     ["a fail(SELF, …) message opening with another listed check", `${list("1", "2")}${section("1")}fail(SELF, \`check ${2} no longer finds it\`);\n${section("2")}`, [WRONG_SECTION]],
     ["an own-probe line naming another listed check", `${list("1", "2")}${section("1")}fail(SELF, \`its rule for check ${2} is broken (its own probe)\`);\n${section("2")}`, [WRONG_SECTION]],
     ["a message after a separator naming no check", `${list("1")}${section("1")}\n// ── shared helpers ──\n${message("1")}`, [OUTSIDE]],
+    ["a fail() for a file opening with another listed check", `${list("1", "2")}${section("1")}fail(rel, "check ${2}'s rule refuses it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a hyphen range with a number the list lacks", `${list("1", "3")}${section("1")}${section("3")}// see checks ${1}-${3}\n`, [UNLISTED_CITE]],
+    ["a list with an Oxford comma naming a check the list lacks", `${list("1", "3")}${section("1")}${section("3")}// see checks ${1}, ${3}, and ${2}\n`, [UNLISTED_CITE]],
     ["a cross-section entry no message needs", `${list("1")}${section("1")}`, [STALE], crossProbe],
   ];
   const wrong = cases.map(([why, text, says, cross]) => ({ why, says, got: checkNumberProblems(text, cross ?? []).map((p) => p[1]) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
-  if (wrong.length) fail(SELF, `check 49 no longer reads its probe as written (${JSON.stringify(wrong)}): a number listed twice, headers for one number at two places (a HEADER_SITE of 38 or more passes that case), a header or citation naming an unlisted check (in a range, any number of it), a listed check with no header, a message in any of the three forms speaking as another check than its section's or outside every section, and a cross-section entry no message needs fail; a separator in each shape or a docblock as a header, a combined or ranged one, a lettered sub-check and its citation, a cited range all listed, a wrapped list line (no entry), each section's own messages, a named cross-section message, and the end of a section at an unnumbered separator pass (SMD-3658)`);
+  if (wrong.length) fail(SELF, `check 49 no longer reads its probe as written (${JSON.stringify(wrong)}): a number listed twice, headers for one number at two places (a HEADER_SITE of 38 or more passes that case), a header or citation naming an unlisted check (in a range, any number of it), a listed check with no header, a message in any of the three forms (a fail() for a file among them) speaking as another check than its section's, a message after a separator naming no check (outside every section), a hyphen range or an Oxford-comma list reaching an unlisted check, and a cross-section entry no message needs fail; a separator in each shape or a docblock as a header, a combined or ranged one, a lettered sub-check and its citation, a cited range all listed, a wrapped list line (no entry), each section's own messages and a named cross-section message pass (SMD-3658)`);
   for (const [line, msg] of checkNumberProblems(readFileSync(join(ROOT, SELF), "utf8"), CROSS_SECTION_MESSAGES)) fail(`${SELF}:${line}`, `${msg.replace(/ \(SMD-3658\)$/, "")} (check 49, SMD-3658)`);
 }
 checkCheckNumbers();
