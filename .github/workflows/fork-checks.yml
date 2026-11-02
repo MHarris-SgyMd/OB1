@@ -44,10 +44,14 @@ defaults:
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
 # lease, deadlock or container wait would otherwise hold the one required
 # check, "Fork Checks passed", pending for six hours. Each is at least three
-# times the job's longest run in the 100 before 2026-11-02 (data-layer's
-# 292 s the longest): 15 minutes for each job that ran past a minute, 5 for
-# the rest. A job at its limit is cancelled with its step in hand, which
-# names where it hung, and the aggregate reads it as failed (check 47,
+# times the job's longest successful run in the newest 400 Fork Checks runs
+# on any branch as of 2026-11-02 (back to 10-22), rounded up to five minutes:
+# deploy-stack's 505 s the longest. That leaves out a registry slowdown on
+# 10-28, when portable-server took 29 minutes, 19 of them one bun install;
+# its 20 would cut that and a re-run would follow, as for a hang. A job at
+# its limit is cancelled with its step in hand, which names where it hung,
+# and the aggregate fails; the run then reads "cancelled", as a superseded
+# one does, and the job's annotation says it hit its limit (check 47,
 # SMD-2094).
 
 concurrency:
@@ -58,7 +62,7 @@ jobs:
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,8 +103,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40 and 44 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
+      # 32 to 38, 40, 44 and 47 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -171,7 +175,7 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -607,7 +611,7 @@ jobs:
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1362,7 +1366,7 @@ jobs:
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2662,7 +2666,7 @@ jobs:
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3508,7 +3512,7 @@ jobs:
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4636,7 +4640,7 @@ jobs:
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
