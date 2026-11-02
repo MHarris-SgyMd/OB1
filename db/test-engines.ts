@@ -713,6 +713,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   };
   const cases: [string, Record<string, unknown>, string[], string][] = [
     ["--budget past a week", { url: AT, budget: 10081 }, ["--url", AT, "--budget", "10081"], "--budget must be a decimal integer >= 0 and <= 10080"],
+    // The pause's quiet (SMD-3379 PR 1c-3b): a second at least, a day at most.
+    ["--capture 0", { url: AT, capture: 0 }, ["--url", AT, "--capture", "0"], "--capture must be a decimal integer >= 1 and <= 86400"],
+    ["--capture past a day", { url: AT, capture: 86401 }, ["--url", AT, "--capture", "86401"], "--capture must be a decimal integer >= 1 and <= 86400"],
     ["--statement-timeout past a day", { url: AT, statementTimeout: 86401 }, ["--url", AT, "--statement-timeout", "86401"], "--statement-timeout must be a decimal integer >= 0 and <= 86400"],
     ["--work-mem 0", { url: AT, workMem: 0 }, ["--url", AT, "--work-mem", "0"], "--work-mem must be a decimal integer >= 1 and <= 2097151"],
     ["--maintenance-work-mem past Postgres's bound", { url: AT, maintenanceWorkMem: 2097152 }, ["--url", AT, "--maintenance-work-mem", "2097152"], "--maintenance-work-mem must be a decimal integer >= 1 and <= 2097151"],
@@ -758,6 +761,11 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   const [quietHook, pollHook, partHook] = [await thrown({ quietMs: 0 }), await thrown({ pollMs: 0.5 }), await thrown({ pollMs: 700.5 })];
   ok(/^RangeError: budgetMs must be/.test(hook) && /^RangeError: quietMs must be/.test(quietHook) && /^RangeError: pollMs must be/.test(pollHook) && /^RangeError: pollMs must be/.test(partHook),
      `…and a negative budgetMs, a quietMs of 0 and a pollMs of half a millisecond or of 700.5 are thrown, not run (${[hook, quietHook, pollHook, partHook].map((h) => h.slice(0, 40)).join(" | ")})`);
+  // The pause's hooks (SMD-3379 PR 1c-3b): a capture of 0 ms, and N12's bound below the stall floor — the
+  // shipped minute, or a test's own — where an abort would be a short stop and a thought never stall.
+  const [captureHook, belowFloor, belowOwnFloor] = [await thrown({ captureMs: 0 }), await thrown({ abortAfterMs: 59_999 }), await thrown({ abortAfterMs: 999, stallFloorMs: 1000 })];
+  ok(/^RangeError: captureMs must be/.test(captureHook) && /^RangeError: abortAfterMs must be .*>= 60000/.test(belowFloor) && /^RangeError: abortAfterMs must be .*>= 1000/.test(belowOwnFloor),
+     `…and a captureMs of 0, or an abortAfterMs below the stall floor, are thrown, not run (${[captureHook, belowFloor, belowOwnFloor].map((h) => h.slice(0, 60)).join(" | ")})`);
 }
 
 // config.mjs's embeddingContract: the constants' rule over any record — over
