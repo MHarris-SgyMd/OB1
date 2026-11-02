@@ -84,9 +84,9 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
   // The shared login (SMD-2756): from it, SQL that undid one plugin's role
   // could SET ROLE to any other's. The migrator retires it.
   const [shared] = (await sql`
-    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) AS held
+    SELECT string_agg(DISTINCT r.rolname, ', ' ORDER BY r.rolname) AS held
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN})`) as { held: string | null }[];
+     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AND starts_with(r.rolname, 'ob1_plugin_')`) as { held: string | null }[];
   if (shared?.held) problems.push(`the shared login role ${SHARED_PLUGIN_LOGIN} still holds ${shared.held}: SQL that undid one plugin's role there could reach every plugin's tables — a plain migrator run retires it`);
   if (!password) problems.push("OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as a plugin's login role");
   const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
