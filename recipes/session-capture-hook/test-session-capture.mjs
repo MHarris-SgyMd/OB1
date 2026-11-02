@@ -3082,7 +3082,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
 {
   // A brain with claims as migration 115 answers them through renew_claim:
   // "claim-key" is the holder's key, "other-claim-key" another agent's,
-  // "cap-key" sees capture_thought alone. A claim is live, released or taken over.
+  // "cap-key" sees capture_thought alone. A claim is live, released, taken over, covered, or answers oddly (the states below).
   const calls = [];
   const claims = new Map(); // id → { token, state }
   // rpcEnvelopeForMissingTool: answer a tool the key can't call as the real server does, a JSON-RPC -32602 error
@@ -3286,7 +3286,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   rmSync(CLAIMS);
   mkdirSync(CLAIMS);
 
-  // Lapsed while another claim covers its work, the registry away, an input the brain refuses, and a brain echoing the call: kept, the token masked (review pass 1).
+  // Lapsed while another claim covers its work (blocked, review pass 4), the registry away, an input the brain refuses, and a brain echoing the call (kept, the token masked, review pass 1): none of them ends the claim.
   putClaim(20, {}, "covered");
   putClaim(21, {}, "unattributed");
   putClaim(22, {}, "badinput");
@@ -3526,7 +3526,7 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   assert(!renews().length, "a session outside any worktree, or with no cwd, renews nothing");
   clearClaims();
 
-  // Several brains: the claim's "server" picks the brain whose connector it is; with none named and two claim keys, none.
+  // Several brains: the claim's "server" picks the brain whose connector it is; a token file without one is skipped.
   const MULTI_CFG = join(TMP, "claims-multi.json");
   writeFileSync(MULTI_CFG, JSON.stringify({ brains: [
     { name: "stable", url: CLAIMS_URL, key: "cap-key", connector: "open-brain", claim_key: "claim-key" },

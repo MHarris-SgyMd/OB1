@@ -2847,7 +2847,11 @@ async function kickWriteDrains(brains, { atEnd = false } = {}) {
 // prompts arrive. It never claims (a branch for a ticket and a scratch branch
 // look alike) and never releases (a session can end with its PR open): a claim
 // ends at its release, or lapses when nothing renews it. The agent renews too;
-// the hook is the backstop.
+// the hook is the backstop. What the agent must hear, it leaves beside the token
+// file: `<id>.ended.json` when the claim ended, `<id>.blocked.json` when another
+// claim covered its work, at a renewal of the hook's or the agent's own (read
+// from the claims hook's PostToolUse), or while it lapsed — checked before the
+// hook revives a claim it knows lapsed (lapseCheck).
 
 export const CLAIMS_DIRNAME = ".work-claims";
 const CLAIM_TOKEN_RE = /^wc_[0-9a-f]{64}$/i;
