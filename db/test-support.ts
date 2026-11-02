@@ -1338,7 +1338,6 @@ export const CONTRIB_DIR = join(HERE, "..");
  * entity-extraction's tables, so the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
-  "extensions/family-calendar/schema.sql",
   "extensions/home-maintenance/schema.sql",
   "extensions/household-knowledge/schema.sql",
   "extensions/job-hunt/schema.sql",

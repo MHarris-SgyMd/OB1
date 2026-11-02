@@ -1,0 +1,20 @@
+{
+  "name": "Family Calendar Plugin",
+  "description": "The household's members, their weekly and dated activities, and the dates to remember, in tables of the plugin's own: the week's schedule, a search over activities, and upcoming dates with yearly ones on their next anniversary. The learning path's Extension 3, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": ["plugin", "family", "calendar", "scheduling", "kids", "logistics"],
+  "difficulty": "intermediate",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-02",
+  "updated": "2026-11-02"
+}

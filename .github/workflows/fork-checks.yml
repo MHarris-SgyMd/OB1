@@ -1252,6 +1252,16 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The extensions ported to plugins (SMD-2311): each plugin's tables made
+      # in its own schema, every operation driven through the REST core and
+      # the MCP server behind each key's scope, and a drift guard that fails
+      # an operation no section drives.
+      - name: The ported extensions' plugins answer through both servers
+        working-directory: server-portable
+        run: bun test-plugin-ports.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # The fully local path: both model calls go to a configured endpoint with no
       # credential, and a wrong-width vector is refused rather than stored.
       - name: Local model provider, no OpenRouter

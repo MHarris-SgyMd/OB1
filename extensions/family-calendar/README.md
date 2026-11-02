@@ -19,116 +19,60 @@ Two kids, two parents, overlapping schedules. Soccer practice conflicts with the
 
 - Multi-entity data models (family members → activities relationship)
 - Time-based queries and date handling
-- Recurring events (weekly activities with day_of_week)
+- Recurring events (weekly activities with day_of_week, and yearly dates on their next anniversary)
 - Nullable foreign keys (activities can belong to one person or the whole family)
 - Querying across date ranges
-
-> **Note:** No extension in this fork uses Row Level Security — every server scopes rows by `DEFAULT_USER_ID` (SMD-1810; the [RLS primitive](../../primitives/rls/) explains what upstream's Extension 4 enforced with it). Extension 4 (Meal Planning) is where a second person first gets access, through a shared server with its own key list.
 
 ## What It Does
 
 A multi-person family scheduling system. Track activities, important dates, and family members so your agent can spot conflicts, surface upcoming events, and make sure nothing gets forgotten.
+
+On this fork the family calendar is a **plugin**: [`plugins/family-calendar`](../../plugins/family-calendar/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_family_calendar`, which the brain's migrator makes when you turn the plugin on.
 
 **Tables:**
 - `family_members` — People in your household
 - `activities` — Scheduled events and recurring activities (soccer every Tuesday, one-time dentist appointment)
 - `important_dates` — Birthdays, anniversaries, deadlines with optional yearly recurrence
 
-**MCP Tools:**
-- `add_family_member` — Add a person to your household roster
-- `add_activity` — Schedule a one-time or recurring activity
-- `get_week_schedule` — See everyone's schedule for a given week
-- `search_activities` — Find activities by title, type, or family member
-- `add_important_date` — Track birthdays, anniversaries, deadlines
-- `get_upcoming_dates` — Surface dates in the next N days
+**Tools** (each also a REST route under `/v1/plugins/family-calendar/`):
+- `family_calendar_add_family_member` — Add a person to your household roster
+- `family_calendar_add_activity` — Schedule a one-time or recurring activity
+- `family_calendar_get_week_schedule` — See everyone's schedule for a given week
+- `family_calendar_search_activities` — Find activities by title, type, member or member's name
+- `family_calendar_add_important_date` — Track birthdays, anniversaries, deadlines
+- `family_calendar_get_upcoming_dates` — Surface dates in the next N days, yearly ones on their next anniversary
+
+The plugin's [README](../../plugins/family-calendar/README.md) gives each one's input, output and refusals.
 
 ## Prerequisites
 
-- Working Open Brain setup
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-2 recommended but not required
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
-
-```text
-FAMILY CALENDAR -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-GENERATED DURING SETUP
-  Default User ID:       ____________
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
-```
 
 ## Steps
 
-### 1. Create the Database Schema
+### 1. Turn on the Plugin
 
-Run the SQL in `schema.sql` against your Open Brain database — a plain Postgres, or Supabase's (the schema has no row-level security, so it needs nothing Supabase-specific):
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-```bash
-# Option A: psql, against the database the server will use
-psql "$DATABASE_URL" -f extensions/family-calendar/schema.sql
-
-# Option B: if your Postgres is Supabase's, paste the contents of schema.sql into
-# its SQL Editor (https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new) and Run
+```
+OB1_PLUGINS=family-calendar
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
 ```
 
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+docker compose up -d migrate api mcp
 ```
 
-Set it in the server's environment (Step 3):
+The migrator makes the plugin's tables, and the servers start with its six tools.
 
-```bash
-export DEFAULT_USER_ID=your-generated-uuid-here   # or on the command line in Step 3
-```
+### 2. Check Your AI Sees It
 
-> If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
+Your MCP client lists the `family_calendar_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the three that read. A write key sees all six.
 
-### 3. Run the MCP Server
-
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74; SMD-1798 moved this server, the week's schedule being the one query whose grouped `.or()` the shim did not read until then). From a checkout of this repository:
-
-```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/family-calendar/index.ts
-```
-
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request.
-
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — the week's schedule through the grouped `.or()`, the family member embedded on every activity and important date, the upcoming-dates window (SMD-1798).
-
-### 4. Connect to Your AI
-
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Family Calendar` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test It
+### 3. Test It
 
 Try these prompts:
 
@@ -146,7 +90,7 @@ What important dates are coming up in the next 30 days?
 
 ## Cross-Extension Integration
 
-The family calendar sets up the `family_members` table that Meal Planning (Extension 4) depends on — knowing who's home this week determines how many meals to plan.
+The family calendar sets up the `family_members` table that Meal Planning (Extension 4) depends on — knowing who's home this week determines how many meals to plan. Each plugin's tables are its own, so your agent connects the two: it reads the week here, then plans meals there.
 
 The multi-entity pattern (family_member → activities) is the same pattern you'll use for contacts → interactions in the Professional CRM (Extension 5).
 
@@ -164,14 +108,18 @@ Your agent can now:
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/family-calendar/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
+**No `family_calendar_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `family-calendar`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
+
 **Activities not showing up in get_week_schedule**
-- Check that `start_date` and `end_date` are set correctly
-- For recurring activities, make sure `day_of_week` is lowercase ('monday', not 'Monday')
-- The week_start date should be a Monday in YYYY-MM-DD format
+- Check that `start_date` and `end_date` are set correctly: a weekly activity whose dates ended before the week is left out
+- `day_of_week` is a lower-case day name ('monday', not 'Monday'); a capitalised one is refused when the activity is added
+- The week runs seven days from `week_start`, in YYYY-MM-DD format
 
 ## Next Steps
 
@@ -185,4 +133,4 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 Continue to [Extension 4: Meal Planning](../meal-planning/)
 
-> **Context check:** With 3 extensions connected, you're now exposing ~15 MCP tools to your AI. This is still manageable, but Extension 4 adds 10 more. Now is a good time to read the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) — it covers when to scope your servers, how to audit your tool surface, and patterns for keeping your AI sharp as you add complexity.
+> **Context check:** With 3 extensions turned on, you're now exposing ~15 more tools to your AI. This is still manageable, but Extension 4 adds 10 more. Now is a good time to read the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) — it covers how to audit your tool surface, and patterns for keeping your AI sharp as you add complexity.

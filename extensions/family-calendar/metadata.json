@@ -1,22 +1,21 @@
 {
   "name": "Kid Logistics / Family Calendar",
-  "description": "Multi-person family scheduling — activities, important dates, and conflict detection across the whole household.",
+  "description": "Multi-person family scheduling — activities, important dates, and conflict detection across the whole household. On this fork it is the family-calendar plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",
     "github": "NateBJones"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Bun 1.4+"]
+    "tools": []
   },
-  "requires_primitives": ["deploy-remote-mcp", "remote-mcp"],
   "learning_order": 3,
   "tags": ["family", "calendar", "scheduling", "kids", "logistics"],
   "difficulty": "intermediate",
-  "estimated_time": "45 minutes",
+  "estimated_time": "15 minutes",
   "created": "2026-03-12",
-  "updated": "2026-03-12"
+  "updated": "2026-11-02"
 }

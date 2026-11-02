@@ -199,7 +199,7 @@ Search recipes tagged "quick".
 ## Cross-Extension Integration
 
 **With Family Calendar (Extension 3):**
-Your agent can check who's home this week via the `family_members` and `activities` tables to adjust serving sizes. Example prompt:
+Your agent can check who's home this week through the family calendar plugin's `family_calendar_get_week_schedule` to adjust serving sizes. Example prompt:
 
 ```
 Who's home for dinner this week? Adjust the meal plan servings accordingly.
