@@ -49,7 +49,7 @@
 
 import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
-import type { BudgetStop, SleepAside, SleepBudget, SleepHeld } from "../server-portable/brain-info.ts";
+import type { BudgetStop, SleepAside, SleepBudget, SleepHeld, SleepHold } from "../server-portable/brain-info.ts";
 
 /**
  * What the coordinator's clock sends board-sync for each pass (db/supervise.ts's
@@ -212,6 +212,15 @@ export interface PassStamper {
    * (SMD-2679 PR 4b). Only the scheduler sets it.
    */
   aside?(aside: SleepAside | null): void;
+  /**
+   * The sleep scheduler's passes held out of its work, each until it re-arms
+   * by its own rule (SMD-3379 PR 1c-4a): `holds [{ pass, why, until }]` in the
+   * value, `until` on the database's clock in toISOString()'s form or null
+   * for an event, left out while none is (null or empty). Carried by the
+   * row's next write and kept on its end, the last word on what was held, as
+   * brain-info and db/supervise.ts read it. Only the scheduler sets it.
+   */
+  holds?(holds: readonly SleepHold[] | null): void;
 }
 
 /** The longest endOnRefusal waits for its write: the refusal's exit must not wait on a database that does not answer. */
@@ -341,12 +350,13 @@ export function passStamper(opts: {
   let resting = false;
   let paused: string | null = null;
   let aside: SleepAside | null = null;
+  let holds: readonly SleepHold[] = [];
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}), ...(paused ? { paused: { since: paused } } : {}), ...(aside ? { aside } : {}), ...(holds.length ? { holds } : {}), ...(opts.reembedJob === undefined ? {} : { reembedJob: opts.reembedJob }) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -441,6 +451,9 @@ export function passStamper(opts: {
     },
     aside(a) {
       aside = a;
+    },
+    holds(h) {
+      holds = h === null ? [] : h.map((x) => ({ ...x }));
     },
   };
 }
