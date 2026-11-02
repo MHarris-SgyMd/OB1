@@ -227,7 +227,7 @@ These are observations, not decisions. The decisions are listed in §8.
 5. **Non-core features:**
    - Kanban, agent memory and smart-ingest: extensions, retired, or folded into core with a migration?
    - Reflections: drop, since no table exists.
-   - Quality audit and importance: drop, or define one scale in core?
+   - Quality audit and importance: drop, or define one scale in core? *(Importance answered by SMD-3661, `priority.md`, 2026-11-02: `importance` is dropped, and the core defines a priority scale of its own.)*
    - The restricted lock: drop until `sensitivity-tiers` exists?
 6. **Retire what:** once the surface exists, delete N and P (and OBR's dashboard-only routes)? This fits the fork's no-upstream-parity posture.
 7. **Destructive-action policy:**
