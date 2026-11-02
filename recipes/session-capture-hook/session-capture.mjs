@@ -2959,8 +2959,10 @@ function brainForClaim(claim, brains) {
 
 /** A call the key may not make, as the server answers it: a JSON-RPC -32602 envelope (what the real server sends, review pass 4) or an isError result in the SDK's words. */
 const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
-/** A renewal's words when it revived a lapsed claim after claims were made on its work, or couldn't read them, or couldn't read whether it had lapsed (the server's since SMD-3654). */
-const REVIVED_COVERED_RE = /\b(?:It had lapsed at \S+, and (?:since then .* made on its work|the claims made on its work since could not be read)|Whether it had lapsed could not be read)\b/;
+/** A renewal's words when it revived a lapsed claim after claims were made or renewed on its work, or couldn't read them, or couldn't read whether it had lapsed (the server's since SMD-3654). */
+const REVIVED_COVERED_RE = /\b(?:It had lapsed at \S+, and (?:since then .* made or renewed on its work|the claims made or renewed on its work since could not be read)|Whether it had lapsed could not be read)\b/;
+/** A lapse marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2). */
+const lapseSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
@@ -2990,9 +2992,12 @@ export async function renewClaim(cfg, claim) {
     // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
     const lapsed = result?.structuredContent?.lapsed;
     if (lapsed && (lapsed.at === null || lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
-      const said = `CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
+      const said = lapseSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
       return { ...o, blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `${o.line} — but ${said.replace(new RegExp(`^CLAIMED_WHILE_LAPSED: Renewed your claim .*?\\(claim ${UUID}\\)\\.\\s*`, "i"), "")} (renewals wait until the .blocked.json beside its token file is deleted)` };
     }
+    // A lapse with nothing since is said in the log too: the agent's own renewal after it sees a live claim, and the
+    // rule's search after a lapse needs to know there was one (review pass 2).
+    if (lapsed && typeof lapsed.at === "string") o.line += ` (it had lapsed at ${lapsed.at}; no other claim was made or renewed on its work meanwhile)`;
     return o;
   }
   const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
@@ -3079,12 +3084,15 @@ function ownPieceNote(text, root, claimId) {
 
 /**
  * Before reviving a claim the hook's own record shows lapsed — its last known
- * expiry past — list the ticket's claims, ended ones included: a renewal
- * revives a lapsed claim without saying so (SMD-3654), and the hook's renewal
- * at a resuming prompt would otherwise erase the lapse the rule's check looks
- * for (review pass 5, against a real server). Live (the agent renewed it) or
- * lapsed with no claim on overlapping work made since: renew. Lapsed with one:
- * `blocked`, the marker written as for WORK_CLAIMED. Can't tell: `keep`.
+ * expiry past — list the ticket's claims, ended ones included: a brain from
+ * before SMD-3654 revives a lapsed claim without saying so, and the hook's
+ * renewal at a resuming prompt would otherwise erase the lapse the rule's check
+ * looks for (review pass 5, against a real server). Live (the agent renewed it)
+ * or lapsed with no claim on overlapping work made or renewed since: renew. A
+ * claim made before the lapse and revived during it counts (review pass 2 of
+ * SMD-3654: it was missed). Lapsed with one: `blocked`, the marker written as
+ * for WORK_CLAIMED, naming each claim's id so the agent can tell one the user
+ * already decided on. Can't tell: `keep`.
  */
 async function lapseCheck(cfg, claim, knownExpiry) {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
@@ -3098,9 +3106,9 @@ async function lapseCheck(cfg, claim, knownExpiry) {
   if (!mine) return { keep: `kept: ${claimLabel(claim)} — its record shows it lapsed at ${knownExpiry}, and list_claims for ${claim.ticket} doesn't list it` };
   if (mine.state !== "lapsed") return {};
   const lapsedAt = Date.parse(mine.expiresAt);
-  const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && Date.parse(c?.claimedAt) > lapsedAt && overlaps(c, mine));
+  const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && (Date.parse(c?.claimedAt) > lapsedAt || Date.parse(c?.renewedAt) > lapsedAt) && overlaps(c, mine));
   if (!since.length) return {};
-  const said = scrubTokens(`CLAIMED_WHILE_LAPSED: lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${oneLine(String(c.piece)).slice(0, 100)}` : ""} at ${c.claimedAt} (now ${c.state})`).join("; ")}`).slice(0, 600);
+  const said = lapseSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} ${Date.parse(c.claimedAt) > lapsedAt ? "claimed" : "renewed"} ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${Date.parse(c.claimedAt) > lapsedAt ? c.claimedAt : c.renewedAt} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
 }
 
@@ -3160,9 +3168,9 @@ function noteAgentClaimCall(hook, brains) {
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
-    // A renewal that revived a lapsed claim after claims were made on its work meanwhile (the server says so since SMD-3654): marked as a covered claim is.
+    // A renewal that revived a lapsed claim after claims were made or renewed on its work meanwhile (the server says so since SMD-3654): marked as a covered claim is.
     if (REVIVED_COVERED_RE.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
-      const said = `CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
+      const said = lapseSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
       const wrote = writeMarker(f.path, f.claim, "blocked", { code: "CLAIMED_WHILE_LAPSED", message: said });
       log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} revived it: ${said}${wrote ? "" : " (the marker could not be written)"}`);
     }

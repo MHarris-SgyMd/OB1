@@ -1786,22 +1786,24 @@ const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOv
   ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
   : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`;
 /**
- * A renewal that revived a lapsed claim (SMD-3654): when it lapsed, and what was claimed on its work meanwhile —
- * each claim by its work (a piece quoted, as heldLine does: another key's piece is its words, not ours), holder,
- * time and state, never its label, the first SINCE_MAX and a count of the rest. None: said so. Unread, or whether
- * it had lapsed unread: said so, with one check to make and what each answer means (review pass 1).
+ * A renewal that revived a lapsed claim (SMD-3654): when it lapsed, and what was claimed or renewed on its work
+ * meanwhile — each claim by its work (a piece quoted, as heldLine does: another key's piece is its words, not ours),
+ * holder, times and state, never its label, the first SINCE_MAX and a count of the rest. None: said so. Unread, or
+ * whether it had lapsed unread: said so, with one check to make and what each answer means (review pass 1). The
+ * check's bound when the lease is unread is the claim's own claimedAt: no overlapping claim is made or renewed while
+ * it is live, so one after it came in a lapse (review pass 2: "your previous lease ran out" was a time nothing kept).
  */
 const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
-  `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} at ${c.claimedAt} (${c.state}, claim ${c.id})`;
+  `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
 const lapseCheck = (after: string) =>
-  `list the ticket's claims with list_claims and include_ended: one on its work claimed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
-const lapseText = (l: ClaimLapse | undefined) => {
+  `list the ticket's claims with list_claims and include_ended: one on its work claimed or renewed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+const lapseText = (l: ClaimLapse | undefined, claim: WorkClaim) => {
   if (!l) return "";
-  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck("your previous lease ran out")}`;
-  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made on its work since could not be read: ${lapseCheck(l.at)}`;
-  if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made on its work meanwhile.`;
+  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck(`${claim.claimedAt}, when this claim was made,`)}`;
+  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made or renewed on its work since could not be read: ${lapseCheck(l.at)}`;
+  if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made or renewed on its work meanwhile.`;
   const n = l.claimedSince.length + (l.moreSince ?? 0);
-  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
+  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made or renewed on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
 };
 // 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
 // in the wrong one is masked, a cut one too.
@@ -1825,12 +1827,12 @@ const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
-    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed)}`,
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
-  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed)}`,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)

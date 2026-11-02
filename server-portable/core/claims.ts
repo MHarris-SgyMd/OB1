@@ -18,15 +18,15 @@ import { actorOf } from "./writes.ts";
 
 /**
  * A renewal that revived a lapsed claim (SMD-3654): when its lease had run out,
- * and the claims made on its work since — work another agent may have built on
- * while it was free. `claimedSince` is null when they could not be read, and
+ * and the claims made or renewed on its work since — work another agent may
+ * have built on while it was free, each with its `renewedAt`. `claimedSince` is null when they could not be read, and
  * holds the first SINCE_MAX, `moreSince` counting the rest. `at` is null when
  * the lease before the renewal could not be read, so whether it had lapsed is
  * unknown (review pass 1: that was said as nothing at all). Absent on a renewal
  * of a live claim. 115 revives a lapsed claim nothing covers without a word;
  * this is the word.
  */
-export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { state: WorkClaim["state"]; releasedAt: string | null })[] | null; moreSince?: number };
+export type ClaimLapse = { at: string | null; claimedSince: (HeldClaim & { renewedAt: string | null; state: WorkClaim["state"]; releasedAt: string | null })[] | null; moreSince?: number };
 /** How many of the claims made since a lapse a reply names (review pass 1: a long lapse could list without end). */
 const SINCE_MAX = 10;
 /** claim_work's value: the claim, and on `claimed` the token that proves it — shown this once. */
@@ -105,16 +105,17 @@ async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string): Pr
   try { return await (await ctx.store()).claimLease(token, id); } catch { return "unread"; }
 }
 
-/** The lapse a renewal revived, if it did: the lease before had run out by the renewal. With the claims made on the work since (the first SINCE_MAX, the rest counted), or null when they can't be read. */
+/** The lapse a renewal revived, if it did: the lease before had run out by the renewal. With the claims made or renewed on the work since (the first SINCE_MAX, the rest counted), or null when they can't be read. */
 async function lapseOf(ctx: Ctx, principal: Principal, before: LeaseBefore | undefined, claim: WorkClaim): Promise<ClaimLapse | undefined> {
   if (before === "unread") return { at: null, claimedSince: null };
   if (!before || before.id !== claim.id || before.releasedAt !== null) return undefined;
   const renewedAt = Date.parse(claim.renewedAt ?? "") || Date.now();
   if (!(Date.parse(before.expiresAt) <= renewedAt)) return undefined;
   try {
-    const since = await (await ctx.store()).claimsMadeSince(claim.id, before.expiresAt);
-    const named = since.slice(0, SINCE_MAX).map((c) => ({ ...held(principal)(c), state: c.state, releasedAt: c.releasedAt }));
-    return { at: before.expiresAt, claimedSince: named, ...(since.length > SINCE_MAX ? { moreSince: since.length - SINCE_MAX } : {}) };
+    // Read bounded, the rest counted by the store (review pass 2: every row was fetched for ten).
+    const since = await (await ctx.store()).claimsMadeSince(claim.id, before.expiresAt, SINCE_MAX);
+    const named = since.claims.slice(0, SINCE_MAX).map((c) => ({ ...held(principal)(c), renewedAt: c.renewedAt, state: c.state, releasedAt: c.releasedAt }));
+    return { at: before.expiresAt, claimedSince: named, ...(since.total > named.length ? { moreSince: since.total - named.length } : {}) };
   } catch {
     return { at: before.expiresAt, claimedSince: null };
   }

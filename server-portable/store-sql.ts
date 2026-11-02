@@ -970,15 +970,17 @@ export class SqlStore implements ThoughtStore {
     return { id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null) };
   }
 
-  async claimsMadeSince(id: string, since: string): Promise<WorkClaim[]> {
-    // 115's overlap (ob1_work_claims_in_the_way): the same piece key, or either the whole ticket.
+  async claimsMadeSince(id: string, since: string, limit: number): Promise<{ claims: WorkClaim[]; total: number }> {
+    // 115's overlap (ob1_work_claims_in_the_way): the same piece key, or either the whole ticket. Made or renewed
+    // since: no overlapping claim was live while this one was, so either time after the lapse means live in it.
     const rows = await this.sql`
-      SELECT ob1_work_claim_json(c, now()) AS j
+      SELECT ob1_work_claim_json(c, now()) AS j, count(*) OVER () AS total
         FROM work_claims c JOIN work_claims m ON m.id = ${id}::uuid AND c.issue = m.issue AND c.id <> m.id
-       WHERE c.claimed_at > ${since}::timestamptz
+       WHERE (c.claimed_at > ${since}::timestamptz OR c.renewed_at > ${since}::timestamptz)
          AND (c.piece_key = m.piece_key OR c.piece_key = '' OR m.piece_key = '')
-       ORDER BY c.claimed_at, c.id` as { j: unknown }[];
-    return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
+       ORDER BY c.claimed_at, c.id
+       LIMIT ${limit}::int` as { j: unknown; total: unknown }[];
+    return { claims: rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json")), total: rows.length ? Number(rows[0].total) : 0 };
   }
 
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {

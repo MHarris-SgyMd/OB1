@@ -1883,6 +1883,14 @@ console.log("\n[21] claimLease reads the lease a renewal starts from by its toke
   assert(a.outcome === "claimed" && b.outcome === "claimed" && byToken?.id === aId && byToken.expiresAt === a.claim?.expiresAt && byToken.releasedAt === null
       && byBoth?.id === aId && crossed === null && unknown === null,
     `the lease by token, by token and id; another claim's id, or a token no claim has, reads none (${JSON.stringify([byToken, byBoth, crossed, unknown])})`);
+  // claimsMadeSince reads the first `limit` and counts them all (review pass 2: every row was fetched for ten).
+  await store.releaseClaim({ id: aId, token: aToken, reason: "split", actor });
+  await store.releaseClaim({ id: bId, token: String(b.token), reason: "split", actor });
+  const whole = await store.claimWork({ issue: "SMD-9310", actor });
+  const first = await store.claimsMadeSince(String(whole.claim?.id), "2000-01-01T00:00:00Z", 1);
+  const all = await store.claimsMadeSince(String(whole.claim?.id), "2000-01-01T00:00:00Z", 10);
+  assert(whole.outcome === "claimed" && first.claims.length === 1 && first.claims[0].id === aId && first.total === 2 && all.claims.length === 2 && all.total === 2,
+    `claimsMadeSince: the first of two overlapping claims at limit 1, the total 2 (${JSON.stringify([first.claims.map((c) => c.id), first.total, all.claims.length, all.total])})`);
 }
 
 await store.close();

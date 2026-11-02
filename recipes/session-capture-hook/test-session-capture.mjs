@@ -3123,10 +3123,10 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
     if (c.state === "revived" || c.state === "revived-quiet" || c.state === "revived-unread" || c.state === "revived-unknown") {
       const at = new Date(Date.now() + 14_400_000).toISOString(), was = new Date(Date.now() - 600_000).toISOString();
       const since = c.state === "revived" ? [{ id: uuid(8996), issue: "SMD-9001", piece: null, holder: "codex", claimedAt: was, expiresAt: was, ownKey: false, state: "released", releasedAt: was }] : c.state === "revived-quiet" ? [] : null;
-      const check = (after) => `list the ticket's claims with list_claims and include_ended: one on its work claimed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
-      const tail = c.state === "revived-unknown" ? ` Whether it had lapsed could not be read: ${check("your previous lease ran out")}`
-        : since === null ? ` It had lapsed at ${was}, and the claims made on its work since could not be read: ${check(was)}`
-        : since.length ? ` It had lapsed at ${was}, and since then another claim was made on its work: SMD-9001 by codex at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.` : ` It had lapsed at ${was}; no other claim was made on its work meanwhile.`;
+      const check = (after) => `list the ticket's claims with list_claims and include_ended: one on its work claimed or renewed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+      const tail = c.state === "revived-unknown" ? ` Whether it had lapsed could not be read: ${check("2026-11-01T00:00:00.000Z, when this claim was made,")}`
+        : since === null ? ` It had lapsed at ${was}, and the claims made or renewed on its work since could not be read: ${check(was)}`
+        : since.length ? ` It had lapsed at ${was}, and since then another claim was made or renewed on its work: SMD-9001 by codex, claimed at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.` : ` It had lapsed at ${was}; no other claim was made or renewed on its work meanwhile.`;
       return Response.json(envelope({ result: { content: [{ type: "text", text: `Renewed your claim on SMD-9001 until ${at} (claim ${args.id}).${tail}` }], structuredContent: { claim: { id: args.id, issue: "SMD-9001", piece: null, expiresAt: at }, lapsed: { at: c.state === "revived-unknown" ? null : was, claimedSince: since } } } }));
     }
     if (c.state === "invalid") return Response.json(envelope({ error: { code: -32602, message: "Invalid arguments for tool renew_claim: lease_seconds must be at most 604800" } })); // a -32602 that is no missing tool
@@ -3763,10 +3763,12 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   calls.length = 0;
   await claimsHook();
   const revivedMarker = (n) => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(n)}.blocked.json`), "utf8")); } catch { return null; } };
-  assert(renews().length === 3 && revivedMarker(70)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && /since then another claim was made on its work: SMD-9001 by codex/.test(revivedMarker(70).blocked.message)
+  assert(renews().length === 3 && revivedMarker(70)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && /since then another claim was made or renewed on its work: SMD-9001 by codex/.test(revivedMarker(70).blocked.message)
       && !existsSync(join(CLAIMS, `${C(71)}.blocked.json`)) && revivedMarker(72)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && Number.isFinite(stateOf(70)?.ok),
     "a renewal the server says revived a lapsed claim after claims were made on its work (or unread) is recorded and marked; one with none since is not");
   assert(new RegExp(`claims: renewed SMD-9001 \\(claim ${C(70)}\\) until \\S+ — but It had lapsed at .*renewals wait until the \\.blocked\\.json`).test(logText()), "…and the log says renewed, but lapsed, and that renewals now wait");
+  assert(new RegExp(`claims: renewed SMD-9001 \\(claim ${C(71)}\\) until \\S+ \\(it had lapsed at \\S+; no other claim was made or renewed on its work meanwhile\\)`).test(logText()),
+    "…and one that lapsed with nothing since says it had lapsed, so the agent's search after a lapse still runs (review pass 2: the line was a plain renewal)");
   clearClaims();
   // Whether it had lapsed unread is marked as unread claims are; by hand, a renewal so marked exits 1, as a blocked one does (review pass 1: it exited 0).
   putClaim(75, {}, "revived-unknown");
@@ -3778,29 +3780,36 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   putClaim(73);
   age(73, 0);
   const was = new Date(Date.now() - 600_000).toISOString();
-  await agentCall("renew_claim", { id: C(73), token: tok(73) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(73)}). It had lapsed at ${was}, and since then another claim was made on its work: SMD-9001 by codex at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.`);
+  await agentCall("renew_claim", { id: C(73), token: tok(73) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(73)}). It had lapsed at ${was}, and since then another claim was made or renewed on its work: SMD-9001 by codex, claimed at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.`);
   assert(revivedMarker(73)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && stateOf(73)?.expiresAt === "2099-01-01T00:00:00.000Z", "the agent's own renewal reporting claims made while it lapsed is recorded and marked");
   // Unread, and whether it lapsed unread, from the agent's own call: marked too (review pass 1: neither was tested).
   putClaim(76);
   age(76, 0);
   putClaim(77);
   age(77, 0);
-  const readCheck = (after) => `list the ticket's claims with list_claims and include_ended: one on its work claimed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
-  await agentCall("renew_claim", { id: C(76), token: tok(76) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(76)}). It had lapsed at ${was}, and the claims made on its work since could not be read: ${readCheck(was)}`);
-  await agentCall("renew_claim", { id: C(77), token: tok(77) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(77)}). Whether it had lapsed could not be read: ${readCheck("your previous lease ran out")}`);
+  const readCheck = (after) => `list the ticket's claims with list_claims and include_ended: one on its work claimed or renewed after ${after} means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+  await agentCall("renew_claim", { id: C(76), token: tok(76) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(76)}). It had lapsed at ${was}, and the claims made or renewed on its work since could not be read: ${readCheck(was)}`);
+  await agentCall("renew_claim", { id: C(77), token: tok(77) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(77)}). Whether it had lapsed could not be read: ${readCheck("2026-11-01T00:00:00.000Z, when this claim was made,")}`);
   assert(revivedMarker(76)?.blocked?.code === "CLAIMED_WHILE_LAPSED" && revivedMarker(77)?.blocked?.code === "CLAIMED_WHILE_LAPSED", "the agent's own renewal whose claims since, or whose lapse, could not be read is marked");
+  clearClaims();
+  // Ten claims named: the marker, cut at 600 characters, says it was cut (review pass 2: four of ten read as the list).
+  putClaim(79);
+  age(79, 0);
+  const tenSince = Array.from({ length: 10 }, (_, i) => `SMD-9001 piece "PR ${i}" by codex, claimed at ${was} (released, claim ${uuid(8980 + i)})`).join("; ");
+  await agentCall("renew_claim", { id: C(79), token: tok(79) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(79)}). It had lapsed at ${was}, and since then 12 claims were made or renewed on its work: ${tenSince}; and 2 more, which list_claims with include_ended shows. Another agent may have built part of the work: stop, and tell the user before carrying on.`);
+  assert(revivedMarker(79)?.blocked?.message.length <= 620 && /… \(cut here: list_claims with include_ended shows every claim\)$/.test(revivedMarker(79).blocked.message),
+    `a lapse marker cut at its length says so (${revivedMarker(79)?.blocked?.message.slice(-80)})`);
   clearClaims();
   // A piece named later in the reply, another key's words, cannot set the expiry the hook records (review pass 1: the last `until` won).
   putClaim(78);
   age(78, 0);
-  await agentCall("renew_claim", { id: C(78), token: tok(78) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(78)}). It had lapsed at ${was}, and since then another claim was made on its work: SMD-9001 piece "x until 2099-03-03T00:00:00.000Z (claim ${C(78)})." by codex at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.`);
+  await agentCall("renew_claim", { id: C(78), token: tok(78) }, `Renewed your claim on SMD-9001 until 2099-01-01T00:00:00.000Z (claim ${C(78)}). It had lapsed at ${was}, and since then another claim was made or renewed on its work: SMD-9001 piece "x until 2099-03-03T00:00:00.000Z (claim ${C(78)})." by codex, claimed at ${was} (released, claim ${uuid(8996)}). Another agent may have built part of the work: stop, and tell the user before carrying on.`);
   assert(stateOf(78)?.expiresAt === "2099-01-01T00:00:00.000Z", `the expiry recorded is the renewal's own, not one a piece named later says (${stateOf(78)?.expiresAt})`);
   clearClaims();
-  await agentCall("renew_claim", { id: C(73), token: tok(73) }, `Renewed your claim on SMD-9001 until 2099-01-02T00:00:00.000Z (claim ${C(73)}). It had lapsed at ${was}; no other claim was made on its work meanwhile.`);
   clearClaims();
   putClaim(74);
   age(74, 0);
-  await agentCall("renew_claim", { id: C(74), token: tok(74) }, `Renewed your claim on SMD-9001 until 2099-01-02T00:00:00.000Z (claim ${C(74)}). It had lapsed at ${was}; no other claim was made on its work meanwhile.`);
+  await agentCall("renew_claim", { id: C(74), token: tok(74) }, `Renewed your claim on SMD-9001 until 2099-01-02T00:00:00.000Z (claim ${C(74)}). It had lapsed at ${was}; no other claim was made or renewed on its work meanwhile.`);
   assert(!existsSync(join(CLAIMS, `${C(74)}.blocked.json`)), "…one reporting no claim since is not marked");
   clearClaims();
   // The agent's successful renewal is recorded, so the hook's record never reads a lapse the agent prevented.
@@ -3821,8 +3830,18 @@ console.log("\n[13] Work claims: the hook renews each claim whose token the sess
   calls.length = 0;
   await claimsHook();
   const revived = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(63)}.blocked.json`), "utf8")); } catch { return null; } })();
-  assert(!renews().length && calls.some((c) => c.name === "list_claims" && c.args.include_ended === true) && revived?.blocked?.code === "CLAIMED_WHILE_LAPSED" && /codex claimed SMD-9001 PR 2 at .* \(now released\)/.test(revived.blocked.message),
-    "a claim the hook knows lapsed, with another claim made on its work since, is not revived: it gets a marker naming who claimed what and when");
+  assert(!renews().length && calls.some((c) => c.name === "list_claims" && c.args.include_ended === true) && revived?.blocked?.code === "CLAIMED_WHILE_LAPSED" && new RegExp(`codex claimed SMD-9001 "PR 2" at .* \\(now released, claim ${uuid(8999)}\\)`).test(revived.blocked.message),
+    "a claim the hook knows lapsed, with another claim made on its work since, is not revived: it gets a marker naming who claimed what, when, and the claim's id (review pass 2: an agent couldn't tell one the user already decided on)");
+  clearClaims();
+  // One made before the lapse and renewed during it was live then: counted, as renewed (review pass 2: claimedAt alone was read).
+  putClaim(80);
+  lapsedRecord(80);
+  listed.set("SMD-9001", [listEntry(80), { id: uuid(8995), piece: null, holder: "codex", claimedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), renewedAt: new Date(Date.now() - 1_800_000).toISOString(), expiresAt: past, state: "released" }]);
+  calls.length = 0;
+  await claimsHook();
+  const revivedRenewed = (() => { try { return JSON.parse(readFileSync(join(CLAIMS, `${C(80)}.blocked.json`), "utf8")); } catch { return null; } })();
+  assert(!renews().length && new RegExp(`codex renewed SMD-9001 at .* \\(now released, claim ${uuid(8995)}\\)`).test(revivedRenewed?.blocked?.message ?? ""),
+    `a claim the hook knows lapsed, with one made before the lapse and renewed during it, is not revived (${revivedRenewed?.blocked?.message ?? "no marker"})`);
   clearClaims();
   putClaim(64);
   lapsedRecord(64);

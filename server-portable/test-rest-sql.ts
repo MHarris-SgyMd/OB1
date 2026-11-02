@@ -1235,14 +1235,33 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const busyLapse = busyMcp.sc.lapsed as { claimedSince?: { id: string; holder: string; state: string; ownKey: boolean }[] } | undefined;
   assert(meanwhile.status === 200 && otherPiece.status === 200 && !busyMcp.isError && busyLapse?.claimedSince?.length === 1 && busyLapse.claimedSince[0].id === meanwhileId && busyLapse.claimedSince[0].holder === "rival"
       && busyLapse.claimedSince[0].state === "released" && busyLapse.claimedSince[0].ownKey === false
-      && /^Renewed your claim on SMD-9309 PR 1 until \S+ \(claim [0-9a-f-]{36}\)\. It had lapsed at \S+, and since then another claim was made on its work: SMD-9309 by rival at \S+ \(released, claim [0-9a-f-]{36}\)\. Another agent may have built part of the work: stop, and tell the user before carrying on\.$/.test(busyMcp.text)
+      && /^Renewed your claim on SMD-9309 PR 1 until \S+ \(claim [0-9a-f-]{36}\)\. It had lapsed at \S+, and since then another claim was made or renewed on its work: SMD-9309 by rival, claimed at \S+ \(released, claim [0-9a-f-]{36}\)\. Another agent may have built part of the work: stop, and tell the user before carrying on\.$/.test(busyMcp.text)
       && !busyMcp.text.includes(lapsesToken) && !JSON.stringify(busyMcp.sc).includes("wrong ticket"),
     `a lapsed claim renewed after another key claimed its work meanwhile names that claim — its holder, time and state, not its reason or label — and says stop; a claim on another piece is no overlap (${busyMcp.text.slice(-170)})`);
   // claim_work with the token renews too, and says the same.
   await lapseIt();
   const viaClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken }, KEYS.writer);
-  assert(viaClaim.status === 200 && viaClaim.body.outcome === "renewed" && Array.isArray((viaClaim.body.lapsed as { claimedSince?: unknown[] } | undefined)?.claimedSince) && !("token" in viaClaim.body),
+  // The rival's whole-ticket claim, made within the lapse lapseIt sets, is named again (review pass 2: the array alone was checked).
+  assert(viaClaim.status === 200 && viaClaim.body.outcome === "renewed" && (viaClaim.body.lapsed as { claimedSince?: { id: string }[] } | undefined)?.claimedSince?.[0]?.id === meanwhileId && !("token" in viaClaim.body),
     `claim_work with the token, renewing a lapsed claim, reports the lapse as renew_claim does (${viaClaim.status} ${viaClaim.body.outcome} ${JSON.stringify(viaClaim.body.lapsed)?.slice(0, 80)})`);
+  // A claim made before the lapse and revived during it was live then, so it is named too (review pass 2: only claims
+  // made since were read, and the reply said none). The rival's PR 2 lapses, the writer claims the whole ticket (a lapsed
+  // claim is not in the way) and lapses in turn, the rival renews PR 2 and releases it; the writer's renewal names it.
+  const early = await rest("POST", "/v1/claims", { ticket: "SMD-9311", piece: "PR 2" }, KEYS.rival);
+  const earlyId = String((early.body.claim as Claim | undefined)?.id);
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '2 hours', expires_at = now() - interval '90 minutes' WHERE id = ${earlyId}::uuid`;
+  const wholeTicket = await rest("POST", "/v1/claims", { ticket: "SMD-9311" }, KEYS.writer);
+  const wholeId = String((wholeTicket.body.claim as Claim | undefined)?.id), wholeToken = String(wholeTicket.body.token ?? "");
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '1 hour', expires_at = now() - interval '30 minutes' WHERE id = ${wholeId}::uuid`;
+  const revivedEarly = await rest("POST", `/v1/claims/${earlyId}/renew`, { token: early.body.token }, KEYS.rival);
+  await rest("POST", `/v1/claims/${earlyId}/release`, { token: early.body.token, reason: "merged" }, KEYS.rival);
+  const wholeRenew = await mcp("renew_claim", { id: wholeId, token: wholeToken });
+  const wholeLapse = wholeRenew.sc.lapsed as { claimedSince?: { id: string; renewedAt: string | null }[] } | undefined;
+  assert(early.status === 200 && wholeTicket.status === 200 && revivedEarly.status === 200 && !wholeRenew.isError
+      && wholeLapse?.claimedSince?.length === 1 && wholeLapse.claimedSince[0].id === earlyId && typeof wholeLapse.claimedSince[0].renewedAt === "string"
+      && /since then another claim was made or renewed on its work: SMD-9311 piece "PR 2" by rival, claimed at \S+, renewed at \S+ \(released, claim [0-9a-f-]{36}\)\. Another agent may have built part of the work: stop/.test(wholeRenew.text),
+    `a claim made before the lapse and renewed during it is named, with when it was renewed (${revivedEarly.status} | ${wholeRenew.text.slice(-200)})`);
+  await rest("POST", `/v1/claims/${wholeId}/release`, { token: wholeToken, reason: "done" }, KEYS.writer);
   await rest("POST", `/v1/claims/${lapsesId}/release`, { token: lapsesToken, reason: "done" }, KEYS.writer);
   // A plain release's refusal asks the user before claiming again (SMD-3654: it said "claim it again").
   const releasedRenew = await mcp("renew_claim", { id: lapsesId, token: lapsesToken });

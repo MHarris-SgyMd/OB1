@@ -1938,11 +1938,13 @@ export interface ThoughtStore {
   claimLease(token: string, id?: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null>;
   /**
    * The claims on work overlapping a claim's — its ticket's whole, its piece, or
-   * any piece of a whole-ticket claim, by 115's piece key — made after `since`,
-   * oldest first, the claim itself left out (SMD-3654): what another agent may
-   * have built on while that claim had lapsed. Ended ones included.
+   * any piece of a whole-ticket claim, by 115's piece key — made or renewed after
+   * `since`, oldest first, the claim itself left out (SMD-3654): what another
+   * agent may have built on while that claim had lapsed. Renewed counts: a claim
+   * made before the lapse and revived during it was live then (review pass 2:
+   * it was missed). Ended ones included. The first `limit`, and `total` of all.
    */
-  claimsMadeSince(id: string, since: string): Promise<WorkClaim[]>;
+  claimsMadeSince(id: string, since: string, limit: number): Promise<{ claims: WorkClaim[]; total: number }>;
   /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
