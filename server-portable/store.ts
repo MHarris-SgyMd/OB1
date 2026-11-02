@@ -1928,6 +1928,20 @@ export interface ThoughtStore {
   /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
   listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
   /**
+   * The lease of the claim a token proves, read before a renewal (SMD-3654): its
+   * id, its expiry and whether it was released — never the token or its hash.
+   * Null when no claim has that token. 115's writers report the new lease, not
+   * the one renewed, so a renewal that revived a lapsed claim learns it here.
+   */
+  claimLease(token: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null>;
+  /**
+   * The claims on work overlapping a claim's — its ticket's whole, its piece, or
+   * any piece of a whole-ticket claim, by 115's piece key — made after `since`,
+   * oldest first, the claim itself left out (SMD-3654): what another agent may
+   * have built on while that claim had lapsed. Ended ones included.
+   */
+  claimsMadeSince(id: string, since: string): Promise<WorkClaim[]>;
+  /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
    * lapse cleared (082) and the reviewer the row records (114), in one
@@ -2199,7 +2213,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

@@ -2959,6 +2959,8 @@ function brainForClaim(claim, brains) {
 
 /** A call the key may not make, as the server answers it: a JSON-RPC -32602 envelope (what the real server sends, review pass 4) or an isError result in the SDK's words. */
 const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
+/** A renewal's words when it revived a lapsed claim after claims were made on its work, or couldn't read them (the server's since SMD-3654). */
+const REVIVED_COVERED_RE = /\bIt had lapsed at \S+, and (?:since then .* made on its work|the claims made on its work since could not be read)\b/;
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
 
 /**
@@ -2983,7 +2985,15 @@ export async function renewClaim(cfg, claim) {
   const text = textOfResult(result);
   if (!result?.isError) {
     const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
-    return { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
+    const o = { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
+    // Renewed, but it had lapsed and claims were made on its work meanwhile (or they couldn't be read) — the server
+    // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
+    const lapsed = result?.structuredContent?.lapsed;
+    if (lapsed && (lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
+      const said = `CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
+      return { ...o, blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `${o.line} — but ${said.replace(new RegExp(`^CLAIMED_WHILE_LAPSED: Renewed your claim .*?\\(claim ${UUID}\\)\\.\\s*`, "i"), "")} (renewals wait until the .blocked.json beside its token file is deleted)` };
+    }
+    return o;
   }
   const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
   // Long enough for the server's last sentence (review pass 4: 300 cut "Your claim lapsed before another covered its work").
@@ -3149,6 +3159,12 @@ function noteAgentClaimCall(hook, brains) {
   const renewed = new RegExp(`^Renewed your claim on .* until (\\S+) \\(claim (${UUID})\\)`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
+    // A renewal that revived a lapsed claim after claims were made on its work meanwhile (the server says so since SMD-3654): marked as a covered claim is.
+    if (REVIVED_COVERED_RE.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
+      const said = `CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text)).slice(0, 600)}`;
+      const wrote = writeMarker(f.path, f.claim, "blocked", { code: "CLAIMED_WHILE_LAPSED", message: said });
+      log(`claims: blocked: ${claimLabel(f.claim)} — the agent's own ${m[2]} revived it: ${said}${wrote ? "" : " (the marker could not be written)"}`);
+    }
     return;
   }
   if (/\bis covered by a live claim\b/.test(text) && !existsSync(markerPath(f.path, "blocked"))) {

@@ -510,7 +510,7 @@ export const SPECS = {
   list_claims: {
     title: "List Work Claims",
     description:
-      "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its key's claims with `holder` set to its key's name (claim_work's reply names it). `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.",
+      "List who holds which work: the live claims on tickets (or on one piece of a ticket, such as `PR 1b-2`), each with its holder's key, its label, when it was claimed and when its lease runs out. Read this before recommending or starting work, and leave held work alone. `ticket` lists one ticket's; `holder` one key's (its name); `include_ended` adds lapsed and released claims, each with its `state`. A new session, or one whose context was compacted, finds its own claims by the token files it kept in its worktree; `holder` set to its key's name lists every session's claims under that key, its own among them. `truncated: true` means the limit cut the list: narrow by ticket or holder. Never shows a claim's token.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       ticket: z.string().min(1).max(200).optional().describe("Only this ticket's claims, its whole and its pieces (e.g. SMD-3379; case and surrounding white space don't matter)"),
@@ -535,7 +535,7 @@ export const SPECS = {
   renew_claim: {
     title: "Renew Work Claim",
     description:
-      "Set your claim's lease to lease_seconds from now (default four hours; a shorter one shortens it): the claim id and the token claim_work returned. Renew well before the lease runs out — about hourly on the default. Refused when another key holds the claim, or your key under another token; when it ended (released, or taken over after it lapsed: stop work on it); or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed. The label changes through claim_work with your token.",
+      "Set your claim's lease to lease_seconds from now (default four hours; a shorter one shortens it): the claim id and the token claim_work returned. Renew well before the lease runs out — about hourly on the default. Refused when another key holds the claim, or your key under another token; when it ended (released, or taken over after it lapsed: stop work on it); or when it lapsed and another claim now covers its work. A claim that lapsed with nothing covering it is renewed, and the reply says when it had lapsed and names any claim made on its work meanwhile: another agent may have built part of it. The label changes through claim_work with your token.",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       id: z.string().describe("The claim's id, from claim_work's reply or list_claims"),

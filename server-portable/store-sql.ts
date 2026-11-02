@@ -958,6 +958,27 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r) => normaliseWorkClaim(r, "list_work_claims"));
   }
 
+  // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside
+  // 115's writers, the token a bind parameter matched by its hash, as claimTokenIs does. Neither returns a token or hash.
+  async claimLease(token: string): Promise<{ id: string; expiresAt: string; releasedAt: string | null } | null> {
+    const rows = await this.sql`
+      SELECT id, expires_at, released_at FROM work_claims WHERE token_hash = ob1_work_claim_token_hash(${token}::text)` as Record<string, unknown>[];
+    const r = rows[0];
+    if (!r || typeof r.id !== "string" || r.expires_at == null) return null;
+    return { id: r.id, expiresAt: isoTimestampOrNull(r.expires_at) as string, releasedAt: isoTimestampOrNull(r.released_at ?? null) };
+  }
+
+  async claimsMadeSince(id: string, since: string): Promise<WorkClaim[]> {
+    // 115's overlap (ob1_work_claims_in_the_way): the same piece key, or either the whole ticket.
+    const rows = await this.sql`
+      SELECT ob1_work_claim_json(c, now()) AS j
+        FROM work_claims c JOIN work_claims m ON m.id = ${id}::uuid AND c.issue = m.issue AND c.id <> m.id
+       WHERE c.claimed_at > ${since}::timestamptz
+         AND (c.piece_key = m.piece_key OR c.piece_key = '' OR m.piece_key = '')
+       ORDER BY c.claimed_at, c.id` as { j: unknown }[];
+    return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
+  }
+
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {
     // SMD-3338: one transaction, under 029's lock — the CLI's own decision
     // (proposal-review.ts). The audit rows name the actor as its envelope does.
