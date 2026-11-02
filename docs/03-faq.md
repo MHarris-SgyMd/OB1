@@ -242,3 +242,5 @@ If you run into a blocker, post it in the Substack chat thread — not in someon
 ---
 
 *This FAQ is based on real community questions from the Substack chat and YouTube comments. If you run into something not covered here, [open an issue](https://github.com/NateBJones-Projects/OB1/issues) or post in the [Substack community](https://natesnewsletter.substack.com/) so everyone benefits from the answer.*
+
+<!-- SMD-2435 skip-path probe: a docs-only change. This PR is never merged. -->
