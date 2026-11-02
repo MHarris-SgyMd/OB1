@@ -6,7 +6,8 @@
  * reads those runs through `gh` and prints, per run, the job's wall time and each step's that matches; then, over
  * the runs where the job succeeded, each one's median, p90, min and max. A failed or cancelled job is listed, marked,
  * and left out of the figures: its steps stop early. A skipped step is left out too: it starts and ends at once, and
- * would read 0 s. A run `gh` cannot read is tried three times, then said and passed over (see --shift below).
+ * would read 0 s. A run `gh` cannot read is tried three times, and once more 30 s after the rest are read (LATE_MS),
+ * then said and passed over (see --shift below); a list `gh` cannot read is tried once more 30 s on.
  *
  *   bun scripts/ci-step-times.ts --job "Portable server"
  *   bun scripts/ci-step-times.ts --job "Portable server" --step "REST core" --days 14
@@ -32,8 +33,8 @@
  *
  * Each shift made at the newest run read (or --through's) is a `::warning` (past GitHub's 10 a step, nine and one
  * counting the rest), and a table in $GITHUB_STEP_SUMMARY when that is set; the earlier ones are listed as the window
- * reads them. A run not read, or being re-run, among the window's newest 26 fails it after the report (a warning may
- * have moved); an older one is a warning. The run reported on (--through's, or a listed window's newest) not read
+ * reads them. A run not read on its late try, or being re-run, among the window's newest 26 fails it after the report
+ * (a warning may have moved); an older one is a warning. A run read on its late try is said, in the summary too. The run reported on (--through's, or a listed window's newest) not read
  * fails it with no report; re-run since the list, it reads nothing, exit 0, as when the list shows it re-run. With
  * --runs the report is at the newest run read. .github/workflows/ci-shift.yml runs it after each Fork Checks run on
  * main.
@@ -57,10 +58,11 @@
  *                         re-run is not completed, so nothing is read (exit 0), and its end is read later
  *   --repo <owner/name>   default gh's own (the repository of the current directory)
  *
- * Exits 0 with the report, warnings or none; 1 when `gh` is missing or cannot list the runs, there are none, none can
- * be read, --through's run is not among them, or no run read has the job (the job names the runs do have are
- * listed), and with --shift when fewer than 20 runs are left to read, the run reported on could not be read, or one of
- * the newest 26 could not or was being re-run (the report still printed); 2 for a refused option. The per-job report
+ * Exits 0 with the report, warnings or none; 1 when `gh` is missing or cannot list the runs (on its late try too),
+ * there are none, none can be read, --through's run is not among them, or no run read has the job (the job names the
+ * runs do have are listed), and with --shift when fewer than 20 runs are left to read, the run reported on could not
+ * be read, or one of the newest 26 could not or was being re-run (the report still printed); 2 for a refused option.
+ * "Could not be read" is after the late try. The per-job report
  * reads a re-run's latest attempt, and marks it. Needs `gh` signed in. Reads only; writes nothing but the step
  * summary.
  */
@@ -412,6 +414,45 @@ async function gh(args: string[]): Promise<{ ok: true; json: unknown } | { ok: f
   return { ok: false, error };
 }
 
+/** A `gh` call's answer, as gh() gives it. */
+type Got = Awaited<ReturnType<typeof gh>>;
+
+/**
+ * The late try (SMD-3690). GitHub's 502s can outlast gh()'s three tries 3 s apart: on 10-30 six runs' reads failed
+ * all three, and twice one among a window's newest 26 failed CI shift, though each read fine when tried later. So a
+ * call that fails all three is tried once more this long after: a run's once the window's other runs are read, so one
+ * pause serves them all, and a list's at once. A run where every read succeeds pays nothing.
+ */
+export const LATE_MS = 30_000;
+
+/** A read that gave no run: gh failed, or the run came back with no status, so whether it is done is unknown. */
+const unreadable = (got: Got) => !got.ok || (got.json as { status?: unknown } | null)?.status === undefined;
+
+/**
+ * Each run read through `view`, at most 6 at once, in the ids' order. Those unreadable are read once more after
+ * `pause` (given how many), one pause for them all, keeping the late read's answer; `late` when it gave the run.
+ */
+export async function readRuns(ids: string[], view: (id: string) => Promise<Got>, pause: (n: number) => Promise<unknown>): Promise<{ id: string; got: Got; late?: true }[]> {
+  const viewed: { id: string; got: Got; late?: true }[] = await pooled(ids, 6, async (id) => ({ id, got: await view(id) }));
+  const again = viewed.filter((v) => unreadable(v.got));
+  if (again.length === 0) return viewed;
+  await pause(again.length);
+  await pooled(again, 6, async (v) => {
+    v.got = await view(v.id);
+    if (!unreadable(v.got)) v.late = true;
+  });
+  return viewed;
+}
+
+/** gh(), and when its three tries fail, one more LATE_MS on, said: for a call nothing else can wait beside. */
+async function ghLate(args: string[]): Promise<Got> {
+  const got = await gh(args);
+  if (got.ok) return got;
+  console.log(`gh ${args.slice(0, 2).join(" ")} failed (${got.error.split("\n")[0].slice(0, 120)}): tried once more in ${LATE_MS / 1000} s`);
+  await Bun.sleep(LATE_MS);
+  return gh(args);
+}
+
 /** `f` over `items`, at most `width` at once, the results in the items' order. */
 async function pooled<T, R>(items: T[], width: number, f: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -442,9 +483,10 @@ const sec = (s: number) => `${Math.round(s * 10) / 10} s`;
 /**
  * The shifts over the runs read: each one in the window listed (as the window reads them: none in its first 13), and
  * those made at `reportOn` (reportedOn's run; the newest run read when it gives none) given as `::warning`s and,
- * where the runner sets $GITHUB_STEP_SUMMARY, a table. `gapNote` says what was not read or being re-run, in both.
+ * where the runner sets $GITHUB_STEP_SUMMARY, a table. `gapNote` says what was not read or being re-run, and `late`
+ * what was read on its late try, in both.
  */
-async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | undefined, repo: string[], unread: number, rerun: number, gapNote: string): Promise<void> {
+async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | undefined, repo: string[], unread: number, rerun: number, gapNote: string, late: string[]): Promise<void> {
   const { ordered, series, found: shifts } = collectShifts(runs);
   const at = reportOn ?? ordered[ordered.length - 1].id;
   const created = new Map(ordered.map(({ id, run }) => [id, run.createdAt]));
@@ -468,6 +510,8 @@ async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | 
     `${f.name}: ${sec(f.sh.before)} → ${f.sh.after.join(", ")} s over the last ${SHIFT.after} runs, its line ${sec(f.sh.line)}; landed in ${f.from ? `${f.from.slice(0, 8)}..` : "..."}${f.to.slice(0, 8)} (${f.prs})`;
   const gapCount = [unread ? `${unread} not read` : "", rerun ? `${rerun} being re-run` : ""].filter(Boolean).join(", ");
   console.log(`\n${series.size} series over ${ordered.length} runs${gapCount ? ` (${gapCount})` : ""}; a line is the median of a series' ${SHIFT.before} runs before its last ${SHIFT.after}, plus max(${SHIFT.floor} s, ${SHIFT.share * 100}%).`);
+  const lateNote = late.length ? `${late.length} run${late.length === 1 ? "" : "s"} read on the late try, ${LATE_MS / 1000} s after the rest, gh having failed three times first: ${late.join(", ")}` : "";
+  if (lateNote) console.log(`${lateNote}.`);
   console.log(`Shifts in the window, as it reads them: ${found.length}`);
   for (const f of found) console.log(`  ${created.get(f.run)!.slice(0, 16)} run ${f.run}  ${text(f)}`);
   const now = found.filter((f) => f.run === at);
@@ -484,11 +528,12 @@ async function shiftReport(runs: { id: string; run: Run }[], reportOn: string | 
     ]
     : [`No job or step on main got slower at run ${at} (${series.size} series over ${ordered.length} runs).`];
   if (gapNote) md.push("", `**${gapNote}**`);
+  if (lateNote) md.push("", `${lateNote}.`);
   // The summary is the warnings again, in a table.
   appendSummary(md.join("\n"));
 }
 
-function selfCheck(): number {
+async function selfCheck(): Promise<number> {
   let failed = 0;
   const ok = (cond: boolean, what: string) => {
     if (!cond) failed++;
@@ -667,6 +712,24 @@ function selfCheck(): number {
     "at most 10 warnings: past 10, nine and one counting the rest");
   ok(compareNote(300, 250).includes("newest 250") && compareNote(28, 28) === "" && compareNote(undefined, 5) === "" && tableCell("a|b\nc\rd") === "a\\|b c d",
     "a compare past GitHub's 250 says the oldest may be missing; a table cell's | and line break");
+  // The late try (SMD-3690): 2 fails its first read, 3 every read, 4 first gives no status; one pause, after all first reads.
+  const events: string[] = [];
+  const reads = new Map<string, number>();
+  const flaky = async (id: string): Promise<Got> => {
+    const n = (reads.get(id) ?? 0) + 1;
+    reads.set(id, n);
+    events.push(`${id}#${n}`);
+    if (id === "3" || (id === "2" && n === 1)) return { ok: false, error: "HTTP 502: Server Error" };
+    return { ok: true, json: id === "4" && n === 1 ? {} : { status: "completed" } };
+  };
+  const lateRead = await readRuns(["1", "2", "3", "4"], flaky, async (n) => void events.push(`pause ${n}`));
+  ok(events.indexOf("pause 3") === 4 &&events.filter((e) => e.startsWith("pause")).length === 1
+    && [...reads].map(([id, n]) => `${id}:${n}`).join() === "1:1,2:2,3:2,4:2"
+    && lateRead.map((v) => `${v.id}${v.late ? " late" : ""}${v.got.ok ? "" : " unread"}`).join() === "1,2 late,3 unread,4 late",
+    "a run gh fails, or that gives no status, is read once more after one pause that follows every first read; one read then is late, one still failing stays unread");
+  const steady: string[] = [];
+  const allRead = await readRuns(["1", "2"], async () => ({ ok: true, json: { status: "completed" } }), async () => void steady.push("pause"));
+  ok(steady.length === 0 && allRead.every((v) => !v.late), "every run read at once: no pause, none late");
   console.log(failed ? `${failed} failed` : "all passed");
   return failed ? 1 : 0;
 }
@@ -674,7 +737,7 @@ function selfCheck(): number {
 if (import.meta.main) {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.error) refuse(opts.error);
-  if (opts["--self-check"]) process.exit(selfCheck());
+  if (opts["--self-check"]) process.exit(await selfCheck());
   const shift = opts["--shift"] === true;
   const jobName = opts["--job"];
   if (shift) {
@@ -730,7 +793,7 @@ if (import.meta.main) {
     console.log(`${ids.length} run${ids.length === 1 ? "" : "s"} named${ids.length < named.length ? ` (${named.length - ids.length} named again, read once)` : ""}`);
   } else if (last !== undefined) {
     const list = async (limit: number) => {
-      const got = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--limit", String(limit), "--json", "databaseId,status"]);
+      const got = await ghLate(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--limit", String(limit), "--json", "databaseId,status"]);
       if (!got.ok) stop(`gh run list failed: ${got.error}`);
       return (got.json as { databaseId: number; status: string }[]).map((r) => ({ id: String(r.databaseId), status: r.status })).reverse();
     };
@@ -742,7 +805,7 @@ if (import.meta.main) {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
-    const got = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
+    const got = await ghLate(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, ...event, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
     if (!got.ok) stop(`gh run list failed: ${got.error}`);
     const runs = got.json as { databaseId: number; status: string; createdAt: string }[];
     // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
@@ -769,12 +832,20 @@ if (import.meta.main) {
   }
   // A window shorter than SHIFT.window misses or repeats shifts: say so rather than "None made".
   if (shift && ids.length < SHIFT.window) stop(`${ids.length} run${ids.length === 1 ? "" : "s"} in the window: a shift wants ${SHIFT.window} (see SHIFT), so none is named`);
-  // Six runs read at once: one `gh run view` a run takes about 2 s.
-  const viewed = await pooled(ids.filter((id) => !running.includes(id)), 6, async (id) => ({ id, got: await gh(["run", "view", id, ...repo, "--json", "jobs,headSha,createdAt,attempt,status"]) }));
+  // Six runs read at once: one `gh run view` a run takes about 2 s. Those not read are tried once more after the rest.
+  const viewed = await readRuns(ids.filter((id) => !running.includes(id)), (id) => gh(["run", "view", id, ...repo, "--json", "jobs,headSha,createdAt,attempt,status"]), async (n) => {
+    console.log(`${n} run${n === 1 ? "" : "s"} not read: tried once more in ${LATE_MS / 1000} s, the late try`);
+    await Bun.sleep(LATE_MS);
+  });
   const read: { id: string; run: Run; job?: Job; row?: ReturnType<typeof jobRow> }[] = [];
   const unreadIds: string[] = [];
+  const lateIds: string[] = [];
   const seen = new Set<string>();
-  for (const { id, got } of viewed) {
+  for (const { id, got, late } of viewed) {
+    if (late) {
+      lateIds.push(id);
+      console.log(`${id}  read on the late try`);
+    }
     if (!got.ok) {
       unreadIds.push(id);
       console.log(`${id}  not read, passed over: ${got.error.split("\n")[0].slice(0, 120)}`);
@@ -811,7 +882,7 @@ if (import.meta.main) {
       summaryNote(verdict.note);
       process.exit(verdict.code);
     }
-    await shiftReport(read, at, repo, unread, running.length, verdict.note);
+    await shiftReport(read, at, repo, unread, running.length, verdict.note, lateIds);
     if (verdict.note) console.log(`::${verdict.code ? "error title=CI shift incomplete" : "warning title=CI shift"}::${escapeCommand(verdict.note)}`);
     process.exit(verdict.code);
   }
@@ -839,7 +910,8 @@ if (import.meta.main) {
     const f = stats(xs);
     console.log(f ? `  ${label}: median ${f.median} s, p90 ${f.p90} s, min ${f.min} s, max ${f.max} s over ${f.n} runs` : `  ${label}: ${none}`);
   };
-  const passed = [unread ? `${unread} run${unread === 1 ? "" : "s"} not read` : "", running.length ? `${running.length} not completed when read` : ""].filter(Boolean).join(", ");
+  const passed = [unread ? `${unread} run${unread === 1 ? "" : "s"} not read` : "", running.length ? `${running.length} not completed when read` : "",
+    lateIds.length ? `${lateIds.length} read on the late try` : ""].filter(Boolean).join(", ");
   console.log(`\nOver the runs where the job succeeded${passed ? ` (${passed})` : ""}:`);
   line(String(jobName), jobTimes, "no successful run");
   for (const [name, xs] of stepTimes) line(name, xs, jobTimes.length ? `ran in none of the ${jobTimes.length} successful runs` : "no successful run");

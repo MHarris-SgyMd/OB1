@@ -11,7 +11,8 @@
 # through is done when it starts. It fails when it cannot read what it needs:
 # the runs' list, the run it reads through, or one of the window's newest 26
 # runs, not read or being re-run, whose gap could move a shift off the run
-# that makes it (an older one is a warning).
+# that makes it (an older one is a warning). A read gh fails three times is
+# tried once more 30 s later (SMD-3690): GitHub's 502s have outlasted the three.
 #
 # workflow_run reads this file from the default branch, so it runs from main's
 # copy, never a pull request's, and it is asked of main's push runs alone (a
