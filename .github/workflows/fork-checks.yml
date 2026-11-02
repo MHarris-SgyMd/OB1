@@ -37,15 +37,61 @@ defaults:
 # full commit SHA with the tag it was in a trailing comment; Dependabot
 # (.github/dependabot.yml) moves the pins by PR, and check-fork-consistency
 # check 23 refuses a tag or a -latest runner (SMD-2093). Every checkout sets
-# persist-credentials: false: no step talks to the remote after it (a job that
-# reads history takes it at checkout, fetch-depth: 0), so the token has no
-# reason to stay in the workspace.
+# persist-credentials: false: no step needs the token after it (a job that
+# reads history takes it at checkout, fetch-depth: 0; the changes job's one
+# lazy blob fetch, on a PR that edits its classifier, is anonymous, the
+# repository public), so the token has no reason to stay in the workspace.
 
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # ── What the change can affect (SMD-2435) ─────────────────────────────────
+  # A pull request into the default branch whose every changed path is docs
+  # runs none of the jobs that need this one: .github/ci/changes.sh says
+  # code=false only then, and each gated job runs on any other answer. It
+  # fails open: a failed or cancelled run of this job runs them all, and the
+  # aggregate lets them skip only when this job said code=false. Any other
+  # event runs every job, with no checkout. The classifier that decides is the
+  # BASE branch's copy (HEAD^1's), so a pull request that edits it is judged by
+  # the copy already on its base, which denies .github/ (review pass 1); a base
+  # with none, or a fetch that fails, runs every job. The checkout is .github/ci
+  # and the root's files (sparse cone mode), blobless otherwise: the diff reads
+  # trees, and the base's classifier is the checked-out blob unless the PR
+  # edits it, when it is fetched alone. Its answer is on the run's summary page
+  # too (review pass 2). Check 20 holds this job as written.
+  changes:
+    name: What the change can affect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: .github/ci
+
+      - name: Whether it can affect the code jobs
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
+            bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+          else
+            if [ "$EVENT" = pull_request ]; then why="the base has no .github/ci/changes.sh, or it could not be read"; else why="a $EVENT run runs every job"; fi
+            echo "code=true: $why"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "**What the change can affect:** code=true — $why" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-24.04
@@ -157,10 +203,17 @@ jobs:
       # stack.
       - name: tier.sh's two halves against a stub runtime
         run: bun deploy/test-tier-sh.ts
+      # SMD-2435: the changes job's classifier on its own cases — docs alone
+      # are code=false, and anything else (a path off the list, another event,
+      # an empty change, a name holding a newline) is code=true.
+      - name: The changes job's reading of what changed
+        run: bash .github/ci/changes.sh --self-check
 
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -596,6 +649,8 @@ jobs:
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -718,6 +773,8 @@ jobs:
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -819,6 +876,8 @@ jobs:
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -965,6 +1024,8 @@ jobs:
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -1392,6 +1453,8 @@ jobs:
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2704,6 +2767,8 @@ jobs:
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3549,6 +3614,8 @@ jobs:
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4309,6 +4376,8 @@ jobs:
   deploy-stack-observability:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4675,6 +4744,8 @@ jobs:
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4731,6 +4802,8 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
     # recordCount): publish-test-counts has why (SMD-3614).
     env:
@@ -4854,7 +4927,9 @@ jobs:
   # this job gathers them, writes the page (.github/ci/test-counts-page.ts)
   # and commits it to the wiki. It runs on a push to main alone, when a job it
   # needs failed too (the page names the jobs that did not succeed), so it is
-  # the second job MAY_SKIP lets skip. A pull request, the merge queue and a
+  # the second job MAY_SKIP always lets skip; its `!cancelled()` keeps a gated
+  # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
+  # A pull request, the merge queue and a
   # push to another branch publish nothing. contents: write, on this job
   # alone, is what pushes to the wiki's repository; the token stays out of the
   # clone's config (an extraheader on each git call) and out of the checkout.
@@ -4971,13 +5046,16 @@ jobs:
   # GitHub reads a skipped required check as passing; it fails unless every
   # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
   # own `if:` runs it on pull requests and the merge queue alone, and
-  # publish-test-counts, whose own runs it on a push to main alone. The step
-  # is held verbatim by check 20, which runs it against its own cases.
+  # publish-test-counts, whose own runs it on a push to main alone; and, only
+  # when the changes job succeeded and said code=false, the jobs it gates
+  # (SMD-2435), so a cancelled run's unstarted jobs never pass. The step is
+  # held verbatim by check 20, which runs it against its own cases.
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
     if: always()
     needs:
+      - changes
       - repo-consistency
       - portable-server
       - db-schema
@@ -4997,7 +5075,7 @@ jobs:
       - name: Every job succeeded, or was skipped where MAY_SKIP allows it
         env:
           NEEDS: ${{ toJSON(needs) }}
-          MAY_SKIP: commit-lint publish-test-counts
+          MAY_SKIP: ${{ needs.changes.result == 'success' && needs.changes.outputs.code == 'false' && 'commit-lint publish-test-counts portable-server db-schema replay-gate db-live data-layer deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability auth-poc compat-shim' || 'commit-lint publish-test-counts' }}
         run: |
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
