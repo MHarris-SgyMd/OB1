@@ -4379,6 +4379,173 @@ version 2. Two fresh blind raters per set re-labelled both sets under version 3:
 
 The pairs, the answers and the labels hold the brain's text, so they stay out of the repo.
 
+## Does a read put what matters first? (SMD-3662)
+
+`eval-priority.ts`, its rules in `priority.ts`. Twice a "highest-value unstarted issue" question went to both brains,
+and both put a ticket whose words matched the question ahead of the one the board said mattered: SMD-2540 over
+SMD-2888 on 2026-10-14, and SMD-1853 over SMD-2908 on 2026-11-02. SMD-3660's reads (`priority_weight`, the agenda)
+are meant to fix that, and none turns on by default without this number.
+
+```bash
+bun eval-priority.ts --self-check                       # the rules; no database, no model
+../db/with-postgres.sh bun eval-priority.ts --seeded    # the seeded set on a throwaway Postgres; keyless
+```
+
+**The seeded set.** It has 18 items and 7 prompts, with the gold order for each prompt written by judgement, not
+computed from `docs/priority.md`'s weights.
+* **Personal items:** a bill due tomorrow, a renewal next month, an operator's "this matters", a commitment from a
+  meeting, a home-maintenance task two weeks overdue, an action item done last week, and four pieces of chatter,
+  which are the newest rows.
+* **A small board:** an Urgent ticket that blocks another, a High, a claimed High, a blocked High, a Medium, a Low, a
+  Done and a "No priority". Each is a Linear issue run through board-sync's own adapter (`db/ingest-linear.ts`'s
+  `renderIssue` for the text, `issueFacets` for the metadata), so a read finds it as it finds a synced ticket.
+
+Each item also states the facts its gold rests on (a due offset, a stated level, done, claimed, the blocks links).
+Today's rows carry only what main's reads read: the text, and a board row's facets. A later read's PR plants the
+facts its own store reads (SMD-3663's assertions, a claim in `work_claims`, Linear's blocks relations through
+board-sync's links) by extending the seeding. A read never takes them from `ITEMS`, which is the answer's side.
+
+A hash pins the corpus and `priority.ts` from the stub embedder through the baseline reads, as source text with LF
+line endings: the stub (noise weights included), the seeding (`plantRows`, the insert itself), how a tool's
+arguments and answer are read, the score, the mutant, the bar and the baseline reads. Changing any of them, a comment included, is a new
+registration with its baseline re-run, never an edit. A board item is registered by its issue's fields, not by
+`renderIssue`'s text, so a change to board-sync's adapter moves no registration here; if it moves the baseline's
+numbers, the drift check below says so. The bar's three numbers also have a pin of their own: changing them is a
+decision recorded on SMD-3662, never part of a re-registration. `--seeded` refuses a corpus that isn't the
+registered one, so no verdict is printed on an unregistered corpus.
+
+**The vectors are keyless.** They are a hashed bag of words over a shared background axis: texts that share no word
+sit at a cosine of about 0.4, as unrelated texts do under a real model. A small hashed noise axis breaks ties
+instead of the listing order. Plain search therefore ranks by word overlap. The seeded number measures how a read
+orders results on a fixed similarity, which is the part a priority read changes. The dogfood rows carry the real
+model's.
+
+**The baseline reads are the tools themselves.** Each is a search tool and the arguments a client would send, called
+over MCP on the server itself: the MCP server with the REST core behind it, in-process, as the write-path gate runs
+them (`server-portable/test-support.ts`'s `mcpUnderTest`), with a read key. The tool parses its own arguments. The
+server's own embedder embeds the query through a stub provider on loopback that answers with the stub's vectors. The
+ids come from each answer's structured content.
+* `plain`: the `search` tool;
+* `current`: `search_thoughts` with `prefer_current` on;
+* `filter`: `search_thoughts` with the workaround SMD-3660 measured, `{"status_type":"backlog","priority":"High"}`.
+
+So any change to how either tool searches reaches the baseline, and the drift check says when it moved the numbers. A
+baseline read that returns more than the 10 hits the score reads also fails the run.
+
+**A priority read joins `MEASURED`** in `priority.ts`, outside the hashed section, so adding the read under test is
+not a new registration. It is any function to thought ids, best first. It is handed what a deployed read has: the
+query's words and vector, the store, and `callTool`, a search tool called over MCP as the baseline reads are. It never gets the prompt's key or its gold. A search argument fits (SMD-3668's `priority_weight`, through
+`callTool`), and so does a read that isn't a search (SMD-3669's agenda). `--seeded` runs every measured read a second
+time with each gold replaced by the items outside it and each item's facts moved to the next item. A read whose answer
+moves consults the answer, and fails the run. The ceiling, which reads the gold, is that check's control. A second
+pass that errors is reported as an error, not as reading the answer. A read that copies the answer when its module
+loads is the reviewer's to catch. A measured read's ids are scored once each, first occurrence kept. The run prints each measured read's
+verdict against the baselines of the same run. A measured read that errors on a prompt scores it false, false, 0, as
+the bar says, and the run lists the error; its verdict doesn't fail the run. The gold ceiling runs through the same path on every run, so the path is exercised before a priority
+read exists.
+
+**The score.** For each prompt:
+* **top-1:** the gold's first item is the read's first hit;
+* **top-3:** the gold's first item is among the read's first three;
+* **tau:** Kendall's tau-b between the gold order and the read's ranks of the gold items. An item the read left out
+  ranks 11, tied with the others left out.
+
+top-1 and top-3 are averaged over every prompt. tau is averaged over the prompts with two or more gold items, and a
+null tau among them counts as 0.
+
+**The mutant.** Each read is scored against its gold shuffled 2,000 times, seeded per prompt (`db/test-support.ts`'s
+`seededRandom`), so prompts with golds of one length don't share their permutations. If the score reads the
+gold's order, the shuffled gold scores chance:
+* top-1 is 1/|gold| when the read's first hit is a gold item;
+* top-3 is the read's top three's share of the gold;
+* tau is 0.
+
+The mutant's tau and chance's are averaged over the same prompts as "mean tau". The self-check also runs an
+order-blind top-1 through the mutant and requires it to land far from chance.
+
+The seeded run exits 1 when any of these holds:
+* the corpus isn't the registered one;
+* a baseline read errors, since a baseline that never ran would set the bar;
+* a baseline read's scores differ from `priority.ts`'s recorded `BASELINE`, so a change to search on main that
+  moves the bar is seen and re-recorded, not absorbed;
+* the gold ceiling errors or can't clear the bar;
+* a measured read answers differently when the answer moves;
+* the dogfood rows aren't sound;
+* the mutant sits more than 0.05 from chance for a baseline read or the ceiling.
+
+Before it resets the schema, `db/test-support.ts`'s `refuseHeldDatabase` refuses (exit 2) a database that already
+holds thoughts unless `OB1_FIXTURE_RESET=1`, the same guard `eval-projection-replay.ts --fixture-check` uses.
+
+These mutants are each refused:
+* an order-blind top-1, by the self-check and by the seeded run's own chance check;
+* a constant tau;
+* no background axis;
+* a null tau counted as 1;
+* no regression check;
+* a changed noise weight, bar, absent rank or read knob (the hash);
+* a `search_thoughts` default changed for `limit` or `prefer_current`;
+* a recorded baseline that differs from the run, a baseline read that throws, an unreachable bar, and a fixture
+  with no `rows` array (each fails the seeded run);
+* a measured read that looks up the gold, defined outside `MEASURED`; one that ranks by the items' facts; one that
+  uses the gold as a set and keeps search's order (each fails the seeded run); a broken answer-moving check (the
+  ceiling isn't seen); an edited gold (an unregistered corpus);
+* a drift check comparing counts, not which prompts;
+* a second `--seeded` on a database holding thoughts, without `OB1_FIXTURE_RESET=1` (exit 2).
+
+An honest measured read returning duplicate ids, or one that errors only on its second pass, leaves the run green.
+
+**The bar** was pre-registered on 2026-11-02, before any priority read is measured (`priority.ts`'s `BAR`), and the
+maintainer confirmed it, with the gold orders, the same day. On the
+seeded set, against the best baseline read on each measure, a read helps only if all four hold:
+* (a) it gets top-1 on at least 5 of the 7 prompts;
+* (b) it gets top-1 on at least 2 more prompts than the best baseline read;
+* (c) its mean tau is at least 0.25 above the best baseline read's;
+* (d) no prompt that a baseline read kept in the top 3 leaves it.
+
+These edge cases are fixed in advance:
+* a read's order is the order it returns;
+* a read that errors scores false, false, 0 on that prompt;
+* a read with a weight is measured once, at the value it would ship with;
+* the dogfood rows are reported beside the verdict and don't gate it.
+
+**Baseline, 2026-11-02** (main 8aa855f1, the same on a04cd907, registration `0139fc455cb15104`; deterministic, two runs
+identical; the
+program's output, verbatim):
+
+| read | top-1 | top-3 | mean tau | shuffled gold: top-1 / top-3 / tau | chance: top-1 / top-3 / tau |
+| --- | --- | --- | --- | --- | --- |
+| plain | 0.143 | 0.286 | 0.252 | 0.085 / 0.147 / -0.002 | 0.085 / 0.149 / 0.000 |
+| current | 0.143 | 0.286 | 0.212 | 0.085 / 0.176 / -0.003 | 0.085 / 0.178 / 0.000 |
+| filter | 0.000 | 0.000 | 0.055 | 0.075 / 0.075 / -0.005 | 0.078 / 0.078 / 0.000 |
+| gold (ceiling) | 1.000 | 1.000 | 1.000 | 0.430 / 0.712 / -0.002 | 0.428 / 0.711 / 0.000 |
+
+So a priority read must get top-1 on at least 5 of 7 prompts and a mean tau of at least 0.502, and keep
+`highest-value` and `due-soon` in the top 3.
+
+What the baseline gets wrong:
+* **Plain search** gets one prompt right, `highest-value`, because the Urgent ticket's row says "unstarted". On
+  "which ticket should I pick up next?" it puts a renewal first and the claimed ticket second. On "what needs my
+  attention this week?" it puts a documentary first and the insurance claim, done last week, second.
+* **`prefer_current`** moves only the Done ticket down. The insurance claim's note says it's done but has no lifecycle
+  of its own, so it stays second. That's SMD-3665's gap: an action item never closes.
+* **The filter** returns the two High backlog tickets for every prompt, one of them blocked, and nothing personal.
+
+`priority.ts`'s `BASELINE` records, per baseline read, which prompts it puts first and in the top 3, and its mean tau.
+The run fails when one moves, including when a count holds but its prompts change, since the bar's (d) reads which. That is a record of today's main,
+not part of the registration: the verdict always compares a measured read with the baselines of the same run. A
+re-record changes `BASELINE` and adds a dated table here, naming the main and the change that moved it. The tables
+before it stay as they were measured.
+
+**The dogfood rows** (`fixtures/priority-dogfood.json`) are recorded by hand in the session that asked, as ids and
+numbers (check 9). A row is never rewritten once the board moves. Each later "what next" session appends a row.
+A row names its reads from `DOGFOOD_READS`: the seeded set's reads, baseline and measured, and `ticket_rows` (search
+filtered to board-sync's ticket rows, the 10-14 session's second read). A new read is added there with what it is, so rows stay comparable.
+
+| date | pick | picked instead | read: rank of the pick |
+| --- | --- | --- | --- |
+| 2026-10-14 | SMD-2888 | SMD-2540 | plain absent; ticket_rows absent |
+| 2026-11-02 | SMD-2908 | SMD-1853 | plain absent; filter 4 |
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
