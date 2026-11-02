@@ -844,8 +844,13 @@ jobs:
       # subshell holds none of the step's output, so the step ends at once.
       - name: Start Postgres in the background
         run: |
-          (docker pull -q "$IMAGE" && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
-           echo $? > "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
+          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
+          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
         env:
           IMAGE: pgvector/pgvector:0.8.6-pg16
 
@@ -935,10 +940,14 @@ jobs:
 
       # What the runner's teardown did for a service container (SMD-3474):
       # each container's log, folded, then the container removed, after a
-      # failure or a cancel too.
+      # failure or a cancel too. A start still running is given 10 s to end
+      # first, so a container it makes after this step is not left behind
+      # (review pass 1; it matters only off a hosted runner, whose machine
+      # goes with the job).
       - name: Postgres's log, and its removal
         if: always()
         run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
           for c in postgres; do
             echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
             docker rm -f "$c" > /dev/null 2>&1 || true
@@ -971,11 +980,16 @@ jobs:
       # default too.
       - name: Start Postgres in the background
         run: |
-          (docker pull -q "$IMAGE" \
+          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
+          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
+          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull \
              && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE" \
              && docker run -d --name pair-postgres -p 5433:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1upgrade "$IMAGE" \
              && docker run -d --name preflight-postgres -p 5434:5432 --shm-size=1g -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1preflight "$IMAGE"
-           echo $? > "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
         env:
           IMAGE: pgvector/pgvector:0.8.6-pg16
 
@@ -1361,6 +1375,7 @@ jobs:
       - name: Postgres's log, and its removal
         if: always()
         run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
           for c in postgres pair-postgres preflight-postgres; do
             echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
             docker rm -f "$c" > /dev/null 2>&1 || true
@@ -4703,8 +4718,13 @@ jobs:
       # db-live's "Start Postgres in the background" has why (SMD-3474).
       - name: Start Postgres in the background
         run: |
-          (docker pull -q "$IMAGE" && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
-           echo $? > "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
+          # The runner retried a service's pull, three tries a few seconds apart; so does this. The subshell runs
+          # under set +e: under the step's -e a failing last `docker run` ended it before its code was written,
+          # and the wait stalled for its whole deadline (review pass 1). The code is written whole, by a rename.
+          pull() { local try; for try in 1 2 3; do docker pull -q "$IMAGE" && return 0; [ "$try" = 3 ] || sleep $((try * 3)); done; return 1; }
+          (set +e
+           pull && docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=ob1test -e POSTGRES_DB=ob1test "$IMAGE"
+           rc=$?; echo "$rc" > "$RUNNER_TEMP/postgres-start.rc.part"; mv "$RUNNER_TEMP/postgres-start.rc.part" "$RUNNER_TEMP/postgres-start.rc") > "$RUNNER_TEMP/postgres-start.log" 2>&1 < /dev/null &
         env:
           IMAGE: pgvector/pgvector:0.8.6-pg16
 
@@ -4798,6 +4818,7 @@ jobs:
       - name: Postgres's log, and its removal
         if: always()
         run: |
+          for _ in $(seq 50); do [ -s "$RUNNER_TEMP/postgres-start.rc" ] && break; sleep 0.2; done
           for c in postgres; do
             echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
             docker rm -f "$c" > /dev/null 2>&1 || true
