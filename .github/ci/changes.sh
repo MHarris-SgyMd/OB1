@@ -69,14 +69,15 @@ decide() {
 # answer EVENT BASE_REF DEFAULT_BRANCH, in a checkout: prints "true|false<TAB>why".
 answer() {
   local event=$1 base=$2 default=$3 changed result
-  if [ "$event" = pull_request ] && { [ -z "$default" ] || [ "$base" != "$default" ]; }; then
+  if [ "$event" != pull_request ]; then decide "$event" /dev/null; return; fi
+  if [ -z "$default" ] || [ "$base" != "$default" ]; then
     printf 'true\ta pull request into %s, not %s, runs every job\n' "${base:-no branch}" "${default:-the default branch}"; return
   fi
-  if [ "$event" = pull_request ] && ! git rev-parse -q --verify 'HEAD^2' > /dev/null 2>&1; then
+  if ! git rev-parse -q --verify 'HEAD^2' > /dev/null 2>&1; then
     printf 'true\tHEAD has no second parent here: not the merge commit, or a shallow fetch\n'; return
   fi
   changed=$(mktemp) || { printf 'true\tno scratch file for the change\n'; return; }
-  if [ "$event" = pull_request ] && ! git diff --raw -z --no-renames --no-abbrev 'HEAD^1' HEAD > "$changed" 2> /dev/null; then : > "$changed"; fi
+  if ! git diff --raw -z --no-renames --no-abbrev 'HEAD^1' HEAD > "$changed" 2> /dev/null; then : > "$changed"; fi
   result=$(decide "$event" "$changed")
   rm -f "$changed"
   printf '%s\n' "$result"

@@ -557,13 +557,15 @@
  *      it stops listing db/with-postgres.sh or .github/ci/held-cases.sh
  *  47. no Markdown or image file that tracked code names (a path token in a
  *      non-comment line, read from the root or from the naming file's own
- *      directory — a lexical reading: a path built from pieces, a template
- *      or a directory walk is not seen) is on .github/ci/changes.sh's allowlist of paths that skip
- *      Fork Checks' code jobs (SMD-2435), unless NAMED_NOT_READ lists it with
- *      the reason no gated job reads it — so a suite that starts reading a
- *      README fails here until the allowlist denies it; a stale entry fails
- *      too. It fails if it stops seeing the ADR an eval pins as named and
- *      denied, the reading broken rather than the tree clean
+ *      directory; a lexical reading, so a path built from pieces, a template
+ *      or a directory walk is not seen) is on .github/ci/changes.sh's
+ *      allowlist of paths that skip Fork Checks' code jobs (SMD-2435), unless
+ *      NAMED_NOT_READ lists it with exactly the files that name it and the
+ *      reason none reads it for a gated job — so a suite that starts reading
+ *      a README fails here until the allowlist denies it or the entry names
+ *      it; a stale entry or namer fails too. It fails if it stops seeing the
+ *      ADR an eval pins as named and denied, the reading broken rather than
+ *      the tree clean
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40 and 44 parse YAML with Bun.YAML,
