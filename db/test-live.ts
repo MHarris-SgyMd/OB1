@@ -109,7 +109,10 @@ if (!URL_) {
  * main's CI logs stamp in its runs from 7301d0f5 to e7220bd5 (SMD-3469):
  * sleep has [17] beside [38] and [10g], and the rest takes [10e], [37] and
  * [43] from extract. [41] went to sleep too once [10] grew ~7 s (SMD-3379
- * PR 1c-3a), by the runs from 68ba1e13 to 6d613601 (SMD-3469 PR 2). The
+ * PR 1c-3a), by the runs from 68ba1e13 to 6d613601 (SMD-3469 PR 2). [38]
+ * grew ~125 s with the pause's cases (SMD-3379 PR 1c-3b), so it runs alone
+ * and [10g], [17] and [41] (~39 s) went to the rest, by main's run at
+ * 30bd9637 (sleep 218 s of sections, long 217, extract 303, rest 221). The
  * rest's sections wait on the CPU, not on timers, so its time moves most
  * with the runner's speed. A cell's job runs ~18 s past its sections (~25 s
  * for the rest's, with test-search-path.ts), so a section added to a cell
@@ -119,7 +122,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["10g", "17", "38", "41"],
+  sleep: ["38"],
   long: ["9", "38r", "38b"],
   extract: ["9f", "10", "10f", "10h", "37b", "39"],
 };
