@@ -851,7 +851,7 @@ another tag is what zizmor finds, and zizmor ran once for SMD-2093 and is not in
 CI. Two images the release job's actions start by default, QEMU's binfmt and
 the BuildKit builder that pushes to GHCR, are pinned by digest through their
 inputs in `release.yml`, and nothing moves those but a hand edit; nor does
-anything move the `services:` images (pgvector). The rehearsal still runs with
+anything move the database jobs' pgvector image. The rehearsal still runs with
 the release's write token on a PR that touches what it builds from, a
 Dependabot one included (SMD-2111).
 
@@ -967,8 +967,8 @@ its measurements are in the change file named.
 run of the Actions app; changes only through a pull request; no deletion, **no
 force-push**, and no bypass actors — it applies to admins too. "Fork Checks
 passed" is `fork-checks.yml`'s job `fork-checks-passed`, which needs every other
-job, runs even when one of them failed, and fails unless each succeeded (or, for
-a job with an `if:` of its own, was skipped). So every job is required through
+job, runs even when one failed, and fails unless each succeeded (or skipped: by
+its own `if:`, or as a docs-only PR's code job). So every job is required through
 it, and a job added, renamed, split or run as a matrix changes nothing in the
 ruleset (SMD-3168). The ruleset is a file, `.github/rulesets/main.json`, applied
 with `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
