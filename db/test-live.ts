@@ -40,7 +40,7 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
@@ -113,8 +113,9 @@ if (!URL_) {
  * its sections (~25 s for the rest's, with test-search-path.ts), so a
  * section added to a cell adds to the run's length once that cell's job is
  * the run's longest.
- * db/README.md states each shard's assertion count beside the full run's,
- * and [doc] checks, on every run, that they add up.
+ * Each shard's count is published to the wiki's Test-counts page on a push to
+ * main (SMD-3614). An assertion outside every section would count in each
+ * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["10g", "17", "38"],
@@ -141,15 +142,19 @@ const begun = new Set<string>();
 const headed: string[] = [];
 /** Whether section `id` runs here: every section with no shard named, else the shard's. */
 const runsHere = (id: string): boolean => SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
-/** runsHere, noting the section begun: each section's header reads it. */
+const counted = createAssert();
+const { skip, docCheck, report } = counted;
+/** The assertions, each noted when made outside a section this run runs (trackSections, SMD-3614). */
+const sections = trackSections(counted.assert);
+const { assert } = sections;
+/** runsHere, noting the section begun, and the section the code after it is in: each section's header reads it. */
 function want(id: string): boolean {
   headed.push(id);
   const runs = runsHere(id);
   if (runs) begun.add(id);
+  sections.at(id, runs);
   return runs;
 }
-
-const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
 /**
  * Cut the pauses before a follower's provider outage to 100 ms in this
@@ -14865,10 +14870,6 @@ if (want("28")) {
   await sql.close();
 }
 
-// db/README.md's Testing block quotes this suite's assertion total. The count
-// is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
-// run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
-
 if (want("27")) {
   console.log("\n[27] search_thoughts_current against a hand oracle on real Postgres: ties in score go to the current row, then to the hybrid's order, whichever order the join hands the rows over in (migration 059, SMD-2255)");
   // test-schema [55] holds the rule under PGlite, whose small plans hand the
@@ -21431,6 +21432,8 @@ if (want("46")) {
 }
 
 console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
+// Every shard runs [end], on purpose: its assertion is no stray outside a section.
+sections.at("end", true);
 {
   // [33] and [35] check the projection after the sections before them, in the
   // rest; this checks it after a run's last section, so a section in another
@@ -21445,23 +21448,14 @@ console.log("\n[end] Every section this run ran left the node_state projection e
   }
 }
 
-console.log("\n[doc] db/README.md states this suite's assertion total, and each shard's");
+console.log("\n[doc] The sections: each header an id of its own, each section a shard lists run, no assertion outside a section");
 {
-  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
-  const n = total();
-  const lines = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)].map((m) => m[0]);
-  const counts = (ls: string[]) => ls.flatMap((l) => [...l.matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
-  const shardOf = (l: string) => /\bOB1_LIVE_SHARD=(\S+)/.exec(l)?.[1];
-  const full = counts(lines.filter((l) => shardOf(l) === undefined));
-  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
-  // On every run, the README's own sum: one count a shard, adding up to the
-  // full run's once [end], which every run has, is counted once. An
-  // assertion outside a want() section counts in every shard too, and shows
-  // here as the shards adding up to more than the full run.
-  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (SHARD_NAMES.length - 1);
-  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
-  docCheck(sumHolds,
-    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for a section or assertion with no want(), which runs in every shard"}`);
+  // An assertion outside every section runs, and counts, in every shard
+  // (trackSections). A shard sees one made after a section it skips; CI runs
+  // every shard, so one made after any section fails a cell.
+  const strays = sections.outside();
+  docCheck(strays.length === 0,
+    `no assertion was made outside a section this run runs (${strays.length ? `${strays.length}: ${strays.slice(0, 3).join("; ")} — put it inside its section's want() block` : "none"})`);
   // No two headers share an id: a copied header would take its section to the other's shard unseen.
   const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
   docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
@@ -21471,14 +21465,6 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
     const listed = SHARD === undefined ? [...LISTED] : SHARDS[SHARD];
     const absent = listed.filter((id) => !begun.has(id));
     docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
-  }
-  const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
-  const run = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
-  if (skipped() === 0) {
-    docCheck(claims.length > 0 && claims.every((c) => c === n),
-      `db/README.md quotes test-live.ts's ${n} assertions for ${run} (found ${[...new Set(claims)].join(", ") || "none"})`);
-  } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the count the README states for ${run}`);
   }
 }
 
