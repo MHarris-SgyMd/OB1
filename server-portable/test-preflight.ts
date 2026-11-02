@@ -4390,8 +4390,8 @@ else {
       await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
       assert(/✓\s+workers\s+board-sync alive \(last stamped 2 min ago, every 300 s\)$/.test(row(mixedOut.out, "workers")) && /✓\s+sleep\s+running a pass/.test(row(mixedOut.out, "sleep")),
         `beside board-sync's heartbeat the workers row names board-sync alone, the scheduler its own row (${row(mixedOut.out, "workers")})`);
-      assert(/✓\s+sleep\s+running a pass \(last stamped 1\d s ago, every 60 s\); asleep, its passes running — for 2 min; a live write wakes it; a search does not$/.test(row(asleepOut.out, "sleep")),
-        `asleep: the row says so, for how long, and that a live write wakes it, a search not (${row(asleepOut.out, "sleep")})`);
+      assert(/✓\s+sleep\s+running a pass \(last stamped 1\d s ago, every 60 s\); asleep, its passes running — for 2 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(asleepOut.out, "sleep")),
+        `asleep: the row says so, for how long, and that a live write pauses its passes, a search not (${row(asleepOut.out, "sleep")})`);
       // Paused by a live call, a pass held (SMD-3379 PR 1c), read before a
       // scheduler writes them: the row says both, and warns of neither.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null }, paused: { since: await at(40) }, holds: [{ pass: "consolidate", why: "provider", until: null }] }), 10);
@@ -4413,7 +4413,7 @@ else {
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write wakes it; a search does not$/.test(row(awakeOut.out, "sleep")),
+      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(awakeOut.out, "sleep")),
         `awake: when the last sleep ended and how long it lasted (${row(awakeOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60 }), 20);
       assert(/awake, its passes waiting for the brain to go quiet — no sleep yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no sleep recorded says no sleep yet");
@@ -4425,7 +4425,7 @@ else {
       const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 2 };
       await beat("heartbeat:sleep", v({ every_s: 60, resting: true, slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
       const clockOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); awake — the last sleep ended 6\d s ago, after 60 min, stopped on its budget — its clock spent \(60 min\); the next begins after a live call and the quiet; a live write wakes it; a search does not; budget: a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 2 sleep\(s\) stopped on it since it started$/.test(row(clockOut.out, "sleep")),
+      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); awake — the last sleep ended 6\d s ago, after 60 min, stopped on its budget — its clock spent \(60 min\); the next begins after a live call and the quiet; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not; budget: a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 2 sleep\(s\) stopped on it since it started$/.test(row(clockOut.out, "sleep")),
         `a sleep its clock stopped: the row says so and that the next waits for a live call, the budget and its count in the detail, no warning (${row(clockOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", resting: true, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, stops: 1 } }), 20);
       const stmtOut = await run(LOG_ON);
@@ -4437,7 +4437,7 @@ else {
       // alone — and the fix is not asked for again.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: null, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, statementTimeoutS: 600, stops: 0 } }), 20);
       const raisedOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a live write wakes it; a search does not; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
+      assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a live write pauses its passes, or ends a sleep whose pools are drained; a search does not; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
         `a restarted scheduler, its timeout raised past the bound its last sleep stopped at: the mark's own bound, no "after a live call", no fix (${row(raisedOut.out, "sleep")} | ${fix(raisedOut.out, "sleep")})`);
       // Ended, the row says its last sleep stopped on its budget, the count since it last started.
       await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
@@ -4468,7 +4468,7 @@ else {
       const oddOut = row((await run(LOG_ON)).out, "sleep");
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null, budget: "clock" } }), 10);
       const runningOut = row((await run(LOG_ON)).out, "sleep");
-      assert(/✓\s+sleep\s+alive .*awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write wakes it; a search does not$/.test(oddOut) && /asleep, its passes running — for 2 min; a live write wakes it; a search does not$/.test(runningOut),
+      assert(/✓\s+sleep\s+alive .*awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(oddOut) && /asleep, its passes running — for 2 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(runningOut),
         `a budget word of no kind, on a sleep not over, or a budget not of the shape is left off (${oddOut} | ${runningOut})`);
 
       // A search wakes it under no setting (SMD-3315): the log off here, or an
@@ -4477,8 +4477,8 @@ else {
       for (const [label, env, reads] of [["the log off", SQL_ENV, undefined], ["an older row's reads: denied", LOG_ON, "denied"], ["an older row's reads: missing", LOG_ON, "missing"]] as const) {
         await beat("heartbeat:sleep", v({ every_s: 60, ...(reads ? { reads } : {}), slept: { from: await at(400), to: await at(60) } }), 20);
         const out = await run(env);
-        assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write wakes it; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
-          `${label}: the row is ok, a live write waking it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
+        assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 6\d s ago, after 6 min; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
+          `${label}: the row is ok, a live write pausing it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
       }
 
       // Fresh, its last pass failed: a warning with the scheduler's remedy.
@@ -4490,13 +4490,13 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write wakes it; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Asleep with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract"], slept: { from: await at(130), to: null } }), 10);
       const waitOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 1\d s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a live write wakes it; a search does not$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
+      assert(/!\s+sleep\s+waiting for the provider at a pass's start \(last stamped 1\d s ago, every 60 s\); asleep, extract waiting for the provider at its start — the sleep began 2 min ago; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(waitOut.out, "sleep")) && /→ Extract waiting for the provider at its start: the provider does not answer a one-token call/.test(fix(waitOut.out, "sleep")),
         `a pass waiting at its start for the provider is said, a warning naming the provider (${row(waitOut.out, "sleep")} | ${fix(waitOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, waiting: ["extract", "consolidate"], slept: { from: await at(130), to: null } }), 10);
       const bothOut = await run(LOG_ON);
@@ -4506,7 +4506,7 @@ else {
       // so, the provider in the fix, not "its log says which".
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waitingMidPass: ["consolidate"], slept: { from: await at(130), to: null } }), 10);
       const midOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+waiting for the provider mid-pass, its last pass failed \(last stamped 1\d s ago, every 60 s\); asleep, consolidate waiting for the provider mid-pass — the sleep began 2 min ago; a live write wakes it; a search does not$/.test(row(midOut.out, "sleep"))
+      assert(/!\s+sleep\s+waiting for the provider mid-pass, its last pass failed \(last stamped 1\d s ago, every 60 s\); asleep, consolidate waiting for the provider mid-pass — the sleep began 2 min ago; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(midOut.out, "sleep"))
              && /→ Consolidate waiting for the provider mid-pass: the provider stopped answering — check it, and the model provider rows here \(--deep probes chat\); the pass goes on by itself once it answers/.test(fix(midOut.out, "sleep")) && !/its log says which/.test(fix(midOut.out, "sleep")),
         `a pass waiting mid-pass for the provider is said, a warning naming the provider (${row(midOut.out, "sleep")} | ${fix(midOut.out, "sleep")})`);
       // One at its start, another mid-pass: both said, the start's first.
@@ -4678,7 +4678,7 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true }), 20);
       await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: null }), 10);
       const keptDown = await run(LOG_ON);
-      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write wakes it; a search does not$/.test(row(keptDown.out, "sleep")) && /→ Followers run here outside the scheduler \(extract:qwen2\.5:7b@p2\), and it will not run beside them — the coordinator never runs both.*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, name workers and not sleep in deploy\/\.env's OB1_PASSES, recreate the coordinator \(up -d coordinator\) and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
+      assert(/!\s+sleep\s+ended on a failure .*; when it runs, a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(keptDown.out, "sleep")) && /→ Followers run here outside the scheduler \(extract:qwen2\.5:7b@p2\), and it will not run beside them — the coordinator never runs both.*DELETE FROM ob1_config WHERE key IN \('heartbeat:extract:qwen2\.5:7b@p2'\).*For workers, name workers and not sleep in deploy\/\.env's OB1_PASSES, recreate the coordinator \(up -d coordinator\) and retire this row: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(keptDown.out, "sleep")) && !/start it again/.test(fix(keptDown.out, "sleep")),
         `a scheduler kept down by followers is told to choose a profile, naming them, not to start again (${fix(keptDown.out, "sleep")})`);
       // …and a follower stopped for a scheduler running here is retired, not started again.
       await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", running: true, slept: { from: await at(60), to: null } }), 10);
@@ -4789,12 +4789,12 @@ else {
       const sleeping = (held: unknown) => beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: new Date(Date.now() - 60_000).toISOString().replace(/\d{3}Z$/, "000Z"), to: null }, held }), 10);
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 2, kept: 7, windows: 24 }] });
       const gaining = await run(LOG_ON);
-      assert(/✓\s+sleep\s+running a pass .*; a live write wakes it; a search does not; 1 thought\(s\) held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
+      assert(/✓\s+sleep\s+running a pass .*; a live write pauses its passes, or ends a sleep whose pools are drained; a search does not; 1 thought\(s\) held back across its stops — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\), the last 2 with none gained$/.test(row(gaining.out, "sleep")),
         `a thought held back, two stops short of the three the scheduler joins past at, is named, and the row passes (${row(gaining.out, "sleep")})`);
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
-        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*stop coordinator.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+      assert(/!\s+sleep\s+.*2 thought\(s\) held back across its stops — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
+        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler, which returns its passes' leases .*stop coordinator.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
         `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
       // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });
@@ -4802,22 +4802,22 @@ else {
         "a stalled thought whose windows are all kept is told apart: the stops land past its last window");
       // Two stalled, each with its own reason (review pass 2).
       await sleeping({ total: 2, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }, { id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] });
-      assert(/→ 2 thoughts: 3 or more long hard stops in a row have taken each with no window gained — 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the sleeps\./.test(fix((await run(LOG_ON)).out, "sleep")),
+      assert(/→ 2 thoughts: 3 or more long hard stops in a row have taken each with no window gained — 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand\./.test(fix((await run(LOG_ON)).out, "sleep")),
         "two stalled thoughts are each given their own reason");
       // More held than named: the rest counted.
       await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
-      assert(/held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
+      assert(/held back across its stops — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
       // The scheduler's own cuts, said apart from the stops, which say the
       // wakes — a judge outage's let-outs are no wakes (SMD-3060).
       await sleeping({ total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null, cuts: 41 }] });
       const cutOut = await run(LOG_ON);
-      assert(/held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained, and 41 cut\(s\) of the scheduler's own$/.test(row(cutOut.out, "sleep")),
+      assert(/held back across its stops — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained, and 41 cut\(s\) of the scheduler's own$/.test(row(cutOut.out, "sleep")),
         `the scheduler's cuts are said apart from the stops (${row(cutOut.out, "sleep")})`);
       // A scheduler stopped says what it held at its last word, and warns of none:
       // a hand run may have finished it since (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
       const endedHeld = await run(LOG_ON);
-      assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
+      assert(/at its last word, 1 thought\(s\) held back across its stops — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
         `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);
       // A held word out of its bounds is left off: more thoughts than its total, more windows kept than sent, or cuts that are no count.
       for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4, cuts: -1 }] }]) {
