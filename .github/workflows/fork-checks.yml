@@ -42,6 +42,21 @@ defaults:
 # lazy blob fetch, on a PR that edits its classifier, is anonymous, the
 # repository public), so the token has no reason to stay in the workspace.
 
+# Every job has a time limit, where GitHub's default is 360 minutes: a hung
+# lease, deadlock or container wait would otherwise hold the one required
+# check, "Fork Checks passed", pending for six hours. Each is at least three
+# times the job's longest successful run in the newest 400 Fork Checks runs
+# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
+# on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
+# 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
+# them one bun install, and auth-poc 302 s: portable-server's limit is 30,
+# over the rule's 20, so that run is held, if barely, and auth-poc's 10
+# holds its. A job at its limit is cancelled with its step in hand, which
+# names where it hung, and the aggregate fails; the run then reads
+# "cancelled", as a superseded one does, and the job's annotation says it hit
+# its limit. The limits count a job's own run, not its wait for a runner
+# (check 48, SMD-2094).
+
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -95,6 +110,7 @@ jobs:
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -135,8 +151,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40 and 44 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
+      # 32 to 38, 40, 44 and 48 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -212,6 +228,7 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -649,6 +666,7 @@ jobs:
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -773,6 +791,7 @@ jobs:
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -876,6 +895,7 @@ jobs:
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -1024,6 +1044,7 @@ jobs:
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -1453,6 +1474,7 @@ jobs:
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -2767,6 +2789,7 @@ jobs:
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -3614,6 +3637,7 @@ jobs:
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4376,6 +4400,7 @@ jobs:
   deploy-stack-observability:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4744,6 +4769,7 @@ jobs:
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4802,6 +4828,7 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -4988,6 +5015,7 @@ jobs:
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
     # are the range, and commitlint ignores the merge commit the queue creates.
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -5014,6 +5042,7 @@ jobs:
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5053,6 +5082,7 @@ jobs:
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: always()
     needs:
       - changes
