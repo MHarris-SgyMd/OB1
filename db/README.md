@@ -275,9 +275,12 @@ only when the core's are clean:
   `CREATEROLE` and `ADMIN` on it alone. A role something else still depends
   on cannot be dropped: every plugin role it holds is revoked from it, each
   grant by its own grantor (`GRANTED BY` on PG 16, which needs a migrator
-  that is no superuser to hold that grantor's privileges), and it can no
-  longer log in, in one transaction; it is kept, and the run says so. A
-  later run finds it so, says so in a line, and takes no lock. The plugins' schemas and rows
+  that is no superuser to hold `ADMIN` on the plugin role and that grantor's
+  privileges), and it can no longer log in, in one transaction; it is kept,
+  and the run says so, naming what depends on it. A later run finds it so,
+  says so in a line, and takes no lock. A drop refused for anything else (a
+  lock held on the role, a privilege the migrator lacks) fails the run and
+  changes nothing, so the next run tries again. The plugins' schemas and rows
   are not touched, and a plugin not named gets its own login when a run names
   it. `--dry-run` says it would retire it.
 

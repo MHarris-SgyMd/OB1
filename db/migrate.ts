@@ -1440,11 +1440,15 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
    * grantor's privileges, which a migrator that is no superuser may lack).
    * Its plugins' schemas and rows are not touched; a plugin not named gets
    * its own login when a run names it. Read first, so a brain without it
-   * takes no lock. A role something else still depends on cannot be dropped:
-   * its plugin roles are revoked from it and it can no longer log in, in one
-   * transaction, and it is kept and said; a later run finds it so and says
-   * so in a line, taking no lock and writing nothing (review pass 1). 0, 1
-   * where it could be neither dropped nor revoked, or 2 refused for the lock.
+   * takes no lock. A role something else still depends on (2BP01) cannot be
+   * dropped: its plugin roles are revoked from it and it can no longer log
+   * in, in one transaction, and it is kept and said; a later run finds it so
+   * and says so in a line, taking no lock and writing nothing (review pass
+   * 1). Any other refusal of the drop (a lock held on the role, a privilege
+   * the migrator lacks) fails the run, so a later run tries the drop again
+   * (review pass 3). Postgres's DETAIL is said with its message: it names
+   * what depends, or the grant that is missing. 0, 1 where it could not be
+   * dropped and not be kept, or 2 refused for the lock.
    */
   async function retireSharedLogin(): Promise<number> {
     /** Whether it is there, and whether it still needs retiring: it can log in, or holds a plugin's role. */
@@ -1458,7 +1462,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     let shared = await readShared();
     if (!shared.present) return 0;
     if (!shared.live) {
-      out(`\nplugins: the shared login role ${SHARED_PLUGIN_LOGIN} is kept from an earlier run, NOLOGIN and holding no plugin role, so it reaches nothing (SMD-2756); drop it by hand once nothing depends on it (DROP ROLE ${SHARED_PLUGIN_LOGIN} names what does)`);
+      out(`\nplugins: the shared login role ${SHARED_PLUGIN_LOGIN} is kept from an earlier run, NOLOGIN and holding no plugin role, so no one logs in as it (SMD-2756); drop it by hand once nothing depends on it (DROP ROLE ${SHARED_PLUGIN_LOGIN} names what does)`);
       return 0;
     }
     if (dryRun) {
@@ -1475,13 +1479,23 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const before = ((await sql`
       SELECT string_agg(DISTINCT r.rolname, ', ' ORDER BY r.rolname) AS held FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
        WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AND starts_with(r.rolname, 'ob1_plugin_')`) as { held: string | null }[])[0].held;
+    /** Postgres's message with its DETAIL, which Bun's message leaves out. */
+    const why = (e: unknown) => {
+      const { message, detail } = e as Error & { detail?: string };
+      return detail ? `${message} (${detail})` : message;
+    };
     let dropWhy: string;
     try {
       await sql.unsafe(`DROP ROLE ${quoteIdent(SHARED_PLUGIN_LOGIN)}`);
-      out(`  ✓  ${SHARED_PLUGIN_LOGIN} dropped${before ? `, and with it its SET on ${before}` : ""}`);
+      out(`  ✓  ${SHARED_PLUGIN_LOGIN} dropped${before ? `, and with it its membership in ${before}` : ""}`);
       return 0;
     } catch (caught) {
-      dropWhy = (caught as Error).message;
+      dropWhy = why(caught);
+      if ((caught as { errno?: string }).errno !== "2BP01") {
+        err(`  ✗  ${SHARED_PLUGIN_LOGIN} could not be dropped: ${dropWhy}`);
+        err(`  Nothing changed; a later run tries again. The migrating role must be a superuser, or have CREATEROLE and hold ADMIN on ${SHARED_PLUGIN_LOGIN}; the compose stack's postgres is a superuser.`);
+        return 1;
+      }
     }
     let revoked: string[] = [];
     let grantors: string[] = [];
@@ -1508,8 +1522,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         revoked = [...new Set(held.map((h) => h.rolname))];
       });
     } catch (caught) {
-      err(`  ✗  ${SHARED_PLUGIN_LOGIN} could not be retired: it could not be dropped (${dropWhy}), and its plugin roles could not be revoked: ${(caught as Error).message}`);
-      err(`  The migrating role must be a superuser, or hold ADMIN on ${SHARED_PLUGIN_LOGIN} and the privileges of each grant's grantor${grantors.length ? ` (${grantors.join(", ")})` : ""}; the compose stack's postgres is a superuser.`);
+      err(`  ✗  ${SHARED_PLUGIN_LOGIN} could not be retired: it could not be dropped (${dropWhy}), and its plugin roles could not be revoked: ${why(caught)}`);
+      err(`  Nothing changed. The migrating role must be a superuser, or hold ADMIN on ${SHARED_PLUGIN_LOGIN} and on each plugin role it holds, and the privileges of each grant's grantor${grantors.length ? ` (${grantors.join(", ")})` : ""}; the compose stack's postgres is a superuser.`);
       return 1;
     }
     out(`  ·  ${SHARED_PLUGIN_LOGIN} kept, NOLOGIN and holding no plugin role${revoked.length ? ` (${revoked.join(", ")} revoked from it)` : ""}: it could not be dropped: ${dropWhy}`);

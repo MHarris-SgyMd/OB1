@@ -642,13 +642,16 @@ console.log("\n[9] A migrator that is no superuser, with CREATEROLE: it takes th
     const retired = await migrate({ url: asMigrator.toString(), pluginPassword: PLUGIN_PW, writer: { out: (l: string) => out.push(l), err: (l: string) => errs.push(l) } });
     const gone = await one<{ present: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_plugins') AS present`);
     assert(retired === 0 && !gone.present, `a CREATEROLE migrator with ADMIN on the shared login drops it, a superuser's grant and all (${retired}: ${errs.join(" | ").slice(-200)})`);
-    // Something depending on it, and the grant a superuser's: the revoke needs postgres's privileges, and the run says so, naming the grantor.
+    // Something depending on it, and a plugin role this migrator holds no ADMIN on, granted by a superuser: neither the drop
+    // nor the revoke is its to make. The run exits 1 naming what it needs, and the one transaction leaves the role as it was.
     await sql.unsafe(`CREATE ROLE ob1_plugins LOGIN NOINHERIT; GRANT ob1_plugin_example TO ob1_plugins WITH SET TRUE, INHERIT FALSE; GRANT ob1_plugins TO ${migrator} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE; GRANT SELECT ON plugin_example.notes TO ob1_plugins`);
     const stuckErr: string[] = [];
     const stuck = await migrate({ url: asMigrator.toString(), pluginPassword: PLUGIN_PW, writer: { out: () => {}, err: (l: string) => stuckErr.push(l) } });
     const [{ superuser }] = (await sql`SELECT rolname AS superuser FROM pg_roles WHERE oid = 10`) as { superuser: string }[];
-    assert(stuck === 1 && stuckErr.join("\n").includes(`hold ADMIN on ob1_plugins and the privileges of each grant's grantor (${superuser})`),
-      `a grant it may not revoke, on a role it may not drop: exit 1, naming the grantor whose privileges it needs (${stuck}: ${stuckErr.join(" | ").slice(0, 300)})`);
+    const untouched = await one<{ can_login: boolean; holds: boolean }>(sql`
+      SELECT rolcanlogin AS can_login, pg_has_role('ob1_plugins', 'ob1_plugin_example', 'MEMBER') AS holds FROM pg_roles WHERE rolname = 'ob1_plugins'`);
+    assert(stuck === 1 && stuckErr.join("\n").includes(`hold ADMIN on ob1_plugins and on each plugin role it holds, and the privileges of each grant's grantor (${superuser})`) && stuckErr.join("\n").includes("privileges for table plugin_example.notes") && untouched.can_login && untouched.holds,
+      `a role it may not drop holding a grant it may not revoke: exit 1, naming what it needs and what depends, the role left as it was (${stuck}, ${JSON.stringify(untouched)}: ${stuckErr.join(" | ").slice(0, 300)})`);
     await sql.unsafe("REVOKE SELECT ON plugin_example.notes FROM ob1_plugins; DROP ROLE ob1_plugins");
     // With everything in place and nothing pending, a run asks the migrator no privilege: CREATE on the database taken back, it is still clean.
     const [{ db: dbName }] = (await sql`SELECT current_database() AS db`) as { db: string }[];
@@ -871,7 +874,7 @@ console.log("\n[13] A brain migrated under the one shared login moves over (SMD-
     const run = await runMigrate({ plugins: moved, pluginsDir: dir });
     const after = await shared();
     const own = await one<{ holds: string | null }>(sql`SELECT (SELECT string_agg(g.rolname, ',') FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid) AS holds FROM pg_roles r WHERE rolname = ${login}`);
-    assert(run.code === 0 && run.out.includes(`  ✓  role ${login}  made`) && run.out.includes("plugins: retiring the shared login role ob1_plugins (SMD-2756)") && run.out.includes(`  ✓  ob1_plugins dropped, and with it its SET on ob1_plugin_example, ${role}`),
+    assert(run.code === 0 && run.out.includes(`  ✓  role ${login}  made`) && run.out.includes("plugins: retiring the shared login role ob1_plugins (SMD-2756)") && run.out.includes(`  ✓  ob1_plugins dropped, and with it its membership in ob1_plugin_example, ${role}`),
       `the run makes the plugin's login and retires the shared one, saying so (${run.code}: ${run.out.split("\n").filter((l) => /ob1_plugins/.test(l)).join(" | ")}${run.err.slice(0, 160)})`);
     assert(!after.present && own?.holds === role, `ob1_plugins is gone, and the plugin's login holds its role alone (${JSON.stringify(after)}, ${JSON.stringify(own)})`);
     const rows = await store.pluginTx(moved, (q) => q<{ note: string }>`SELECT note FROM kept`);
@@ -908,6 +911,26 @@ console.log("\n[13] A brain migrated under the one shared login moves over (SMD-
       await again.close();
     }
     await sql.unsafe(`REVOKE SELECT ON "plugin_${moved}".kept FROM ob1_plugins; DROP ROLE ob1_plugins`);
+    // A drop refused for anything but a dependency — a lock an open transaction holds on the role — fails the run and
+    // changes nothing, so the next run drops it, rather than keeping a role nothing depends on (review pass 3).
+    await asBefore(true);
+    const locker = new SQL({ url: URL_, max: 1 });
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const locking = locker.begin(async (tx: SQL) => { await tx.unsafe("COMMENT ON ROLE ob1_plugins IS 'held by an open transaction'"); await held; });
+    try {
+      await Bun.sleep(200);
+      const blocked = await runMigrate({});
+      const still = await shared();
+      assert(blocked.code === 1 && blocked.err.includes("  ✗  ob1_plugins could not be dropped: ") && still.present && still.can_login === true && still.holds === `ob1_plugin_example,${role}`,
+        `a drop refused for a held lock: exit 1, the role as it was, not kept (${blocked.code}, ${JSON.stringify(still)}: ${blocked.err.slice(0, 200)})`);
+    } finally {
+      release();
+      await locking;
+      await locker.close();
+    }
+    const next = await runMigrate({});
+    assert(next.code === 0 && next.out.includes("  ✓  ob1_plugins dropped") && !(await shared()).present, `and the next run drops it (${next.code}: ${next.err.slice(0, 160)})`);
     // A plugin role granted to it by another role, as a migrator that is no superuser grants it: on PG 16 a REVOKE
     // without GRANTED BY leaves that grant, so the run revokes each by its own grantor (review pass 1).
     const grantor = `smd2756_grantor_${RUN}`;
