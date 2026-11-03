@@ -1970,15 +1970,15 @@ polls for new work.
 
 **Two passes, pick one.** `workers` runs both followers always, at low
 concurrency, beside live traffic. `sleep` runs the same two
-passes, and re-embed when the brain has vectors to re-embed, only while the brain is quiet, at most an hour a sleep by default (its pauses aside), and
-pauses them within seconds of the next live call ("The `sleep` pass
-instead", below) — so a backlog, and a sync write's capture made after a
-sleep's clock, waits for the next live call and the quiet. They are alternatives,
+passes, and re-embed when the brain has vectors to re-embed, in work periods
+that begin once there is work and no live call has landed for 20 s, and run
+until their pools drain, pausing within seconds of each live call ("The
+`sleep` pass instead", below). They are alternatives,
 not companions: `OB1_PASSES` naming both runs `sleep` alone, and the log says
 so (SMD-3476). The scheduler itself will not run beside a follower run outside
 it — by hand, or an old stack's container — it refuses at its start, and when
-one starts later it ends (exit 2) before its next sleep begins, or within a
-poll if asleep; its supervisor then tries it again every few minutes, so it
+one starts later it ends (exit 2) before its next period begins, or within a
+poll if in one; its supervisor then tries it again every few minutes, so it
 starts on its own once the followers stop. The rest of this section is the
 `workers` pass.
 
@@ -2215,8 +2215,9 @@ the key. Accepting unattended waits on a judge that can tell conflicts apart
 
 `sleep` in `OB1_PASSES` runs `db/sleep.ts --follow`, the sleep scheduler
 (SMD-1794, SMD-2678), as the coordinator's child. It runs the `workers`
-pass's two followers' work, and re-embed, only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
-with no live call — the re-derive sweep, then re-embed when the brain has
+pass's two followers' work, and re-embed, in work periods: a period begins once
+a pass has work and no live call has landed for `OB1_SLEEP_CAPTURE` seconds
+(unset, 20), and runs the re-derive sweep, then re-embed when the brain has
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call), then
 extraction, and
@@ -2226,10 +2227,10 @@ at two polls, or the ledger moved — stops its passes and ends it with exit
 75, and the coordinator starts it again at once to wait the migration out
 (SMD-3379 PR 1c-1, `db/README.md`'s "A migration"). Anything that refuses re-embed — the embedding
 key, credit, the model not served — or its endpoint down sets it down for
-that sleep, said in its log and on `heartbeat:sleep`, and extraction and
-consolidation run on; the next sleep with work tries again. **Upgrading a
+that period, said in its log and on `heartbeat:sleep`, and extraction and
+consolidation run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
-labelled by the first sleeps, one embedding call a row, before extraction;
+labelled by the first periods, one embedding call a row, before extraction;
 `bun db/reembed.ts --dry-run` says how many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
@@ -2237,24 +2238,24 @@ it can print the model names), and the others run on: run `bun db/reembed.ts --s
 re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
 back and recreate `api` and the coordinator, which read them once. On the next live call it pauses them within `OB1_SLEEP_POLL` seconds
 (unset, 5): they wait between thoughts and go on once `OB1_SLEEP_CAPTURE`
-seconds (unset, 20; held to the quiet) pass with no live call, a model call in
+seconds pass with no live call, a model call in
 hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
-its thought set back (SMD-3379 PR 1c-3b). One that finds nothing left to do ends the sleep, as during the sweep
-(its call in hand given 2 s, then cancelled), and the brain is quiet again
-`OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
-`OB1_SLEEP_BUDGET` minutes (unset, 60) besides its pauses, so a busy day's
-sleep lasts longer by them, and the next begins after a live call
-(**Settings**, below). Each pass's cost is the same as under `workers`, spent
-only while nobody is using the brain.
+its thought set back (SMD-3379 PR 1c-3b). One during the sweep ends the period
+there (its call in hand given 2 s, then cancelled). A period ends once its
+pools drain, however long that takes (SMD-3379 PR 1c-4b), and the next begins
+once there is work again: a capture's claim, read each poll, or what the
+idle scheduler finds reading its work whole every `OB1_SLEEP_RESCAN` seconds
+(unset, 3600). Each pass's cost is the same as under `workers`, spent
+only while nobody is writing to the brain.
 `db/README.md`, "Sleep", has the full rules.
 
-**What wakes it.** A live write: one through a key that is not classified
+**What pauses it.** A live write: one through a key that is not classified
 `ingested` (board-sync's sync writes are; the servers' vector mender's are
-marked background and do not wake it either). That is the "live call" these
-sections name. A search does not wake it, whatever `OB1_QUERY_LOG` says: a
+marked background and pause nothing either). That is the "live call" these
+sections name. A search is not one, whatever `OB1_QUERY_LOG` says: a
 running pass costs a search 24–33 ms, so its passes go on through a session of
-searches (SMD-3315). Preflight's `sleep` row says whether it is asleep, with
-its last sleep.
+searches (SMD-3315). Preflight's `sleep` row says whether it is working,
+paused or idle, with its last period.
 
 **First start.** The same worker key as the `workers` pass (`OB1_WORKER_KEY`,
 its line in `MCP_ACCESS_KEYS`), and `sleep` in `OB1_PASSES`, then:
@@ -2264,17 +2265,14 @@ podman compose -f deploy/compose.yaml up -d coordinator
 podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
-The log says `asleep:` when a sleep begins, `extraction drained — consolidating
+The log says `working:` when a period begins, `extraction drained — consolidating
 beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `awake:` with the live call that ended it (its
-pools drained, or the clock spent); `budget:` at its start
-names the budget in force, and a sleep it stops says why — `the sleep's budget
-is spent (60 min)`, `… still in hand 300 s past the budget — stopped now`, or
-`<pass>: a statement passed the pass's statement_timeout (300 s)` with `the
-sleep stops on its budget` — and a quiet night's clock with nothing left to do
-says `the sleep's clock is spent (60 min) with nothing left to do — it ends`.
-Each sleep begins with the re-derive sweep, which says `re-derive: N orphaned
-lineage row(s) swept` when it deletes any.
+the capture has passed, and `the pools drained — the period ends`; `budget:`
+at its start names the session settings in force, and a statement past its
+timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
+and `<pass> held until a restart`. Each period begins with the re-derive
+sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
+any.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts
@@ -2290,8 +2288,8 @@ preflight's `workers` row asks for them back. A follower run outside the
 coordinator — by hand, or an old stack's `extract` and `consolidate`
 containers, which `up -d --remove-orphans` removes — still keeps the
 scheduler down: it refuses to run (exit 2, its log naming them) while a
-follower's heartbeat is fresh, at its start or when an awake or asleep poll
-finds one, since a follower does not yield to a live call. A follower stopped
+follower's heartbeat is fresh, at its start or when a poll, idle or in a
+period, finds one, since a follower does not yield to a live call. A follower stopped
 cleanly marks its row ended, so the refusal lifts at once; one killed past
 its grace leaves its row fresh for up to three of its intervals (3 min). The
 coordinator does not exit on the refusal: its supervisor tries again after 1,
@@ -2305,29 +2303,27 @@ podman compose -f deploy/compose.yaml up -d coordinator
 podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -c "DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%'"
 ```
 
-**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_CAPTURE` (1–86400, held
-to the quiet: the quiet after the newest live call before paused passes go
-on, unset 20), `OB1_SLEEP_ABORT_AFTER` (60–86400, unset 60: how long a model
+**Settings.** `OB1_SLEEP_CAPTURE` (1–86400, unset 20: the time after the
+newest live call before a period begins or paused passes go on),
+`OB1_SLEEP_RESCAN` (60–86400, unset 3600: how often the idle scheduler reads
+its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER` (60–86400, unset 60: how long a model
 call in hand may have run, counted from its start, when a pause aborts it, its thought set back;
 at least extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
-digits only (`deploy/.env.example`). The budget (SMD-2679):
-`OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes, its pauses aside
-(0–10080, unset 60; 0
-for no clock) — at it the passes stop after the thought in hand and the next
-sleep waits for a live call — and each pass's session settings:
+digits only (`deploy/.env.example`). The budget (SMD-2679), each pass's
+session settings:
 `OB1_SLEEP_STATEMENT_TIMEOUT` in seconds (0–86400, unset 300; 0 leaves the
-role's or the database's own: a statement past it stops the sleep, not the
-scheduler), `OB1_SLEEP_WORK_MEM` and `OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
-(1–2097151, unset 4 and 64). Preflight's `sleep` row says the budget, why the
-last sleep stopped, and how many sleeps stopped on it. **The clock is on by
-default:** upgraded, a quiet night holds the model for an hour, and the rest
-of a backlog waits for the next live call — `OB1_SLEEP_BUDGET=0` and a
-recreate run a sleep until its pools drain, a live write then ending it (one
-that finds work pauses it, so a stalled thought keeps the sleep going since
-SMD-3379 PR 1c-3b); a larger value drains a backlog sooner. The scheduler reads its
+role's or the database's own: a statement past it holds its pass until a
+restart, the others going on), `OB1_SLEEP_WORK_MEM` and `OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
+(1–2097151, unset 4 and 64). Preflight's `sleep` row says the budget and any
+pass a statement holds. **Upgrading to 2.0.0:** `OB1_SLEEP_QUIET` and
+`OB1_SLEEP_BUDGET` were removed — the coordinator no longer reads them, so
+delete them from `deploy/.env`. A period now begins on work rather than after
+a quiet, and runs until its pools drain rather than to a clock, so a backlog
+drains in one period, paused by each live call (`db/README.md`, "Upgrading to
+2.0.0"). The scheduler reads its
 environment once, so recreate the coordinator after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
 A `restart` keeps the values it was created with.
@@ -3960,8 +3956,8 @@ so the profile builds from a checkout.
   worker with a per-thought model cost, so the coordinator runs it only when
   `OB1_PASSES` asks: the `workers` pass runs it and `db/consolidate.ts
   --follow`, the pass that proposes supersessions from the entities it
-  extracts, or the `sleep` pass runs both only while the brain is quiet
-  ("Extraction and consolidation as passes", above). Decide on the cost
+  extracts, or the `sleep` pass runs both in work periods, pausing for live
+  calls ("Extraction and consolidation as passes", above). Decide on the cost
   before you ask for either.
   A follower exits 0 when stopped, so watch its log: it says there when the
   model looks at fault, after each pass drains the pool. A follower started on

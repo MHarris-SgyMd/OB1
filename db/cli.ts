@@ -71,6 +71,8 @@ export interface ScanOptions<K extends string = string> {
   positionals?: number;
   /** A word shown after a flag in the list: `<postgres://…>` for a value, `(with --grant)` for a switch. */
   hints?: Partial<Record<K, string>>;
+  /** Flags a release removed, by name, each refused with its words — what replaced it — rather than as unknown (SMD-3379 PR 1c-4b). */
+  removed?: Readonly<Record<string, string>>;
 }
 
 /** What argv said, read by flag name. */
@@ -198,6 +200,8 @@ export function scanArgs<K extends string>(argv: readonly string[], spec: FlagSp
       continue;
     }
     const name = a.slice(2);
+    const flag = name.includes("=") ? name.slice(0, name.indexOf("=")) : name;
+    if (options.removed && Object.hasOwn(options.removed, flag)) return { error: options.removed[flag] };
     if (name.includes("=")) {
       const base = name.slice(0, name.indexOf("="));
       if (!known(base)) return { error: `unknown argument ${i + 1}: a flag this script does not have, with a value joined by "="` };

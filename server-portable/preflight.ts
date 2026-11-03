@@ -318,7 +318,7 @@ const providerWaitWords = (passes: readonly string[], midPass = false) => `${pas
 const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
   [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
 /** A sleeping scheduler's passes, running or paused by a live call (SMD-3379 PR 1c), as the rows of the passes it runs say them. */
-const asleepWords = (h: Pick<WorkerHeartbeat, "paused">) => (h.paused ? "paused by a live call, its passes going on once the brain is quiet" : "asleep, its passes running");
+const asleepWords = (h: Pick<WorkerHeartbeat, "paused">) => (h.paused ? "paused by a live call, its passes going on once the brain is quiet" : "working, its passes running");
 /**
  * What the scheduler is doing with one pass, as that pass's row says it:
  * held out (SMD-3379 PR 1c), paused, awake, or asleep — its passes waiting
@@ -334,7 +334,7 @@ const passWords = (sleeping: WorkerHeartbeat, pass: SleepHold["pass"], awake: st
   // Paused, a provider wait goes on beside it (draft 5's §3, review pass 2).
   if (sleeping.paused) return `${asleepWords(sleeping)}${waits ? `, ${waits}` : ""}`;
   if (!sleeping.running) return awake;
-  return waits ? `asleep, ${waits}` : asleepWords(sleeping);
+  return waits ? `working, ${waits}` : asleepWords(sleeping);
 };
 /** The rows to check for passes waiting on their provider: re-embed's is the embedding endpoint, the others' chat (SMD-2679 PR 4b). */
 const providerRows = (passes: readonly string[]) =>
@@ -4443,7 +4443,7 @@ if (configFailed) {
               if (runner.by === "scheduler") {
                 const sleeping = runner.beat;
                 // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
-                const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "awake, its passes waiting for the brain to go quiet";
+                const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "idle, no work";
                 const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake, runner.down !== null || runner.clears !== null)})`;
                 // Its failed rows: retried once their cause is fixed, or one the
                 // provider refuses permanently accepted — a retry of that fails
@@ -4661,7 +4661,7 @@ if (configFailed) {
                 const beside = followersBeside(facts.workers?.heartbeats ?? [], sleeping);
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${besideWords(beside)}` : "";
                 const diedFix = l.expired ? fixOf(besideFix(beside), reclaim(key)) : "";
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "awake, its passes waiting for the brain to go quiet")})`;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "idle, no work")})`;
                 if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
@@ -5052,7 +5052,7 @@ if (configFailed) {
             add("sleep", "skip", "the sleep scheduler has not run on this brain — the coordinator runs it when deploy/.env's OB1_PASSES names sleep, as an alternative to workers (deploy/README.md, SMD-2678, SMD-3476).");
           } else {
             // Since 1c-3b a live write pauses the passes, and ends a sleep only when it finds nothing left to do (SMD-3379).
-            const wakes = h.paused && !(h.stale || h.ended) ? "a live write pauses it; a search does not" : "a live write pauses its passes, or ends a sleep whose pools are drained; a search does not";
+            const wakes = h.paused && !(h.stale || h.ended) ? "a live write pauses it; a search does not" : "a live write pauses its passes; a search does not";
             const s = h.slept;
             const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
             const since = (t: string) => ago(Math.max(0, secondsSince(h, t)));
@@ -5078,23 +5078,27 @@ if (configFailed) {
             const onBudget = s?.to && s.budget
               ? `, stopped on its budget — ${s.budget === "clock" ? `its clock spent${s.limit ? ` (${s.limit} min)` : ""}` : `a pass's statement past statement_timeout${s.limit ? ` (${s.limit} s)` : s.limit === 0 ? " (the role's or the database's own)" : ""}`}`
               : "";
+            // Working, paused or idle (SMD-3379 PR 1c-4b, draft 5's §4): a work
+            // period in hand, one paused or waiting on the brain's quiet, or no
+            // work. An older scheduler's row — resting after its clock — is
+            // read in its own words (a rollback).
             const sleepWords = h.stale || h.ended
-              ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
+              ? s ? (s.to ? `its last period ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}` : `its last period began ${since(s.from)} ago`) : "no period recorded"
               // Paused: heartbeatState says by what and for how long (SMD-3379 PR 1c).
-              // Between sleeps, its work waits for the next (review pass 2: an ended sleep read as current).
+              // Between periods, its work waits for the next (review pass 2: an ended period read as current).
               : h.paused
                 ? s && !s.to
-                  ? `its passes waiting between thoughts, going on once the brain is quiet${waitingFor || waitingMid ? `, ${waitWords}` : ""} — the sleep began ${since(s.from)} ago`
-                  : `its work waiting, the next sleep beginning once the brain is quiet — ${s?.to ? `the last sleep ended ${since(s.to)} ago` : "no sleep yet"}`
+                  ? `its passes waiting between thoughts, going on once the brain is quiet${waitingFor || waitingMid ? `, ${waitWords}` : ""} — the period began ${since(s.from)} ago`
+                  : `its work waiting, the next period beginning once the brain is quiet — ${s?.to ? `the last period ended ${since(s.to)} ago` : "no period yet"}`
               : h.running
                 ? waitingFor || waitingMid
-                  ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
-                  : `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
+                  ? `working, ${waitWords}${s ? ` — the period began ${since(s.from)} ago` : ""}`
+                  : `working, its passes running${s ? ` — for ${since(s.from)}` : ""}`
                 : s && s.to
                   ? h.resting
                     ? `awake — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget || ", at its clock with nothing left to do"}; the next begins after a live call and the quiet`
-                    : `awake, its passes waiting for the brain to go quiet — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}`
-                  : "awake, its passes waiting for the brain to go quiet — no sleep yet";
+                    : `idle, no work — the last period ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}`
+                  : "idle, no work — no period yet";
             const down = h.stale || h.ended;
             // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
             // A held row's own words say it, the supervisor's (SMD-3214).
@@ -5109,7 +5113,8 @@ if (configFailed) {
             const held = h.held;
             const stuck = down ? [] : held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
             const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its stops — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
-            const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.stops} sleep(s) stopped on it since ${down ? "it last started" : "it started"}` : "";
+            // With no clock, `stops` counts the passes a statement past its timeout holds (N9, PR 1c-4b); an older row's, its sleeps stopped on its budget.
+            const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.minutes ? `${b.stops} sleep(s) stopped on it` : `${b.stops} pass(es) held by a statement past its timeout`} since ${down ? "it last started" : "it started"}` : "";
             // Re-embed set aside or down by the scheduler, by its own word
             // (SMD-2679 PR 4b): extraction and consolidation run on. A set-down
             // speaks of one sleep, so an ended row's is its last word, its cause
@@ -5212,7 +5217,7 @@ if (configFailed) {
             // Running, it refuses beside a hand re-embed follower at its next
             // poll and ends, every pass with it (review pass 1: all three rows
             // passed until then; pass 2: a poll, awake or asleep, not a sleep).
-            if (!down && handFollowers.length) fixes.push(`${handFix}: at its next poll, awake or asleep, the scheduler refuses beside it and ends, every pass with it.`);
+            if (!down && handFollowers.length) fixes.push(`${handFix}: at its next poll, idle or working, the scheduler refuses beside it and ends, every pass with it.`);
             if (stuck.length) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
