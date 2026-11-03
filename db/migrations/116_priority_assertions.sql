@@ -46,13 +46,20 @@
 --        source. All as they stood at the write: a key reclassified since
 --        keeps the tier its earlier statements were made at.
 --      * THE TIER (decision 4), from the maker at the write:
---          1 operator  — operator trust;
+--          1 operator  — operator trust, declared a source or not;
 --          2 source    — a key the operator declared a priority source;
 --          3 agent     — agent trust;
 --          4 inferred  — flagged `inferred`, or ingested trust from an
 --                        undeclared key, or a key with no trust at all.
 --        A maker may lower its own tier (`inferred`), never raise it: the flag
---        is checked first, then the declaration, then the trust.
+--        is checked first, then operator trust, then the declaration, then
+--        agent trust — so a declaration only raises a key, and an operator's
+--        key declared a source (a default install's one key, serving board-sync
+--        too) stays at tier 1 (review pass 3; decision 4's list orders it so,
+--        where docs/priority.md's "A statement over MCP" puts the source first).
+--      * TWO DUE TIMES: an assertion may carry due_at and a due reference
+--        both; its own due_at wins, the reference's is read only where it has
+--        none (decision 5: "the winning due_at, or else due_ref's").
 --      * THE ORDER: seq, the order rows were written under the item's lock —
 --        the history's order and what "newest" means; asserted_at is the
 --        clock's, for display.
@@ -130,6 +137,13 @@
 --      * declare_priority_source(p_label, p_declared): the operator's.
 --      The assertion jsonb never carries anything that proves a key: its
 --      maker's name, agent id, kind, trust, scope and source flag, as data.
+--      WHO READS: priority_of and priority_history take no actor; any role
+--      with EXECUTE reads every item's statements, reasons included. Which
+--      keys may call them is the operations layer's (SMD-3664: read tools,
+--      which a capture-only key is never given, as it is given no read tool
+--      today). The writers keep their own replies to it: a capture key is
+--      shown its own statement and never the winner, which may be another
+--      key's (review passes 2 and 3).
 --
 --   7. CONCURRENCY. Each writer raises (0A000) above READ COMMITTED, then
 --      takes a transaction advisory lock on its item
@@ -141,7 +155,11 @@
 --      or take items in key order: two transactions locking two items in
 --      opposite orders deadlock (40P01).
 --
---   8. NOT THE EVENT LOG, AND FORGETTING. An assertion is not a thought:
+--   8. NOT THE EVENT LOG, DELETING AND FORGETTING. An item deleted (a
+--      thought by delete_thought, an entity merged away) leaves its
+--      assertions as they were, open ones included, and priority_of still
+--      answers for it: closing them is SMD-3711, and removing a reason
+--      SMD-1723's. An assertion is not a thought:
 --      thought_audit is the thoughts' log. The table keeps its own history.
 --      A reason is text and may hold personal data: forget_thought (SMD-1723)
 --      has to reach the assertions on a forgotten item — they are the rows
@@ -307,9 +325,9 @@ CREATE TABLE IF NOT EXISTS priority_sources (
 );
 COMMENT ON TABLE priority_sources IS
   'The keys the operator declared priority sources (decision 4''s tier 2): board-sync for Linear, a plugin''s key. One row per declaration, closed by its withdrawal and never rewritten, so the history says when each key was a source. A declaration names the key''s label and, when the registry knows it, its agent id, which is what a maker is matched by — a renamed key stays a source, and a new key given the old name is not. Written only through declare_priority_source, which server roles cannot (they hold SELECT alone). The assertions made under a declaration keep their tier. Migration 116 / SMD-3663.';
-CREATE UNIQUE INDEX IF NOT EXISTS priority_sources_one_standing ON priority_sources (label) WHERE withdrawn_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS priority_sources_one_standing ON priority_sources ((COALESCE(source_agent_id::text, 'label:' || label))) WHERE withdrawn_at IS NULL;
 COMMENT ON INDEX priority_sources_one_standing IS
-  'One standing declaration per label. Migration 116 / SMD-3663.';
+  'One standing declaration per key: by its agent id, by its label where declared before the registry knew it. The label is the name it had when declared. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- Append-only, but for closing a window
@@ -490,14 +508,14 @@ IMMUTABLE
 AS $$
   SELECT (CASE
     WHEN COALESCE(p_inferred, false) THEN 4   -- the maker lowers its own tier
+    WHEN p_trust = 'operator'        THEN 1   -- before a declaration, which only raises (review pass 3)
     WHEN COALESCE(p_source, false)   THEN 2   -- declared by the operator
-    WHEN p_trust = 'operator'        THEN 1
     WHEN p_trust = 'agent'           THEN 3
     ELSE 4                                    -- ingested and undeclared, or no trust at all
   END)::smallint
 $$;
 COMMENT ON FUNCTION ob1_priority_tier(boolean, boolean, text) IS
-  'Decision 4''s tier at the write: 4 when the maker flags its assertion inferred (a maker may lower its tier, never raise it), 2 for a declared priority source, 1 for operator trust, 3 for agent trust, 4 otherwise (ingested trust from an undeclared key, or none). Migration 116 / SMD-3663.';
+  'Decision 4''s tier at the write: 4 when the maker flags its assertion inferred (a maker may lower its tier, never raise it), 1 for operator trust, 2 for a declared priority source below that, 3 for agent trust, 4 otherwise (ingested trust from an undeclared key, or none). A declaration only raises: an operator-trust key declared a source stays at 1. Migration 116 / SMD-3663.';
 
 -- One assertion as the functions return it.
 CREATE OR REPLACE FUNCTION ob1_priority_json(a priority_assertions)
@@ -711,7 +729,7 @@ BEGIN
     v_win := ob1_priority_winner(v_item.kind, v_item.key);
     RETURN jsonb_build_object('outcome', 'unchanged', 'code', NULL, 'message', NULL,
       'assertion', ob1_priority_json(v_old), 'replaced', NULL,
-      'winner', CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END);
+      'winner', CASE WHEN v_win.id IS NOT NULL AND v_who.scope = 'write' THEN ob1_priority_json(v_win) END);
   END IF;
 
   -- The maker's open one closes first, naming the id the new one is about to
@@ -733,11 +751,13 @@ BEGIN
   RETURN jsonb_build_object('outcome', 'asserted', 'code', NULL, 'message', NULL,
     'assertion', ob1_priority_json(v_row),
     'replaced', CASE WHEN v_old.id IS NOT NULL THEN ob1_priority_json(v_old) END,
-    'winner', CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END);
+    -- A capture key is shown no winner, as clear_priority shows it none: the
+    -- winner may be another key's statement (review pass 3).
+    'winner', CASE WHEN v_win.id IS NOT NULL AND v_who.scope = 'write' THEN ob1_priority_json(v_win) END);
 END;
 $$;
 COMMENT ON FUNCTION assert_priority(text, text, int, timestamptz, timestamptz, text, text, text, boolean, jsonb) IS
-  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before (never after p_due_at), or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertion on the item, if any, closes as replaced; the same statement again is unchanged, nothing written. Returns jsonb {outcome: asserted | unchanged | refused, code, message, assertion, replaced, winner}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key on anything but a thought its agent captured and nobody took, or a due reference to one — asked before existence, and answered alike for an item that is not there), or ITEM_NOT_FOUND (the item, or the due reference). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
+  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before (never after p_due_at), or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertion on the item, if any, closes as replaced; the same statement again is unchanged, nothing written. Returns jsonb {outcome: asserted | unchanged | refused, code, message, assertion, replaced, winner}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key on anything but a thought its agent captured and nobody took, or a due reference to one — asked before existence, and answered alike for an item that is not there), or ITEM_NOT_FOUND (the item, or the due reference). The winner is shown to a write key alone. With both p_due_at and a due reference, p_due_at is the item''s due time (decision 5). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- clear_priority
@@ -845,18 +865,28 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_label    text := btrim(COALESCE(p_label, ''));
+  v_agent    uuid;
   v_standing priority_sources;
   v_now      timestamptz := clock_timestamp();
 BEGIN
   IF v_label = '' OR length(v_label) > 200 THEN
     RETURN jsonb_build_object('ok', false, 'error', 'BAD_LABEL');
   END IF;
-  SELECT * INTO v_standing FROM priority_sources WHERE label = v_label AND withdrawn_at IS NULL FOR UPDATE;
+  -- The key the label names now, and its standing declaration by that key's
+  -- id, as makers are matched — not by the label a declaration was made under
+  -- (review pass 3: after a rename, withdrawing by the new name found nothing,
+  -- and declaring a new key given the old name found the renamed key's row).
+  v_agent := (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = v_label);
+  SELECT * INTO v_standing FROM priority_sources s
+   WHERE s.withdrawn_at IS NULL
+     AND CASE WHEN v_agent IS NOT NULL THEN s.source_agent_id = v_agent OR (s.source_agent_id IS NULL AND s.label = v_label)
+              ELSE s.source_agent_id IS NULL AND s.label = v_label END
+   ORDER BY s.declared_at DESC LIMIT 1
+   FOR UPDATE;
   IF COALESCE(p_declared, true) THEN
     -- A new declaration is a new row: a withdrawn one keeps its window (review pass 2).
     IF v_standing.id IS NULL THEN
-      INSERT INTO priority_sources (label, source_agent_id, declared_at)
-      VALUES (v_label, (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = v_label), v_now);
+      INSERT INTO priority_sources (label, source_agent_id, declared_at) VALUES (v_label, v_agent, v_now);
     END IF;
   ELSIF v_standing.id IS NOT NULL THEN
     UPDATE priority_sources SET withdrawn_at = v_now WHERE id = v_standing.id;

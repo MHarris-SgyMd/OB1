@@ -2354,9 +2354,9 @@ passes for the key) and the registry, never from an argument or from what the
 envelope says of its own kind or trust: the key's name and agent id, its kind,
 its trust (046's ceiling of the kind; an unclassified key has none), its scope,
 and whether the operator declared it a priority source. Those set its **tier**,
-which decides whose statement wins: 1 operator trust, 2 a declared source, 3
-agent trust, 4 inferred (flagged so by its maker, ingested trust from an
-undeclared key, or no trust); the lowest tier wins, then the newest within it —
+which decides whose statement wins: 1 operator trust (declared a source or not:
+a declaration only raises), 2 a declared source, 3 agent trust, 4 inferred
+(flagged so by its maker, ingested trust from an undeclared key, or no trust); the lowest tier wins, then the newest within it —
 the later written (`seq`, the order the writers took the item's lock in; the
 clock's `asserted_at` is for display). A maker may lower its own tier, never
 raise it. The maker is the key: the envelope's agent id, else the registry's for
@@ -2380,7 +2380,11 @@ thought), and take a due time
 only from another such thought — never a ticket, an entity or another key's
 thought. That is asked before any existence answer and refused alike for an
 item that is not there (`ITEM_NOT_YOURS`), so the refusal tells it nothing about
-what exists; `clear_priority` never shows it the item's winner. The refusals are
+what exists; neither writer shows it the item's winner. `priority_of` and
+`priority_history` take no actor: who may read them is the operations layer's
+(SMD-3664's read tools, which a capture-only key is never given). With both
+`due_at` and a due reference, the item's own `due_at` is its due time. A
+deleted item's assertions stay as they were (SMD-3711, beside SMD-1723). The refusals are
 outcomes, as an unknown item is (`ITEM_NOT_FOUND`). `priority_of` reads a
 JSON array of items (at most 1000) in one query: each item's winning level, the
 winner, and every open assertion, the winner first; `priority_history` reads
@@ -2392,9 +2396,10 @@ checks it with its own copy of the winner's rule (068's) and
 `declare_priority_source(label, declared)` is the operator's, beside
 `set_agent_kind`: server roles hold only `SELECT` on `priority_sources`. Each
 declaration is a row of its own, closed by its withdrawal and never rewritten,
-and names the key's agent id when the registry knows it: a maker is matched by
-that id, so a renamed source stays one and a new key given the old name does
-not. The statements made under a declaration keep their tier. Each
+and names the key's agent id when the registry knows it: makers, declarations
+and withdrawals are matched by that id, so a renamed source stays one (and is
+withdrawn by its new name) and a new key given the old name is not one until
+declared itself. The statements made under a declaration keep their tier. Each
 writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
 lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach

@@ -16617,8 +16617,8 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(capReal.code === "ITEM_NOT_YOURS" && capGhost.code === "ITEM_NOT_YOURS" && capNone.code === "ITEM_NOT_YOURS" && capReal.message === capGhost.message && capGhost.message === capNone.message
          && capRefOther.code === "ITEM_NOT_YOURS" && capRefOwn.outcome === "asserted" && capRefOwn.assertion?.due_ref?.key === capOwn2 && capTaken.code === "ITEM_NOT_YOURS"
          && capNoId.code === "ITEM_NOT_YOURS" && capClearOther.outcome === "nothing_to_clear" && capClearOther.winner === null && capClearTicket.winner === null
-         && capClearOwn.outcome === "cleared" && capClearOwn.winner === null,
-    `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own; an envelope without its agent id owns nothing (an id read by name proves nothing); clear_priority shows it no winner, on another's item or its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code}, ${capNoId.code}, ${JSON.stringify(capClearOther.winner)})`);
+         && capClearOwn.outcome === "cleared" && capClearOwn.winner === null && capOwn.winner === null && capRefOwn.winner === null,
+    `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own; an envelope without its agent id owns nothing (an id read by name proves nothing); neither assert_priority nor clear_priority shows it a winner, on another's item or its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code}, ${capNoId.code}, ${JSON.stringify(capClearOther.winner)})`);
   const readKey = await put("thought", capThought, 1, READ);
   const readClear = await clear("thought", capThought, READ);
   const unstated = await put("thought", opThought, 1, { name: "prio-bot" });
@@ -16728,6 +16728,19 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const usurper = await put("ticket", "SMD-9301", 1, { name: "prio-sync", scope: "write", agent_id: await agentOf("prio-sync") });
   assert(JSON.stringify(declarations) === JSON.stringify([true, false]) && renamed.assertion?.tier_name === "source" && usurper.assertion?.tier_name === "agent",
     `re-declaring a withdrawn source writes a new row and keeps the old one's window; a declared source renamed keeps tier 2 by its agent id, and a new key given the old name is an agent, not a source (${JSON.stringify(declarations)}, ${renamed.assertion?.tier_name}, ${usurper.assertion?.tier_name})`);
+
+  // After the rename the declarations follow the key: withdrawn by its new name, and a new key given the old name declared on its own.
+  const withdrawRenamed = (await db.query<{ r: { was_declared: boolean } }>(`SELECT declare_priority_source('prio-sync-renamed', false) AS r`)).rows[0].r;
+  const renamedAfter = await put("ticket", "SMD-9301", 2, { name: "prio-sync-renamed", scope: "write", agent_id: syncId });
+  const declareNew = (await db.query<{ r: { was_declared: boolean } }>(`SELECT declare_priority_source('prio-sync') AS r`)).rows[0].r;
+  const newSource = await put("ticket", "SMD-9301", 2, { name: "prio-sync", scope: "write", agent_id: await agentOf("prio-sync") });
+  // A declaration only raises: an operator's key declared a source stays at tier 1.
+  await db.query(`SELECT declare_priority_source('prio-op')`);
+  const opDeclared = await put("thought", ladder, 4, OP);
+  await db.query(`SELECT declare_priority_source('prio-op', false)`);
+  assert(withdrawRenamed.was_declared && renamedAfter.assertion?.tier_name === "inferred" && !declareNew.was_declared && newSource.assertion?.tier_name === "source"
+         && opDeclared.assertion?.tier_name === "operator" && opDeclared.assertion?.maker.source === true,
+    `withdrawing by the renamed key's new name withdraws its declaration (its next statement at its trust's tier, ingested: 4); declaring a new key given the old name declares that key; an operator's key declared a source stays at tier 1 (${withdrawRenamed.was_declared}, ${renamedAfter.assertion?.tier_name}, ${declareNew.was_declared}, ${newSource.assertion?.tier_name}, ${opDeclared.assertion?.tier_name})`);
 
   // Re-applied: the assertions and the projection stand, one of each call.
   const before = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
