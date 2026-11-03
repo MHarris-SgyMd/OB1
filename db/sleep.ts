@@ -157,37 +157,37 @@
  *
  * ── Pausing ─────────────────────────────────────────────────────────────────
  * Every --poll seconds while asleep the logs are read for a live event newer
- * than any seen — from 30 s before the last read that reached the wake, within the quiet at the
- * sleep's start: an audit row is dated at its transaction's start, so a
- * capture begun before a read and committed after it is dated before it, and
- * read as landing at that read (one blocked longer is missed). Every such
- * time is the database's to the microsecond, never a Date's millisecond, so
- * no read begins before the window another judged (SMD-3245, PR 1c-4a). On one, the
- * sleep pauses (SMD-3379 PR 1c-3b): its gate (lease.ts' liveGate) closes, and
- * the passes stay up and wait at it — before a claim, between a long
- * thought's windows, between a thought's pairs — a worker between thoughts
- * holding no claim, one mid-thought keeping its claim and the windows
- * answered; the row says `paused`. The gate opens once --capture seconds (at
- * most --quiet, so a sleep begins open) have passed with no live write since
- * the newest, the passes going on. A closed poll starts, restarts, joins and
- * sets aside nothing; and a model call in hand longer than --abort-after (60 s)
- * is aborted (N12, lease.ts' abortInHand), its thought set back in the queue —
- * extraction keeping its answered windows and counting the stop on 093,
- * which stalls a window longer than every pause as a wake's stop did —
- * consolidation's none once CONSOLIDATE_ABORTS are made in a sleep (one poll
- * with more workers may pass it). As the gate opens, the
- * stopped thoughts are moved behind the newer work first (stoppedLast).
- * Paused time is not the clock's (Budget). Under --follow a live write that
- * finds the pools drained — re-embed's while it runs, extraction's claims and
- * consolidation's pool — ends the sleep, as a wake did: the passes stop, and
- * the next sleep reads re-embed's backlog and sweeps again. A live write
- * during the sweep ends the sleep, the passes not yet started. The first live
- * call is not spared: it is recorded after the model work it does, so on a
- * one-slot model it can queue behind the call in hand to that call's end —
- * nothing pauses the sleep before the call is recorded; N12's bound holds
- * only once it is. Awake, it reads again when the brain could first fall
- * asleep — --quiet seconds after the newest live event — at most a minute
- * apart.
+ * than any seen — from 30 s before the last read that reached the wake,
+ * within the quiet at the sleep's start: an audit row is dated at its
+ * transaction's start, so a capture begun before a read and committed after
+ * it is dated before it, and read as landing at that read (one blocked longer
+ * is missed). Every such time is the database's to the microsecond, never a
+ * Date's millisecond, so no read begins before the window another judged
+ * (SMD-3245, PR 1c-4a). On one, the sleep pauses (SMD-3379 PR 1c-3b): its
+ * gate (lease.ts' liveGate) closes, and the passes stay up and wait at it —
+ * before a claim, between a long thought's windows, between a thought's pairs
+ * — a worker between thoughts holding no claim, one mid-thought keeping its
+ * claim and the windows answered; the row says `paused`. The gate opens once
+ * --capture seconds (at most --quiet, so a sleep begins open) have passed
+ * with no live write since the newest, the passes going on. A closed poll
+ * starts, restarts, joins and sets aside nothing; and a model call in hand
+ * longer than --abort-after (60 s) is aborted (N12, lease.ts' abortInHand),
+ * its thought set back in the queue — extraction keeping its answered windows
+ * and counting the stop on 093, which stalls a window longer than every pause
+ * as a wake's stop did — consolidation's none once CONSOLIDATE_ABORTS are
+ * made in a sleep (one poll with more workers may pass it). As the gate
+ * opens, the stopped thoughts are moved behind the newer work first
+ * (stoppedLast). Paused time is not the clock's (Budget). Under --follow a
+ * live write that finds the pools drained — re-embed's while it runs,
+ * extraction's claims and consolidation's pool — ends the sleep, as a wake
+ * did: the passes stop, and the next sleep reads re-embed's backlog and
+ * sweeps again. A live write during the sweep ends the sleep, the passes not
+ * yet started. The first live call is not spared: it is recorded after the
+ * model work it does, so on a one-slot model it can queue behind the call in
+ * hand to that call's end — nothing pauses the sleep before the call is
+ * recorded; N12's bound holds only once it is. Awake, it reads again when the
+ * brain could first fall asleep — --quiet seconds after the newest live event
+ * — at most a minute apart.
  *
  * ── Budget ──────────────────────────────────────────────────────────────────
  * Each sleep runs under a budget (SMD-2679, SMD-1794's step 2), stated here
@@ -674,15 +674,6 @@ async function migrationState(sql: SQL): Promise<{ holder: string | null; ledger
 }
 
 /**
- * The newest live write after `after` — a timestamp, or a number of seconds
- * before now() — and the database's now(). A live write is a thought_audit
- * row whose actor_kind is not 'ingested' (NULL counts as live) and that no
- * server's background work wrote (actor_context.background — the vector
- * mender's, SMD-2889), as these passes' own writes are not live; a search is
- * none (SMD-3315). Bounded below, so a brain whose newest audit rows are all
- * sync writes is not read back to its last live one.
- */
-/**
  * A database instant at its full precision (SMD-3245, SMD-3379 PR 1c-4a): a
  * Date for display, and the epoch microseconds every bound is read and
  * compared in, which a Date's milliseconds would truncate — a read starting
@@ -696,6 +687,16 @@ export function usText(us: number): string {
   return new Date(ms).toISOString().replace(/Z$/, `${String(us - ms * 1000).padStart(3, "0")}Z`);
 }
 
+/**
+ * The newest live write after `after` — an instant in epoch microseconds, or
+ * a number of seconds before now() — and the database's now(), each a Moment.
+ * A live write is a thought_audit row whose actor_kind is not 'ingested'
+ * (NULL counts as live) and that no server's background work wrote
+ * (actor_context.background — the vector mender's, SMD-2889), as these
+ * passes' own writes are not live; a search is none (SMD-3315). Bounded below,
+ * so a brain whose newest audit rows are all sync writes is not read back to
+ * its last live one.
+ */
 export async function newestLive(sql: SQL, after: { us: number } | { secondsAgo: number }): Promise<{ now: Moment; write: Moment | null }> {
   const since = "secondsAgo" in after ? sql`now() - make_interval(secs => ${after.secondsAgo})` : sql`${usText(after.us)}::timestamptz`;
   const [r] = await sql`
