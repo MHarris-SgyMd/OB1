@@ -1195,7 +1195,7 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const releaseBare = await rest("POST", `/v1/claims/${firstId}/release`, {}, KEYS.writer);
   const releaseBareMcp = await mcp("release_claim", { id: firstId });
   const rivalSees = await rest("POST", "/v1/claims", { ticket: "SMD-9307" }, KEYS.rival);
-  assert(second.status === 409 && (second.body.heldBy as { ownKey?: boolean }[])[0]?.ownKey === true && /by your own key \(writer\) since .*A claim by your own key is another session of yours, or this one without its token/.test(secondMcp.text)
+  assert(second.status === 409 && (second.body.heldBy as { ownKey?: boolean }[])[0]?.ownKey === true && /by your own key \(writer\) since .*A claim by your own key is this session.s own .*, another session of yours, or this one without its token/.test(secondMcp.text)
       && releaseBare.status === 403 && releaseBare.body.ownKey === true && /^Refused: claim \S+ is held by your own key \(writer\) under a token this call did not give .*claim the work again once the claim lapses at /.test(releaseBareMcp.text)
       && (rivalSees.body.heldBy as { ownKey?: boolean }[])[0]?.ownKey === false,
     `a second session of one key: its claim and its tokenless release say the holder is its own key and the way back; another key's sees ownKey false (${second.status} | ${secondMcp.text.slice(0, 90)} | ${releaseBare.status} ${releaseBare.body.ownKey})`);
@@ -1211,6 +1211,84 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
       && /lapsed and was taken over by rival at .*: stop work on it; list_claims shows the claim that holds the work now\.$/.test(overtakenMcp.text)
       && !lateRelease.isError && /had already ended at .*: it lapsed and was taken over by rival\.$/.test(lateRelease.text),
     `a lapsed claim taken over: the old holder's renew answers CLAIM_RELEASED takenOver, "stop work on it", and its release says who took it (${overtaken.status} ${overtaken.body.takenOver} | ${overtakenMcp.text.slice(0, 90)} | ${lateRelease.text.slice(-60)})`);
+  // claim_work with that token says the same, and makes no new claim (review pass 3: 115 made one without a word).
+  const writersBefore = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9308' AND holder_name = 'writer'`;
+  const overtakenClaim = await mcp("claim_work", { ticket: "SMD-9308", token: shortToken });
+  const writersAfter = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9308' AND holder_name = 'writer'`;
+  assert(overtakenClaim.isError && overtakenClaim.sc.code === "CLAIM_RELEASED" && overtakenClaim.sc.takenOver === true && overtakenClaim.text.includes(`claim ${shortId} `)
+      && /lapsed and was taken over by rival at .*: stop work on it;/.test(overtakenClaim.text) && !overtakenClaim.text.includes("wc_") && writersAfter[0].n === writersBefore[0].n,
+    `claim_work with a taken-over claim's token is refused as renew_claim is, and makes no claim (${overtakenClaim.text.slice(0, 120)} | ${writersBefore[0].n} → ${writersAfter[0].n})`);
+  // A renewal that revives a lapsed claim says so (SMD-3654): when it lapsed, and the claims made on its work meanwhile.
+  // A claim on the work made and released before the writer's (so before its lapse) is never one of them.
+  const before = await rest("POST", "/v1/claims", { ticket: "SMD-9309" }, KEYS.rival);
+  await rest("POST", `/v1/claims/${(before.body.claim as Claim | undefined)?.id}/release`, { token: before.body.token, reason: "earlier" }, KEYS.rival);
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '1 hour' WHERE id = ${String((before.body.claim as Claim | undefined)?.id)}::uuid`;
+  const lapses = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", lease_seconds: 60 }, KEYS.writer);
+  const lapsesId = String((lapses.body.claim as Claim | undefined)?.id), lapsesToken = String(lapses.body.token ?? "");
+  const lapseIt = () => sql`UPDATE work_claims SET claimed_at = now() - interval '10 minutes', expires_at = now() - interval '5 minutes' WHERE id = ${lapsesId}::uuid`;
+  const liveRenew = await rest("POST", `/v1/claims/${lapsesId}/renew`, { token: lapsesToken }, KEYS.writer);
+  await lapseIt();
+  const quiet = await rest("POST", `/v1/claims/${lapsesId}/renew`, { token: lapsesToken }, KEYS.writer);
+  const quietLapse = quiet.body.lapsed as { at?: string; claimedSince?: unknown[] } | undefined;
+  assert(liveRenew.status === 200 && !("lapsed" in liveRenew.body) && quiet.status === 200 && typeof quietLapse?.at === "string" && Array.isArray(quietLapse.claimedSince) && quietLapse.claimedSince.length === 0,
+    `a live claim's renewal carries no lapse; a lapsed one nothing touched is renewed with lapsed.at and no claims since (${JSON.stringify(quiet.body.lapsed)})`);
+  // Lapsed again: the rival claims and releases the whole ticket (overlapping) and claims PR 2 (not overlapping); the writer's renewal names the first alone.
+  await lapseIt();
+  const meanwhile = await rest("POST", "/v1/claims", { ticket: "SMD-9309" }, KEYS.rival);
+  const meanwhileId = String((meanwhile.body.claim as Claim | undefined)?.id);
+  await rest("POST", `/v1/claims/${meanwhileId}/release`, { token: meanwhile.body.token, reason: "wrong ticket" }, KEYS.rival);
+  const otherPiece = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 2" }, KEYS.rival);
+  const busyMcp = await mcp("renew_claim", { id: lapsesId, token: lapsesToken });
+  const busyLapse = busyMcp.sc.lapsed as { claimedSince?: { id: string; holder: string; state: string; ownKey: boolean }[] } | undefined;
+  assert(meanwhile.status === 200 && otherPiece.status === 200 && !busyMcp.isError && busyLapse?.claimedSince?.length === 1 && busyLapse.claimedSince[0].id === meanwhileId && busyLapse.claimedSince[0].holder === "rival"
+      && busyLapse.claimedSince[0].state === "released" && busyLapse.claimedSince[0].ownKey === false
+      && /^Renewed your claim on SMD-9309 PR 1 until \S+ \(claim [0-9a-f-]{36}\)\. It had lapsed at \S+, and since then another claim was made or renewed on its work: SMD-9309 by rival, claimed at \S+ \(released, claim [0-9a-f-]{36}\)\. Another agent may have built part of the work: stop, and tell the user before carrying on\.$/.test(busyMcp.text)
+      && !busyMcp.text.includes(lapsesToken) && !JSON.stringify(busyMcp.sc).includes("wrong ticket"),
+    `a lapsed claim renewed after another key claimed its work meanwhile names that claim — its holder, time and state, not its reason or label — and says stop; a claim on another piece is no overlap (${busyMcp.text.slice(-170)})`);
+  // claim_work with the token renews too, and says the same.
+  await lapseIt();
+  const viaClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken }, KEYS.writer);
+  // The rival's whole-ticket claim, made within the lapse lapseIt sets, is named again (review pass 2: the array alone was checked).
+  assert(viaClaim.status === 200 && viaClaim.body.outcome === "renewed" && (viaClaim.body.lapsed as { claimedSince?: { id: string }[] } | undefined)?.claimedSince?.[0]?.id === meanwhileId && !("token" in viaClaim.body),
+    `claim_work with the token, renewing a lapsed claim, reports the lapse as renew_claim does (${viaClaim.status} ${viaClaim.body.outcome} ${JSON.stringify(viaClaim.body.lapsed)?.slice(0, 80)})`);
+  // A claim made before the lapse and revived during it was live then, so it is named too (review pass 2: only claims
+  // made since were read, and the reply said none). The rival's PR 2 lapses, the writer claims the whole ticket (a lapsed
+  // claim is not in the way) and lapses in turn, the rival renews PR 2 and releases it; the writer's renewal names it.
+  const early = await rest("POST", "/v1/claims", { ticket: "SMD-9311", piece: "PR 2" }, KEYS.rival);
+  const earlyId = String((early.body.claim as Claim | undefined)?.id);
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '2 hours', expires_at = now() - interval '90 minutes' WHERE id = ${earlyId}::uuid`;
+  const wholeTicket = await rest("POST", "/v1/claims", { ticket: "SMD-9311" }, KEYS.writer);
+  const wholeId = String((wholeTicket.body.claim as Claim | undefined)?.id), wholeToken = String(wholeTicket.body.token ?? "");
+  await sql`UPDATE work_claims SET claimed_at = now() - interval '1 hour', expires_at = now() - interval '30 minutes' WHERE id = ${wholeId}::uuid`;
+  const revivedEarly = await rest("POST", `/v1/claims/${earlyId}/renew`, { token: early.body.token }, KEYS.rival);
+  await rest("POST", `/v1/claims/${earlyId}/release`, { token: early.body.token, reason: "merged" }, KEYS.rival);
+  const wholeRenew = await mcp("renew_claim", { id: wholeId, token: wholeToken });
+  const wholeLapse = wholeRenew.sc.lapsed as { claimedSince?: { id: string; renewedAt: string | null }[] } | undefined;
+  assert(early.status === 200 && wholeTicket.status === 200 && revivedEarly.status === 200 && !wholeRenew.isError
+      && wholeLapse?.claimedSince?.length === 1 && wholeLapse.claimedSince[0].id === earlyId && typeof wholeLapse.claimedSince[0].renewedAt === "string"
+      && /since then another claim was made or renewed on its work: SMD-9311 piece "PR 2" by rival, claimed at \S+, renewed at \S+ \(released, claim [0-9a-f-]{36}\)\. Another agent may have built part of the work: stop/.test(wholeRenew.text),
+    `a claim made before the lapse and renewed during it is named, with when it was renewed (${revivedEarly.status} | ${wholeRenew.text.slice(-200)})`);
+  await rest("POST", `/v1/claims/${wholeId}/release`, { token: wholeToken, reason: "done" }, KEYS.writer);
+  await rest("POST", `/v1/claims/${lapsesId}/release`, { token: lapsesToken, reason: "done" }, KEYS.writer);
+  // A plain release's refusal asks the user before claiming again (SMD-3654: it said "claim it again").
+  const releasedRenew = await mcp("renew_claim", { id: lapsesId, token: lapsesToken });
+  assert(releasedRenew.isError && /was released by writer at \S+ \("done"\); if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose\.$/.test(releasedRenew.text),
+    `a renewal of a released claim says to ask the user before claiming it again (${releasedRenew.text.slice(-120)})`);
+  const releasedClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken }, KEYS.writer);
+  const releasedClaimMcp = await mcp("claim_work", { ticket: "SMD-9309", piece: "PR 1", token: lapsesToken });
+  const liveMine = await sql`SELECT count(*)::int AS n FROM work_claims WHERE issue = 'SMD-9309' AND piece_key = 'pr 1' AND released_at IS NULL`;
+  // The same work spelled as 115 cleans it is the same work; other work with that token is a new claim (review pass 4:
+  // a split's pieces were refused), and so is another key's call with it.
+  const foldedClaim = await rest("POST", "/v1/claims", { ticket: " smd-9309 ", piece: "pr 1", token: lapsesToken }, KEYS.writer);
+  const otherWork = await rest("POST", "/v1/claims", { ticket: "SMD-9309", piece: "PR 3", token: lapsesToken }, KEYS.writer);
+  if (otherWork.body.token) await rest("POST", `/v1/claims/${(otherWork.body.claim as Claim | undefined)?.id}/release`, { token: otherWork.body.token, reason: "done" }, KEYS.writer);
+  const rivalWithIt = await rest("POST", "/v1/claims", { ticket: "SMD-9312", token: lapsesToken }, KEYS.rival);
+  assert(releasedClaim.status === 409 && releasedClaim.body.code === "CLAIM_RELEASED" && releasedClaim.body.takenOver === false && !("token" in releasedClaim.body)
+      && releasedClaimMcp.isError && /was released by writer at \S+ \("done"\); if the work is still yours to do, ask the user before claiming it again/.test(releasedClaimMcp.text)
+      && liveMine[0].n === 0 && foldedClaim.status === 409 && foldedClaim.body.code === "CLAIM_RELEASED"
+      && otherWork.status === 200 && otherWork.body.outcome === "claimed" && rivalWithIt.status === 200 && rivalWithIt.body.outcome === "claimed",
+    `claim_work with its own released claim's token on that work, however spelled, is refused, asking the user, and claims nothing; on other work, or another key's call, it is the writer's (${releasedClaim.status} ${releasedClaim.body.code} | ${liveMine[0].n} | ${foldedClaim.status} | ${otherWork.status} ${otherWork.body.outcome} | ${rivalWithIt.status} ${rivalWithIt.body.outcome})`);
+
   // The two swaps an agent makes, each with a hint; list_claims says when its limit cut the list.
   const idForToken = await mcp("renew_claim", { id: firstId, token: firstId });
   const pieceInTicket = await mcp("claim_work", { ticket: "SMD-9307 PR 4" });
