@@ -19214,9 +19214,9 @@ if (want("38")) {
    * The timed cases' clock (SMD-3714), as [38b]'s SCALE: a case's quiet, poll,
    * capture and clock, the stub's hold and the waits the case makes around
    * them, each at this share of the milliseconds it was written in, so their
-   * ratios hold. A pass's own start doesn't scale, so a case whose margin rests
-   * on one keeps its seconds. sleepRun's quiet and poll are whole seconds, so a
-   * scaled case passes quietMs and pollMs.
+   * ratios hold. A pass's own start doesn't scale, nor does a read's 250 ms
+   * poll lag, so a case whose margin rests on one keeps its seconds. sleepRun's
+   * quiet and poll are whole seconds, so a scaled case passes quietMs and pollMs.
    */
   const SCALE = 0.6;
   const scaled = (ms: number) => Math.round(ms * SCALE);
@@ -19468,7 +19468,7 @@ if (want("38")) {
     // (review pass 2). One statement, so the call can't end between the two reads (review pass 3).
     const [pauseRead] = (await sql`SELECT (SELECT thought_id::text FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed' LIMIT 1) AS id,
                                           (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded') AS done`) as { id: string | null; done: number }[];
-    const atPause = pauseRead?.id ? { id: pauseRead.id } : undefined;
+    const atPauseId = pauseRead?.id ?? null;
     const doneAtPause = Number(pauseRead?.done ?? 0);
     let pausedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (pausedBeat = await beat())?.paused !== undefined, 3_000);
@@ -19478,9 +19478,9 @@ if (want("38")) {
     await Bun.sleep(scaled(800));
     const heldBack = (await claims(EX)).claimed ?? 0;
     const resumedEarly = lines.some((l) => /resumed:/.test(l));
-    assert(asleepBeat?.running === true && pauseSaid && atPause?.id === inHand?.id && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
+    assert(asleepBeat?.running === true && pauseSaid && atPauseId === inHand?.id && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
         && handDone && doneThought === "succeeded" && heldBack === 0 && !resumedEarly,
-      `a live write pauses a sleep with a ${inHandCall / 1000} s call in hand: said within the poll, the call still in hand, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${atPause?.id === inHand?.id ? "in hand" : "not in hand at the pause"}; done ${handDone}, resumed early ${resumedEarly}; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
+      `a live write pauses a sleep with a ${inHandCall / 1000} s call in hand: said within the poll, the call still in hand, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${atPauseId === inHand?.id ? "in hand" : "not in hand at the pause"}; done ${handDone}, resumed early ${resumedEarly}; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
     // The capture passed with no live write: the passes go on, the row paused no more.
     const resumedSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  resumed: no live write for ${capS(6000)} s — the passes go on \\(paused \\d+ s\\)$`).test(l)), 15_000);
     // Read at the resume, before the next 3.6 s call can end: a gate that let a claim through while closed
