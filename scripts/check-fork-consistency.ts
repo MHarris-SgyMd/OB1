@@ -581,11 +581,11 @@
  *      sit together, so a number with headers at two places is two checks;
  *      every check this file cites (`check N`, `checks N, M, and K`, each
  *      number of `N to M`, `N through M` or `N–M`) is listed, a lettered one
- *      headed; and every check a code line names is its section's, so a
- *      renumber that missed a line fails; CROSS_SECTION_MESSAGES names the
- *      lines that mean another check, and a stale entry fails (SMD-3658: two
- *      PRs took 45, then two took 47, within a day). Its probe pins what it
- *      refuses and passes
+ *      listed or headed; and every check a line's code names, its comments
+ *      aside, is its section's, so a renumber that missed a line fails;
+ *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
+ *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
+ *      two took 47, within a day). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44 and 48 parse YAML with Bun.YAML,
@@ -10519,13 +10519,15 @@ checkJobTimeouts();
  * listed check has a header; one check's headers sit within HEADER_SITE lines of each other (a separator and the
  * docblock under it, five apart at the most today, for 16), so headers for one number further apart are two checks;
  * each number cited is listed, a lettered one by its own header or entry (17c by its docblock), each number in a
- * range. And every check a code line names, a comment trailing it aside, is its section's — the section's own number,
- * its base, or a sub-check of it — so a renumber that moved the headers and missed a line fails, even where the old
- * number is still listed because another check took it: 316 names on 312 lines today, all in their own section but
- * the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and none outside every
- * section; a comment line names none, being no message. It reads this file's own text, and not any other file that
- * cites a check by number; prose that reads as a citation or a header fails loudly and is reworded, as does a
- * numbered docblock that is no check's header. Its probe runs on small texts in the same shape.
+ * range and each letter in a lettered one (`17a–17e`). And every check a line's code names, its `//` and block
+ * comments cut by a scan that keeps a string's `//`, is its section's — the section's own number, its base, or a
+ * sub-check of it — so a renumber that moved the headers and missed a line fails, even where the old number is still
+ * listed because another check took it: 316 names on 312 lines today, all in their own section but the eight pairs
+ * CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and none outside every section; a comment
+ * names none, being no message, and a name in other words (`check-50`, `check #50`, a number built at runtime) is not
+ * read. It reads this file's own text, and not any other file that cites a check by number; prose that reads as a
+ * citation or a header fails loudly and is reworded, as does a numbered docblock that is no check's header. Its probe
+ * runs on small texts in the same shape.
  */
 const HEADER_SITE = 10;
 const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
@@ -10537,26 +10539,49 @@ const CHECK_CITATION = /\bchecks? (\d+[a-z]?(?:(?:, and |, or |, | and | or | to
 const CROSS_SECTION_MESSAGES: [string, string, string][] = [
   ["13", "14", "deploy/.env.example missing: the message names what each reads from it, 13's _BIND knobs and 14's settings"],
   ["14", "13", "a required knob's message sends its fix to 13's ENV_EXAMPLE_LIVE"],
-  ["19", "1", "a probe case: a directory with no metadata.json is 1's to report, so 19 waits on it"],
+  ["19", "1", "a non-probe entry: a directory with no metadata.json is 1's to report, so 19 waits on it"],
   ["22b", "22c", "FORK.md's heading missing: both read their history from it, and the message names both"],
   ["26", "10", "a trust exception and its fixture name the insert 10 counts as well"],
   ["28", "13", "the release assets' message names the env asset 13 holds"],
   ["36", "28", "its character and tag refusals in compose.yaml are 28's rule, which its messages name"],
-  ["37", "38", "lgtm's labels, the alert rules' sha among them, are 37's, so its report of their file missing is 38's"],
+  ["37", "38", "lgtm's labels, the alert rules' sha among them, are 37's: its report of their file missing is 38's, and its inline copies' failure names both"],
 ];
-/** The checks a range or list names: `16–17` and `6 to 8` each number from one end to the other, `1 + 2` each named. */
+/** The checks a range or list names: `16–17` and `6 to 8` each number from one end to the other, `17a–17e` each letter
+ * of one number, `1 + 2` each named. */
 function namedChecks(spec: string): string[] {
   return spec.replace(/\s+/g, " ").split(/ ?[,+] ?(?:(?:and|or) )?| (?:and|or) /).flatMap((part) => {
+    const letters = part.trim().match(/^(\d+)([a-z]) ?(?:to|through|–|-) ?(\d+)([a-z])$/);
+    if (letters && letters[1] === letters[3] && letters[4] >= letters[2]) {
+      return Array.from({ length: letters[4].charCodeAt(0) - letters[2].charCodeAt(0) + 1 }, (_, k) => letters[1] + String.fromCharCode(letters[2].charCodeAt(0) + k));
+    }
     const range = part.trim().match(/^(\d+) ?(?:to|through|–|-) ?(\d+)$/);
     const from = range ? Number(range[1]) : NaN, to = range ? Number(range[2]) : NaN;
     if (range && to >= from && to - from <= 100) return Array.from({ length: to - from + 1 }, (_, k) => String(from + k));
     return part.split(/ (?:to|through) | ?[–-] ?/).map((t) => t.trim()).filter((t) => CHECK_NUMBER_WORD.test(t));
   });
 }
-/** The checks a code line names, a comment trailing it aside: a message, a const, a probe case — a comment line names none. */
-function speakingAs(line: string): string[] {
-  if (/^\s*(?:\/\/|\/\*|\*)/.test(line)) return [];
-  const code = line.replace(/\s\/\/ (?!.*[`"]).*$/, "");
+/** Each line's code, its comments cut: a `//` to the line's end and a block comment to its close, across lines too,
+ * each opening outside a string after a space or at the line's start. A quote opens a string to its close on the line,
+ * so a comment's quotes are a comment's and a string's `//` a string's; a template's later lines read as code, as a
+ * message is. */
+function codeOf(lines: string[]): string[] {
+  let block = false;
+  return lines.map((line) => {
+    let code = "", quote = "";
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i], lead = i === 0 || /\s/.test(line[i - 1]);
+      if (block) { if (ch === "*" && line[i + 1] === "/") { block = false; i++; } continue; }
+      if (quote) { code += ch; if (ch === "\\") code += line[++i] ?? ""; else if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && line[i + 1] === "/" && lead) break;
+      if (ch === "/" && line[i + 1] === "*" && lead) { block = true; i++; continue; }
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+      code += ch;
+    }
+    return code;
+  });
+}
+/** The checks a line's code names: a message, a const, a probe case. */
+function speakingAs(code: string): string[] {
   return [...new Set([...code.matchAll(CHECK_CITATION)].flatMap((m) => namedChecks(m[1])))];
 }
 function checkNumberProblems(text: string, crossSection: [string, string, string][] = []): [number, string][] {
@@ -10576,6 +10601,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
   const used = new Set<string>();
   // A line in 17a's section is 17a's, or names 17, its base; one in 22's names 22 or a sub-check of it, 22b.
   const owns = (section: string[], n: string) => section.some((x) => x === n || checkBase(x) === n || x === checkBase(n));
+  const code = codeOf(lines);
   let section: string[] = [];
   lines.forEach((l, i) => {
     const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*(?:[+–-]|to)\s*\d+[a-z]?)*)\s*[:.]/);
@@ -10585,12 +10611,12 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
       section = namedChecks(spec);
       for (const n of section) (sites.get(n) ?? sites.set(n, []).get(n)!).push(i + 1);
     } else if (/^\/\/ (?:──|----)/.test(l)) section = []; // a separator naming no check ends the section
-    for (const speaks of speakingAs(l)) {
+    for (const speaks of speakingAs(code[i])) {
       if (!section.length) { problems.push([i + 1, `a line names check ${speaks} outside any check's section — move it under its check's header, give its section a check header, or reword it (SMD-3658)`]); continue; }
       if (owns(section, speaks)) continue;
       const allowed = crossSection.find(([s, c]) => owns(section, s) && speaks === c);
       if (allowed) used.add(`${allowed[0]}>${allowed[1]}`);
-      else problems.push([i + 1, `a line in check ${section.join(" + ")}'s section names check ${speaks} — a renumber that moved the headers and missed this line, or a line in the wrong section; a line that means the other check goes in CROSS_SECTION_MESSAGES, with why (SMD-3658)`]);
+      else problems.push([i + 1, `a line in check ${section.join(" + ")}'s section names check ${speaks} — a renumber that moved the headers and missed this line, a line in the wrong section, or prose that reads as a citation and wants rewording; a line that means the other check goes in CROSS_SECTION_MESSAGES, with why, and a fixture builds its number (\`check \${N}\`) (SMD-3658)`]);
     }
   });
   const crossAt = lines.findIndex((l) => /^const CROSS_SECTION_MESSAGES\b/.test(l)) + 1 || 1;
@@ -10598,7 +10624,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
   for (const [n, at] of sites) {
     if (!isListed(n)) problems.push([at[0], `a header names check ${n}, which the list above \` * Run:\` does not hold — list it, or give it the number its list entry holds (SMD-3658)`]);
     const elsewhere = at.find((l) => l - at[0] > HEADER_SITE);
-    if (elsewhere !== undefined) problems.push([elsewhere, `check ${n} has a header here and another at line ${at[0]} — two checks took one number, so give the newer the next free one, or a numbered docblock here is no check's header and wants rewording (SMD-3658)`]);
+    if (elsewhere !== undefined) problems.push([elsewhere, `check ${n} has a header here and another at line ${at[0]} — two checks took one number, so give the newer the next free one, or a numbered docblock or separator here (\`// ── 1. a step ──\`) is no check's header and wants rewording (SMD-3658)`]);
   }
   for (const [n, at] of listed) {
     if (![...sites.keys()].some((h) => h === n || checkBase(h) === n)) problems.push([at, `the list holds check ${n}, but no header names it — open its section with a \`// ── ${n}: …\` separator or a docblock opening \` * ${n}: …\` (SMD-3658)`]);
@@ -10607,7 +10633,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
   const isCited = (n: string) => listed.has(n) || (listed.has(checkBase(n)) && (n === checkBase(n) || sites.has(n)));
   lines.forEach((l, i) => {
     for (const m of l.matchAll(CHECK_CITATION)) {
-      for (const n of namedChecks(m[1])) if (!isCited(n)) problems.push([i + 1, `cites check ${n}, which neither the list above \` * Run:\` nor a lettered header holds — a renumbered or mistyped check (SMD-3658)`]);
+      for (const n of namedChecks(m[1])) if (!isCited(n)) problems.push([i + 1, `cites check ${n}, which neither the list above \` * Run:\` nor a lettered header holds — a renumbered or mistyped check, or prose that reads as one and wants rewording (SMD-3658)`]);
     }
   });
   return problems;
@@ -10663,6 +10689,17 @@ function checkCheckNumbers() {
     ["a cross-section entry's check named in another section", `${list("35", "37", "38")}${section("35")}${message("38")}${section("37")}${message("38")}${section("38")}`, [WRONG_SECTION], crossProbe],
     ["another check named in the cross-section entry's section", `${list("37", "38", "39")}${section("37")}${message("38")}${message("39")}${section("38")}${section("39")}`, [WRONG_SECTION], crossProbe],
     ["a cross-section entry no line needs", `${list("1")}${section("1")}`, [STALE], crossProbe],
+    ["one entry used and one stale", `${list("37", "38")}${section("37")}${message("38")}${section("38")}`, [STALE], [...crossProbe, ["1", "2", "the probe's stale one"]]],
+    ["a sub-check of a cross-section entry's check, which the entry does not name", `${list("37", "38", "38b")}${section("37")}${message("38")}${message("38b")}${section("38")}${section("38b")}`, [WRONG_SECTION], crossProbe],
+    ["comments naming another check: a trailing one holding quotes, a block line, a docblock line", `${list("1", "2")}${section("1")}const x = 1; // the \`_BIND\` knob "check ${2}" reads\n/* as check ${2} reads it */\n/**\n * as check ${2} reads it\n */\n${section("2")}`, []],
+    ["a // in a string, double- or single-quoted, before a mention of another check", `${list("1", "2")}${section("1")}fail(rel, "a // b — check ${2}");\nfail(rel, 'a // b — check ${2}');\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["an escaped quote, then a // still in the string, before a mention", `${list("1", "2")}${section("1")}fail(rel, "a \\" // b — check ${2}");\n${section("2")}`, [WRONG_SECTION]],
+    ["a regex ending in an escaped slash, its // no comment, before a mention", `${list("1", "2")}${section("1")}if (/^\\/\\//.test(x)) fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a mention after an inline block comment", `${list("1", "2")}${section("1")}/* a note */ fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a template's later line opening with *, naming another check", `${list("1", "2")}${section("1")}const t = \`a\n * check ${2} reads it\`;\n${section("2")}`, [WRONG_SECTION]],
+    ["a list of checks on a code line, its second another's", `${list("1", "2")}${section("1")}fail(rel, "checks ${1} and ${2} read it");\n${section("2")}`, [WRONG_SECTION]],
+    ["a lettered cited range, each letter of it read", `${list("17")}// ── 17: it ──\n/**\n * 17a: a part\n */\n/**\n * 17c: a part\n */\n// see checks ${"17a"}–${"17c"}\n`, [UNLISTED_CITE]],
+    ["a range past the bound, read at its ends", `${list("1")}${section("1")}// see checks ${1} to ${1000}\n`, [UNLISTED_CITE]],
   ];
   const wrong = cases.map(([why, text, says, cross]) => ({ why, says, got: checkNumberProblems(text, cross ?? []).map((p) => p[1]) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
