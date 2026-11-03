@@ -36,8 +36,8 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
 # A run is every shard of each suite, so a shard named in the caller's shell
-# applies to none of its rows, and would only drop from a row's name the shard
-# a live lane is held to (SMD-3688 review pass 4).
+# applies to none of its rows. Left set, it would drop that shard from a row's
+# name, and a live lane is held to its row's name (SMD-3688 review pass 4).
 unset OB1_LIVE_SHARD OB1_PREFLIGHT_SHARD
 
 # One row per suite or typecheck: ✓ or ✗, the name, the verdict and its seconds.
