@@ -16979,6 +16979,50 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
          && capRefOwnItem.outcome === "asserted" && capRefOthersItem.code === "ITEM_NOT_YOURS",
     `a write key states a priority on an open item (its id in any case), an unknown one refused naming it an open item; a capture key on its own open item, not another key's nor one that is not there (one answer), and a due time from its own open item alone (${opOnItem.outcome}, ${opOnGhost.message}, ${capOnOwnItem.outcome}, ${capOnOthersItem.code}, ${capOnGhostItem.code}, ${capRefOwnItem.outcome}, ${capRefOthersItem.code})`);
 
+  // A proposal made by name before the key had an agent id is still its own: its proposer may not accept it once it has one (review pass 1).
+  const lateItem = await open("[105] a late key's item", OP);
+  const lateProp = await propose(lateItem.item?.id ?? GHOST, { name: "item-late", scope: "write" });
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-late', 'agent')`);
+  const lateAccept = await decide(lateProp.proposal?.id ?? GHOST, true, { name: "item-late", scope: "write", agent_id: await agentOf("item-late") });
+  assert(lateProp.outcome === "proposed" && lateAccept.code === "PROPOSAL_YOURS",
+    `a proposal made by name before the key had an agent id is still its proposer's once it has one: its accept is PROPOSAL_YOURS (${lateProp.outcome}, ${lateAccept.code})`);
+
+  // A proposer's second proposal with the same evidence: the same words unchanged, other words a correction that withdraws the first (review pass 1).
+  const corrItem = await open("[105] an item a judge corrects itself on", OP);
+  const cid = corrItem.item?.id ?? GHOST;
+  const first = await propose(cid, BOT, { evidence: booked, status: "done", reason: "looks done" });
+  const firstAgain = await propose(cid, BOT, { evidence: booked, status: "done", reason: "looks done" });
+  const corrected = await propose(cid, BOT, { evidence: booked, status: "dropped", reason: "it was dropped, not done" });
+  const pendingNow = (await history(cid)).proposals.filter((x) => x.decision === null);
+  assert(first.outcome === "proposed" && firstAgain.outcome === "unchanged" && firstAgain.proposal?.id === first.proposal?.id
+         && corrected.outcome === "proposed" && corrected.proposal?.status === "dropped" && (corrected as { replaced?: Proposal | null }).replaced?.id === first.proposal?.id
+         && (corrected as { replaced?: Proposal | null }).replaced?.decision === "rejected" && pendingNow.length === 1 && pendingNow[0].id === corrected.proposal?.id,
+    `the same proposal again is unchanged; the same proposer and evidence with another status is a correction: the first withdrawn (rejected), one pending (${firstAgain.outcome}, ${corrected.outcome}, ${pendingNow.length})`);
+
+  // A plugin hook's principal (capture scope, no agent id) owns the items its plugin's rows stand for, and no other plugin's (review pass 1).
+  const HOOK = { name: "hook:home-maintenance", scope: "capture", plugin: "home-maintenance" };
+  const hooked = await open("[105] replace the furnace filter", HOOK, { row: "task-40", due_at: "2026-11-01T00:00:00Z" });
+  const hid = hooked.item?.id ?? GHOST;
+  const hookMoves = await update(hid, { due_at: "2027-02-01T00:00:00Z" }, HOOK);
+  const hookPrio = await ans(`SELECT assert_priority('item', $1, 2, p_actor => $2::jsonb) AS r`, [hid, j(HOOK)]);
+  const otherHook = await update(hid, { owner: "x" }, { name: "hook:family-calendar", scope: "capture", plugin: "family-calendar" });
+  const hookDone = await status(hid, "done", HOOK, "the log row says it was replaced");
+  assert(hooked.outcome === "opened" && hookMoves.outcome === "updated" && hookPrio.outcome === "asserted" && otherHook.code === "ITEM_NOT_YOURS" && hookDone.item?.status === "done",
+    `a plugin hook (capture scope, no agent id) moves the due time of, states a priority on and settles the item its plugin's row stands for; another plugin's hook may not touch it (${hookMoves.outcome}, ${hookPrio.outcome}, ${otherHook.code}, ${hookDone.outcome})`);
+
+  // A plugin row is its item's identity: opened with a thought another item came from, it is its own item, and found again without the thought (review pass 1).
+  const passport = await thoughtBy("item-op", "[105] I need to renew the passport");
+  const fromThought = await open("renew the passport", OP, { thought: passport });
+  const fromRow = await open("renew the passport", HM, { thought: passport, row: "task-41" });
+  const rowAgain = await open("renew the passport", HM, { row: "task-41" });
+  assert(fromThought.outcome === "opened" && fromRow.outcome === "opened" && fromRow.item?.id !== fromThought.item?.id && fromRow.item?.origin_thought_id === passport
+         && rowAgain.outcome === "unchanged" && rowAgain.item?.id === fromRow.item?.id,
+    `a plugin row opened with a thought another item came from is an item of its own, its thought kept, and its next sync without the thought finds it (${fromRow.outcome}, ${rowAgain.outcome})`);
+
+  // Due times: one Postgres can't read, or an infinite one, raise 22023 (review pass 1).
+  const dues = await Promise.all([update(tid, { due_at: "next tuesday" }, OP), update(tid, { due_at: "infinity" }, OP), open("[105] never due", OP, { due_at: "infinity" })]);
+  assert(dues.every((d) => d.code === "22023"), `a due time that is no time, or an infinite one, raises 22023 from update_item and open_item (${dues.map((d) => d.code).join(",")})`);
+
   // Append-only events; proposals decided once — for the owner too.
   const anyEvent = h.events[0].id;
   const edits = await Promise.all([
@@ -17047,6 +17091,26 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
     `a role granted capture, server and items opens, changes, proposes, decides, reopens and reads an item; it cannot DELETE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleDelete.code}, ${roleWithout.message?.slice(0, 60)})`);
   await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
 
+  // A role with the priority group and not the items group: a capture key's priority on its own thought and its own open item (review pass 1: a row lock on open_items needed UPDATE, which only the items group grants).
+  const PROLE = "ob1_test_items_priority";
+  await db.exec(`CREATE ROLE ${PROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${PROLE}`, ...grantStatements(PROLE, { groups: ["capture", "server", "priority"] })]) await db.exec(st);
+  const capFresh = await thoughtBy("item-cap", "[105] a capture key's thought, prioritised by a role without the items group");
+  let pRole: { code: string; r?: string; message?: string };
+  try {
+    let r = "";
+    await db.transaction(async (tx) => {
+      await tx.exec(`SET LOCAL ROLE ${PROLE}`);
+      const onThought = (await tx.query<{ r: Answer }>(`SELECT assert_priority('thought', $1, 3, p_actor => $2::jsonb) AS r`, [capFresh, j(CAP)])).rows[0].r;
+      const onItem = (await tx.query<{ r: Answer }>(`SELECT assert_priority('item', $1, 4, p_actor => $2::jsonb) AS r`, [capPlain.item?.id ?? GHOST, j(CAP)])).rows[0].r;  // 4: its 3 stands already
+      r = `${onThought.outcome},${onItem.outcome}`;
+    });
+    pRole = { code: "", r };
+  } catch (e) { pRole = { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  assert(pRole.code === "" && pRole.r === "asserted,asserted",
+    `a role granted capture, server and priority, without items, states a capture key's priority on its own thought and its own open item (${JSON.stringify(pRole)})`);
+  await db.exec(`DROP OWNED BY ${PROLE}; DROP ROLE ${PROLE}`);
+
   // Re-applied: the items, their events and proposals stand, one of each call, the projection exact.
   const counts = async () => JSON.stringify((await db.query(`SELECT (SELECT count(*) FROM open_item_events) AS e, (SELECT count(*) FROM open_items) AS i, (SELECT count(*) FROM open_item_close_proposals) AS p`)).rows);
   const beforeRe = await counts();
@@ -17055,7 +17119,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const ones = await Promise.all(["open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "open_item_history", "assert_priority"].map(functionsNamed));
   assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
 
-  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

@@ -1354,7 +1354,7 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const { item: _hookItem, ...hookFacts } = hookSet.body as Record<string, unknown>;
     const { item: _nowhereItem, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
     assert(hookSet.status === 403 && hookSet.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(hookFacts, nowhereFacts) && hookTicket.status === 403 && hookTicket.body.code === "ITEM_NOT_YOURS"
-        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since\.$/.test(hookMcp.text) && hookReads.status === 403,
+        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it\.$/.test(hookMcp.text) && hookReads.status === 403,
       `a capture-only key's set on the writer's thought is refused 403 ITEM_NOT_YOURS, the same for a thought that is not there and for a ticket; in words over MCP; it may not read the history (${hookSet.status} ${hookSet.body.code} | ${hookNowhere.status} ${hookNowhere.body.code} | ${hookMcp.text} | ${hookReads.status})`);
     // …and on its own thought it may, at its own trust, shown no winner.
     const hookThought = String((await rest("POST", "/v1/thoughts", { content: "omega: a thought the hook captured, to state a priority on" }, KEYS.hook)).body.id);

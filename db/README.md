@@ -2418,6 +2418,8 @@ grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
 082 and 115; a re-apply is a no-op. The REST and MCP operations are
 `set_priority`, `clear_priority` and `priority_history` (SMD-3664;
 server-portable/README.md, Priority assertions).
+test-schema [104] (the rules, the tiers, the refusals, the projection, the
+group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
 Migration 117 adds open items: a to-do, a commitment or a plugin's task gets an
 id, a status and a history (SMD-3665 PR 1; docs/priority.md decision 1's fourth
@@ -2441,18 +2443,28 @@ from a JSON object, a JSON null clearing owner or due time), `set_item_status`
 pending proposals), `propose_item_close` and `decide_item_close`; each answers
 `{outcome, code, message, …}` and changes nothing it was not asked to (the same
 again is `unchanged`). The same thought and text, or the same plugin row, opened
-again is the item that is there, so a re-run opens nothing twice. A **proposed
+again is the item that is there, so a re-run opens nothing twice; a plugin row
+is its item's identity, the thought and text that of an item standing for no
+row. A **proposed
 close** (`open_item_close_proposals`: the status, the evidence thought, a label
 such as `resolves`, a reason) never closes the item by itself: a key other than
 its proposer accepts it, which closes the item with an event naming it, or
-rejects it (`PROPOSAL_YOURS` for the proposer accepting its own); a row changes
-only to be decided, once. The scope rule fails closed as 116's. A
+rejects it (`PROPOSAL_YOURS` for the proposer accepting its own, matched as 116
+matches a maker: by agent id when one was recorded, else by name). A proposer's
+second proposal with the same evidence withdraws its first when it says
+something else. A row changes only to be decided, once. The scope rule fails closed as 116's. A
 **capture-only key** may open an item, from a thought only if it captured the
 thought, and change only an item it opened under its envelope's agent id that
-no other key has changed since — asked before any existence answer, and refused
-alike for an item that is not there (`ITEM_NOT_YOURS`). 117 replaces 116's
+no other key has changed since, or one that stands for a row of the plugin its
+call came through (a plugin hook, `hook:<plugin>`, has no agent id) — asked
+before any existence answer, and refused alike for an item that is not there
+(`ITEM_NOT_YOURS`). A due time that is not one, or an infinite one, is refused
+(22023); text without an offset is read in the session's time zone, so the
+server passes instants. 117 replaces 116's
 `ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
-whose capture rule now admits an open item the key owns. `open_item_history`
+whose capture rule now admits an open item the key owns, and redefines
+`ob1_priority_actor` on `ob1_actor_maker`, the maker reader the item writers
+share (its answers as 116's). `open_item_history`
 reads one item, every event and every proposal. Each writer raises (0A000) above
 READ COMMITTED and takes an advisory lock on its item, then its projection row.
 An item's text, owner and reasons may hold personal data: `forget_thought`
@@ -2460,8 +2472,6 @@ An item's text, owner and reasons may hold personal data: `forget_thought`
 grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
 and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
 REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
-test-schema [104] (the rules, the tiers, the refusals, the projection, the
-group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
 ## What changed relative to the guide
 

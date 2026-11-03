@@ -442,7 +442,10 @@ const FUNCTIONS = [
   "ob1_item_event_json(open_item_events)",
   "ob1_item_proposal_json(open_item_close_proposals)",
   "ob1_item_lock(uuid)",
-  "ob1_item_owns(uuid, uuid)",
+  "ob1_item_owns(uuid, uuid, text)",
+  "ob1_item_is_proposer(open_item_close_proposals, text, uuid)",
+  "ob1_actor_maker(jsonb, text)",
+  "ob1_item_due(text)",
   "ob1_item_id(text)",
   "ob1_item_actor(jsonb, text)",
   "ob1_item_refused(text, text)",
@@ -450,7 +453,7 @@ const FUNCTIONS = [
   "ob1_item_project(uuid)",
   "ob1_item_moot(uuid, timestamp with time zone, uuid)",
   "ob1_item_gate(uuid, record, text)",
-  "ob1_priority_owns_item(text, text, uuid)",
+  "ob1_priority_owns_item(text, text, uuid, text)",
 ];
 
 /**

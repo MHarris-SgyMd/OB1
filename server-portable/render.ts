@@ -1883,7 +1883,7 @@ const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
     ? r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
   : r.code === "ITEM_NOT_YOURS"
-    ? `Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since${r.dueRef ? ", and take a due time only from another such thought" : ""}.`
+    ? `Refused: a capture-only key may state a priority only on a thought it captured or an open item it opened, while nobody else has taken it${r.dueRef ? ", and take a due time only from another such item" : ""}.`
   : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
   : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not state or clear a priority.`
   : r.code === "PRIORITY_UNATTRIBUTED"

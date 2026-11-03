@@ -996,8 +996,9 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   each with its maker, tier, reason and how its window closed. `exists: false` is an
   item since removed, whose statements are kept.
 
-**A capture-only key** reaches the two writers (decision 10): migration 116 lets it
-state a priority on a thought it captured and nobody has taken since, and refuses it
+**A capture-only key** reaches the two writers (decision 10): migrations 116 and 117
+let it state a priority on a thought it captured or an open item it opened, while
+nobody else has taken it, and refuse it
 anything else alike whether the item exists or not. It is never shown the winner
 (`winnerShown: false`, and no word of one), and it has no read tool, so no history.
 The server states the key's scope in the envelope it passes (`write` or `capture`),
@@ -1009,7 +1010,7 @@ caller; a hook's principal is capture-scoped.
 | Code | Status | When |
 | --- | --- | --- |
 | `ITEM_NOT_FOUND` | 404 | The brain holds no such item: `item` names it as 116 keys it (a ticket upper-cased), `which` whether it was the item or the due reference. `priority_history` answers it for an item nobody stated a priority on. |
-| `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured and nobody took, or a due reference to one. |
+| `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured or an open item it opened, which nobody else took, or a due reference to one. |
 | `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
 | `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. A principal with no agent id by design (a plugin hook's) is answered by 116. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
