@@ -68,7 +68,8 @@ function spawnScript(args, { stdin, env = {} } = {}) {
 const runHook = (input, env = {}, args = [], raw = false) => spawnScript(args, { env, stdin: raw ? String(input) : JSON.stringify(input) });
 
 // ── A fake MCP endpoint ──────────────────────────────────────────────────────
-// Keys: "cap-key" sees capture_thought alone; "write-key" everything; "read-key"
+// Keys: "cap-key" sees capture_thought alone; "cap-prio-key" a capture key on a server
+// since SMD-3664, with the priority writers beside it; "write-key" everything; "read-key"
 // the reads; anything else is -32001 inside a 200, as the server answers.
 // tools/call answers as an SSE frame, tools/list as raw JSON, so both shapes
 // the client must parse are exercised. Behaviour markers in the content:
@@ -139,9 +140,9 @@ const fake = Bun.serve({
     const envelope = (payload) => ({ jsonrpc: "2.0", id: body.id, ...payload });
     const sse = (payload) => new Response(`event: message\ndata: ${JSON.stringify(envelope(payload))}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
     const json = (payload) => Response.json(envelope(payload));
-    const scope = key === "cap-key" ? "capture" : key === "write-key" ? "write" : key === "read-key" ? "read" : null;
+    const scope = key === "cap-key" || key === "cap-prio-key" ? "capture" : key === "write-key" ? "write" : key === "read-key" ? "read" : null;
     if (!scope) return json({ error: { code: -32001, message: "Unauthorized: missing or invalid authentication." } });
-    const surface = scope === "capture" ? ["capture_thought"] : scope === "write" ? [...READ, "capture_thought", "update_thought", "delete_thought"] : READ;
+    const surface = scope === "capture" ? (key === "cap-prio-key" ? ["capture_thought", "set_priority", "clear_priority"] : ["capture_thought"]) : scope === "write" ? [...READ, "capture_thought", "update_thought", "delete_thought"] : READ;
     if (body.method === "tools/list") return json({ result: { tools: surface.map((name) => ({ name })) } });
     if (body.method === "tools/call") {
       const { name, arguments: args } = body.params;
@@ -2280,6 +2281,10 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
   const wide = await run(["--check"], "write-key");
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
+  // A capture key on a server since SMD-3664 sees the priority writers too: still a capture key, no warning.
+  const prio = await run(["--check"], "cap-prio-key");
+  assert(prio.code === 0 && /sees capture_thought, clear_priority, set_priority alone \(capture scope\)/.test(prio.out) && !/warning/.test(prio.err),
+    `--check with a capture key that also sees the priority writers: ok, no warning (${prio.out.trim().slice(0, 120)} | ${prio.err.trim().slice(0, 80)})`);
   const ro = await run(["--check"], "read-key");
   assert(ro.code === 1 && /cannot capture/.test(ro.err), "--check with a read key: exit 1");
   // The proxy's legacy root route: the fake's answers, each marked deprecated with legacy-window's Link (SMD-2686). It keeps the last url asked for.

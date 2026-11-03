@@ -8,7 +8,7 @@
  *
  *   bun keygen.ts --name laptop  --scope write
  *   bun keygen.ts --name chatgpt --scope read
- *   bun keygen.ts --name session-hook --scope capture   # may add a thought, nothing else (SMD-1298)
+ *   bun keygen.ts --name session-hook --scope capture   # may add a thought, and state a priority on its own (SMD-1298, SMD-3664)
  *   bun keygen.ts --name mcp-forwarder --scope forward  # grants nothing; names who forwarded a client's key (SMD-2284)
  */
 
@@ -43,9 +43,10 @@ if (minted === "read") {
   console.log(`  delete_thought; an extension's add/update tools) are not registered for`);
   console.log(`  this key, so they do not appear in tools/list. Safe for a URL-embedded connector.\n`);
 } else if (minted === "capture") {
-  console.log(`  Capture-only: capture_thought is the one tool registered for this key — no`);
-  console.log(`  search, no update, no delete. For a hook or a pipeline that adds thoughts`);
-  console.log(`  from a machine you do not sit at: a leak of this key can add, not read.\n`);
+  console.log(`  Capture-only: capture_thought, and set_priority and clear_priority on a thought`);
+  console.log(`  this key captured, are the tools registered for it — no search, no update, no`);
+  console.log(`  delete. For a hook or a pipeline that adds thoughts from a machine you do not`);
+  console.log(`  sit at: a leak of this key can add, and rank what it added, not read.\n`);
 } else if (minted === "forward") {
   console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
   console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
