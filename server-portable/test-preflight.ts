@@ -62,7 +62,10 @@ const { assert } = sections;
  * a fresh one; first takes [5] and [9], whose local endpoints wait out
  * their timeouts, and the rest the others, [5b] and [12] the long ones among
  * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them).
+ * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
+ * in a job of its own and ends well before the first (its job 103 s, against
+ * the data layer's 184 s, one run), so the split no longer evens two legs:
+ * [9], about 16 s of waits, could go to the rest and take that off the first.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).

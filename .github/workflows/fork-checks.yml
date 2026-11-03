@@ -1510,9 +1510,9 @@ jobs:
       # named no CPU; this says which a run had. "busy" is user, nice, system
       # and interrupt time over all time; "runnable" is /proc/loadavg's
       # count, less the sampler. Runnable over the CPU count most seconds,
-      # with busy 80% or more on average, is a runner bound by its CPUs, where
-      # another leg adds contention, not time off (preflight-rest's comment
-      # has what this found). It reads, so it never fails the job.
+      # with busy about 80% or more on average, is a runner bound by its
+      # CPUs, where another leg adds contention, not time off (preflight-rest's
+      # comment has what this found). It reads, so it never fails the job.
       - name: The runner's CPU while the legs ran
         if: ${{ !cancelled() }}
         run: |
