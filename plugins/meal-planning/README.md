@@ -7,7 +7,7 @@ Recipes, a week's planned meals, and the shopping list made from them, kept in t
 Four tables of its own, in the schema `plugin_meal_planning`, made by `migrations/001_meal_planning.sql`:
 
 - `recipes`: each with its ingredients (`{ name, quantity, unit }`, the quantity and unit as written), its steps, its tags, its times and servings.
-- `meal_plans`: a week's meals. Each is in a week (by its first day), on a day, at a meal (breakfast, lunch, dinner or snack), and is a recipe or a custom meal ("leftovers").
+- `meal_plans`: a week's meals. Each is in a week (by its Monday), on a day, at a meal (breakfast, lunch, dinner or snack), and is a recipe or a custom meal ("leftovers").
 - `shopping_lists` and `shopping_list_items`: one list a week, made from the week's recipes, each item with whether it is bought.
 
 | Operation | MCP tool | REST route | Scope | Input | Output |
@@ -21,17 +21,17 @@ Four tables of its own, in the schema `plugin_meal_planning`, made by `migration
 | The week's shopping list | `meal_planning_get_shopping_list` | `GET /v1/plugins/meal-planning/shopping-lists` | `read` | `week_start` | `{ shopping_list }` |
 | Mark an item bought | `meal_planning_mark_item_purchased` | `PATCH /v1/plugins/meal-planning/shopping-list-items/{item_id}` | `write` | `item_id`; `purchased` (default true) | `{ item }` |
 
-- **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. A week is named by its Monday: a `week_start` on any other day is refused at 400, so two plans never hold the same days under two names. `day_of_week` is a lower-case day name, and `meal_type` is breakfast, lunch, dinner or snack. Text is trimmed and holds no NUL. Tags are kept lower-case, each once.
+- **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and timestamps are ISO text in UTC. A week is named by its Monday: a `week_start` on any other day is refused at 400, so two plans never hold the same days under two names. The tables hold the same rule. `day_of_week` is a lower-case day name, and `meal_type` is breakfast, lunch, dinner or snack. Text is trimmed and holds no NUL. Tags are kept lower-case, each once.
 - **Searching recipes.** `query` matches word by word: every word must be in the name, cuisine, notes, tags or ingredients' names, in any case and any order. `cuisine` matches part of the cuisine, `tag` a whole tag, and `ingredient` part of any ingredient's name ("oil" finds olive oil), each in any case. The newest recipe comes first, and `truncated` says whether more matched than `limit`.
 - **Changing a recipe.** Only the fields given change. One given as `null` is cleared (the cuisine, the times, servings, rating or notes). Ingredients, instructions and tags, when given, replace the whole list.
 - **Planning meals.** Each day and meal type given is set to the meals given for it, replacing what was planned there; the answer's `replaced` lists what went. So the same plan sent twice is planned once, and two meals for one slot (pasta and garlic bread for Monday's dinner) are both kept, in the order sent. To add to a slot, send what is already there too (`get_meal_plan` has it). Slots not given are left as they are. A shopping list already made is not changed by a plan: make it again.
 - **The week's meals** come by day, Monday first, then by meal (breakfast, lunch, dinner, snack). Each carries `on_date`, the date it falls on in the week from `week_start`, and its recipe's name, cuisine, times and servings, or `null` for a custom meal.
 - **The shopping list** is made from the week's planned recipes.
-  - Each ingredient is listed once by its name (any case) and unit, in the order the week's meals first name it. A unit has one spelling: "lbs" and "pounds" are "lb", "cups" is "cup", "tablespoons" is "tbsp".
-  - Quantities written as numbers ("2", "1/2", "1 1/2", "½", ".5", or "1 lb" with the unit in the quantity) are summed, and shown as a fraction where they make a half, third, quarter or eighth ("2/3"). Any others follow the sum with how many times they came ("2 + a pinch ×2"). A recipe planned twice counts twice. Quantities are the recipes' as written, not scaled to a meal's servings.
+  - Each ingredient is listed once by its name (any case) and unit, in the order the week's meals first name it. A unit has one spelling: "lbs" and "pounds" are "lb", "cups" is "cup", "tablespoons" and "T" are "tbsp", and "t" is "tsp". A word after a number that is no unit ("2 large") stays in the quantity.
+  - Quantities written as numbers ("2", "1/2", "1 1/2", "½", ".5", or "1 lb" with the unit in the quantity) are summed, and shown as a fraction where they make a half, third, quarter, sixth or eighth ("2/3"). Any others follow the sum, in one order whatever the meals', with how many times they came ("2 + a pinch ×2"). A recipe planned twice counts twice. Quantities are the recipes' as written, not scaled to a meal's servings.
   - Each item names the recipes it is for.
-  - Made again, the same list follows the plan as it now is. An item marked bought stays marked while its quantity is the same; one whose quantity changed is to buy again. Item ids change when the list is made again. A week with no planned recipe has an empty list.
-  - `get_shopping_list` says the list is `stale` once a meal is planned or a planned recipe changes after it was made.
+  - Made again, the same list follows the plan as it now is. An item marked bought stays marked while its quantity is the same, or a smaller number (bought 800 g, now 400 g). One that grew, or a quantity not a number that changed, is to buy again. Item ids change when the list is made again. A week with no planned recipe has an empty list.
+  - `get_shopping_list` says the list is `stale` when the list made now would differ: the plan or a planned recipe's ingredients changed after it was made. A mark, a recipe's rating, or a slot planned again with the same meal leaves it as it was.
 - **Refusals.**
   - A recipe that is not there: `404 NO_SUCH_RECIPE`, naming each id and saying where the ids are.
   - A change with no field: `422 NOTHING_TO_CHANGE`.
@@ -90,11 +90,19 @@ The standalone server kept its rows in `public.recipes`, `public.meal_plans` and
             (SELECT coalesce(array_agg(t ORDER BY n), '{}') FROM (SELECT DISTINCT ON (lower(btrim(t))) lower(btrim(t)) AS t, n
                 FROM unnest(r.tags) WITH ORDINALITY AS u(t, n) WHERE btrim(t) <> '' ORDER BY lower(btrim(t)), n) d),
             r.rating, r.notes, coalesce(r.created_at, now()), coalesce(r.updated_at, now()) FROM public.recipes r;
+   -- Each meal under the Monday of the date it falls on (the old week could start on any day), keeping its day.
    INSERT INTO plugin_meal_planning.meal_plans (id, user_id, week_start, day_of_week, meal_type, recipe_id, custom_meal, servings, notes, created_at)
-     SELECT id, user_id, week_start, lower(day_of_week), meal_type, recipe_id, custom_meal, servings, notes, coalesce(created_at, now()) FROM public.meal_plans;
+     SELECT m.id, m.user_id, d.on_date - (extract(isodow FROM d.on_date)::int - 1), lower(m.day_of_week), m.meal_type, m.recipe_id, m.custom_meal, m.servings, m.notes,
+            coalesce(m.created_at, now())
+       FROM public.meal_plans m CROSS JOIN LATERAL (
+              -- A day that is no day name falls back to the old week's start, and the day check names it.
+              SELECT coalesce(m.week_start + ((array_position(ARRAY['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'], lower(m.day_of_week))
+                                                - extract(isodow FROM m.week_start)::int + 7) % 7), m.week_start) AS on_date) d;
+   -- Each list under the Monday of its week's first day, the latest of a week's lists kept.
    INSERT INTO plugin_meal_planning.shopping_lists (id, user_id, week_start, notes, created_at, updated_at)
-     SELECT DISTINCT ON (week_start) id, user_id, week_start, notes, coalesce(created_at, now()), coalesce(updated_at, now())
-       FROM public.shopping_lists ORDER BY week_start, updated_at DESC NULLS LAST, created_at DESC NULLS LAST;
+     SELECT DISTINCT ON (monday) id, user_id, monday, notes, coalesce(created_at, now()), coalesce(updated_at, now())
+       FROM (SELECT l.*, l.week_start - (extract(isodow FROM l.week_start)::int - 1) AS monday FROM public.shopping_lists l) d
+      ORDER BY monday, updated_at DESC NULLS LAST, created_at DESC NULLS LAST;
    INSERT INTO plugin_meal_planning.shopping_list_items (list_id, name, quantity, unit, purchased, recipe_ids, position)
      SELECT l.id, e->>'name', nullif(btrim(e->>'quantity'), ''), nullif(btrim(e->>'unit'), ''), coalesce((e->>'purchased')::boolean, false),
             CASE WHEN e->>'recipe_id' IS NULL THEN '{}'::uuid[] ELSE ARRAY[(e->>'recipe_id')::uuid] END, x.n
@@ -104,7 +112,8 @@ The standalone server kept its rows in `public.recipes`, `public.meal_plans` and
    ```
 
    - **`user_id`.** Each row keeps its `user_id`, in the column the plugin keeps and ignores.
-   - **The shopping lists.** The old list's `items` was a JSON array. Each item becomes a row of its own, in its order, keeping whether it was bought. Where a week had more than one list, the latest one is kept.
+   - **Weeks.** The old server's week could start on any day; the plugin's starts on a Monday. Each meal is copied under the Monday of the date it fell on, keeping its day, and each list under the Monday of its week's first day.
+   - **The shopping lists.** The old list's `items` was a JSON array. Each item becomes a row of its own, in its order, keeping whether it was bought. Where a week had more than one list, the latest one is kept. A copied list reads `stale` until it is made again here.
    - **Tags and days** are copied lower-case, as the plugin keeps them, each tag once in the order first given.
    - **Ingredients** are rebuilt as `{ name, quantity, unit }` text: a quantity stored as a number becomes its text, and a blank quantity or unit none. A recipe whose `created_at` was null takes the time of the copy.
    - **A refused copy.** The plugin's tables check what the old ones did not:
@@ -126,5 +135,5 @@ The standalone server kept its rows in `public.recipes`, `public.meal_plans` and
 - **Preflight's `plugin tables` row says the server "cannot log in as ob1_plugins_meal_planning".** `OB1_PLUGIN_DB_PASSWORD` is not the secret the role was made with. [The example plugin's troubleshooting](../example/README.md#troubleshooting) says how to set it back or change both.
 - **`403 FORBIDDEN` with `needs: "write"`.** A read key cannot add, change, plan or mark. Over MCP, a read key's tool list has no write tools at all.
 - **A shopping list quantity reads "2 + a pinch".** Only quantities written as numbers are summed. Write "1/2" rather than "half", and the unit in `unit`, where it should add up.
-- **A list is `stale`.** The plan or a planned recipe changed after it was made: `generate_shopping_list` makes it again.
+- **A list is `stale`.** The plan or a planned recipe's ingredients changed after it was made, or it was copied from the standalone server: `generate_shopping_list` makes it again.
 - **A meal planned twice.** Plan it again for its day and meal type: the slot holds what the last plan sent for it.

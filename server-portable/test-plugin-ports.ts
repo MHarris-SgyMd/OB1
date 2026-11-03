@@ -22,7 +22,7 @@ import { createAssert, dropSchema, pollUntil } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginIdents } from "../db/config.mjs";
 import { PLUGINS as REGISTRY } from "../plugins/registry.ts";
-import { shoppingItems } from "../plugins/meal-planning/index.ts";
+import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/index.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
@@ -948,7 +948,8 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
     if (r.status !== 400) notMonday.push(`${key}: ${r.status}`);
   }
   assert(notMonday.length === 0, `…a week_start that is not a Monday is refused at 400 by every operation that takes one (${notMonday.join("; ") || "all four"})`);
-  assert(JSON.stringify((await c("get_meal_plan", { week_start: "2020-01-06" })).body.meals) === "[]", "an unplanned week is no meals");
+  assert(JSON.stringify((await c("get_meal_plan", { week_start: "2020-01-06" })).body.meals) === "[]" && (await c("get_meal_plan", { week_start: "9999-12-20" })).status === 200,
+    "an unplanned week is no meals; the last week ending in the year 9999 is a week");
 
   // The shopping list, from the week of Monday 2026-10-05: pasta twice, the salad, the soup, and a custom meal.
   const LIST_WEEK = "2026-10-05";
@@ -977,19 +978,34 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
   assert(ISO.test(String(listed.body.shopping_list?.updated_at)) && String(listed.body.shopping_list?.updated_at) > String(made.body.shopping_list?.updated_at), "…a mark moves the list's updated_at on");
   assert(listed.status === 200 && ((listed.body.shopping_list?.items ?? []) as { name: string; purchased: boolean }[]).find((i) => i.name === "olive oil")?.purchased === true && listed.body.shopping_list?.id === made.body.shopping_list?.id,
     "get_shopping_list answers the week's list as it now is, the mark kept");
-  // The plan changed: Wednesday's pasta gone. The list says it is stale; made again, it follows the plan, lettuce
-  // (the same quantity) stays bought, and olive oil (5 tbsp, now 3) is to buy again.
+  // The plan changed: Wednesday's pasta gone. The list says it is stale; made again, it follows the plan, and lettuce
+  // (the same quantity) and olive oil (5 tbsp bought, now 3: less than was bought) stay bought.
   await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "wednesday", meal_type: "dinner", custom_meal: "takeaway" }] });
-  assert((await c("get_shopping_list", { week_start: LIST_WEEK })).body.shopping_list?.stale === true, "…once the plan changes, the list made before it says it is stale");
+  const staleNow = async (week = LIST_WEEK) => (await c("get_shopping_list", { week_start: week })).body.shopping_list?.stale;
+  assert((await staleNow()) === true, "…once the plan changes, the list made before it says it is stale");
   const remade = await c("generate_shopping_list", { week_start: LIST_WEEK }, { door: "mcp" });
   const remadeItems = (remade.body.shopping_list?.items ?? []) as { id: string; name: string; quantity: string | null; purchased: boolean }[];
-  assert(remade.body.shopping_list?.id === made.body.shopping_list?.id && remade.body.shopping_list?.stale === false && remadeItems.find((i) => i.name === "spaghetti")?.quantity === "400"
-         && remadeItems.find((i) => i.name === "olive oil")?.quantity === "3" && remadeItems.find((i) => i.name === "olive oil")?.purchased === false && remadeItems.find((i) => i.name === "lettuce")?.purchased === true,
-    `…made again, the same list follows the plan; a mark stays on an item whose quantity is the same and goes from one whose quantity changed (the old server's regeneration wiped every mark) (${remadeItems.map((i) => `${i.name}:${i.quantity}:${i.purchased}`).join()})`);
-  await c("update_recipe", { recipe_id: ids.salad, notes: "with croutons" });
-  assert((await c("get_shopping_list", { week_start: LIST_WEEK })).body.shopping_list?.stale === true, "…and a planned recipe changed since makes it stale too");
+  const was = (its: typeof remadeItems, name: string) => its.find((i) => i.name === name);
+  assert(remade.body.shopping_list?.id === made.body.shopping_list?.id && remade.body.shopping_list?.stale === false && was(remadeItems, "spaghetti")?.quantity === "400" && was(remadeItems, "spaghetti")?.purchased === false
+         && was(remadeItems, "olive oil")?.quantity === "3" && was(remadeItems, "olive oil")?.purchased === true && was(remadeItems, "lettuce")?.purchased === true,
+    `…made again, the same list follows the plan; a mark stays on an item whose quantity is the same or smaller (the old server's regeneration wiped every mark) (${remadeItems.map((i) => `${i.name}:${i.quantity}:${i.purchased}`).join()})`);
   assert(String(remade.body.shopping_list?.updated_at) > String(listed.body.shopping_list?.updated_at) && String(remade.body.shopping_list?.created_at) === String(made.body.shopping_list?.created_at),
     "…making it again moves updated_at on and keeps created_at");
+  // Stale is whether a list made now would say otherwise: a recipe's notes and rating, the same meal planned again in
+  // its slot, and a custom meal change nothing it says.
+  await c("update_recipe", { recipe_id: ids.salad, notes: "with croutons", rating: 4 });
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad }, { day_of_week: "friday", meal_type: "lunch", custom_meal: "picnic" }] });
+  assert((await staleNow()) === false, "…a planned recipe's notes and rating, the same meal planned again in its slot, and a custom meal leave the list current");
+  // A planned recipe's ingredients changed: stale, and a mark after it leaves it stale (pass 1's stale was by the list's
+  // updated_at, which a mark moves on).
+  await c("update_recipe", { recipe_id: ids.soup, ingredients: [{ name: "stock", quantity: "2", unit: "cup" }, { name: "salt", quantity: "a pinch" }] });
+  await c("mark_item_purchased", { item_id: String(was(remadeItems, "spaghetti")?.id) });
+  assert((await staleNow()) === true, "…a planned recipe's ingredients changed make it stale, and a mark after it leaves it stale");
+  // Wednesday's pasta back: spaghetti, 400 g bought, is now 800 g, and to buy again.
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "wednesday", meal_type: "dinner", recipe_id: ids.pasta }] });
+  const grownItems = ((await c("generate_shopping_list", { week_start: LIST_WEEK })).body.shopping_list?.items ?? []) as typeof remadeItems;
+  assert(was(grownItems, "spaghetti")?.quantity === "800" && was(grownItems, "spaghetti")?.purchased === false && was(grownItems, "lettuce")?.purchased === true && was(grownItems, "stock")?.quantity === "2 1/2",
+    `…a quantity that grew is to buy again (${grownItems.map((i) => `${i.name}:${i.quantity}:${i.purchased}`).join()})`);
   // An item first named in capitals ("Olive Oil", the salad's) keeps its mark when the list is made again unchanged.
   const CAPS_WEEK = "2026-10-12";
   await c("create_meal_plan", { week_start: CAPS_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.salad }] });
@@ -998,8 +1014,73 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
   await c("mark_item_purchased", { item_id: String(capsOil?.id) });
   const capsAgain = ((await c("generate_shopping_list", { week_start: CAPS_WEEK })).body.shopping_list?.items ?? []) as { name: string; purchased: boolean }[];
   assert(capsOil !== undefined && capsAgain.find((i) => i.name === "Olive Oil")?.purchased === true, `…an item first named in capitals keeps its mark (${JSON.stringify(capsAgain).slice(0, 160)})`);
-  const unmarked = await c("mark_item_purchased", { item_id: String(remadeItems.find((i) => i.name === "lettuce")?.id), purchased: false });
+  // A name JavaScript and Postgres lower-case apart ("ΑΣ" is "ας" to one, "ασ" to the other) keeps its mark too: the
+  // keys are made in one place.
+  const greek = await c("add_recipe", { name: "Greek plate", ingredients: [{ name: "\u0391\u03a3", quantity: "1" }], instructions: [] });
+  const GREEK_WEEK = "2026-10-19";
+  await c("create_meal_plan", { week_start: GREEK_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: String(greek.body.recipe?.id) }] });
+  const greekItem = (((await c("generate_shopping_list", { week_start: GREEK_WEEK })).body.shopping_list?.items ?? []) as { id: string }[])[0];
+  await c("mark_item_purchased", { item_id: String(greekItem?.id) });
+  const greekAgain = (((await c("generate_shopping_list", { week_start: GREEK_WEEK })).body.shopping_list?.items ?? []) as { purchased: boolean }[])[0];
+  assert(greekAgain?.purchased === true, `…and so does a name whose lower case JavaScript and Postgres disagree on (${JSON.stringify(greekAgain)})`);
+  const unmarked = await c("mark_item_purchased", { item_id: String(was(grownItems, "lettuce")?.id), purchased: false });
   assert(unmarked.body.item?.purchased === false, "…and purchased false takes the mark off");
+
+  // A mark and a list made again at once, forced to race: a lock held on the item stops the mark at it, and the list
+  // made again then waits too. Pass 1's mark took the item before the list, and the list's maker the list before the
+  // items: released, the two deadlocked (a 500), or the new items took the mark's item away. The mark now takes the
+  // list first, so the maker waits for it, and keeps the mark.
+  const RACE_WEEK = "2026-10-26";
+  await c("create_meal_plan", { week_start: RACE_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.toast }] });
+  const bread = (((await c("generate_shopping_list", { week_start: RACE_WEEK })).body.shopping_list?.items ?? []) as { id: string }[])[0];
+  const waiting = async () => Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = 'ob1_plugins_meal_planning' AND wait_event_type = 'Lock'`) as { n: number }[])[0].n);
+  const holdWhile = async (lock: string, id: string, race: () => Promise<boolean>) => {
+    const holder = new SQL({ url: URL_, max: 1 });
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => (held = r));
+    const holding = holder.begin(async (tx) => {
+      await tx.unsafe(lock, [id]);
+      held();
+      await released;
+    });
+    await isHeld;
+    try {
+      return await race();
+    } finally {
+      release();
+      await holding;
+      await holder.close();
+    }
+  };
+  let marking!: Promise<Called>, making!: Promise<Called>;
+  const bothWait = await holdWhile("SELECT 1 FROM plugin_meal_planning.shopping_list_items WHERE id = $1 FOR UPDATE", bread.id, async () => {
+    marking = c("mark_item_purchased", { item_id: bread.id });
+    const markWaits = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    making = c("generate_shopping_list", { week_start: RACE_WEEK });
+    return markWaits && (await pollUntil(async () => (await waiting()) === 2, 10_000));
+  });
+  const [markDone, makeDone] = await Promise.all([marking, making]);
+  const raced = (((await c("get_shopping_list", { week_start: RACE_WEEK })).body.shopping_list?.items ?? []) as { purchased: boolean }[])[0];
+  assert(bothWait && markDone.status === 200 && makeDone.status === 200 && raced?.purchased === true,
+    `a mark and a list made again at once, both waiting on a held item and released together: both succeed and the new list keeps the mark (${bothWait}, ${markDone.status} ${String(markDone.body.code ?? "")}, ${makeDone.status} ${String(makeDone.body.code ?? "")}, ${JSON.stringify(raced)})`);
+  // A plan committing while a list is made, forced: a lock held on the salad's row stops a plan of it at its
+  // foreign-key check, its meal already stamped, and the list is made meanwhile without the salad. Pass 1's stale
+  // compared stamps, the meal's older than the list's, and read current; it now compares what the list says.
+  let planning!: Promise<Called>;
+  let meanwhile!: Called;
+  const planWaits = await holdWhile("SELECT 1 FROM plugin_meal_planning.recipes WHERE id = $1 FOR UPDATE", ids.salad, async () => {
+    planning = c("create_meal_plan", { week_start: RACE_WEEK, meals: [{ day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad }] });
+    const waits = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    meanwhile = await c("generate_shopping_list", { week_start: RACE_WEEK });
+    return waits;
+  });
+  const planDone = await planning;
+  const meanwhileNames = ((meanwhile.body.shopping_list?.items ?? []) as { name: string }[]).map((i) => i.name).join();
+  const lateStale = await staleNow(RACE_WEEK);
+  assert(planWaits && meanwhile.status === 200 && !meanwhileNames.includes("lettuce") && planDone.status === 200 && lateStale === true,
+    `…and a plan that commits after a list made while it was open leaves that list stale (${planWaits}, ${meanwhile.status} ${meanwhileNames}, ${planDone.status}, stale ${lateStale})`);
   const noList = await c("get_shopping_list", { week_start: "2020-01-06" });
   const noItem = await c("mark_item_purchased", { item_id: NO_ROW });
   const emptyList = await c("generate_shopping_list", { week_start: "2020-01-13" });
@@ -1021,6 +1102,22 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
                                               { name: "y", quantity: "0.1" }, { name: "y", quantity: "0.2" }, { name: "z", quantity: "1/0" }] }])
          === "oil:2 tbsp | oil:1 cup | x:2 | y:0.3 | z:1/0",
     "…two units of one ingredient listed apart; 0.5 and 1.5 make 2; 0.1 and 0.2 make 0.3, not its float; a division by zero is a word, not Infinity");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "eggs", quantity: "2 large" }, { name: "eggs", quantity: "3" }, { name: "oil", quantity: "1", unit: "T" }, { name: "oil", quantity: "1", unit: "t" },
+                                              { name: "milk", quantity: "1", unit: "c" }, { name: "milk", quantity: "1", unit: "cup" }, { name: "thyme", quantity: "1", unit: "Sprig" }, { name: "thyme", quantity: "2", unit: "sprig" }] }])
+         === "eggs:3 + 2 large | oil:1 tbsp | oil:1 tsp | milk:2 cup | thyme:3 Sprig",
+    "…a word after a number that is no unit stays part of the quantity; T and t are a tablespoon and a teaspoon, apart; c is a cup; an unknown unit merges in any case");
+  const pinch = { recipe_id: r1, ingredients: [{ name: "salt", quantity: "a pinch" }, { name: "Oil", quantity: "1" }] }, taste = { recipe_id: r2, ingredients: [{ name: "oil", quantity: "2" }, { name: "salt", quantity: "to taste" }] };
+  assert(list([pinch, taste]) === "salt:a pinch + to taste | Oil:3" && list([taste, pinch]) === "oil:3 | salt:a pinch + to taste",
+    "…the words in one order whatever the meals' order, so a mark made at them holds when two meals swap");
+  assert(listSource(shoppingItems([pinch, taste])) === listSource(shoppingItems([taste, pinch])) && listSource(shoppingItems([pinch, taste])) !== listSource(shoppingItems([pinch, pinch])),
+    "listSource: two lists saying the same with their items in another order and case are one source; another quantity is another");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "a", quantity: "0.004", unit: "kg" }, { name: "b", quantity: "9".repeat(50) }, { name: "c", quantity: "1 \u00bd cup" }, { name: "d", quantity: "\u2159" }, { name: "d", quantity: "\u2159" },
+                                              { name: "e", quantity: "2", unit: "Tbs" }, { name: "e", quantity: "1", unit: "tbsp" }, { name: "f", quantity: "1/16" }, { name: "g", quantity: "1/6" }] }])
+         === `a:0.004 kg | b:${"9".repeat(50)} | c:1 1/2 cup | d:1/3 | e:3 tbsp | f:0.063 | g:1/6`,
+    "…a sum below a hundredth in two figures, not 0; a number past a billion kept as written, not 1e+50; \"1 \u00bd cup\" read; \u2159 a sixth; Tbs a tablespoon; 1/16 as 0.063, a sixth as 1/6");
+  const marks: [string | null, string | null, boolean][] = [["800", "800", true], ["800", "400", true], ["400", "800", false], ["1 1/2", "1/2", true], ["a pinch", "a pinch", true], ["2 + a pinch", "1 + a pinch", false], [null, null, true], [null, "1", false]];
+  const markMisses = marks.filter(([a, b, want]) => keepsMark(a, b) !== want).map(([a, b, want]) => `${a} → ${b}: ${!want}`);
+  assert(markMisses.length === 0, `keepsMark: a mark holds at the same quantity or a smaller number, and goes from more, or a changed quantity not a number (${markMisses.join("; ") || "all eight"})`);
 
   const missed = await outOfBounds(c, [
     ["a name of 201 characters", "add_recipe", { name: "x".repeat(201), ingredients: [], instructions: [] }], ["no ingredients list", "add_recipe", { name: "x", instructions: [] }],
@@ -1031,7 +1128,7 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
     ["a meal type of brunch", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "brunch", custom_meal: "x" }] }],
     ["a meal with neither recipe nor custom meal", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner" }] }],
     ["no meals", "create_meal_plan", { week_start: WEEK, meals: [] }], ["a recipe id that is no uuid", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: "pasta" }] }],
-    ["a week in the year 0000", "get_meal_plan", { week_start: "0000-01-03" }], ["a limit of 0", "search_recipes", { limit: 0 }], ["an empty query", "search_recipes", { query: "" }],
+    ["a week in the year 0000", "get_meal_plan", { week_start: "0000-01-03" }], ["a week ending in the year 10000", "get_meal_plan", { week_start: "9999-12-27" }], ["a limit of 0", "search_recipes", { limit: 0 }], ["an empty query", "search_recipes", { query: "" }],
     ["an item id that is no uuid", "mark_item_purchased", { item_id: "oil" }], ["servings of 1001", "add_recipe", { name: "x", ingredients: [], instructions: [], servings: 1001 }],
     ["a cook time of 10081", "add_recipe", { name: "x", ingredients: [], instructions: [], cook_time_minutes: 10081 }], ["a rating of 0", "add_recipe", { name: "x", ingredients: [], instructions: [], rating: 0 }],
     ["an empty quantity", "add_recipe", { name: "x", ingredients: [{ name: "salt", quantity: "" }], instructions: [] }], ["101 steps", "add_recipe", { name: "x", ingredients: [], instructions: Array.from({ length: 101 }, () => "stir") }],
@@ -1054,8 +1151,10 @@ console.log("\n[meal-planning] its recipes, the week's meals and the shopping li
     [`INSERT INTO plugin_meal_planning.shopping_list_items (list_id, name, position) VALUES ('00000000-0000-4000-8000-00000000dead', 'x', 0)`, /foreign key/],
     ["INSERT INTO plugin_meal_planning.recipes (name, rating) VALUES ('t', 6)", /rating_check/],
     [`INSERT INTO plugin_meal_planning.shopping_lists (week_start) VALUES ('${LIST_WEEK}')`, /shopping_lists_week_start_key/],
+    ["INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type, custom_meal) VALUES ('2026-09-23', 'monday', 'dinner', 'x')", /meal_plans_week_monday/],
+    ["INSERT INTO plugin_meal_planning.shopping_lists (week_start) VALUES ('2026-09-23')", /shopping_lists_week_monday/],
   ]);
-  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all thirteen"})`);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all fifteen"})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

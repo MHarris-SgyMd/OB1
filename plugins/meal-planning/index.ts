@@ -14,8 +14,9 @@ const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
 const MEALS = ["breakfast", "lunch", "dinner", "snack"] as const;
 /** A calendar date as the tables hold it, YYYY-MM-DD, from the year 0001: Postgres has no year 0000, which zod's ISO date accepts. */
 const Day = z.iso.date().refine((d) => !d.startsWith("0000-"), "a date from the year 0001");
-/** A week, named by its Monday: one name a week, so two plans never hold the same days under two starts. */
-const Week = Day.refine((d) => new Date(`${d}T00:00:00Z`).getUTCDay() === 1, "a Monday, YYYY-MM-DD: a week is named by its Monday");
+/** A week, named by its Monday: one name a week, so two plans never hold the same days under two starts. Its Sunday is in the year 9999 at the latest, so every day of it is a YYYY-MM-DD. */
+const Week = Day.refine((d) => new Date(`${d}T00:00:00Z`).getUTCDay() === 1, "a Monday, YYYY-MM-DD: a week is named by its Monday")
+  .refine((d) => d <= "9999-12-20", "a week ending in the year 9999 at the latest");
 /** Free text a person types: trimmed, at most `max` characters, and no NUL, which Postgres will not store in text. */
 const text = (max: number) => z.string().trim().max(max).refine((s) => !s.includes("\u0000"), "no NUL character");
 const minutes = () => z.number().int().min(0).max(10080);
@@ -38,7 +39,7 @@ const Meal = z.object({
   recipe: z.object({ id: z.string(), name: z.string(), cuisine: z.string().nullable(), prep_time_minutes: z.number().int().nullable(), cook_time_minutes: z.number().int().nullable(), servings: z.number().int().nullable() }).nullable(),
 });
 const Item = z.object({ id: z.string(), name: z.string(), quantity: z.string().nullable(), unit: z.string().nullable(), purchased: z.boolean(), recipe_ids: z.array(z.string()) });
-/** A week's list; stale says the plan or a planned recipe changed after it was made, so generate_shopping_list would make it otherwise. */
+/** A week's list; stale says generate_shopping_list would now make it otherwise: the plan or a planned recipe's ingredients changed after it was made. */
 const ShoppingList = z.object({ id: z.string(), week_start: z.string(), items: z.array(Item), stale: z.boolean(), created_at: z.string(), updated_at: z.string() });
 
 /** MCP hints: every operation reaches the plugin's own tables alone. An add destroys nothing; a change overwrites what was there (a recipe's fields, a slot's meals, a list's items, each under a new id). A read is read-only already. */
@@ -60,15 +61,22 @@ const tagsOf = (tags: string[]) => [...new Set(tags.map((t) => t.trim().toLowerC
 
 /** Unicode's vulgar fractions, by the value each stands for: "½" is a half. */
 const VULGAR: Record<string, number> = Object.fromEntries(
-  ([[0xbd, 1 / 2], [0x2153, 1 / 3], [0x2154, 2 / 3], [0xbc, 1 / 4], [0xbe, 3 / 4], [0x2155, 1 / 5], [0x215b, 1 / 8], [0x215c, 3 / 8], [0x215d, 5 / 8], [0x215e, 7 / 8]] as const)
+  ([[0xbd, 1 / 2], [0x2153, 1 / 3], [0x2154, 2 / 3], [0xbc, 1 / 4], [0xbe, 3 / 4], [0x2155, 1 / 5], [0x2156, 2 / 5], [0x2157, 3 / 5], [0x2158, 4 / 5],
+    [0x2159, 1 / 6], [0x215a, 5 / 6], [0x2150, 1 / 7], [0x215b, 1 / 8], [0x215c, 3 / 8], [0x215d, 5 / 8], [0x215e, 7 / 8], [0x2151, 1 / 9], [0x2152, 1 / 10]] as const)
     .map(([c, v]) => [String.fromCodePoint(c), v]),
 );
+/** The largest amount read as a number: past it, a sum would print as "1e+21". */
+const MOST = 1e9;
 /**
  * A quantity as a number, where it is written as one: "2", "0.5", ".5",
- * "1/2", "1 1/2", "½", "1½". Anything else ("a pinch", "2-3") is no number,
- * and is kept as written.
+ * "1/2", "1 1/2", "½", "1½", "1 ½". Anything else ("a pinch", "2-3", a number
+ * past a billion) is no number, and is kept as written.
  */
 function amount(q: string | null | undefined): number | null {
+  const n = written(q);
+  return n !== null && n <= MOST ? n : null;
+}
+function written(q: string | null | undefined): number | null {
   let s = (q ?? "").trim();
   let part = 0;
   const last = s.slice(-1);
@@ -90,12 +98,16 @@ function amount(q: string | null | undefined): number | null {
 const UNITS: Record<string, string> = Object.fromEntries(Object.entries({
   lb: ["lb", "lbs", "pound", "pounds"], oz: ["oz", "ozs", "ounce", "ounces"], g: ["g", "gram", "grams"], kg: ["kg", "kgs", "kilogram", "kilograms"],
   ml: ["ml", "milliliter", "milliliters", "millilitre", "millilitres"], l: ["l", "liter", "liters", "litre", "litres"],
-  tsp: ["tsp", "tsps", "teaspoon", "teaspoons"], tbsp: ["tbsp", "tbsps", "tablespoon", "tablespoons"], cup: ["cup", "cups"],
+  tsp: ["tsp", "tsps", "teaspoon", "teaspoons"], tbsp: ["tbsp", "tbsps", "tbs", "tbl", "tablespoon", "tablespoons"], cup: ["cup", "cups"],
   clove: ["clove", "cloves"], slice: ["slice", "slices"], can: ["can", "cans"], jar: ["jar", "jars"], head: ["head", "heads"],
   pint: ["pint", "pints"], quart: ["quart", "quarts"], piece: ["piece", "pieces"], bunch: ["bunch", "bunches"],
 }).flatMap(([unit, spellings]) => spellings.map((sp) => [sp, unit])));
-/** A unit in its one spelling where it has one ("Lbs." is "lb"), else as written. */
-const unitOf = (u: string) => UNITS[u.trim().toLowerCase().replace(/\.$/, "")] ?? u.trim();
+/** The cooks' one-letter units, whose case is the unit: "T" a tablespoon and "t" a teaspoon, so they are read before any lower-casing. */
+const LETTER_UNITS: Record<string, string> = { T: "tbsp", t: "tsp", c: "cup", C: "cup" };
+/** A unit's one spelling where it has one ("Lbs." is "lb", "T" is "tbsp"); undefined for a word that is no unit this knows. */
+const knownUnit = (u: string) => LETTER_UNITS[u.trim().replace(/\.$/, "")] ?? UNITS[u.trim().toLowerCase().replace(/\.$/, "")];
+/** A unit in its one spelling where it has one, else as written. */
+const unitOf = (u: string) => knownUnit(u) ?? u.trim();
 /**
  * A quantity and a unit as a list reads them: a number written with its
  * unit in the quantity ("1 lb", unit left out) is the number and the unit.
@@ -104,44 +116,61 @@ function measure(quantity: string | null | undefined, unit: string | null | unde
   const q = quantity?.trim() || null;
   const u = unit?.trim() || null;
   if (q && !u) {
-    const m = /^(\S+(?:\s+\d+\/\d+)?)\s+([A-Za-z][A-Za-z.]*)$/.exec(q);
-    if (m && amount(m[1]) !== null) return { quantity: m[1], unit: unitOf(m[2]) };
+    const m = /^(\S+(?:\s+\S+)?)\s+([A-Za-z][A-Za-z.]*)$/.exec(q);
+    // Only a word that is a unit: "2 large" is two of something large, not two larges.
+    if (m && amount(m[1]) !== null && knownUnit(m[2]) !== undefined) return { quantity: m[1], unit: knownUnit(m[2])! };
   }
   return { quantity: q, unit: u ? unitOf(u) : null };
 }
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-/** A summed quantity as text: a whole number, a half, third, quarter or eighth as a fraction ("1 1/2", "2/3"), else to two decimal places. */
+/** A summed quantity as text: a whole number, a half, third, quarter, sixth or eighth as a fraction ("1 1/2", "2/3"), else to two decimal places, or two figures below one ("0.004"). */
 function quantityText(n: number): string {
   const whole = Math.floor(n + 1e-9);
   const frac = n - whole;
-  if (frac < 0.005) return String(whole);
-  for (const d of [2, 3, 4, 8]) {
+  if (n < 1e-9 || (whole > 0 && frac < 0.005)) return String(whole);
+  for (const d of [2, 3, 4, 6, 8]) {
     const k = Math.round(frac * d);
     if (k > 0 && k < d && Math.abs(frac - k / d) < 0.005) {
       const g = gcd(k, d);
       return `${whole > 0 ? `${whole} ` : ""}${k / g}/${d / g}`;
     }
   }
-  return String(Math.round(n * 100) / 100);
+  return String(n >= 1 ? Math.round(n * 100) / 100 : Number(n.toPrecision(2)));
 }
 
 type IngredientRow = { name: string; quantity?: string | null; unit?: string | null };
 type ListItem = { name: string; quantity: string | null; unit: string | null; recipe_ids: string[] };
+/** An item's name and unit as one key: the name in any case (JavaScript's lower-casing, here alone), the unit as measure() spelled it, in any case. */
+const itemKey = (name: string, unit: string | null) => JSON.stringify([name.trim().toLowerCase(), (unit ?? "").toLowerCase()]);
+/**
+ * Whether a mark made at quantity `was` still holds at `now`: the same
+ * quantity, or a number no bigger (bought 800, now 400). Anything more, or a
+ * quantity not a number that changed, is to buy again.
+ */
+export function keepsMark(was: string | null, now: string | null): boolean {
+  if (was === now) return true;
+  const [a, b] = [amount(was), amount(now)];
+  return a !== null && b !== null && b <= a + 1e-9;
+}
+/** A list's items as what they say, apart from their order and the case a meal first named them in: equal for two lists that say the same. */
+export const listSource = (items: ListItem[]) =>
+  JSON.stringify(items.map((i) => JSON.stringify([itemKey(i.name, i.unit), i.quantity, [...i.recipe_ids].sort()])).sort());
 /**
  * The week's ingredients as one list: each ingredient once by its name and
  * unit (the name in any case, the unit in its one spelling: "lbs" is "lb"),
  * in the order the week's meals first name it. Its quantities written as
  * numbers are summed; any others ("a pinch", "2-3") follow the sum, each with
- * how many times it came ("2 + a pinch ×2"). A recipe planned twice counts
- * twice. Quantities are the recipes' as written, not scaled to a meal's
- * servings.
+ * how many times it came ("2 + a pinch ×2"), in one order whatever the meals'.
+ * A recipe planned twice counts twice. Quantities are the recipes' as
+ * written, not scaled to a meal's servings.
  */
 export function shoppingItems(meals: { recipe_id: string; ingredients: IngredientRow[] }[]): ListItem[] {
   const byKey = new Map<string, { name: string; unit: string | null; quantities: (string | null)[]; recipe_ids: string[] }>();
   for (const meal of meals) {
     for (const ing of meal.ingredients) {
       const { quantity, unit } = measure(ing.quantity, ing.unit);
-      const key = JSON.stringify([ing.name.trim().toLowerCase(), (unit ?? "").toLowerCase()]);
+      // Any case: the one-letter units whose case is their meaning ("T", "t") are already spelled out by measure().
+      const key = itemKey(ing.name, unit);
       const held = byKey.get(key) ?? byKey.set(key, { name: ing.name.trim(), unit, quantities: [], recipe_ids: [] }).get(key)!;
       held.quantities.push(quantity);
       if (!held.recipe_ids.includes(meal.recipe_id)) held.recipe_ids.push(meal.recipe_id);
@@ -152,7 +181,8 @@ export function shoppingItems(meals: { recipe_id: string; ingredients: Ingredien
     const numbers = given.map(amount).filter((n): n is number => n !== null);
     const counts = new Map<string, number>();
     for (const q of given) if (amount(q) === null) counts.set(q, (counts.get(q) ?? 0) + 1);
-    const words = [...counts].map(([q, k]) => (k > 1 ? `${q} ×${k}` : q));
+    // Sorted, so the same meals in another order say the same quantity, and a mark made at it holds.
+    const words = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([q, k]) => (k > 1 ? `${q} ×${k}` : q));
     const parts = [...(numbers.length > 0 ? [quantityText(numbers.reduce((a, b) => a + b, 0))] : []), ...words];
     const quantity = parts.length === 0 ? null : parts.join(" + ");
     return { name: h.name, quantity, unit: h.unit, recipe_ids: h.recipe_ids };
@@ -170,15 +200,23 @@ async function missingRecipes(sql: PluginSql, ids: string[]): Promise<string[]> 
 const noSuchRecipe = (recipe_ids: string[]) =>
   refuse(404, "NO_SUCH_RECIPE", { recipe_ids, message: "no recipe has this id: search_recipes gives each recipe's id, and add_recipe adds one" });
 
+/** The week's planned recipes' ingredients, a row a meal, in the order the week has its meals. */
+const plannedIngredients = (sql: PluginSql, week: string) => sql<{ recipe_id: string; ingredients: IngredientRow[] }>`
+  SELECT m.recipe_id::text AS recipe_id, r.ingredients
+    FROM meal_rows m JOIN recipes r ON r.id = m.recipe_id
+   WHERE m.week_start = ${week}::date
+   ORDER BY m.day_rank, m.meal_rank, m.created_at, m.id`;
+
 /** A week's shopping list as the operations answer it, its items in their order; none, if the week has no list. */
 async function listOf(sql: PluginSql, week: string): Promise<z.input<typeof ShoppingList> | null> {
+  // Stale by what the list says, not by when things changed: a list made now would say otherwise. A clock cannot order
+  // a plan that commits while a list is being made, and a mark or a rating changes nothing a list says.
+  const now = listSource(shoppingItems(await plannedIngredients(sql, week)));
   const [row] = await sql<Answer<z.input<typeof ShoppingList>>>`
     SELECT jsonb_build_object(
              'id', l.id, 'week_start', l.week_start::text,
              'items', (SELECT coalesce(jsonb_agg(i.answer ORDER BY i.position, i.id), '[]'::jsonb) FROM shopping_item_rows i WHERE i.list_id = l.id),
-             -- A meal planned (each plan writes its meals afresh) or a planned recipe changed since the list was made.
-             'stale', EXISTS (SELECT 1 FROM meal_plans m LEFT JOIN recipes r ON r.id = m.recipe_id
-                               WHERE m.week_start = l.week_start AND (m.created_at > l.updated_at OR r.updated_at > l.updated_at)),
+             'stale', l.made_from IS DISTINCT FROM md5(${now}),
              'created_at', to_char(l.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
              'updated_at', to_char(l.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) AS answer
       FROM shopping_lists l WHERE l.week_start = ${week}::date`;
@@ -375,7 +413,7 @@ export default definePlugin({
     }),
     generate_shopping_list: operation({
       title: "Make the week's shopping list",
-      description: "Makes the shopping list for the week whose Monday is week_start out of its planned recipes' ingredients, and answers it. Each ingredient is listed once by name (any case) and unit (one spelling: 'lbs' and 'pounds' are 'lb'); its quantities written as numbers ('2', '1/2', '½', or '1 lb' with the unit in the quantity) are summed, and any others follow the sum with how many times they came ('2 + a pinch ×2'); a recipe planned twice counts twice; quantities are the recipes' as written, not scaled to a meal's servings. Made again, the list follows the plan as it now is, and an item marked purchased stays marked while its quantity is the same (one that grew is to buy again). A week with no planned recipe has an empty list.",
+      description: "Makes the shopping list for the week whose Monday is week_start out of its planned recipes' ingredients, and answers it. Each ingredient is listed once by name (any case) and unit (one spelling: 'lbs' and 'pounds' are 'lb'); its quantities written as numbers ('2', '1/2', '½', or '1 lb' with the unit in the quantity) are summed, and any others follow the sum with how many times they came ('2 + a pinch ×2'); a recipe planned twice counts twice; quantities are the recipes' as written, not scaled to a meal's servings. Made again, the list follows the plan as it now is, and an item marked purchased stays marked while its quantity is the same or a smaller number (one that grew, or a quantity not a number that changed, is to buy again). A week with no planned recipe has an empty list.",
       scope: "write",
       annotations: CHANGES,
       method: "POST",
@@ -384,25 +422,23 @@ export default definePlugin({
       output: { shopping_list: ShoppingList },
       async handler(ctx, { week_start }) {
         const list = await ctx.db.tx(async (sql) => {
-          const meals = await sql<{ recipe_id: string; ingredients: IngredientRow[] }>`
-            SELECT m.recipe_id::text AS recipe_id, r.ingredients
-              FROM meal_rows m JOIN recipes r ON r.id = m.recipe_id
-             WHERE m.week_start = ${week_start}::date
-             ORDER BY m.day_rank, m.meal_rank, m.created_at, m.id`;
-          const items = shoppingItems(meals);
+          const items = shoppingItems(await plannedIngredients(sql, week_start));
+          // The list's row locked first, as mark_item_purchased locks it: a mark either commits before the marks are read
+          // below, or waits for the new items and finds its old one gone.
           const [{ id }] = await sql<{ id: string }>`
-            INSERT INTO shopping_lists (week_start) VALUES (${week_start}::date)
-            ON CONFLICT (week_start) DO UPDATE SET updated_at = now()
+            INSERT INTO shopping_lists (week_start, made_from) VALUES (${week_start}::date, md5(${listSource(items)}))
+            ON CONFLICT (week_start) DO UPDATE SET made_from = excluded.made_from, updated_at = now()
             RETURNING id`;
-          // What was marked purchased, by name, unit and quantity: kept for an item the new list still has in the same
-          // quantity. One whose quantity changed is more (or less) to buy, so its mark goes.
-          const bought = new Set((await sql<{ k: string }>`
-            SELECT lower(name) || '|' || lower(coalesce(unit, '')) || '|' || coalesce(quantity, '') AS k FROM shopping_list_items WHERE list_id = ${id} AND purchased`).map((b) => b.k));
+          // What was marked purchased, by name and unit, keyed here rather than by Postgres's lower(), which differs from
+          // JavaScript's on some letters: kept for an item the new list has at a quantity the mark covers (keepsMark).
+          const bought = new Map((await sql<{ name: string; unit: string | null; quantity: string | null }>`
+            SELECT name, unit, quantity FROM shopping_list_items WHERE list_id = ${id} AND purchased`).map((b) => [itemKey(b.name, b.unit), b.quantity]));
           await sql`DELETE FROM shopping_list_items WHERE list_id = ${id}`;
           for (const [position, item] of items.entries()) {
+            const key = itemKey(item.name, item.unit);
             await sql`
               INSERT INTO shopping_list_items (list_id, name, quantity, unit, purchased, recipe_ids, position)
-              VALUES (${id}, ${item.name}, ${item.quantity}, ${item.unit}, ${bought.has(`${item.name.toLowerCase()}|${(item.unit ?? "").toLowerCase()}|${item.quantity ?? ""}`)},
+              VALUES (${id}, ${item.name}, ${item.quantity}, ${item.unit}, ${bought.has(key) && keepsMark(bought.get(key)!, item.quantity)},
                       (SELECT coalesce(array_agg(x::uuid), '{}') FROM jsonb_array_elements_text((${JSON.stringify(item.recipe_ids)}::text)::jsonb) x), ${position})`;
           }
           return listOf(sql, week_start);
@@ -412,7 +448,7 @@ export default definePlugin({
     }),
     get_shopping_list: operation({
       title: "The week's shopping list",
-      description: "The shopping list for the week whose Monday is week_start as generate_shopping_list last made it, each item with its id (which mark_item_purchased takes) and whether it is purchased. stale says the plan or a planned recipe changed since it was made: generate_shopping_list makes it again. A week with no list is refused (NO_SUCH_LIST): generate_shopping_list makes one.",
+      description: "The shopping list for the week whose Monday is week_start as generate_shopping_list last made it, each item with its id (which mark_item_purchased takes) and whether it is purchased. stale says the list made now would differ (the plan or a planned recipe's ingredients changed since): generate_shopping_list makes it again. A week with no list is refused (NO_SUCH_LIST): generate_shopping_list makes one.",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
@@ -427,7 +463,7 @@ export default definePlugin({
     }),
     mark_item_purchased: operation({
       title: "Mark an item bought",
-      description: "Marks a shopping list item (item_id, from get_shopping_list or generate_shopping_list) as purchased, or not with purchased false. A list made again keeps the mark while the item's quantity is the same, under a new id. An item that is not there (an id from before the list was made again) is refused (NO_SUCH_ITEM).",
+      description: "Marks a shopping list item (item_id, from get_shopping_list or generate_shopping_list) as purchased, or not with purchased false. A list made again keeps the mark, under a new id, while the item's quantity is the same or a smaller number. An item that is not there (an id from before the list was made again) is refused (NO_SUCH_ITEM).",
       scope: "write",
       annotations: ADDS,
       method: "PATCH",
@@ -439,9 +475,13 @@ export default definePlugin({
       output: { item: Item },
       async handler(ctx, { item_id, purchased }) {
         const row = await ctx.db.tx(async (sql) => {
-          const marked = await sql<{ list_id: string }>`UPDATE shopping_list_items SET purchased = ${purchased} WHERE id = ${item_id} RETURNING list_id`;
+          // The list first, then the item, the order generate_shopping_list takes them in: the other order deadlocks with it.
+          const list = await sql<{ id: string }>`
+            UPDATE shopping_lists SET updated_at = now() WHERE id = (SELECT list_id FROM shopping_list_items WHERE id = ${item_id}) RETURNING id`;
+          if (list.length === 0) return null;
+          // None, when a list made again while this waited took the item away.
+          const marked = await sql<{ id: string }>`UPDATE shopping_list_items SET purchased = ${purchased} WHERE id = ${item_id} RETURNING id`;
           if (marked.length === 0) return null;
-          await sql`UPDATE shopping_lists SET updated_at = now() WHERE id = ${marked[0].list_id}`;
           const [full] = await sql<Answer<z.input<typeof Item>>>`SELECT answer FROM shopping_item_rows WHERE id = ${item_id}`;
           return full;
         });

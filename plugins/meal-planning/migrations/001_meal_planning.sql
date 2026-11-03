@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS recipes (
 CREATE TABLE IF NOT EXISTS meal_plans (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id      uuid,
-  -- The week the meal is in, by its first day (a Monday, say).
-  week_start   date NOT NULL,
+  -- The week the meal is in, by its Monday.
+  week_start   date NOT NULL CONSTRAINT meal_plans_week_monday CHECK (extract(isodow FROM week_start) = 1),
   day_of_week  text NOT NULL CHECK (day_of_week IN ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')),
   meal_type    text NOT NULL CHECK (meal_type IN ('breakfast', 'lunch', 'dinner', 'snack')),
   recipe_id    uuid REFERENCES recipes (id),
@@ -58,9 +58,14 @@ CREATE TABLE IF NOT EXISTS meal_plans (
 CREATE TABLE IF NOT EXISTS shopping_lists (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id     uuid,
-  -- One list a week.
-  week_start  date NOT NULL UNIQUE,
+  -- One list a week, by its Monday.
+  week_start  date NOT NULL UNIQUE CONSTRAINT shopping_lists_week_monday CHECK (extract(isodow FROM week_start) = 1),
   notes       text,
+  -- What the list was made from: a digest of its items as made, which the
+  -- operations compare with the items the plan would give now to say the list
+  -- is stale. Null for a list copied from the standalone server, never made
+  -- here, so it reads stale until made again.
+  made_from   text,
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
