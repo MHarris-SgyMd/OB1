@@ -19430,14 +19430,15 @@ if (want("38")) {
     lines.length = 0;
     for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
     // The call in hand 3.6 s, scaled less than the rest: the write's lag before the pause (about 0.4 s of
-    // reads) doesn't scale, and a 3 s call left 0.5 s for the pause to meet it in hand. At 3.6 s it leaves
-    // about 1.1 s, as the unscaled case did, and ends about 1.2 s before the scaled capture's resume, so no
-    // claim follows while paused (SMD-3714 review pass 1: unscaled, 5 s outlasted the capture).
+    // reads) doesn't scale, and a 3 s call left 0.5 s for the pause to meet it in hand. At 3.6 s it leaves at
+    // least 1.1 s, and ends at least 1.5 s before the scaled capture's resume, so no claim follows while paused
+    // (SMD-3714 review pass 1: unscaled, 5 s outlasted the capture).
     const inHandCall = 3600;
     sw.slow = inHandCall;
     const ac = new AbortController();
     const callsBefore = modelCalls.length;
-    // A 6 s capture in a 7 s quiet: the call in hand ends about 2.5 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s).
+    // A 6 s capture in a 7 s quiet, written in seconds and run at SCALE (3.6 s, 4.2 s): the call in hand, 3.6 s,
+    // ends 1.2-1.7 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s, unscaled).
     // The scheduler's pool reads counted by the lines written before each: a paused poll reads none.
     const poolReadAt: number[] = [];
     const poolCounting = new Proxy(sql, {
@@ -19451,7 +19452,7 @@ if (want("38")) {
     await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
     const asleepBeat = await beat();
     const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
-    // A logged search, two polls and a half inside the 5 s call: the lease stays where it is.
+    // A logged search, two polls and a half inside the call in hand: the lease stays where it is.
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a search during a pass')`;
     await Bun.sleep(scaled(2500));
     const [searchedHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
@@ -19464,6 +19465,8 @@ if (want("38")) {
     const pauseMs = Date.now() - pausedAt;
     // The thought in hand still claimed as the pause is said: the pause met a call in hand (SMD-3714 review pass 1).
     const [atPause] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    // Extractions finished as the pause began: by the resume, only the call in hand may have joined them (SMD-3714 review pass 2).
+    const doneAtPause = (await claims(EX)).succeeded ?? 0;
     let pausedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (pausedBeat = await beat())?.paused !== undefined, 3_000);
     // The call in hand runs on and its thought is done; no claim follows while the gate is closed.
@@ -19474,14 +19477,17 @@ if (want("38")) {
     const resumedEarly = lines.some((l) => /resumed:/.test(l));
     assert(asleepBeat?.running === true && pauseSaid && atPause?.id === inHand?.id && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
         && handDone && doneThought === "succeeded" && heldBack === 0 && !resumedEarly,
-      `a live write pauses a sleep with a ${inHandCall / 1000} s call in hand: said within the poll, the call still in hand, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${atPause?.id === inHand?.id ? "in hand" : "not in hand at the pause"}; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
+      `a live write pauses a sleep with a ${inHandCall / 1000} s call in hand: said within the poll, the call still in hand, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${atPause?.id === inHand?.id ? "in hand" : "not in hand at the pause"}; done ${handDone}, resumed early ${resumedEarly}; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
     // The capture passed with no live write: the passes go on, the row paused no more.
     const resumedSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  resumed: no live write for ${capS(6000)} s — the passes go on \\(paused \\d+ s\\)$`).test(l)), 15_000);
+    // Read at the resume, before the next 3.6 s call can end: a gate that let a claim through while closed
+    // would have finished more of the backlog than the one call in hand.
+    const doneAtResume = (await claims(EX)).succeeded ?? 0;
     let resumedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (resumedBeat = await beat())?.paused === undefined, 3_000);
     const wakeLines = lines.join("\n");
-    assert(resumedSaid && resumedBeat?.paused === undefined && resumedBeat?.running === true && !/awake:|second signal|stopping after the current thought/.test(wakeLines),
-      `…and once no live write has landed for the capture the passes go on, the row paused no more, no pass's line speaking of a signal (${resumedSaid}; ${JSON.stringify(resumedBeat)})`);
+    assert(resumedSaid && doneAtResume === doneAtPause + 1 && resumedBeat?.paused === undefined && resumedBeat?.running === true && !/awake:|second signal|stopping after the current thought/.test(wakeLines),
+      `…and once no live write has landed for the capture the passes go on, the row paused no more, no pass's line speaking of a signal, the one call in hand finished while paused and no other (${resumedSaid}; ${doneAtPause} → ${doneAtResume} extracted; ${JSON.stringify(resumedBeat)})`);
     // Its polls paused read the live writes alone: no pool, a scan of every thought for extraction, between the pause and its resume.
     const pauseLine = lines.findIndex((l) => /^  paused: a live write/.test(l));
     const resumeLine = lines.findIndex((l) => /^  resumed: no live write/.test(l));
@@ -19607,25 +19613,24 @@ if (want("38")) {
       `…but a live write on a thought whose claim was queued before it pauses the sleep: that work is the sleep's (${earlierRan ? `paused ${earlierPaused}, ended ${earlierEnded}` : "not reached: the capture's end or the drain before it failed"})`);
 
     // Paused time is not the clock's (SMD-3379 PR 1c-3b, the maintainer's choice): a 4 s clock with a pause of
-    // about 3 s inside it is spent about 7 s after the sleep began, not at 4. Scaled, the bound is the pause's
-    // floor, not its rounded seconds: the clock, plus the capture less a poll (the write may land just before
-    // one), less 0.4 s of the reads' lag. A pause rounded to 1 s let paused time on the clock pass (SMD-3714
-    // review pass 1: 1 run in 10; the right code spends 3.7-4.5 s, that mutant about 2.5).
+    // about 3 s inside it is spent about 7 s after the sleep began, not at 4. At its seconds, not SCALE's: its two
+    // reads lag a poll of 250 ms each, which doesn't scale, and scaled the bound sat within 0.2 s of the right
+    // code at its worst and the mutant that counts paused time could pass it (SMD-3714 review passes 1 and 2).
     lines.length = 0;
     for (let i = 0; i < 4; i++) await capture(`A note under a paused clock, number ${i}.`, "sync-sleep", 0, 30 + i);
-    sw.slow = scaled(1500);
+    sw.slow = 1500;
     const acPausedClock = new AbortController();
-    const pausedClockRun = sleepRun({ follow: true, quietMs: scaled(3000), pollMs: scaled(1000), captureMs: scaled(3000), budgetMs: scaled(4000), minStampEveryS: 1, signal: acPausedClock.signal });
+    const pausedClockRun = sleepRun({ follow: true, quiet: 3, captureMs: 3000, budgetMs: 4000, minStampEveryS: 1, signal: acPausedClock.signal });
     let clockAsleepAt = 0, clockSpentAt = 0, sleptAgain = true;
     try {
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
       clockAsleepAt = Date.now();
-      await Bun.sleep(scaled(800));
+      await Bun.sleep(800);
       await liveWrite(sql, "a live write inside the clock");
-      await pollUntil(async () => lines.some((l) => l.includes(`the sleep's budget is spent (${scaled(4000)} ms)`) || l.includes(`the sleep's clock is spent (${scaled(4000)} ms)`)) && (clockSpentAt = Date.now()) > 0, 20_000);
+      await pollUntil(async () => lines.some((l) => /the sleep's budget is spent \(4000 ms\)|the sleep's clock is spent \(4000 ms\)/.test(l)) && (clockSpentAt = Date.now()) > 0, 20_000);
       // The write that paused it is no wake: past the 3 s quiet and a poll, no sleep begins again (review pass 1).
       const spentLine = lines.length;
-      await Bun.sleep(scaled(4000));
+      await Bun.sleep(4000);
       sleptAgain = lines.slice(spentLine).some((l) => /asleep:/.test(l));
     } finally {
       sw.slow = 0;
@@ -19633,8 +19638,8 @@ if (want("38")) {
       await pausedClockRun;
     }
     const clockPaused = Number(lines.find((l) => /resumed: no live write/.test(l))?.match(/paused (\d+) s/)?.[1] ?? 0);
-    assert(clockSpentAt > 0 && clockPaused >= 1 && clockSpentAt - clockAsleepAt >= scaled(4000) + scaled(3000) - scaled(1000) - 400,
-      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its ${scaled(4000)} ms clock by its ${clockPaused} s paused, at least ${scaled(4000) + scaled(3000) - scaled(1000) - 400} ms`);
+    assert(clockSpentAt > 0 && clockPaused >= 2 && clockSpentAt - clockAsleepAt >= 4000 + clockPaused * 1000 - 1200,
+      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its 4 s by the ${clockPaused} s paused`);
     assert(clockSpentAt > 0 && !sleptAgain, `…and the live write that paused it does not end the budget's rest: no sleep begins again without a newer one (${sleptAgain ? "slept again" : "resting"})`);
 
     // A live write in the clock's grace still ends the sleep as a wake did: the
