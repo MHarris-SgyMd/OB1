@@ -1870,6 +1870,9 @@ const statementText = (a: PriorityAssertion) =>
   `${levelText(a.level)}${a.dueAt ? `, due ${a.dueAt}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
   + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
   + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
+/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
+const historyLine = (a: PriorityAssertion) =>
+  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's, or none standing. */
 const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null) =>
   !v.winnerShown ? ""
@@ -1899,10 +1902,6 @@ export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorit
     ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null)}`
     : `You have no statement open on that item: nothing to clear.${winnerText(v, null)}`,
   priorityRefusal, AS_JSON);
-
-/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
-const historyLine = (a: PriorityAssertion) =>
-  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
 
 export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
   [

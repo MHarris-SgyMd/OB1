@@ -1322,16 +1322,17 @@ export type PriorityAnswer = {
   winner: PriorityAssertion | null;
 };
 /**
- * priority_of and priority_history over one item, read in one statement: the winner, its level, and every statement
- * in the order written; `exists`, whether the brain holds the item now (116's own test) — a thought deleted since
+ * One item's record, read in one statement: the rule's winner (ob1_priority_winner), its level, and every statement
+ * in the order written (priority_history); `exists`, whether the brain holds the item now (116's own test) — a thought deleted since
  * keeps its statements (116's section 8).
  */
 export type PriorityRecord = { item: PriorityItem; exists: boolean; level: number | null; winner: PriorityAssertion | null; history: PriorityAssertion[] };
 
 /**
- * An argument 116 refused by raising (SQLSTATE 22023), told by which (`problem`),
- * as ClaimRefused tells 115's. Its message is the database's, which quotes the
- * argument it could not read, cut. Any other raise stays the store's fault.
+ * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
+ * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
+ * is the database's, which quotes the argument it could not read, cut. Any other
+ * raise stays the store's fault.
  */
 export class PriorityRefused extends Error {
   constructor(readonly problem: PriorityProblem, message: string) {
@@ -1370,17 +1371,17 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   const time = (v: unknown): string | null => (v === null || v === undefined ? null : isoTimestamp(v as string | Date));
   const item = priorityItemOf(o?.item);
   const tier = Number(o?.tier);
-  const dueRef = o?.due_ref === null || o?.due_ref === undefined ? null : priorityItemOf(o.due_ref);
+  const refGiven = o?.due_ref !== null && o?.due_ref !== undefined;
+  const dueRef = refGiven ? priorityItemOf(o?.due_ref) : null;
   // Every field read, or the row refused: a missing time or a due reference of no kind 116 has is no row to show
   // with a null in its place (review pass 3). The tier's name is 116's own (tier_name), held to the four.
   if (!o || !m || typeof o.id !== "string" || !item || typeof o.level !== "number" || typeof m.name !== "string" || ![1, 2, 3, 4].includes(tier)
-      || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (o.due_ref !== null && o.due_ref !== undefined && !dueRef)
+      || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (refGiven && !dueRef)
       || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared")) {
     throw new Error(`${what} answered an assertion this server cannot read`);
   }
   return {
-    id: o.id, item, level: o.level, dueAt: time(o.due_at), notBefore: time(o.not_before),
-    dueRef,
+    id: o.id, item, level: o.level, dueAt: time(o.due_at), notBefore: time(o.not_before), dueRef,
     reason: text(o.reason), inferred: o.inferred === true,
     maker: { name: m.name, agentId: text(m.agent_id), kind: text(m.kind), trust: text(m.trust), scope: text(m.scope), source: m.source === true },
     tier: tier as PriorityAssertion["tier"], tierName: o.tier_name as PriorityAssertion["tierName"],
