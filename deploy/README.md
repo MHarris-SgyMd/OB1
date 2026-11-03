@@ -2238,8 +2238,8 @@ re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
 back and recreate `api` and the coordinator, which read them once. On the next live call it pauses them within `OB1_SLEEP_POLL` seconds
 (unset, 5): they wait between thoughts and go on once `OB1_SLEEP_CAPTURE`
 seconds (unset, 20; held to the quiet) pass with no live call, a model call in
-hand longer than 60 s aborted meanwhile, its thought set back (SMD-3379 PR
-1c-3b). One that finds nothing left to do ends the sleep, as during the sweep
+hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
+its thought set back (SMD-3379 PR 1c-3b). One that finds nothing left to do ends the sleep, as during the sweep
 (its call in hand given 2 s, then cancelled), and the brain is quiet again
 `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 `OB1_SLEEP_BUDGET` minutes (unset, 60) besides its pauses, so a busy day's
@@ -2307,9 +2307,12 @@ podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -
 
 **Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_CAPTURE` (1–86400, held
 to the quiet: the quiet after the newest live call before paused passes go
-on, unset 20), `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside
-a live call before it pauses; a call in hand runs on, aborted while paused
-once 60 s in hand) and `OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
+on, unset 20), `OB1_SLEEP_ABORT_AFTER` (60–86400, unset 60: how long a model
+call in hand may have run, counted from its start, when a pause aborts it, its thought set back;
+at least extraction's stall floor, so each abort counts as a long stop),
+`OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
+before it pauses; a call in hand runs on, to that bound once paused) and
+`OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
 digits only (`deploy/.env.example`). The budget (SMD-2679):
 `OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes, its pauses aside
 (0–10080, unset 60; 0

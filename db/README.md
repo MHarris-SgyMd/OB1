@@ -4329,7 +4329,7 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
 bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain or its budget stops it, pausing for live calls
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --abort-after SECONDS (60; at least the 60 s stall floor)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained (a live write during its sweep), or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
@@ -4338,7 +4338,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its four numbers, and `OB1_SLEEP_BUDGET`,
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its five numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -4411,7 +4411,7 @@ holding no claim, one mid-thought keeping its claim and the windows answered —
 and go on once `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20, held to the
 quiet) have passed with no live write. The log says `paused:` and `resumed:`,
 and the row `paused { since }`. While paused, a model call in hand longer than
-60 s is aborted and its thought set back in the queue, extraction keeping its
+`--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at least the stall floor) is aborted and its thought set back in the queue, extraction keeping its
 answered windows and counting the stop (093); consolidation's at most three a
 sleep. As the passes go on, the thoughts stopped that way are moved behind
 the newer work. A pause is not the clock's: the budget counts the passes'
@@ -4691,7 +4691,9 @@ apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
 Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
-and 1c-4 will write `holds`. `paused { since }` is the scheduler paused by a live
+and 1c-4a `holds`: re-embed set aside on a model switch, or set down until
+the next sleep, neither with a time, and a claim pass whose start's refusal
+`--follow` retries, until its retry wait ends (the next sleep retries it). `paused { since }` is the scheduler paused by a live
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out
@@ -4703,7 +4705,7 @@ of its work, one to three, each `{ pass, why, until }`:
   event rather than a time.
 
 Paused is the state, before running: `brain_info` reads "paused by a live
-call for 40 s; held out: consolidate (provider)", `task_status` reads it
+call for 40 s; held out: reembed (provider)", `task_status` reads it
 running, and preflight's `sleep` row adds "its passes waiting between
 thoughts, going on once the brain is quiet … a live write pauses it". The
 re-embed and consolidate pass rows each name their own pass's hold, or the
