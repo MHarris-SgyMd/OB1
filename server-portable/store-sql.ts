@@ -22,7 +22,7 @@ import { SQL } from "bun";
 import type { JobSink, JobRow, PublicJob, JobStatus, JobProgress } from "./jobs.ts";
 import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions, type ReadProgress } from "./brain-info.ts";
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
-import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
+import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ClaimRefused, claimProblemOf, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
@@ -140,17 +140,18 @@ export class SqlStore implements ThoughtStore {
   private sql: SQL;
 
   /**
-   * Each plugin's own pool (SMD-2310), made at its first transaction: what a
-   * plugin's SQL leaves on a session — a temp table, which Postgres searches
-   * before any schema and so would stand in for `thoughts` in a core query
-   * that later used the connection, a session setting, an advisory lock, a
-   * cursor held past commit — stays on connections no core query and no
-   * other plugin uses (review pass 1).
+   * Each plugin's own pool (SMD-2310), made at its first transaction and
+   * logged in as the plugin's own login role (SMD-2756): what a plugin's SQL
+   * leaves on a session — a temp table, which Postgres searches before any
+   * schema and so would stand in for `thoughts` in a core query that later
+   * used the connection, a session setting, an advisory lock, a cursor held
+   * past commit — stays on connections no core query and no other plugin
+   * uses (review pass 1).
    */
   private readonly pluginPools = new Map<string, SQL>();
-  /** The plugins whose pool has been seen logged in as PLUGIN_LOGIN_ROLE: checked once, at its first transaction. */
+  /** The plugins whose pool has been seen logged in as the plugin's login role: checked once, at its first transaction. */
   private readonly pluginLogins = new Set<string>();
-  /** The store's own database URL and OB1_PLUGIN_DB_PASSWORD: the plugin login URL is built from them at a plugin's first transaction. */
+  /** The store's own database URL and OB1_PLUGIN_DB_PASSWORD: a plugin's login URL is built from them at its first transaction. */
   private readonly url: string;
   private readonly pluginPassword: string | undefined;
   /** The vector mender's leader lock's own connection (SMD-2889): opened at the first tick, never one of the pool's. */
@@ -158,7 +159,7 @@ export class SqlStore implements ThoughtStore {
   /** How often that connection has closed: an unlock on a new session after one is no pooler's doing. */
   private lockCloses = 0;
 
-  /** `pluginPassword`: OB1_PLUGIN_DB_PASSWORD, the plugin login role's (SMD-2310). */
+  /** `pluginPassword`: OB1_PLUGIN_DB_PASSWORD, the secret each plugin's login password is derived from (SMD-2310, SMD-2756). */
   constructor(url: string, opts: { max?: number; pluginPassword?: string } = {}) {
     // A bounded pool. PostgREST was stateless HTTP, so nothing upstream limits
     // concurrency for us any more — an unbounded pool would let a burst of
@@ -1336,23 +1337,25 @@ export class SqlStore implements ThoughtStore {
 
   /**
    * A plugin's transaction (SMD-2310), on a connection logged in as the
-   * plugin login role (db/config.mjs's PLUGIN_LOGIN_ROLE), then SET LOCAL ROLE
-   * to the plugin's own role with its schema first on the path (pluginIdents,
-   * as the migrator made them): its tables are named bare, and the core's are
+   * plugin's own login role (db/config.mjs's pluginIdents, SMD-2756), then
+   * SET LOCAL ROLE to the plugin's role with its schema first on the path, as
+   * the migrator made them: its tables are named bare, and the core's are
    * Postgres's to refuse. SQL that undoes the role lands on the login role,
-   * which holds nothing on the core either — the boundary is Postgres's, not
-   * the code's good behaviour (review pass 1 of PR 3). The plugin is handed a
-   * tagged template alone: no unsafe(), no second transaction.
+   * which holds nothing on the core either, and may SET ROLE to its own
+   * plugin's role alone, so no other plugin's tables — the boundary is
+   * Postgres's, not the code's good behaviour (review pass 1 of PR 3). The
+   * plugin is handed a tagged template alone: no unsafe(), no second
+   * transaction.
    */
   pluginTx<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> {
     if (!PLUGIN_NAME_RE.test(plugin) || plugin.length > 32) return Promise.reject(new Error(`${JSON.stringify(plugin)} is not a plugin name`));
-    if (!this.pluginPassword) return Promise.reject(new Error(`a plugin's tables need OB1_PLUGIN_DB_PASSWORD, the password of the ${PLUGIN_LOGIN_ROLE} role the migrator made`));
-    const { schema, role } = pluginIdents(plugin);
+    const { schema, role, login } = pluginIdents(plugin);
+    if (!this.pluginPassword) return Promise.reject(new Error(`a plugin's tables need OB1_PLUGIN_DB_PASSWORD, the secret the password of ${login}, the login role the migrator made, is derived from`));
     let pool = this.pluginPools.get(plugin);
     if (!pool) {
       let loginUrl: string;
       try {
-        loginUrl = pluginLoginUrl(this.url, this.pluginPassword);
+        loginUrl = pluginLoginUrl(this.url, plugin, this.pluginPassword);
       } catch (e) {
         return Promise.reject(e);
       }
@@ -1363,7 +1366,7 @@ export class SqlStore implements ThoughtStore {
       // The pool's own login, once: plugin SQL never runs on the server's role (PR 3 review pass 2).
       if (!this.pluginLogins.has(plugin)) {
         const [{ who }] = (await tx`SELECT session_user AS who`) as { who: string }[];
-        if (who !== PLUGIN_LOGIN_ROLE) throw new Error(`a plugin's pool logged in as ${who}, not ${PLUGIN_LOGIN_ROLE}`);
+        if (who !== login) throw new Error(`plugin ${plugin}'s pool logged in as ${who}, not ${login}`);
         this.pluginLogins.add(plugin);
       }
       // No role: a plugin with no migrations, or one the migrator has not run
@@ -1381,6 +1384,14 @@ export class SqlStore implements ThoughtStore {
         return tx(strings, ...values) as never;
       };
       return fn(query);
+    }).catch((e: Error) => {
+      // A pool that never logged in, refused its login: a plugin with no
+      // migrations, or one the migrator has not run for, has no login role
+      // (SMD-2756) — said as that, not as Postgres's bare refusal, which says
+      // the same for a role made under another secret.
+      throw !this.pluginLogins.has(plugin) && /password authentication failed|role ".*" does not exist/.test(e.message)
+        ? new Error(`plugin ${plugin} cannot log in as ${login}: ctx.db reaches the tables its migrations make (plugins/${plugin}/migrations/), and the migrator makes the role, its password derived from OB1_PLUGIN_DB_PASSWORD, when it applies them — or the role was made under another secret (${e.message})`)
+        : e;
     }) as Promise<T>;
   }
 

@@ -42,7 +42,7 @@ import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PLUGIN_LOGIN_ROLE, pluginForeignOwned, pluginIdents, pluginLoginUrl } from "../db/config.mjs";
+import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
 import { MIGRATION_EXIT, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
@@ -71,68 +71,24 @@ const pluginMigrationFiles = (name: string): string[] => {
 
 /**
  * What an enabled plugin's tables lack (SMD-2310), one phrase each: its role,
- * its schema, this connection's right to SET ROLE to the role, a migration
- * file plugin_migrations does not record, or one recorded at another sha.
- * A plugin with no migrations has no tables to lack. The files are the
- * image's plugins/, as the migrator reads them.
+ * its schema, its login role and that login's right to SET ROLE to the role
+ * (SMD-2756), a migration file plugin_migrations does not record, or one
+ * recorded at another sha; and the one shared login a brain migrated before
+ * SMD-2756 holds, while it still holds a plugin's role. A plugin with no
+ * migrations has no tables to lack. The files are the image's plugins/, as
+ * the migrator reads them.
  */
 async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>, names: string[], url: string, password: string | undefined): Promise<string[]> {
   const problems: string[] = [];
   if (!names.some((n) => pluginMigrationFiles(n).length > 0)) return problems;
-  // The login role every plugin's SQL runs on (PR 3 review pass 1): there,
-  // able to log in with the password this server holds, no superuser, NOINHERIT,
-  // and holding nothing on the core — SQL that undoes a plugin's role lands on
-  // it, so its privileges are the boundary's.
-  const login = PLUGIN_LOGIN_ROLE;
-  const [l] = (await sql`
-    SELECT r.rolcanlogin AS can_login, r.rolsuper AS superuser, r.rolinherit AS inherit,
-           (SELECT string_agg(c.relname, ', ' ORDER BY c.relname)
-              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
-               AND (has_table_privilege(${login}, c.oid, 'SELECT') OR has_table_privilege(${login}, c.oid, 'INSERT')
-                 OR has_table_privilege(${login}, c.oid, 'UPDATE') OR has_table_privilege(${login}, c.oid, 'DELETE')
-                 OR has_table_privilege(${login}, c.oid, 'TRUNCATE'))) AS reaches
-      FROM pg_roles r WHERE r.rolname = ${login}`) as { can_login: boolean; superuser: boolean; inherit: boolean; reaches: string | null }[];
-  if (!l) return [`no role ${login}: the migrator makes it, with OB1_PLUGIN_DB_PASSWORD, when it applies a plugin's migrations`];
-  if (!l.can_login) problems.push(`${login} cannot log in`);
-  if (l.superuser) problems.push(`${login} is a superuser: a plugin's SQL that undoes its role would hold the database (ALTER ROLE ${login} NOSUPERUSER)`);
-  if (l.inherit) problems.push(`${login} inherits its plugin roles' rights: every plugin's SQL would reach every plugin's tables (ALTER ROLE ${login} NOINHERIT)`);
-  // Any membership but SET on a plugin's role: a role it could SET ROLE to, or
-  // one whose rights it inherits by the grant's own option (PG 16), would be
-  // reached by SQL that undoes the plugin's role; has_table_privilege alone
-  // cannot see the first (PR 3 review pass 2).
-  const [mem] = (await sql`
-    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE NOT starts_with(r.rolname, 'ob1_plugin_')) AS other,
-           string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE (to_jsonb(m) ->> 'inherit_option')::boolean) AS inherited
+  // The shared login (SMD-2756): from it, SQL that undid one plugin's role
+  // could SET ROLE to any other's. The migrator retires it.
+  const [shared] = (await sql`
+    SELECT string_agg(DISTINCT r.rolname, ', ' ORDER BY r.rolname) AS held
       FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
-  if (mem?.other) problems.push(`${login} is a member of ${mem.other}: a plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
-  if (mem?.inherited) problems.push(`${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
-  // pg_stat_statements' views reach it through PUBLIC, which a restore without privileges gives them back to; migrate.ts takes them back on its next plain run, as their owner (SMD-1849 PR 3b review pass 2: the REVOKE named here changed nothing).
-  if (l.reaches) problems.push(`${login} holds privileges on core relations (${l.reaches}): a plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login}, or FROM PUBLIC where the grant is PUBLIC's${/\bpg_stat_statements(_info)?\b/.test(l.reaches) ? "; for pg_stat_statements' views, run a plain migrate.ts as their owner or a superuser, which takes them back from PUBLIC" : ""})`);
-  if (!password) problems.push(`OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as ${login}`);
-  else {
-    const { SQL } = await import("bun");
-    // A URL with no host cannot carry the login role: failed, as the plugin's
-    // first transaction would be, not a warning (final review).
-    let loginUrl: string | null = null;
-    try {
-      loginUrl = pluginLoginUrl(url, password);
-    } catch (e) {
-      problems.push((e as Error).message);
-    }
-    if (loginUrl) {
-      const probe = new SQL({ url: loginUrl, max: 1 });
-      try {
-        const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
-        if (who !== login) problems.push(`the plugins' connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
-      } catch (e) {
-        problems.push(`the server cannot log in as ${login} with OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
-      } finally {
-        await probe.close().catch(() => {});
-      }
-    }
-  }
+     WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${SHARED_PLUGIN_LOGIN}) AND starts_with(r.rolname, 'ob1_plugin_')`) as { held: string | null }[];
+  if (shared?.held) problems.push(`the shared login role ${SHARED_PLUGIN_LOGIN} still holds ${shared.held}: SQL that undid one plugin's role there could reach every plugin's tables — a plain migrator run retires it`);
+  if (!password) problems.push("OB1_PLUGIN_DB_PASSWORD is not set: the server cannot log in as a plugin's login role");
   const [{ ledger }] = (await sql`SELECT to_regclass('public.plugin_migrations') IS NOT NULL AS ledger`) as { ledger: boolean }[];
   const recorded = new Map<string, string>(
     ledger ? ((await sql`SELECT plugin, name, sha256 FROM public.plugin_migrations`) as { plugin: string; name: string; sha256: string }[]).map((r) => [`${r.plugin}/${r.name}`, r.sha256]) : []
@@ -141,20 +97,74 @@ async function pluginTableProblems(sql: (strings: TemplateStringsArray, ...value
     const dir = pluginMigrationsDir(name);
     const files = pluginMigrationFiles(name);
     if (files.length === 0) continue;
-    const { schema, role } = pluginIdents(name);
-    // SET ROLE needs the SET option from PG 16, which MEMBER does not read: a
-    // `GRANT … WITH SET FALSE` is membership a SET ROLE refuses (review pass 1).
-    // The login role's, not this connection's: the plugins' pools log in as it.
+    const { schema, role, login } = pluginIdents(name);
     const [r] = (await sql`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) AS role_present,
              EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${schema}) AS schema_present,
-             CASE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${role}) THEN false
-                  WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(${login}, ${role}, 'SET')
-                  ELSE pg_has_role(${login}, ${role}, 'MEMBER') END AS can_set,
-             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; can_set: boolean; schema_owner: string | null }[];
+             (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = ${schema}) AS schema_owner`) as { role_present: boolean; schema_present: boolean; schema_owner: string | null }[];
     if (!r.role_present) { problems.push(`${name}: no role ${role}`); continue; }
     if (!r.schema_present) { problems.push(`${name}: no schema ${schema}`); continue; }
-    if (!r.can_set) problems.push(`${name}: ${login} cannot SET ROLE ${role} (the migrator grants it; GRANT ${role} TO ${login}, WITH SET TRUE, INHERIT FALSE on PG 16 and later)`);
+    // The plugin's own login (PR 3 review pass 1, SMD-2756): there, able to
+    // log in with the password derived from the secret this server holds, no
+    // superuser, NOINHERIT, and holding SET on its own plugin's role and
+    // nothing else — SQL that undoes the plugin's role lands on it, so its
+    // privileges are the boundary's: neither the core's relations nor another
+    // plugin's. SET ROLE needs the SET option from PG 16, which MEMBER does
+    // not read: a `GRANT … WITH SET FALSE` is membership a SET ROLE refuses
+    // (review pass 1).
+    const [l] = (await sql`
+      SELECT r.rolcanlogin AS can_login, r.rolsuper AS superuser, r.rolinherit AS inherit,
+             CASE WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(${login}, ${role}, 'SET')
+                  ELSE pg_has_role(${login}, ${role}, 'MEMBER') END AS can_set,
+             (SELECT string_agg(format('%I.%I', n.nspname, c.relname), ', ' ORDER BY n.nspname, c.relname)
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE (n.nspname = 'public' OR (starts_with(n.nspname, 'plugin_') AND n.nspname <> ${schema})) AND c.relkind IN ('r', 'p', 'v', 'm')
+                 AND (has_table_privilege(${login}, c.oid, 'SELECT') OR has_table_privilege(${login}, c.oid, 'INSERT')
+                   OR has_table_privilege(${login}, c.oid, 'UPDATE') OR has_table_privilege(${login}, c.oid, 'DELETE')
+                   OR has_table_privilege(${login}, c.oid, 'TRUNCATE'))) AS reaches
+        FROM pg_roles r WHERE r.rolname = ${login}`) as { can_login: boolean; superuser: boolean; inherit: boolean; can_set: boolean; reaches: string | null }[];
+    if (!l) problems.push(`${name}: no role ${login}: the migrator makes it, its password derived from OB1_PLUGIN_DB_PASSWORD, when a run names the plugin`);
+    else {
+      if (!l.can_login) problems.push(`${name}: ${login} cannot log in`);
+      if (l.superuser) problems.push(`${name}: ${login} is a superuser: the plugin's SQL that undoes its role would hold the database (ALTER ROLE ${login} NOSUPERUSER)`);
+      if (l.inherit) problems.push(`${name}: ${login} inherits its roles' rights (ALTER ROLE ${login} NOINHERIT)`);
+      if (!l.can_set) problems.push(`${name}: ${login} cannot SET ROLE ${role} (the migrator grants it; GRANT ${role} TO ${login}, WITH SET TRUE, INHERIT FALSE on PG 16 and later)`);
+      // Any membership but its own plugin's role: another plugin's, which SQL
+      // that undoes the role could SET ROLE to (SMD-2756), or any other, or
+      // one whose rights it inherits by the grant's own option (PG 16);
+      // has_table_privilege alone cannot see the first (PR 3 review pass 2).
+      const [mem] = (await sql`
+        SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE r.rolname <> ${role}) AS other,
+               string_agg(r.rolname, ', ' ORDER BY r.rolname) FILTER (WHERE (to_jsonb(m) ->> 'inherit_option')::boolean) AS inherited
+          FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
+         WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = ${login})`) as { other: string | null; inherited: string | null }[];
+      if (mem?.other) problems.push(`${name}: ${login} is a member of ${mem.other}: the plugin's SQL that undoes its role could SET ROLE there (REVOKE … FROM ${login})`);
+      if (mem?.inherited) problems.push(`${name}: ${login} inherits ${mem.inherited} by the grant's own INHERIT option (GRANT … TO ${login} WITH INHERIT FALSE)`);
+      // pg_stat_statements' views reach it through PUBLIC, which a restore without privileges gives them back to; migrate.ts takes them back on its next plain run, as their owner (SMD-1849 PR 3b review pass 2: the REVOKE named here changed nothing).
+      if (l.reaches) problems.push(`${name}: ${login} holds privileges on relations not its plugin's (${l.reaches}): the plugin's SQL that undoes its role would reach them (REVOKE ALL ON … FROM ${login}, or FROM PUBLIC where the grant is PUBLIC's${/\bpg_stat_statements(_info)?\b/.test(l.reaches) ? "; for pg_stat_statements' views, run a plain migrate.ts as their owner or a superuser, which takes them back from PUBLIC" : ""})`);
+      if (password) {
+        const { SQL } = await import("bun");
+        // A URL with no host cannot carry the login role: failed, as the
+        // plugin's first transaction would be, not a warning (final review).
+        let loginUrl: string | null = null;
+        try {
+          loginUrl = pluginLoginUrl(url, name, password);
+        } catch (e) {
+          problems.push(`${name}: ${(e as Error).message}`);
+        }
+        if (loginUrl) {
+          const probe = new SQL({ url: loginUrl, max: 1 });
+          try {
+            const [{ who }] = (await probe`SELECT session_user AS who`) as { who: string }[];
+            if (who !== login) problems.push(`${name}: the plugin's connection logs in as ${who}, not ${login}: the database URL names no host for the user to replace`);
+          } catch (e) {
+            problems.push(`${name}: the server cannot log in as ${login} with the password derived from OB1_PLUGIN_DB_PASSWORD (${(e as Error).message}); the role keeps the password it was made with`);
+          } finally {
+            await probe.close().catch(() => {});
+          }
+        }
+      }
+    }
     // Owned by another role — a brain restored without the plugin's role, say
     // — the plugin's role reaches none of it, and every ctx.db call is
     // refused. What the migrator hands back, read by its own query
@@ -4798,10 +4808,11 @@ if (configFailed) {
               "Deploy the server built from the tree that migrated it, or confirm this older one is intended.");
         else add("migration ledger", "ok", `schema_migrations present, highest ${pad3(hi)} — this server's tree ends there too`);
 
-        // An enabled plugin's tables (SMD-2310): the login role the plugins'
-        // SQL runs on, its role, its schema, the login role's right to SET
-        // ROLE to it, and each of its migration files
-        // recorded in plugin_migrations at the file's sha. Failed, not warned:
+        // An enabled plugin's tables (SMD-2310): its role, its schema, the
+        // login role its SQL runs on and that login's right to SET ROLE to it
+        // (SMD-2756), and each of its migration files recorded in
+        // plugin_migrations at the file's sha; and the shared login, while it
+        // holds a plugin's role. Failed, not warned:
         // the server would list operations that fail at their first call.
         // Silent with no plugin enabled, or one with no migrations; an
         // unknown name is the plugins row's.
@@ -4810,7 +4821,7 @@ if (configFailed) {
             const problems = await pluginTableProblems(sql, pluginNames(env.OB1_PLUGINS), conn.url, env.OB1_PLUGIN_DB_PASSWORD);
             if (problems.length)
               add("plugin tables", "fail", problems.join("; "),
-                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same password> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
+                  "Apply them: the compose migrator reads OB1_PLUGINS and OB1_PLUGIN_DB_PASSWORD from deploy/.env (docker compose run --rm migrate); by hand, cd db && OB1_PLUGINS=<the same names> OB1_PLUGIN_DB_PASSWORD=<the same secret> bun migrate.ts --url $DATABASE_URL (--dry-run lists them).");
             else add("plugin tables", "ok", `${pluginNames(env.OB1_PLUGINS).join(", ")} — each plugin's role, schema and migrations in place`);
           } catch (e) {
             add("plugin tables", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_roles, pg_namespace and plugin_migrations.");
@@ -5040,8 +5051,8 @@ if (configFailed) {
           } else if (h === undefined) {
             add("sleep", "skip", "the sleep scheduler has not run on this brain — the coordinator runs it when deploy/.env's OB1_PASSES names sleep, as an alternative to workers (deploy/README.md, SMD-2678, SMD-3476).");
           } else {
-            // Paused, a live write paused it rather than woke it (SMD-3379 PR 1c, review pass 1).
-            const wakes = `a live write ${h.paused && !(h.stale || h.ended) ? "pauses" : "wakes"} it; a search does not`;
+            // Since 1c-3b a live write pauses the passes, and ends a sleep only when it finds nothing left to do (SMD-3379).
+            const wakes = h.paused && !(h.stale || h.ended) ? "a live write pauses it; a search does not" : "a live write pauses its passes, or ends a sleep whose pools are drained; a search does not";
             const s = h.slept;
             const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
             const since = (t: string) => ago(Math.max(0, secondsSince(h, t)));
@@ -5097,7 +5108,7 @@ if (configFailed) {
             // run may have finished them since (review pass 1).
             const held = h.held;
             const stuck = down ? [] : held?.thoughts.filter((t) => t.stalled >= SLEEP_STALLED_JOIN) ?? [];
-            const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its wakes — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
+            const heldDetail = held ? `; ${down ? "at its last word, " : ""}${held.total} thought(s) held back across its stops — ${held.thoughts.map(heldWords).join("; ")}${held.total > held.thoughts.length ? `; and ${held.total - held.thoughts.length} more` : ""}` : "";
             const budgetDetail = b ? `; budget: ${budgetWords(b)} — ${b.stops} sleep(s) stopped on it since ${down ? "it last started" : "it started"}` : "";
             // Re-embed set aside or down by the scheduler, by its own word
             // (SMD-2679 PR 4b): extraction and consolidation run on. A set-down
@@ -5206,13 +5217,13 @@ if (configFailed) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
               // Each its own reason: every window kept puts the stops past the last (review pass 2).
-              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps");
+              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand");
               // The remedy as an operator runs it (review pass 4): stopped
               // asleep, the scheduler finishes the window in hand first, up
               // to its 120 s grace, and may leave the lease; and a checkout
               // reaches the stack's Postgres only through host-ports.
               const it = one ? "it" : "them";
-              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler just after a live call, when its passes have returned their leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped asleep, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no wake stops and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
+              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler, which returns its passes' leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped asleep, paused or not, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no live call pauses and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
             }
             add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
           }

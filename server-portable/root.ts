@@ -247,9 +247,10 @@ export type Env = {
    */
   OB1_PLUGINS?: string;
   /**
-   * The password of the login role plugins' SQL runs on, `ob1_plugins`
-   * (SMD-2310): the migrator makes the role with it, and the servers' plugin
-   * pools log in with it. Required while an enabled plugin keeps tables.
+   * The secret each plugin's login role's password is derived from
+   * (`ob1_plugins_<name>`, SMD-2310, SMD-2756): the migrator makes each role
+   * with its password, and the servers' plugin pools log in with it.
+   * Required while an enabled plugin keeps tables.
    */
   OB1_PLUGIN_DB_PASSWORD?: string;
   /**

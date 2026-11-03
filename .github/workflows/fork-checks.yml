@@ -42,6 +42,21 @@ defaults:
 # lazy blob fetch, on a PR that edits its classifier, is anonymous, the
 # repository public), so the token has no reason to stay in the workspace.
 
+# Every job has a time limit, where GitHub's default is 360 minutes: a hung
+# lease, deadlock or container wait would otherwise hold the one required
+# check, "Fork Checks passed", pending for six hours. Each is at least three
+# times the job's longest successful run in the newest 400 Fork Checks runs
+# on any branch as of 2026-11-02 (back to 10-22), outside a registry slowdown
+# on 10-28 15:00-16:30 UTC, rounded up to the next five minutes: deploy-stack's
+# 505 s the longest. In that slowdown portable-server took 29 minutes, 19 of
+# them one bun install, and auth-poc 302 s: portable-server's limit is 30,
+# over the rule's 20, so that run is held, if barely, and auth-poc's 10
+# holds its. A job at its limit is cancelled with its step in hand, which
+# names where it hung, and the aggregate fails; the run then reads
+# "cancelled", as a superseded one does, and the job's annotation says it hit
+# its limit. The limits count a job's own run, not its wait for a runner
+# (check 48, SMD-2094).
+
 concurrency:
   group: fork-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -95,6 +110,7 @@ jobs:
   repo-consistency:
     name: Repo consistency
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -135,8 +151,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40 and 44 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
+      # 32 to 38, 40, 44 and 48 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -212,6 +228,7 @@ jobs:
   portable-server:
     name: Portable server
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -342,8 +359,9 @@ jobs:
 
       # Plugins in the contract (SMD-2310) over a stub core: the manifests,
       # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
-      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
-      # plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks;
+      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, each
+      # plugin's login URL and its derived password (SMD-2756), the GUI's
+      # registry at GET /v1/plugins, and webhooks;
       # an enabled plugin's operation as the MCP server's tool, called on the
       # REST core by its route (SMD-2287 PR 4a).
       - name: Plugins in the contract
@@ -481,6 +499,16 @@ jobs:
         working-directory: evals
         run: bun eval-stated-status.ts --self-check
 
+      # The "what matters now" eval's rules (SMD-3662): the seeded corpus
+      # against its registered hash, the stub embedder, top-1, top-3 and
+      # tau-b, the shuffled-gold mutant beside chance, the pre-registered bar
+      # at its edges, the reads' knobs read from the tools' own source, and
+      # the dogfood rows' shape. No database, no model; the seeded run is the
+      # data-layer job's.
+      - name: Priority eval rules
+        working-directory: evals
+        run: bun eval-priority.ts --self-check
+
       # The orchestration profile's provisioning rules (SMD-2210), with no real
       # n8n:
       # - the brain-key rule (write refused, the declared scope held, a key
@@ -578,7 +606,7 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # seven extensions (change 64) and the recipes' and integrations' MCP
+      # extensions (change 64; six, family-calendar a plugin since SMD-2311) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. One MCP stack across the
       # tree's installs — the test fails if server-portable's or mcp-server's
@@ -649,6 +677,7 @@ jobs:
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -773,6 +802,7 @@ jobs:
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -876,6 +906,7 @@ jobs:
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -1024,6 +1055,7 @@ jobs:
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -1221,10 +1253,22 @@ jobs:
       # A plugin's tables (SMD-2310): the migrator's plugin ledger, the plugin
       # role's boundary (its own schema, none of the core's tables), the
       # example plugin's operations through both servers, read back through
-      # the MCP server as a REST client (SMD-2287 PR 4a), preflight's row.
+      # the MCP server as a REST client (SMD-2287 PR 4a), preflight's row; and
+      # each plugin's own login role (SMD-2756): one plugin's SQL that undoes
+      # its role is refused another's, and the shared login is retired.
       - name: Plugin tables, their ledger and their role
         working-directory: server-portable
         run: bun test-plugins-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The extensions ported to plugins (SMD-2311): each plugin's tables made
+      # in its own schema, every operation driven through the REST core and
+      # the MCP server behind each key's scope, and a drift guard that fails
+      # an operation no section drives.
+      - name: The ported extensions' plugins answer through both servers
+        working-directory: server-portable
+        run: bun test-plugin-ports.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
@@ -1270,6 +1314,27 @@ jobs:
       - name: Projection-replay fixture
         working-directory: evals
         run: bun eval-projection-replay.ts --fixture-check
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_FIXTURE_RESET: "1"
+
+      # The "what matters now" eval, seeded (SMD-3662): the schema reset, a
+      # personal brain and a small board planted with the stub embedder's
+      # vectors, and seven prompts through the search tools themselves,
+      # called over MCP on the server in-process, its embedder on a stub
+      # provider (plain, prefer_current, and the priority filter
+      # workaround), then any priority read under measurement. Prints the
+      # baseline table and each measured read's verdict, and fails when the
+      # corpus is not the registered one, a baseline read errors or moves from
+      # the recorded baseline (a change to search moves the bar), the bar is
+      # out of the gold's reach, a measured read answers differently with the
+      # answer moved, or the shuffled-gold mutant does not score chance.
+      # Keyless. It DROPS the schema, as the check above does, so it refuses a
+      # database holding thoughts unless told (test-support's
+      # refuseHeldDatabase).
+      - name: Priority eval, seeded
+        working-directory: evals
+        run: bun eval-priority.ts --seeded
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
           OB1_FIXTURE_RESET: "1"
@@ -1355,7 +1420,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the seven servers on the SQL shim, called through
+      # Every tool of the six servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this
@@ -1453,6 +1518,7 @@ jobs:
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -2317,8 +2383,9 @@ jobs:
       # reach the old address (as the auth job's mcp is; review pass 1). Then
       # off again, so the steps after meet the plugin-free stack they expect;
       # the next step, which ends key sign-in, recreates the GUI itself. The
-      # plugin login keeps the password the migrator first made it with, so the
-      # webhook step's run reads it from here.
+      # example's login role keeps the password the migrator first made it
+      # with, derived from this secret (SMD-2756), so the webhook step's run
+      # reads the secret from here.
       - name: The operator GUI renders a plugin's page while the plugin is on
         working-directory: deploy
         run: |
@@ -2410,8 +2477,8 @@ jobs:
       # SMD-2310: a plugin's webhook reaches the REST core only through the
       # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
       # plugin is turned on for this step (and the operator GUI's plugin step,
-      # whose password for the plugin login it reads) — the migrator, recreated with
-      # the REST core, applies its table as ob1_plugins, and the REST core's
+      # whose plugin secret it reads) — the migrator, recreated with the REST
+      # core, applies its table as ob1_plugins_example, and the REST core's
       # preflight finds it in place; the proxy is recreated with --no-deps, so
       # the MCP server, whose environment the knobs change too, is left as it
       # was — then off again, so every other step sees
@@ -2429,7 +2496,7 @@ jobs:
           B=http://127.0.0.1:8010
           code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
           SECRET=$(openssl rand -hex 16)
-          # The plugin login's password, made by the operator GUI's plugin step: the migrator keeps the first one.
+          # The plugin secret, made by the operator GUI's plugin step: the migrator keeps the login password it first derived.
           PLUGIN_PW=$(cat "$RUNNER_TEMP/plugin-pw")
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
@@ -2767,6 +2834,7 @@ jobs:
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -3123,7 +3191,7 @@ jobs:
           # database-monitor passwords too, dummies (nothing here runs the
           # profile).
           printf 'LINEAR_API_KEY=ci-dummy-linear-key\nLINEAR_COMMENT_API_KEY=ci-dummy-linear-comment-key\nLINEAR_OTHER_KEY=ci-dummy-linear-other-key\nGRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\n' >> .env
-          # SMD-3032 and SMD-2874 PR 2: the plugin role's password and the
+          # SMD-3032 and SMD-2874 PR 2: the plugin logins' secret and the
           # webhook secrets, dummies too (no plugin runs here), which the
           # canary's file must not hold as stable's; taken out of .env again
           # once the first up has made the canary's file.
@@ -3207,7 +3275,7 @@ jobs:
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
-          # plugin role password of its own; no webhook secret of stable's.
+          # plugin secret of its own; no webhook secret of stable's.
           # The canary's forward key as the file holds it last, and the
           # MCP_ACCESS_KEYS its write key and a given forward key make.
           canary_forward() { sed -n 's/^OB1_FORWARDER_KEY=//p' .env.canary.local | tail -n 1 | tr -d "\"'"; }
@@ -3233,7 +3301,7 @@ jobs:
             if grep -qF "$h" .env.canary.local; then echo "the canary's env file holds a key hash of stable's" >&2; exit 1; fi
           done
           canary_plugin="$(sed -n 's/^OB1_PLUGIN_DB_PASSWORD=//p' .env.canary.local | tr -d "\"'")"
-          if [ -z "$canary_plugin" ] || [ "$canary_plugin" = ci-dummy-plugin-password-0123456789 ]; then echo "the canary's plugin role password is not its own" >&2; exit 1; fi
+          if [ -z "$canary_plugin" ] || [ "$canary_plugin" = ci-dummy-plugin-password-0123456789 ]; then echo "the canary's plugin secret is not its own" >&2; exit 1; fi
           if grep -qF ci-dummy-hook-secret .env.canary.local; then echo "the canary's env file holds stable's webhook secret" >&2; exit 1; fi
           sed -i '/^OB1_PLUGIN_DB_PASSWORD=ci-dummy/d; /^OB1_HOOK_SECRETS=demo=ci-dummy/d' .env
           # Neither brain takes the other's key: stable's smoke key lists nothing
@@ -3296,20 +3364,23 @@ jobs:
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
           echo 'OB1_QUERY_LOG_RETENTION_DAYS=31' >> .env
-          # SMD-3032: the plugins' login role made on stable's password, as a
-          # canary that ran plugins before its file had a password of its own
+          # SMD-3032: a plugin's login role made under stable's secret, as a
+          # canary that ran plugins before its file had a secret of its own
           # holds it: migrate.ts never changes it, so the up must (code review).
-          cq "CREATE ROLE ob1_plugins LOGIN PASSWORD 'ci-dummy-plugin-password-0123456789'" > /dev/null
+          # Its password is derived from the secret (SMD-2756), by config.mjs's
+          # own pluginLoginPassword.
+          derived() { OB1_SECRET="$1" OB1_CONFIG="$GITHUB_WORKSPACE/db/config.mjs" bun --no-env-file -e 'const { pluginLoginPassword } = await import(process.env.OB1_CONFIG); console.log(pluginLoginPassword(process.env.OB1_SECRET, "example"))'; }
+          cq "CREATE ROLE ob1_plugins_example LOGIN PASSWORD '$(derived ci-dummy-plugin-password-0123456789)'" > /dev/null
           touch /tmp/provider-stub-wrong
           # SMD-3155: --refresh, since a plain up now keeps the canary's database
           # and this one is to bring stable's new thought.
           rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up --refresh > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
-          plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
-          plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
-          if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
-          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed a key or password of the canary's (this check shows no line of it)" >&2; exit 1; fi
+          plugin_login() { PGPASSWORD="$(derived "$1")" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins_example -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
+          plugin_login "$canary_plugin" || { echo "the canary's plugin login role does not take the password derived from the canary's own secret" >&2; exit 1; }
+          if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin login role still takes the password derived from stable's secret" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin" "$(derived "$canary_plugin")") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed a key or password of the canary's (this check shows no line of it)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
@@ -3614,6 +3685,7 @@ jobs:
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4376,6 +4448,7 @@ jobs:
   deploy-stack-observability:
     name: "Full stack: the observability profile"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4744,6 +4817,7 @@ jobs:
   auth-poc:
     name: Authorization server POC (oidc-provider on Bun)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     steps:
@@ -4802,6 +4876,7 @@ jobs:
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code != 'false') }}
     # Where report() appends each suite run's counts (db/test-support.ts's
@@ -4988,6 +5063,7 @@ jobs:
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # Nothing to lint on a plain push; a PR's own commits — or the queued PR's —
     # are the range, and commitlint ignores the merge commit the queue creates.
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -5014,6 +5090,7 @@ jobs:
   workflow-lint:
     name: Workflow lint (actionlint + shellcheck)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5053,6 +5130,7 @@ jobs:
   fork-checks-passed:
     name: Fork Checks passed
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: always()
     needs:
       - changes

@@ -44,14 +44,14 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
 
 ## Turn it on
 
-1. Add the plugin to `deploy/.env`, with a password for `ob1_plugins`, the login role every plugin's SQL runs on (generate one with `openssl rand -hex 32`, and back it up with `POSTGRES_PASSWORD`):
+1. Add the plugin to `deploy/.env`, with the secret each plugin's login role's password is derived from (`ob1_plugins_example` is this plugin's; generate the secret with `openssl rand -hex 32`, and back it up with `POSTGRES_PASSWORD`):
 
    ```
    OB1_PLUGINS=example
-   OB1_PLUGIN_DB_PASSWORD=<the generated password>
+   OB1_PLUGIN_DB_PASSWORD=<the generated secret>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`, then `docker compose up -d --force-recreate --no-deps app`, so the operator GUI reaches the recreated REST core at once, not its old address. Name the stack's other `-f` files in both (`-f compose.yaml -f compose.release.yaml …`), so an overlay's settings on these services (a release's image, Grafana's link) stay. Recreating `app` signs everyone out of the GUI: its sessions live in its memory. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`, then `docker compose up -d --force-recreate --no-deps app`, so the operator GUI reaches the recreated REST core at once, not its old address. Name the stack's other `-f` files in both (`-f compose.yaml -f compose.release.yaml …`), so an overlay's settings on these services (a release's image, Grafana's link) stay. Recreating `app` signs everyone out of the GUI: its sessions live in its memory. The migrator makes the plugin's role and schema and its login role `ob1_plugins_example` (the first time), and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
@@ -68,7 +68,7 @@ Copy this directory to `plugins/<name>/` and set `name` in `index.ts` to the dir
 ## Troubleshooting
 
 - **The server refuses to start: "OB1_PLUGINS names … which is no plugin in this build".** The name is not in `plugins/registry.ts` in the image that is running. Check the spelling, or rebuild the image after adding a plugin.
-- **Preflight's `plugin tables` row says the server "cannot log in as ob1_plugins".** `OB1_PLUGIN_DB_PASSWORD` is not the password the role was made with: the migrator never changes an existing role's password. Set the variable back, or change both together (`ALTER ROLE ob1_plugins PASSWORD '…'` as the database owner).
+- **Preflight's `plugin tables` row says the server "cannot log in as ob1_plugins_example".** `OB1_PLUGIN_DB_PASSWORD` is not the secret the role's password was derived from when it was made: the migrator never changes an existing role's password. Set the variable back, or change both together: in `psql` as the database owner, run `\password ob1_plugins_example` and give it `db/config.mjs`'s `pluginLoginPassword(<the new secret>, "example")` when it asks. `\password` sends it hashed, so it lands in no statement or log.
 - **Preflight's `plugin tables` row fails with "migration(s) not applied".** The migrator has not run with `OB1_PLUGINS` set. Recreate it as in step 2, or run `OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD=… bun migrate.ts --url "$DATABASE_URL"` in `db/`.
 - **`403 FORBIDDEN` with `needs: "write"` or `"read"`.** The key's scope does not reach the operation: a read key cannot pin a note, and a capture-only key cannot read.
 - **`404 NO_SUCH_THOUGHT`.** The thought is not there, or the key cannot read it.
