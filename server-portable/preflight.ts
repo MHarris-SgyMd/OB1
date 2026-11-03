@@ -5213,11 +5213,14 @@ if (configFailed) {
             // poll and ends, every pass with it (review pass 1: all three rows
             // passed until then; pass 2: a poll, awake or asleep, not a sleep).
             if (!down && handFollowers.length) fixes.push(`${handFix}: at its next poll, awake or asleep, the scheduler refuses beside it and ends, every pass with it.`);
-            // The subject sweep held by the garbage-judge alarm, by the scheduler's word (SMD-3306 PR 6b): a trip holds
-            // its runs of the judge model the trip named until a hand run checks it (db/subject-sweep.ts's judgeHeld).
-            // The hold is the window's, not the process's: an ended row's last word stands for it until that run.
+            // The subject sweep held by the garbage-judge alarm, by the scheduler's word (SMD-3306 PR 6b-1): a trip
+            // holds its runs of the judge model the trip named until a hand run checks it (db/subject-sweep.ts's
+            // judgeHeld). The hold is the window's, not the process's: an ended row's last word stands for it until
+            // that run, which runs in the stack, the coordinator's one-off, with the stack's settings, network and
+            // version (review pass 2, walkthrough: from a checkout it met the egress gate's default deny before it
+            // lifted anything, its chat endpoint not the stack's, its pool key the checkout's version's).
             if (h.holds?.some((x) => x.pass === "subjects" && x.why === "judge")) {
-              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run lifts the hold — (cd db && bun extract-entities.ts --url <the database's URL> --subjects --judge-checked --limit 1), with the stack's OB1_JUDGE_MODEL and OB1_SUBJECT_REASONING, from a checkout that reaches the database (deploy/compose.host-ports.yaml publishes it), or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run lifts the hold, run in the stack, with its settings, its network and its version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

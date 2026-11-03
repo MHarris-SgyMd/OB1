@@ -4542,12 +4542,17 @@ else {
       // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherHold = await run(LOG_ON);
+      // …nor for a judge hold of another pass's, which the scheduler never writes (SMD-3306 PR 6b-1's review pass 2,
+      // mutant: the subjects clause dropped lived).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "extract", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const extractJudgeHold = await run(LOG_ON);
       assert(/asleep, subjects waiting for the provider mid-pass/.test(row(subjectsWait.out, "sleep")) && /check it, and the model provider rows here \(--deep probes chat\)/.test(fix(subjectsWait.out, "sleep"))
              && /held out: subjects \(judge\)/.test(row(subjectsHeld.out, "sleep"))
-             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, .* \(cd db && bun extract-entities\.ts --url <the database's URL> --subjects --judge-checked --limit 1\), with the stack's OB1_JUDGE_MODEL and OB1_SUBJECT_REASONING, from a checkout that reaches the database .* The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
+             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, .* a hand run lifts the hold, run in the stack, with its settings, its network and its version — podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with .* The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
              && /at its last word, held out: subjects \(judge\)/.test(row(subjectsHeldDown.out, "sleep")) && /The subject sweep is held: .*--judge-checked --limit 1/.test(fix(subjectsHeldDown.out, "sleep"))
              && !/The other passes run on meanwhile/.test(fix(subjectsHeldDown.out, "sleep"))
-             && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep")),
+             && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep"))
+             && /held out: extract \(judge\)/.test(row(extractJudgeHold.out, "sleep")) && !/The subject sweep is held/.test(fix(extractJudgeHold.out, "sleep")),
         `the subject sweep's wait and judge hold are said by its name, the hold's fix the hand run that lifts it, a stopped row's too (${row(subjectsWait.out, "sleep")} | ${fix(subjectsHeld.out, "sleep")} | ${fix(subjectsHeldDown.out, "sleep")})`);
       // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
@@ -4656,7 +4661,7 @@ else {
       // kind alone (SMD-3306 PR 6b-1's review pass 1, the consumer's prototype).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "tables", slept: { from: await at(900), to: await at(700) } }), 30);
       const tablesFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/a subject pool another run named is the sweep's to switch \(bun db\/extract-entities\.ts --subjects --switch-key/.test(fix(refusedOut.out, "sleep"))
+      assert(/a subject pool another run named is the sweep's to switch, which pools again, in the stack, with its settings \(podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --switch-key --limit 1,/.test(fix(refusedOut.out, "sleep"))
              && /apply the migrations as the tables' owner .*; or, the subject sweep's, grant the roles its log names what it names/.test(tablesFix),
         `the key's and the tables' remedies name the subject sweep's causes too (${fix(refusedOut.out, "sleep")} | ${tablesFix})`);
       // A lookup that did not name the key may name it next time (too many
