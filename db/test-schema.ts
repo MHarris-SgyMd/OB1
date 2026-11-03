@@ -16571,6 +16571,19 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(beforeId.assertion?.maker.agent_id === null && afterId.replaced?.id === beforeId.assertion?.id && openLate === 1 && clearLate.outcome === "cleared" && openAfterClear === 0,
     `a key that asserted by name before the registry knew it replaces that statement once it has an id, and clears it: one maker throughout (${afterId.replaced?.id === beforeId.assertion?.id}, ${openLate}, ${clearLate.outcome}, ${openAfterClear})`);
 
+  // A key that gained an id restating the same thing is re-stamped under its id, not answered unchanged.
+  const late2 = await thoughtBy("prio-op", "[104] a key the registry learns late, saying the same");
+  const sameBefore = await put("thought", late2, 2, { name: "prio-late2", scope: "write" });
+  // Registered unclassified, as before (no trust either way): the agent id is the one thing that changes.
+  await db.exec(`INSERT INTO ob1_agents (label) VALUES ('prio-late2')`);
+  const sameAfter = await put("thought", late2, 2, { name: "prio-late2", scope: "write", agent_id: await agentOf("prio-late2") });
+  assert(sameBefore.assertion?.maker.agent_id === null && sameBefore.assertion?.tier === sameAfter.assertion?.tier && sameAfter.outcome === "asserted" && sameAfter.replaced?.id === sameBefore.assertion?.id && sameAfter.assertion?.maker.agent_id !== null,
+    `the same statement from a key that has since gained an id (its tier unchanged) is stated afresh under it, the name-only row replaced (${sameAfter.outcome}, ${sameBefore.assertion?.tier_name}, ${sameAfter.assertion?.tier_name})`);
+  // p_actor is an object or nothing: a JSON string raises, naming it.
+  const stringActor = await ans(`SELECT assert_priority('thought', $1, 2, p_actor => $2::jsonb) AS r`, [late2, JSON.stringify(JSON.stringify(OP))]);
+  assert(stringActor.outcome.startsWith("raised:") && stringActor.code === "22023" && /p_actor must be a JSON object, not a string/.test(stringActor.outcome),
+    `a p_actor that is a JSON string (an envelope encoded twice) raises 22023 naming it, never an actor naming nobody (${stringActor.outcome.slice(0, 80)})`);
+
   // Newest within a tier.
   const twin = await thoughtBy("prio-op", "[104] two agents on one item");
   await put("thought", twin, 1, BOT);
@@ -16601,6 +16614,8 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const capOwn2 = await thoughtBy("prio-cap", "[104] a capture key's second note");
   const capRefOther = await put("thought", capThought, 4, CAP, { ref: ["thought", opThought] });
   const capRefOwn = await put("thought", capThought, 4, CAP, { ref: ["thought", capOwn2] });
+  // The same statement again: unchanged, and still no winner shown.
+  const capSame = await put("thought", capThought, 4, CAP, { ref: ["thought", capOwn2] });
   // A thought another key takes (082: an update by another agent) is no longer its own.
   // The id read before the transaction: PGlite has one connection, and a query outside an open transaction waits on it.
   const opAgent = await agentOf("prio-op");
@@ -16617,7 +16632,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(capReal.code === "ITEM_NOT_YOURS" && capGhost.code === "ITEM_NOT_YOURS" && capNone.code === "ITEM_NOT_YOURS" && capReal.message === capGhost.message && capGhost.message === capNone.message
          && capRefOther.code === "ITEM_NOT_YOURS" && capRefOwn.outcome === "asserted" && capRefOwn.assertion?.due_ref?.key === capOwn2 && capTaken.code === "ITEM_NOT_YOURS"
          && capNoId.code === "ITEM_NOT_YOURS" && capClearOther.outcome === "nothing_to_clear" && capClearOther.winner === null && capClearTicket.winner === null
-         && capClearOwn.outcome === "cleared" && capClearOwn.winner === null && capOwn.winner === null && capRefOwn.winner === null,
+         && capClearOwn.outcome === "cleared" && capClearOwn.winner === null && capOwn.winner === null && capRefOwn.winner === null && capSame.outcome === "unchanged" && capSame.winner === null,
     `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own; an envelope without its agent id owns nothing (an id read by name proves nothing); neither assert_priority nor clear_priority shows it a winner, on another's item or its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code}, ${capNoId.code}, ${JSON.stringify(capClearOther.winner)})`);
   const readKey = await put("thought", capThought, 1, READ);
   const readClear = await clear("thought", capThought, READ);
@@ -16675,9 +16690,12 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const exact = await drift();
   await db.query(`INSERT INTO priority_assertions (item_kind, item_key, level, maker_name, maker_source, tier, asserted_at) VALUES ('thought', $1, 5, 'raw-writer', false, 1, now())`, [twin]);
   const behind = await drift();
+  const liveWhileBehind = await winnerNow(twin);
   const rebuilt = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_priority_projection()`)).rows[0];
-  assert(exact === 0 && behind === 1 && rebuilt.written === 1 && rebuilt.deleted === 0 && (await drift()) === 0 && (await winnerNow(twin)) === "raw-writer",
-    `the projection is exact after every call; a raw INSERT leaves it behind, the drift check names the item, and the rebuild writes it (${exact}, ${behind}, ${JSON.stringify(rebuilt)})`);
+  const again2 = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_priority_projection()`)).rows[0];
+  assert(exact === 0 && behind === 1 && rebuilt.written === 1 && rebuilt.deleted === 0 && (await drift()) === 0 && (await winnerNow(twin)) === "raw-writer"
+         && liveWhileBehind === "raw-writer" && again2.written === 0 && again2.deleted === 0,
+    `the projection is exact after every call; a raw INSERT leaves it behind, the drift check names the item, priority_of answers from the rule meanwhile, and the rebuild writes it, a second counting nothing (${exact}, ${behind}, ${liveWhileBehind}, ${JSON.stringify(rebuilt)}, ${JSON.stringify(again2)})`);
 
   // priority_of: in the order asked, an item asked twice once, an unknown item's level NULL (unknown, not low); at most 1000.
   const many = await of([{ kind: "ticket", key: "smd-9301" }, { kind: "thought", key: twin }, { kind: "ticket", key: "SMD-9301" }, { kind: "entity", key: "11111111-2222-4333-8444-555555555555" }]);
@@ -16734,6 +16752,13 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const renamedAfter = await put("ticket", "SMD-9301", 2, { name: "prio-sync-renamed", scope: "write", agent_id: syncId });
   const declareNew = (await db.query<{ r: { was_declared: boolean } }>(`SELECT declare_priority_source('prio-sync') AS r`)).rows[0].r;
   const newSource = await put("ticket", "SMD-9301", 2, { name: "prio-sync", scope: "write", agent_id: await agentOf("prio-sync") });
+  // Declaring a label the registry does not know makes its row, as set_agent_kind does; a key arriving under that name is the source.
+  const fresh = await db.query<{ r: { ok: boolean; agent_id: string | null; was_declared: boolean } }>(`SELECT declare_priority_source('prio-fresh') AS r`).then((x) => x.rows[0].r, (e: Error) => ({ ok: false, agent_id: null, was_declared: false, raised: e.message.split("\n")[0] }));
+  const freshRow = await agentOf("prio-fresh");
+  const freshSays = await put("ticket", "SMD-9301", 3, { name: "prio-fresh", scope: "write" });
+  const standingFresh = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_sources WHERE source_agent_id = $1::uuid AND withdrawn_at IS NULL`, [freshRow])).rows[0].n;
+  assert(fresh.ok && fresh.agent_id !== null && fresh.agent_id === freshRow && freshSays.assertion?.tier_name === "source" && standingFresh === 1,
+    `declaring a label the registry does not know makes its registry row and declares that agent; the key's statements take tier 2 by its id (${fresh.agent_id === freshRow}, ${freshSays.assertion?.tier_name})`);
   // A declaration only raises: an operator's key declared a source stays at tier 1.
   await db.query(`SELECT declare_priority_source('prio-op')`);
   const opDeclared = await put("thought", ladder, 4, OP);
@@ -16749,7 +16774,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const ones = await Promise.all(["assert_priority", "clear_priority", "priority_of", "priority_history", "declare_priority_source"].map(functionsNamed));
   assert(after === before && ones.every((n) => n === 1) && (await drift()) === 0, `116 applied again changes nothing: ${after} assertions stand, one of each call, the projection exact (${ones.join(",")})`);
 
-  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late', 'prio-late2', 'prio-fresh')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

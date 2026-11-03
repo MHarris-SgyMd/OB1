@@ -2365,7 +2365,9 @@ it made by name before the registry knew it is still its own to replace or clear
 (115's `is_holder` rule). A key's new
 statement on an item closes its open one as `replaced`, naming the new one; the
 same statement again (level, times, reference, reason, flag and tier) answers
-`unchanged` and writes nothing, so a source restating every pass adds no rows;
+`unchanged` and writes nothing (a key that has since gained an id, or changed its
+scope, kind or declaration, states it afresh), so a source restating every pass
+adds no rows;
 `clear_priority` closes the caller's own as `cleared` and no other key's.
 `not_before` after `due_at` is refused. `priority_assertions` is append-only: a trigger refuses any UPDATE but an
 open row closing once, every DELETE and TRUNCATE, for the owner too. The
@@ -2387,7 +2389,8 @@ what exists; neither writer shows it the item's winner. `priority_of` and
 deleted item's assertions stay as they were (SMD-3711, beside SMD-1723). The refusals are
 outcomes, as an unknown item is (`ITEM_NOT_FOUND`). `priority_of` reads a
 JSON array of items (at most 1000) in one query: each item's winning level, the
-winner, and every open assertion, the winner first; `priority_history` reads
+winner and every open assertion, the winner first, all read by the rule in one
+statement so a reply never contradicts itself; `priority_history` reads
 every statement on one item, closed ones included, in the order written.
 `priority_current` is the projection, one row per item with an open assertion,
 kept current in the write's transaction; `ob1_priority_projection_drift()`
@@ -2396,10 +2399,11 @@ checks it with its own copy of the winner's rule (068's) and
 `declare_priority_source(label, declared)` is the operator's, beside
 `set_agent_kind`: server roles hold only `SELECT` on `priority_sources`. Each
 declaration is a row of its own, closed by its withdrawal and never rewritten,
-and names the key's agent id when the registry knows it: makers, declarations
-and withdrawals are matched by that id, so a renamed source stays one (and is
-withdrawn by its new name) and a new key given the old name is not one until
-declared itself. The statements made under a declaration keep their tier. Each
+and always names the key's agent id — a declaration makes the registry row for a
+label the registry does not know yet, as `set_agent_kind` does. Makers,
+declarations and withdrawals are matched by that id alone, so a renamed source
+stays one (and is withdrawn by its new name) and a new key given the old name is
+not one until declared itself. The statements made under a declaration keep their tier. Each
 writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
 lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach

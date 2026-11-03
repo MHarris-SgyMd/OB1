@@ -24,10 +24,12 @@
 --      * item    — an open item's id (SMD-3665). Refused until that kind's
 --                  table exists: the write function checks that every item
 --                  exists, and there is nothing yet to check this one against.
---      No registry table and no foreign key: an item may be a ticket nobody
---      synced yet as a row, and a projection must not hold a reference to a
---      row it does not own. The write function checks existence at the write
---      (a thought by id, a ticket by 068's ob1_ticket_head, an entity by id).
+--      No registry table and no foreign key: the four kinds live in four
+--      tables (a ticket in no table at all, but a projection of its rows),
+--      and an assertion is history that outlives a row it named. The write
+--      function checks existence at the write (a thought by id, a ticket by
+--      068's ob1_ticket_head, so a ticket board-sync has not yet written a row
+--      for is refused, an entity by id).
 --
 --   2. AN ASSERTION is one row of priority_assertions — decision 2:
 --      * the item; the level, 0 none to 5 critical (decision 3: 1 low, 2
@@ -59,7 +61,11 @@
 --        where docs/priority.md's "A statement over MCP" puts the source first).
 --      * TWO DUE TIMES: an assertion may carry due_at and a due reference
 --        both; its own due_at wins, the reference's is read only where it has
---        none (decision 5: "the winning due_at, or else due_ref's").
+--        none (decision 5: "the winning due_at, or else due_ref's"). A
+--        reference is followed one hop and no further (decision 5's table:
+--        "its due_ref is not followed"), so references that form a cycle
+--        across items are stored and harmless; only one naming its own item
+--        is refused.
 --      * THE ORDER: seq, the order rows were written under the item's lock —
 --        the history's order and what "newest" means; asserted_at is the
 --        clock's, for display.
@@ -86,8 +92,10 @@
 --
 --   4. THE SOURCES, priority_sources: the keys the operator declared priority
 --      sources, beside set_agent_kind — declare_priority_source(label,
---      declared). One row per declaration, never rewritten; matched by the
---      agent's id (by label only where declared before the registry knew it). Server roles read the table and cannot write it, so
+--      declared). One row per declaration, never rewritten, always by the
+--      key's agent id: a declaration makes the registry row for a label the
+--      registry does not know yet, as set_agent_kind does, and a maker is
+--      matched by that id alone. Server roles read the table and cannot write it, so
 --      only a role the operator holds can declare one (decision 10, as 046's
 --      ob1_agents UPDATE). A withdrawn declaration is kept with when; the
 --      assertions made under it keep their tier.
@@ -106,7 +114,8 @@
 --        (SMD-2617: it may not state a ticket's status either). Asked before
 --        any existence answer and refused alike for an item that is not there
 --        (ITEM_NOT_YOURS), so the refusal tells it nothing about what exists.
---        Its assertion takes its own trust's tier;
+--        Its assertion takes its own trust's tier. Only thoughts: SMD-3665's
+--        open items extend ownership to their kind;
 --      * an ingested key at tier 4 unless declared a source.
 --      The refusals are outcomes, as an unknown item is (ITEM_NOT_FOUND); a
 --      malformed argument, an envelope naming nobody and a transaction above
@@ -317,17 +326,17 @@ COMMENT ON TABLE priority_current IS
 CREATE TABLE IF NOT EXISTS priority_sources (
   id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   label           text        NOT NULL,
-  source_agent_id uuid,
+  source_agent_id uuid        NOT NULL,
   declared_at     timestamptz NOT NULL,
   withdrawn_at    timestamptz,
   CONSTRAINT priority_sources_label  CHECK (label <> '' AND length(label) <= 200 AND label = btrim(label)),
   CONSTRAINT priority_sources_window CHECK (withdrawn_at IS NULL OR withdrawn_at >= declared_at)
 );
 COMMENT ON TABLE priority_sources IS
-  'The keys the operator declared priority sources (decision 4''s tier 2): board-sync for Linear, a plugin''s key. One row per declaration, closed by its withdrawal and never rewritten, so the history says when each key was a source. A declaration names the key''s label and, when the registry knows it, its agent id, which is what a maker is matched by — a renamed key stays a source, and a new key given the old name is not. Written only through declare_priority_source, which server roles cannot (they hold SELECT alone). The assertions made under a declaration keep their tier. Migration 116 / SMD-3663.';
-CREATE UNIQUE INDEX IF NOT EXISTS priority_sources_one_standing ON priority_sources ((COALESCE(source_agent_id::text, 'label:' || label))) WHERE withdrawn_at IS NULL;
+  'The keys the operator declared priority sources (decision 4''s tier 2): board-sync for Linear, a plugin''s key. One row per declaration, closed by its withdrawal and never rewritten, so the history says when each key was a source. A declaration names the key''s agent id, the registry''s row for the label (made by the declaration when the registry has none, as set_agent_kind makes it), and that id alone is what a maker is matched by — a renamed key stays a source, and a new key given the old name is not. The label is the name the key had when declared. Written only through declare_priority_source, which server roles cannot (they hold SELECT alone). The assertions made under a declaration keep their tier. Migration 116 / SMD-3663.';
+CREATE UNIQUE INDEX IF NOT EXISTS priority_sources_one_standing ON priority_sources (source_agent_id) WHERE withdrawn_at IS NULL;
 COMMENT ON INDEX priority_sources_one_standing IS
-  'One standing declaration per key: by its agent id, by its label where declared before the registry knew it. The label is the name it had when declared. Migration 116 / SMD-3663.';
+  'One standing declaration per key, by its agent id. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- Append-only, but for closing a window
@@ -429,6 +438,12 @@ DECLARE
   v_env jsonb;
 BEGIN
   IF p_actor IS NOT NULL THEN
+    -- An object or nothing: a JSON string (a client that encoded the envelope
+    -- twice) would replace the transaction's actor with one naming nobody
+    -- (review pass 4).
+    IF jsonb_typeof(p_actor) <> 'object' THEN
+      RAISE EXCEPTION USING MESSAGE = format('%s: p_actor must be a JSON object, not a %s', p_what, jsonb_typeof(p_actor)), ERRCODE = 'invalid_parameter_value';
+    END IF;
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
   v_env := ob1_current_actor();
@@ -454,18 +469,15 @@ BEGIN
   kind := ob1_registry_kind(agent_id, name);
   trust := ob1_trust_ceiling(kind, NULL);
   scope := left(NULLIF(btrim(COALESCE(v_env->>'scope', '')), ''), 40);
-  -- A standing declaration of this agent by its id; by the label only where
-  -- the declaration was made before the registry knew the key (review pass 2:
-  -- by label, a renamed source lost its tier and a new key given the old name
-  -- gained it).
-  source := EXISTS (
-    SELECT 1 FROM priority_sources s
-     WHERE s.withdrawn_at IS NULL
-       AND CASE WHEN s.source_agent_id IS NOT NULL THEN s.source_agent_id = agent_id ELSE s.label = name END);
+  -- A standing declaration of this agent, by its id alone (review passes 2
+  -- to 4: by label, a renamed source lost its tier and a new key given the old
+  -- name gained it; a by-label fallback kept both seams open).
+  source := agent_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM priority_sources s WHERE s.withdrawn_at IS NULL AND s.source_agent_id = agent_id);
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_actor(jsonb, text) IS
-  'Sets ob1.actor from p_actor when given, then returns the envelope''s maker: name, its agent id (061''s from the envelope, else the registry''s for the name), the envelope''s own id alone (env_agent_id, what proves a capture key''s thought), 046''s registry kind and its trust ceiling, the envelope''s scope, and whether a standing declaration names it a priority source (by its agent id; by label where declared before the registry knew it). Raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 116 / SMD-3663.';
+  'Sets ob1.actor from p_actor when given, then returns the envelope''s maker: name, its agent id (061''s from the envelope, else the registry''s for the name), the envelope''s own id alone (env_agent_id, what proves a capture key''s thought), 046''s registry kind and its trust ceiling, the envelope''s scope, and whether a standing declaration names it a priority source (by its agent id alone). Raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 116 / SMD-3663.';
 
 -- Whether a capture-only key's agent captured this thought and nobody has
 -- taken it since (082's reading: the capturer by agent id on the first capture
@@ -716,14 +728,18 @@ BEGIN
    ORDER BY a.seq DESC LIMIT 1
    FOR UPDATE;
 
-  -- The same statement again — level, times, reference, reason, flag and tier
-  -- as the open one says — is no change: answered unchanged, nothing written,
+  -- The same statement again — level, times, reference, reason, flag, tier and
+  -- the maker's stamp as the open one says — is no change: answered unchanged, nothing written,
   -- so a source restating its priority every pass (board-sync) adds no row
   -- and moves no "newest" (review pass 1).
+  -- The maker's stamp counts too: a key that has since gained an id, or
+  -- changed its scope, kind or declaration, states it afresh (review pass 4).
   IF v_own = 1
-     AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier)
+     AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier,
+          v_old.maker_name, v_old.maker_agent_id, v_old.maker_kind, v_old.maker_trust, v_old.maker_scope, v_old.maker_source)
          IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false),
-                               ob1_priority_tier(p_inferred, v_who.source, v_who.trust)) THEN
+                               ob1_priority_tier(p_inferred, v_who.source, v_who.trust),
+                               v_who.name, v_who.agent_id, v_who.kind, v_who.trust, v_who.scope, v_who.source) THEN
     -- The winner from the rule, as clear_priority reads it: never a stale or
     -- missing projection row's nulls (review pass 2).
     v_win := ob1_priority_winner(v_item.kind, v_item.key);
@@ -831,18 +847,21 @@ BEGIN
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS e(v, ord)
       CROSS JOIN LATERAL ob1_priority_item(e.v->>'kind', e.v->>'key') AS n
      ORDER BY n.kind, n.key, e.ord)
-  SELECT q.kind, q.key, c.level,
-         (SELECT ob1_priority_json(a) FROM priority_assertions a WHERE a.id = c.winner_id),
-         COALESCE((SELECT jsonb_agg(ob1_priority_json(a) ORDER BY (a.id = c.winner_id) DESC, a.tier, a.seq DESC)
+  -- The winner and its level from the rule, read with the open assertions in
+  -- one statement, so one reply never contradicts itself (review pass 4: the
+  -- projection's level beside a live list disagreed until a rebuild).
+  SELECT q.kind, q.key, w.level,
+         CASE WHEN w.id IS NOT NULL THEN ob1_priority_json(w) END,
+         COALESCE((SELECT jsonb_agg(ob1_priority_json(a) ORDER BY a.tier, a.seq DESC)
                      FROM priority_assertions a
                     WHERE a.item_kind = q.kind AND a.item_key = q.key AND a.closed_at IS NULL), '[]'::jsonb)
     FROM asked q
-    LEFT JOIN priority_current c ON c.item_kind = q.kind AND c.item_key = q.key
+    CROSS JOIN LATERAL ob1_priority_winner(q.kind, q.key) AS w
    ORDER BY q.ord;
 END;
 $$;
 COMMENT ON FUNCTION priority_of(jsonb) IS
-  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner, and every open assertion — the winner first, then by tier and newest. An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). The winner is the projection''s (priority_current). Raises on a malformed item. Migration 116 / SMD-3663.';
+  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner, and every open assertion by tier and newest, the winner first. An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). The winner is the rule''s, read with the list in one statement; priority_current is the projection SMD-3667''s reads join. Raises on a malformed item. Migration 116 / SMD-3663.';
 
 CREATE OR REPLACE FUNCTION priority_history(p_kind text, p_key text)
 RETURNS jsonb
@@ -872,16 +891,18 @@ BEGIN
   IF v_label = '' OR length(v_label) > 200 THEN
     RETURN jsonb_build_object('ok', false, 'error', 'BAD_LABEL');
   END IF;
-  -- The key the label names now, and its standing declaration by that key's
-  -- id, as makers are matched — not by the label a declaration was made under
-  -- (review pass 3: after a rename, withdrawing by the new name found nothing,
-  -- and declaring a new key given the old name found the renamed key's row).
+  -- The key the label names now, by its registry row — made here when the
+  -- registry has none, as set_agent_kind makes one (resolve_agent, 010, then
+  -- attaches the key's digest to it), so every declaration is by agent id and
+  -- makers are matched by that alone (review pass 4: a by-label fallback for a
+  -- key the registry did not know yet stayed bound to the name after the key
+  -- registered, and a withdrawal could miss one of two standing rows).
+  IF COALESCE(p_declared, true) THEN
+    INSERT INTO ob1_agents (label) VALUES (v_label) ON CONFLICT (label) DO NOTHING;
+  END IF;
   v_agent := (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = v_label);
   SELECT * INTO v_standing FROM priority_sources s
-   WHERE s.withdrawn_at IS NULL
-     AND CASE WHEN v_agent IS NOT NULL THEN s.source_agent_id = v_agent OR (s.source_agent_id IS NULL AND s.label = v_label)
-              ELSE s.source_agent_id IS NULL AND s.label = v_label END
-   ORDER BY s.declared_at DESC LIMIT 1
+   WHERE s.withdrawn_at IS NULL AND s.source_agent_id = v_agent
    FOR UPDATE;
   IF COALESCE(p_declared, true) THEN
     -- A new declaration is a new row: a withdrawn one keeps its window (review pass 2).
@@ -891,12 +912,12 @@ BEGIN
   ELSIF v_standing.id IS NOT NULL THEN
     UPDATE priority_sources SET withdrawn_at = v_now WHERE id = v_standing.id;
   END IF;
-  RETURN jsonb_build_object('ok', true, 'label', v_label, 'declared', COALESCE(p_declared, true),
+  RETURN jsonb_build_object('ok', true, 'label', v_label, 'agent_id', v_agent, 'declared', COALESCE(p_declared, true),
     'was_declared', v_standing.id IS NOT NULL);
 END;
 $$;
 COMMENT ON FUNCTION declare_priority_source(text, boolean) IS
-  'The operator declares the key named label a priority source (p_declared true, the default) — a new row naming the label and, when the registry knows it, the agent''s id — or withdraws its standing declaration (false), which keeps its row with when. A declared key''s assertions take tier 2, between the operator''s and an agent''s. Server roles hold SELECT alone on priority_sources, so only a role the operator holds can call it — as set_agent_kind. Returns {ok, label, declared, was_declared}, or {ok: false, error: BAD_LABEL}. Migration 116 / SMD-3663.';
+  'The operator declares the key named label a priority source (p_declared true, the default) — a new row naming the key''s agent id, the registry''s row for the label, which the declaration makes when there is none (as set_agent_kind does) — or withdraws the standing declaration of the key the label names now (false), which keeps its row with when. Returns {ok, label, agent_id, declared, was_declared}, or {ok: false, error: BAD_LABEL}. A declared key''s assertions take tier 2, between the operator''s and an agent''s. Server roles hold SELECT alone on priority_sources (and no INSERT on ob1_agents), so only a role the operator holds can call it — as set_agent_kind. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- The drift check and the rebuild (068's pattern)
@@ -930,7 +951,10 @@ RETURNS TABLE (written int, deleted int)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  r record;
+  r        record;
+  w        priority_assertions;
+  v_before text;
+  v_after  text;
 BEGIN
   PERFORM ob1_priority_isolation('ob1_rebuild_priority_projection()');
   written := 0;
@@ -939,12 +963,16 @@ BEGIN
   -- they would wait on in another order.
   FOR r IN SELECT DISTINCT d.item_kind, d.item_key FROM ob1_priority_projection_drift() d ORDER BY 1, 2 LOOP
     PERFORM ob1_priority_lock(r.item_kind, r.item_key);
-    IF EXISTS (SELECT 1 FROM priority_assertions a WHERE a.item_kind = r.item_kind AND a.item_key = r.item_key AND a.closed_at IS NULL) THEN
-      written := written + 1;
-    ELSE
-      deleted := deleted + 1;
+    -- Counted only if still wrong under the lock: a writer may have fixed it
+    -- since the drift was read (review pass 4).
+    SELECT row(c.winner_id, c.level, c.tier, c.maker_name, c.asserted_at, c.open_count)::text INTO v_before
+      FROM priority_current c WHERE c.item_kind = r.item_kind AND c.item_key = r.item_key;
+    w := ob1_priority_project(r.item_kind, r.item_key);
+    SELECT row(c.winner_id, c.level, c.tier, c.maker_name, c.asserted_at, c.open_count)::text INTO v_after
+      FROM priority_current c WHERE c.item_kind = r.item_kind AND c.item_key = r.item_key;
+    IF v_before IS DISTINCT FROM v_after THEN
+      IF w.id IS NOT NULL THEN written := written + 1; ELSE deleted := deleted + 1; END IF;
     END IF;
-    PERFORM ob1_priority_project(r.item_kind, r.item_key);
   END LOOP;
   RETURN NEXT;
 END
