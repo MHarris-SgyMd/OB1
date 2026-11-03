@@ -395,7 +395,7 @@ function proposalsWarnDays(raw: string | undefined): { days: number; problem?: s
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks",
 ];
@@ -3031,6 +3031,45 @@ if (configFailed) {
                 "As a superuser: ALTER SYSTEM SET log_parameter_max_length = 0; ALTER SYSTEM SET log_parameter_max_length_on_error = 0; (and auto_explain.log_parameter_max_length = 0, auto_explain.log_verbose = off, pgaudit.log_parameter = off where loaded; debug_print_plan = off) SELECT pg_reload_conf(); — or turn that logging off (SMD-3598).");
           } else {
             add("ticket claims", "ok", `claim_work, renew_work_claim, release_work_claim and list_work_claims present; the server's role holds the claims group; ${logs ? "the logging settings read print no bind value" : "the logging settings could not be read"}`);
+          }
+        }
+
+        /**
+         * Migration 116's priority assertions (SMD-3664): the functions set_priority, clear_priority and
+         * priority_history call, under 116's signatures, and the server role's `priority` grant — soft, as 115's
+         * claims group is (116's PRIVILEGES: a role without it is refused the priority calls alone, naming the
+         * table). Nothing to read before 116: a skip.
+         */
+        {
+          const PRIORITY_FNS = ["assert_priority(text,text,integer,timestamptz,timestamptz,text,text,text,boolean,jsonb)", "clear_priority(text,text,jsonb)",
+            "priority_of(jsonb)", "priority_history(text,text)", "ob1_priority_item_exists(text,text)"];
+          // The group's grants (db/config.mjs ROLE_GRANTS priority), each table and privilege a pair.
+          const PRIORITY_GRANTS: [string, string][] = [
+            ["priority_assertions", "SELECT"], ["priority_assertions", "INSERT"], ["priority_assertions", "UPDATE"],
+            ["priority_current", "SELECT"], ["priority_current", "INSERT"], ["priority_current", "UPDATE"], ["priority_current", "DELETE"],
+            ["priority_sources", "SELECT"], ["ob1_entities", "SELECT"],
+          ];
+          // Its own read, caught here, as the ticket claims' is: a refusal warns this row alone.
+          const prRows = await sql.unsafe(`
+            SELECT to_regclass('public.priority_assertions') IS NOT NULL AS has_table,
+                   ARRAY(SELECT f FROM unnest(ARRAY[${PRIORITY_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
+                   CASE WHEN to_regclass('public.priority_assertions') IS NULL THEN NULL
+                        ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${PRIORITY_GRANTS.map(([t, p]) => `('${t}', '${p}')`).join(", ")}) g(t, p)
+                                    WHERE to_regclass('public.' || g.t) IS NULL OR NOT has_table_privilege('public.' || g.t, g.p)) END AS ungranted`)
+            .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const pr = Array.isArray(prRows) ? prRows[0] : null;
+          if (!pr) {
+            add("priority", "warn", `could not verify: ${(prRows as Error).message}`, "The check reads priority_assertions and 116's functions in public; the message says why it failed.");
+          } else if (!pr.has_table) {
+            add("priority", "skip", "not checked — priority_assertions does not exist (migration 116 not applied)");
+          } else if (pr.missing.length) {
+            add("priority", "fail", `migration 116's ${pr.missing.join(", ")} missing under 116's signature; set_priority, clear_priority and priority_history call them`,
+                ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
+          } else if (pr.ungranted?.length) {
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: set_priority, clear_priority and priority_history fail naming the table, and nothing else does`,
+                "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
+          } else {
+            add("priority", "ok", "assert_priority, clear_priority, priority_of and priority_history present; the server's role holds the priority group");
           }
         }
 

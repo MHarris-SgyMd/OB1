@@ -1304,6 +1304,118 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     `the holder's own release over MCP with its token; releasing it again, from any key, already_released (${own.text.slice(0, 80)} | ${again.status} ${again.body.outcome})`);
 }
 
+console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3664): a statement set over MCP is the one REST's history names, with its maker, trust and tier; a read key may not set, a capture-only key not on a writer's thought (alike for one that is not there) but on its own, shown no winner; the same record through both doors; another key's statement outranked and kept, a replace and a clear in the history; what 116 refuses answers by its rule, an item the brain does not hold by its name");
+{
+  type A = { id: string; item: { kind: string; key: string }; level: number; dueAt: string | null; reason: string | null; maker: { name: string; trust: string | null; scope: string | null }; tier: number; tierName: string; closedAt: string | null; closeReason: string | null; closedBy: string | null };
+  const item = ids[0];
+  const path = (key: string, kind = "thought") => `/v1/priorities/${kind}/${encodeURIComponent(key)}`;
+  // The writer as the operator and the rival as an agent, so the two statements sit at two tiers.
+  await sql`SELECT set_agent_kind('writer', 'operator')`;
+  await sql`SELECT set_agent_kind('rival', 'agent')`;
+  try {
+    // Verify 1: a set over MCP, the history over REST — one assertion, one maker, one trust.
+    const m = await mcp("set_priority", { kind: "thought", key: item, level: 4, due_at: "2027-03-01", reason: "the passport renewal is urgent" });
+    const set = m.sc.assertion as A | undefined;
+    const h = await rest("GET", path(item));
+    const hist = (h.body.history ?? []) as A[];
+    assert(!m.isError && m.sc.outcome === "asserted" && set?.maker.name === "writer" && set.maker.trust === "operator" && set.tierName === "operator" && set.dueAt === "2027-03-01T00:00:00.000Z"
+        && h.status === 200 && hist.length === 1 && hist[0].id === set.id && hist[0].maker.name === "writer" && hist[0].maker.trust === "operator" && hist[0].tier === 1
+        && (h.body.winner as A | undefined)?.id === set.id && h.body.level === 4 && h.body.exists === true,
+      `a set over MCP and the history over REST name the same assertion, maker and trust: the operator's urgent, due at the start of 2027-03-01 UTC (${m.text.slice(0, 120)} | ${h.status} ${hist.length} ${hist[0]?.maker.name}/${hist[0]?.maker.trust})`);
+    const [row] = await sql`SELECT maker_scope, maker_agent_id IS NOT NULL AS has_id FROM priority_assertions WHERE id = ${set?.id ?? null}::uuid`;
+    assert(row?.maker_scope === "write" && row?.has_id === true, `the envelope stated the write key's scope, and its agent id, to 116 (${JSON.stringify(row)})`);
+
+    // Verify 3: the same record through both doors — the history as REST answers it is what MCP says, text and value.
+    const hm = await mcp("priority_history", { kind: "thought", key: item });
+    const out = rendered((v) => say.renderPriorityHistory(ok(v)), h.body);
+    assert(!hm.isError && out.content[0].text === hm.text && same(out.structuredContent, hm.sc) && /^thought \S+: urgent \(4\), the winner urgent \(4\), due 2027-03-01T00:00:00\.000Z by writer at the operator tier: "the passport renewal is urgent"/.test(hm.text),
+      `priority_history: the MCP reply is the REST answer rendered, text and structuredContent (${hm.text.slice(0, 120)} | ${firstDiff(out.structuredContent, hm.sc)})`);
+    // The same statement again, once through each door: unchanged, nothing written, one reply.
+    const againRest = await rest("POST", path(item), { level: 4, due_at: "2027-03-01T00:00:00Z", reason: "the passport renewal is urgent" });
+    const againMcp = await mcp("set_priority", { kind: "thought", key: item, level: 4, due_at: "2027-03-01", reason: "the passport renewal is urgent" });
+    const againOut = rendered((v) => say.renderSetPriority(ok(v)), againRest.body);
+    assert(againRest.status === 200 && againRest.body.outcome === "unchanged" && againOut.content[0].text === againMcp.text && same(againOut.structuredContent, againMcp.sc)
+        && /^Your statement on thought \S+ already says this — .* so nothing was written\. Yours is the item's winner\.$/.test(againMcp.text),
+      `set_priority: the same statement again is unchanged, one reply through both doors (${againRest.body.outcome} | ${againMcp.text.slice(-80)})`);
+
+    // Verify 2: a read key may not set; a capture-only key not on the writer's thought, and alike on one that is not there.
+    const readerSet = await rest("POST", path(item), { level: 1 }, KEYS.reader);
+    const readerMcp = await mcp("set_priority", { kind: "thought", key: item, level: 1 }, KEYS.reader).then((r) => r.isError, () => true);
+    const readerReads = await rest("GET", path(item), undefined, KEYS.reader);
+    const hookSet = await rest("POST", path(item), { level: 5, reason: "steering a shared read" }, KEYS.hook);
+    const hookNowhere = await rest("POST", path("00000000-0000-4000-8000-000000003664"), { level: 5, reason: "steering a shared read" }, KEYS.hook);
+    // A tool the capture key is not given is a JSON-RPC error: said as a failed reply, so the case fails rather than the suite.
+    const asReply = (e: unknown): Reply => ({ text: `(no reply: ${(e as Error).message})`, sc: {}, isError: true });
+    const hookMcp = await mcp("set_priority", { kind: "thought", key: item, level: 5 }, KEYS.hook).catch(asReply);
+    const hookTicket = await rest("POST", path("smd-3664", "ticket"), { level: 5 }, KEYS.hook);
+    const hookReads = await rest("GET", path(item), undefined, KEYS.hook);
+    assert(readerSet.status === 403 && readerSet.body.code === "FORBIDDEN" && readerMcp && readerReads.status === 200,
+      `a read key's set is refused through both doors (403 FORBIDDEN, no such tool over MCP); it reads the history (${readerSet.status} ${readerSet.body.code} ${readerReads.status})`);
+    const { item: _hookItem, ...hookFacts } = hookSet.body as Record<string, unknown>;
+    const { item: _nowhereItem, ...nowhereFacts } = hookNowhere.body as Record<string, unknown>;
+    assert(hookSet.status === 403 && hookSet.body.code === "ITEM_NOT_YOURS" && hookNowhere.status === 403 && same(hookFacts, nowhereFacts) && hookTicket.status === 403 && hookTicket.body.code === "ITEM_NOT_YOURS"
+        && hookMcp.isError && /^Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since\.$/.test(hookMcp.text) && hookReads.status === 403,
+      `a capture-only key's set on the writer's thought is refused 403 ITEM_NOT_YOURS, the same for a thought that is not there and for a ticket; in words over MCP; it may not read the history (${hookSet.status} ${hookSet.body.code} | ${hookNowhere.status} ${hookNowhere.body.code} | ${hookMcp.text} | ${hookReads.status})`);
+    // …and on its own thought it may, at its own trust, shown no winner.
+    const hookThought = String((await rest("POST", "/v1/thoughts", { content: "omega: a thought the hook captured, to state a priority on" }, KEYS.hook)).body.id);
+    const hookOwn = await rest("POST", path(hookThought), { level: 2 }, KEYS.hook);
+    const hookOwnMcp = await mcp("set_priority", { kind: "thought", key: hookThought, level: 2 }, KEYS.hook).catch(asReply);
+    const hookAssertion = hookOwn.body.assertion as A | undefined;
+    assert(hookOwn.status === 200 && hookOwn.body.outcome === "asserted" && hookAssertion?.maker.name === "hook" && hookAssertion.maker.scope === "capture" && hookOwn.body.winner === null && hookOwn.body.winnerShown === false
+        && !hookOwnMcp.isError && hookOwnMcp.sc.outcome === "unchanged" && !/winner/.test(hookOwnMcp.text),
+      `a capture-only key's set on its own thought is stated, scope capture, no winner shown, nor a word of one (${hookOwn.status} ${hookAssertion?.maker.scope} ${hookOwn.body.winnerShown} | ${hookOwnMcp.text.slice(0, 80)})`);
+
+    // Another key's statement: the rival, an agent, says critical; the operator's urgent still wins, and both are listed.
+    const rivalSet = await rest("POST", path(item), { level: 5, reason: "the rival thinks it critical" }, KEYS.rival);
+    const rivalWinner = rivalSet.body.winner as A | undefined;
+    assert(rivalSet.status === 200 && (rivalSet.body.assertion as A).tierName === "agent" && rivalWinner?.id === set?.id && rivalSet.body.winnerShown === true,
+      `an agent's critical beside the operator's urgent: stated at the agent tier, the operator's still the winner (${(rivalSet.body.assertion as A | undefined)?.tierName} ${rivalWinner?.maker.name})`);
+    // The writer replaces its own: the first closes as replaced, naming the second; the rival's is untouched.
+    const replace = await mcp("set_priority", { kind: "thought", key: item, level: 3 });
+    const replaced = replace.sc.replaced as A | undefined, second = replace.sc.assertion as A | undefined;
+    const after = ((await rest("GET", path(item))).body.history ?? []) as A[];
+    const first = after.find((a) => a.id === set?.id);
+    assert(!replace.isError && replaced?.id === set?.id && first?.closeReason === "replaced" && first.closedBy === second?.id && after.length === 3 && after.filter((a) => a.closedAt === null).length === 2
+        && /It replaces your earlier statement, urgent \(4\) \(assertion \S+\), which stays in the history\. Yours is the item's winner\.$/.test(replace.text),
+      `a replace: the first statement closed as replaced by the second, both in the history beside the rival's (${after.length}; ${first?.closeReason} ${first?.closedBy === second?.id} | ${replace.text.slice(-90)})`);
+    // The writer clears its own over MCP: the rival's is the winner now; clearing again over REST is nothing to clear — one reply through both doors.
+    const cleared = await mcp("clear_priority", { kind: "thought", key: item });
+    const clearRest = await rest("DELETE", path(item));
+    const clearMcp = await mcp("clear_priority", { kind: "thought", key: item });
+    const clearOut = rendered((v) => say.renderClearPriority(ok(v)), clearRest.body);
+    assert(!cleared.isError && cleared.sc.outcome === "cleared" && (cleared.sc.winner as A | undefined)?.maker.name === "rival"
+        && /^Cleared your statement on thought \S+, high \(3\) \(assertion \S+\); it stays in the history\. The item's winner is critical \(5\) by rival at the agent tier: "the rival thinks it critical"/.test(cleared.text)
+        && clearRest.status === 200 && clearRest.body.outcome === "nothing_to_clear" && clearOut.content[0].text === clearMcp.text && same(clearOut.structuredContent, clearMcp.sc),
+      `clear_priority: the writer's own closes and the rival's wins; again, nothing to clear, one reply through both doors (${cleared.text.slice(0, 120)} | ${clearRest.body.outcome})`);
+
+    // What 116 refuses by its rule, 400 by the rule's problem; the schema's own bounds first; an item the brain does not hold, 404 by name.
+    const offScale = await rest("POST", path(item), { level: 6 });
+    const backwards = await rest("POST", path(item), { level: 2, due_at: "2027-03-01", not_before: "2027-04-01" });
+    const notAnId = await rest("POST", path("not-an-id"), { level: 2 });
+    const notATicket = await rest("POST", path("not a key", "ticket"), { level: 2 });
+    const itself = await rest("POST", path(item), { level: 2, due_ref: { kind: "thought", key: item.toUpperCase() } });
+    const backwardsMcp = await mcp("set_priority", { kind: "thought", key: item, level: 2, due_at: "2027-03-01", not_before: "2027-04-01" });
+    assert(offScale.status === 400 && offScale.body.code === "REFUSED_INPUT" && backwards.status === 400 && backwards.body.code === "REFUSED_PRIORITY_INPUT" && backwards.body.problem === "not_before"
+        && notAnId.status === 400 && notAnId.body.problem === "key" && notATicket.status === 400 && notATicket.body.problem === "key" && itself.status === 400 && itself.body.problem === "due_ref"
+        && backwardsMcp.isError && /^Refused: not_before is after due_at/.test(backwardsMcp.text),
+      `a level of 6 is the schema's 400; not_before after due_at, a key that is no thought's id or no ticket's key, and a due reference to itself 400 REFUSED_PRIORITY_INPUT by rule (${offScale.status} ${offScale.body.code} | ${backwards.body.problem} ${notAnId.body.problem} ${notATicket.body.problem} ${itself.body.problem} | ${backwardsMcp.text.slice(0, 60)})`);
+    const nowhere = "00000000-0000-4000-8000-000000003664";
+    const noThought = await rest("POST", path(nowhere), { level: 2 });
+    const noTicket = await rest("POST", path(" smd-9401 ", "ticket"), { level: 2 });
+    const noRef = await rest("POST", path(item), { level: 2, due_ref: { kind: "thought", key: nowhere } });
+    const noOpen = await mcp("set_priority", { kind: "item", key: nowhere, level: 2 });
+    const noHistory = await rest("GET", path(nowhere));
+    const noHistoryMcp = await mcp("priority_history", { kind: "thought", key: nowhere });
+    assert(noThought.status === 404 && noThought.body.code === "ITEM_NOT_FOUND" && same(noThought.body.item, { kind: "thought", key: nowhere }) && noThought.body.which === "item"
+        && noTicket.status === 404 && same(noTicket.body.item, { kind: "ticket", key: "SMD-9401" }) && noRef.status === 404 && noRef.body.which === "due_ref"
+        && noOpen.isError && /^Refused: open items \(kind item\) arrive with SMD-3665/.test(noOpen.text) && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
+        && noHistoryMcp.isError && noHistoryMcp.text === `Refused: the brain holds no thought ${nowhere}.`,
+      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item until SMD-3665 — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
+  } finally {
+    await sql`UPDATE ob1_agents SET kind = NULL WHERE label IN ('writer', 'rival')`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

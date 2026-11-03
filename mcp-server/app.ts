@@ -336,6 +336,10 @@ const WORDS: Record<ToolName, Words> = {
   renew_claim: { render: (o) => say.renderRenewClaim(o), fault: writeFault("renew_claim failed: ") },
   release_claim: { render: (o) => say.renderReleaseClaim(o), fault: writeFault("release_claim failed: ") },
   list_claims: { render: (o) => say.renderListClaims(o), fault: readFault() },
+  // Priority assertions (SMD-3664).
+  set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
+  clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },
+  priority_history: { render: (o) => say.renderPriorityHistory(o), fault: readFault() },
   job_status: { render: (o) => say.renderJobStatus(o), fault: readFault() },
   scan_thoughts: { render: (o) => say.renderJobHandle(o), fault: readFault() },
 };

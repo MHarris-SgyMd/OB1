@@ -20,7 +20,7 @@
 import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
-import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
+import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, PriorityAssertion, PriorityItem, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
@@ -28,6 +28,7 @@ import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.t
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
+import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import { TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
@@ -61,6 +62,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+/** A ticket's key as 116 keys a priority item (SMD-3664): upper-cased, a team key, a hyphen, a number. */
+const TICKET_KEY = /^[A-Z][A-Z0-9]{0,19}-\d{1,9}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -85,6 +88,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
   // A claim's holder (SMD-3598): a key's name — an OAuth principal's `oauth:<sub>+<client>` too — held to no space, so no sentence.
   if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
+  // A priority item's key (SMD-3664): a uuid or a ticket key, as 116 normalised it — neither carries a sentence.
+  if (typeof v === "string" && key === "key" && (UUID.test(v) || TICKET_KEY.test(v))) return v;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -1854,3 +1859,55 @@ export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCo
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderListClaims = (o: Outcome<ListClaimsResult>): Reply => render(o, (v) => JSON.stringify(v), unknownRefusal, AS_JSON);
+
+// ── Priority assertions (SMD-3664, migration 116) ────────────────────────────
+// Each reply's value is its JSON (AS_JSON): a statement's reason and its maker's name are data, which the guard would
+// null, and a reader of the value needs them. In the text another key's reason is its words, quoted on one line.
+
+const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
+const itemText = (i: PriorityItem) => `${i.kind} ${i.key}`;
+const levelText = (level: number) => `${LEVEL_WORDS[level] ?? "level"} (${level})`;
+/** One statement: its level and times, its maker and tier, its reason quoted, its id and when it was made. */
+const statementText = (a: PriorityAssertion) =>
+  `${levelText(a.level)}${a.dueAt ? `, due ${a.dueAt}` : ""}${a.notBefore ? `, not before ${a.notBefore}` : ""}${a.dueRef ? `, due when ${itemText(a.dueRef)} is` : ""}`
+  + ` by ${oneLine(snipText(a.maker.name, 80))} at the ${a.tierName} tier${a.inferred ? " (inferred)" : ""}`
+  + `${a.reason ? `: ${JSON.stringify(oneLine(snipText(a.reason, 200)))}` : ""} (assertion ${a.id}, ${a.assertedAt})`;
+/** The item's winner after a write, to a key shown it: its own statement, another's, or none standing. */
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null) =>
+  !v.winnerShown ? ""
+  : !v.winner ? " No statement on it stands now: its priority is unknown."
+  : v.winner.id === mine ? " Yours is the item's winner."
+  : ` The item's winner is ${statementText(v.winner)}.`;
+const priorityRefusal = (r: Refusal) =>
+  r.code === "ITEM_NOT_FOUND"
+    ? r.openItem ? "Refused: open items (kind item) arrive with SMD-3665; the brain holds none yet."
+      : r.which === "due_ref" ? `Refused: the due reference names no ${itemText(r.item)} in this brain.` : `Refused: the brain holds no ${itemText(r.item)}.`
+  : r.code === "ITEM_NOT_YOURS"
+    ? `Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since${r.dueRef ? ", and take a due time only from another such thought" : ""}.`
+  : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
+  : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not state or clear a priority.`
+  : unknownRefusal(r);
+
+export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>
+  v.outcome === "unchanged"
+    ? `Your statement on ${itemText(v.assertion.item)} already says this — ${statementText(v.assertion)} — so nothing was written.${winnerText(v, v.assertion.id)}`
+    : `Set ${itemText(v.assertion.item)} to ${statementText(v.assertion)}.${v.replaced ? ` It replaces your earlier statement, ${levelText(v.replaced.level)} (assertion ${v.replaced.id}), which stays in the history.` : ""}${winnerText(v, v.assertion.id)}`,
+  priorityRefusal, AS_JSON);
+
+export const renderClearPriority = (o: Outcome<ClearPriorityResult, ClearPriorityCode>): Reply => render(o, (v) =>
+  v.assertion
+    ? `Cleared your statement on ${itemText(v.assertion.item)}, ${levelText(v.assertion.level)} (assertion ${v.assertion.id}); it stays in the history.${winnerText(v, null)}`
+    : `You have no statement open on that item: nothing to clear.${winnerText(v, null)}`,
+  priorityRefusal, AS_JSON);
+
+/** One statement in a history: the statement, and how its window ended — open, replaced (by which) or cleared. */
+const historyLine = (a: PriorityAssertion) =>
+  `- ${statementText(a)}; ${a.closedAt === null ? "open" : a.closeReason === "replaced" ? `replaced at ${a.closedAt}${a.closedBy ? ` by assertion ${a.closedBy}` : ""}` : `cleared at ${a.closedAt}`}`;
+
+export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, PriorityHistoryCode>): Reply => render(o, (v) =>
+  [
+    `${itemText(v.item)}${v.exists ? "" : " (no longer in this brain; its statements are kept)"}: ${v.winner ? `${levelText(v.winner.level)}, the winner ${statementText(v.winner)}.` : "no statement stands — its priority is unknown."}`,
+    v.history.length ? `Every statement, oldest first (${v.history.length}):` : "Nobody has stated a priority on it.",
+    ...v.history.map(historyLine),
+  ].join("\n"),
+  priorityRefusal, AS_JSON);

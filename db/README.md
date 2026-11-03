@@ -2375,7 +2375,8 @@ the whole row, so a column added later is held too), every DELETE and TRUNCATE,
 for the owner too. The scope rule **fails closed**: the envelope must state
 `write` (any item) or `capture`; a read key's scope, or none at all, is refused
 (`READ_ONLY_KEY`). The server's envelopes carry a scope only for a capture key
-today, so SMD-3664's operations state `write`. A **capture-only key** may state
+today, so the operations (SMD-3664) state `write` for a write key and `capture`
+for a capture-only key. A **capture-only key** may state
 a priority only on a thought its agent captured and nobody has taken since
 (082's `ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope
 itself carries, never one read by name, and asked once, under a share lock on
@@ -2384,8 +2385,8 @@ ticket, an entity or another key's thought. That is asked before any existence
 answer and refused alike for an item that is not there (`ITEM_NOT_YOURS`), so
 the refusal tells it nothing about what exists; neither writer shows it the
 item's winner. `priority_of` and `priority_history` take no actor: who may read
-them is the operations layer's (SMD-3664's read tools, which a capture-only key
-is never given). With both `due_at` and a due reference, the item's own `due_at`
+them is the operations layer's (`priority_history`, a read tool, which a
+capture-only key is never given; SMD-3664). With both `due_at` and a due reference, the item's own `due_at`
 is its due time. A deleted item's assertions stay as they were (SMD-3711, beside
 SMD-1723). The refusals are outcomes, as an unknown item is (`ITEM_NOT_FOUND`).
 `priority_of` reads a JSON array of items (at most 1000): each item's winning
@@ -2414,7 +2415,9 @@ lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach
 the rows on a forgotten item, and relaxes the trigger to do so. The **priority**
 grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
-082 and 115; a re-apply is a no-op. The REST and MCP operations are SMD-3664's.
+082 and 115; a re-apply is a no-op. The REST and MCP operations are
+`set_priority`, `clear_priority` and `priority_history` (SMD-3664;
+server-portable/README.md, Priority assertions).
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
