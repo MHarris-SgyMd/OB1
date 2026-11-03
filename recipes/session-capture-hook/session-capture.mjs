@@ -17,7 +17,8 @@
  * session; search results mark a superseded hit. The transcript itself is
  * never sent, and nothing is read from the brain — the hook holds a
  * capture-scoped key (`bun keygen.ts --scope capture`), which the server
- * registers `capture_thought` for and nothing else.
+ * registers `capture_thought` for, and the priority writers on its own
+ * thoughts (SMD-3664), and no read.
  *
  * Before anything leaves the machine the summary is scanned for secrets — the
  * common key prefixes, credential assignments, a URL carrying a password, and
@@ -133,6 +134,8 @@ export const LIMITS = {
   modelInputChars: 12000, // the assistant text handed to the model, tail-clipped
 };
 
+/** The tools a capture-scoped key is given (server-portable/tools.ts's capture group): --check's word for "a capture key". */
+const CAPTURE_SURFACE = new Set(["capture_thought", "set_priority", "clear_priority"]);
 /**
  * The brain's tool names — only THEIR results are read for thought ids, so a uuid printed by some other tool is never claimed as provenance.
  * Not thought_stats: it prints no thought id, and each row of it starts with a type, topic or person, so a tag reading `ID: <uuid>` would read as one (SMD-2510, review pass 2).
@@ -2421,9 +2424,11 @@ async function checkBrain(cfg, tag, onSecret) {
   // config, the model endpoint not called (SMD-2014).
   if (cfg.summary === "model") console.log(`${tag}${modelStatusLine(cfg)}`);
   warnDeprecated();
-  if (tools.join() === "capture_thought") { console.log(`${tag}ok: ${shownUrl(cfg.url)} answers, and the key sees capture_thought alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
+  // A capture key's surface: capture_thought, and since SMD-3664 the priority writers, which the server lets it use on
+  // a thought it captured alone — no read. A server before SMD-3664 lists capture_thought alone.
+  if (tools.includes("capture_thought") && tools.every((t) => CAPTURE_SURFACE.has(t))) { console.log(`${tag}ok: ${shownUrl(cfg.url)} answers, and the key sees ${tools.join(", ")} alone (capture scope). On a secret: ${onSecret}. State: ${STATE_DIR}`); return 0; }
   if (!tools.includes("capture_thought")) { console.error(`session-capture: ${tag}the key cannot capture — its surface is [${tools.join(", ")}]. Mint one with: bun server-portable/keygen.ts --name session-hook --scope capture`); return 1; }
-  console.error(`${tag}warning: the key can capture, and it can also ${tools.filter((t) => t !== "capture_thought").join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
+  console.error(`${tag}warning: the key can capture, and it can also ${tools.filter((t) => !CAPTURE_SURFACE.has(t)).join(", ")} — a leak of this file reads your brain. Prefer a capture-scoped key: bun server-portable/keygen.ts --name session-hook --scope capture`);
   return 0;
 }
 

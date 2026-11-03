@@ -1012,6 +1012,51 @@ naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks t
 functions, the grant and the log setting. The `worker claims` row, named `work
 claims` before this ticket, is migration 015's: it keeps two workers off one thought.
 
+## Priority assertions (SMD-3664)
+
+A key states how much an item matters, and every statement is kept (migration 116,
+SMD-3663; `docs/priority.md`). An item is a thought (its id), a ticket (its key) or an
+entity (its id), addressed by its kind and key; an open item (`item`) is refused until
+SMD-3665 adds it. Three tools reach it, each over REST and MCP alike:
+
+- **`set_priority`** (`POST /v1/priorities/{kind}/{key}`, capture scope): a level, 0
+  none to 5 critical, and optionally `due_at`, `not_before`, `due_ref` (another item
+  whose due time this one takes), a `reason` and `inferred`. A time is an instant with
+  its offset, or a date, read as the start of that day in UTC. The maker is the key,
+  its tier the key's (operator, a declared priority source, agent, inferred), never an
+  argument's. The caller's new statement on an item replaces its earlier one there; the
+  same statement again is `unchanged`, nothing written. The reply names what it
+  replaced and the item's winner, the lowest tier's newest statement.
+- **`clear_priority`** (`DELETE /v1/priorities/{kind}/{key}`, capture scope): closes
+  the caller's own statement, never another key's, and names the winner after.
+- **`priority_history`** (`GET /v1/priorities/{kind}/{key}`, read scope): the winner
+  and its level (null: unknown, not low), and every statement in the order written,
+  each with its maker, tier, reason and how its window closed. `exists: false` is an
+  item since removed, whose statements are kept.
+
+**A capture-only key** reaches the two writers (decision 10): migration 116 lets it
+state a priority on a thought it captured and nobody has taken since, and refuses it
+anything else alike whether the item exists or not. It is never shown the winner
+(`winnerShown: false`, and no word of one), and it has no read tool, so no history.
+The server states the key's scope in the envelope it passes (`write` or `capture`),
+which 116 requires. A plugin's `ctx.call("set_priority", …)` states a priority as its
+caller; a hook's principal is capture-scoped.
+
+**A refusal is an answer**, not an error:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `ITEM_NOT_FOUND` | 404 | The brain holds no such item: `item` names it as 116 keys it (a ticket upper-cased), `which` whether it was the item or the due reference, `openItem` an open item before SMD-3665. `priority_history` answers it for an item nobody stated a priority on. |
+| `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured and nobody took, or a due reference to one. |
+| `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
+| `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. A principal with no agent id by design (a plugin hook's) is answered by 116. `clear_priority` runs first, since 116 finds a key's statements by the registry's id for its name too; only a clear that closed nothing while the lookup failed answers this. |
+| `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
+
+Each writer is one statement, its own READ COMMITTED transaction holding its item's
+lock (116's rule); the history reads the winner and the statements in one statement.
+A role without the `priority` grant group has the priority calls fail, naming the
+table, and nothing else. Preflight's `priority` row checks the functions and the grant.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the

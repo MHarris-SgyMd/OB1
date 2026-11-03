@@ -10,6 +10,7 @@ import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
+import { PRIORITY_KINDS } from "../priority-kinds.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -26,6 +27,13 @@ export type ToolSpec = {
  * an importer says what it imports from, and the default stays `mcp`.
  */
 export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+/** Postgres's text holds no NUL character, and refuses one as a 22021 the store would raise as a fault (review pass 3). */
+const NO_NUL = (s: string) => !s.includes(String.fromCharCode(0));
+const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
+/** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
+const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
+// A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
 export const SCAN_DEFAULT = 1_000;
@@ -558,6 +566,46 @@ export const SPECS = {
       token: z.string().max(200).optional().describe("The token claim_work returned for this claim; not needed for an operator's forced release"),
       reason: z.string().max(500).optional().describe("Why the claim ends, at most 500 characters: the merged PR, or why it was dropped (required with force)"),
       force: z.boolean().optional().describe("Operator only: release another holder's claim. Needs a reason"),
+    },
+  },
+  // Priority assertions (SMD-3664, migration 116): how much an item matters, said by a key, every statement kept.
+  set_priority: {
+    title: "Set Priority",
+    description:
+      "State how much an item matters: a thought (its id), a ticket (its key, e.g. SMD-3664) or an entity (its id), on one scale — 0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical — optionally by when it is due (`due_at`), when it can start at the earliest (`not_before`, never after `due_at`), or taking another item's due time (`due_ref`), and why (`reason`). The statement is yours: your key is its maker, and its tier comes from your key, never from an argument — operator, a declared priority source, agent, or inferred (`inferred: true` lowers your own statement to it). Your new statement on an item replaces your earlier one there, which stays in the history; the same statement again writes nothing (`unchanged`). Every key's statement is kept, and the item's winner is the statement of the lowest tier, the newest within it; the reply names the winner. A capture-only key may state a priority only on a thought it captured and nobody has taken since, and is never shown the winner. Refused: an item the brain does not hold (ITEM_NOT_FOUND), a capture-only key on anything else (ITEM_NOT_YOURS), an argument out of its rule (REFUSED_PRIORITY_INPUT). Open items (kind `item`) arrive with SMD-3665 and are refused until then.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity, or item (an open item, refused until SMD-3665)"),
+      key: PRIORITY_KEY.describe("The item's key: a thought's or an entity's id (a uuid), or a ticket's key such as SMD-3664 (case and surrounding white space don't matter)"),
+      level: z.number().int().min(0).max(5).describe("0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical"),
+      due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
+      not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms; never after due_at"),
+      due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: PRIORITY_KEY }).strict().optional()
+        .describe("Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself"),
+      // 116 counts a reason's characters once cleaned; the schema's cap only bounds the request, four UTF-16 units a
+      // character, so an astral character (two units) is never refused here (review pass 1).
+      reason: z.string().max(4000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Why it matters, at most 1000 characters: free text, shown to every key that reads the item's priority"),
+      inferred: z.boolean().optional().describe("True when this is your inference, not a statement you were given: lowers your statement to the inferred tier"),
+    },
+  },
+  clear_priority: {
+    title: "Clear Priority",
+    description:
+      "Withdraw your own statement of an item's priority (its kind and key, as set_priority takes them): it closes as cleared and stays in the history. Another key's statements are untouched, so the item may still have a winner, which the reply names (never to a capture-only key). With no statement of yours open on the item, nothing changes (`nothing_to_clear`).",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
+      key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
+    },
+  },
+  priority_history: {
+    title: "Priority History",
+    description:
+      "Read who said an item (its kind and key, as set_priority takes them) matters, how much and when: its winning statement and level (null: nobody stated one — unknown, not low), and every statement made on it, replaced and cleared ones included, in the order written, each with its maker (key name, kind and trust as they stood), its tier, its reason, and when its window closed and why. `exists: false` is an item the brain no longer holds, whose statements are kept. Refused: an item the brain does not hold and nobody stated a priority on (ITEM_NOT_FOUND).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
+      key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

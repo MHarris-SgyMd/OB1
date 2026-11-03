@@ -20,7 +20,7 @@ export type { CallOptions } from "../core/index.ts";
  * conflicts, 422 a reference to nothing or a refusal the store named that
  * this server does not know (REFUSED), 501 a mode not built, 503 retry —
  * with Retry-After when the refusal is retryable, without it when the server waits
- * on an operator (CLAIM_UNATTRIBUTED's set-up causes).
+ * on an operator (CLAIM_UNATTRIBUTED's and PRIORITY_UNATTRIBUTED's set-up causes).
  */
 export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 501 | 503> = {
   NOT_FOUND: 404,
@@ -52,6 +52,11 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CLAIM_INPUT: 400,
   REFUSED_CLAIM_KEY: 403,
   CLAIM_UNATTRIBUTED: 503,
+  ITEM_NOT_FOUND: 404,
+  ITEM_NOT_YOURS: 403,
+  REFUSED_PRIORITY_INPUT: 400,
+  READ_ONLY_KEY: 403,
+  PRIORITY_UNATTRIBUTED: 503,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -114,6 +119,10 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   claim_work: { method: "POST", path: "/v1/claims", ok: 200, call: CALLS.claim_work },
   renew_claim: { method: "POST", path: "/v1/claims/{id}/renew", ok: 200, call: CALLS.renew_claim },
   release_claim: { method: "POST", path: "/v1/claims/{id}/release", ok: 200, call: CALLS.release_claim },
+  // Priority assertions (SMD-3664, migration 116): an item by its kind and key in the path; a reason rides the body.
+  set_priority: { method: "POST", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.set_priority },
+  clear_priority: { method: "DELETE", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.clear_priority },
+  priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
 };
 
 /** The `{field}` names a route's path fills, in order — core/calls.ts's, which a plugin's manifest is checked by too. */
