@@ -25,7 +25,7 @@ import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
-import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord,ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, type ClaimLease, type ClaimLeaseWork } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -69,7 +69,6 @@ import type {
   WriteEvent,
 } from "./store.ts";
 
-/** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
 /**
  * One of 115's writers, run and read (SMD-3598): its jsonb answer as a ClaimAnswer, a malformed argument (22023) or
  * an ingested key (42501, by its words) as ClaimRefused, any other raise rethrown as the store's fault. The SQLSTATE
@@ -89,9 +88,14 @@ async function claimCall(what: string, run: () => Promise<Record<string, unknown
   return normaliseClaimAnswer(rows[0]?.r, what);
 }
 
-/** A 22023 from 116 as PriorityRefused, by its words; any other raise as it was, the store's fault. */
+/**
+ * A 22023 from 116 as PriorityRefused, by its words; a time the schema took that Postgres cannot cast (22007, 22008,
+ * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
+ * was, the store's fault.
+ */
 function priorityRefusedOr(e: unknown): unknown {
   const message = String((e as Error)?.message ?? "");
+  if (timeCastFailed(e)) return new PriorityRefused("time", `due_at or not_before is no time Postgres can read: ${message}`);
   return String((e as { errno?: unknown }).errno ?? "") === "22023" ? new PriorityRefused(priorityProblemOf(message), message) : e;
 }
 
@@ -112,6 +116,7 @@ async function priorityCall(what: string, run: () => Promise<Record<string, unkn
  */
 const priorityEnvelope = (actor: Actor | undefined, scope: "write" | "capture") => (actor ? { ...actorPayload(actor), scope } : null);
 
+/** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
 function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }

@@ -66,7 +66,7 @@ export type Refusal =
   | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured and nobody took (or a due reference to one) — answered alike whether it exists or not
   | { code: "REFUSED_PRIORITY_INPUT"; retryable: false; problem: PriorityProblem; message: string } // an argument 116 refused by its rule (SQLSTATE 22023); message: the database's words
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own thoughts, is not to hand while the registry may answer
-  | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown" } // …and the registry cannot answer this server until an operator acts
+  | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
   | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.

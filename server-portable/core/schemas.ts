@@ -10,7 +10,7 @@ import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import type { PriorityItem } from "../store.ts";
+import { PRIORITY_KINDS } from "../priority-kinds.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -28,11 +28,9 @@ export type ToolSpec = {
  */
 export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
-/** The item kinds 116 takes (SMD-3664): the store's PriorityItem kinds, each, spelled here so this file loads no store. */
-const PRIORITY_KINDS = ["thought", "ticket", "entity", "item"] as const satisfies readonly PriorityItem["kind"][];
-const _everyKind: Exclude<PriorityItem["kind"], (typeof PRIORITY_KINDS)[number]> extends never ? true : never = true;
 /** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
+// A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
 
 /** The reference async job (scan_thoughts, SMD-2273): how many thoughts a scan walks by default and at most. Bounded so the demo job is finite; a larger corpus job is a follow-up. */
 export const SCAN_DEFAULT = 1_000;

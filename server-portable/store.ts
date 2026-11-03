@@ -21,6 +21,7 @@ import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
+import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -1283,8 +1284,8 @@ export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
 }
 
 /** An item a priority is stated on (migration 116, SMD-3663): its kind and its key, as 116 normalised them. */
-export type PriorityItem = { kind: "thought" | "ticket" | "entity" | "item"; key: string };
-export const PRIORITY_KINDS = ["thought", "ticket", "entity", "item"] as const;
+export type PriorityItem = { kind: PriorityKind; key: string };
+export { PRIORITY_KINDS };
 /**
  * One priority assertion as 116's ob1_priority_json answers it (SMD-3664): the
  * item, the level and times, the reason (the maker's free text, data), the
@@ -1338,7 +1339,7 @@ export class PriorityRefused extends Error {
     this.name = "PriorityRefused";
   }
 }
-export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "other";
+export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "other";
 
 /** Which argument a 22023 from 116 names, by its message's opening words (116's and 115's own wording, one rule each). */
 export function priorityProblemOf(message: string): PriorityProblem {

@@ -1429,9 +1429,11 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
       const clearAway = await rest("DELETE", path(hookThought), undefined, KEYS.hook);
       const setAwayMcp = await mcp("set_priority", { kind: "thought", key: hookThought, level: 3 }, KEYS.hook).catch(asReply);
       assert(setAway.status === 503 && setAway.body.code === "PRIORITY_UNATTRIBUTED" && setAway.body.cause === "registry_misconfigured" && setAway.body.retryable === false && setAway.headers.get("retry-after") === null
-          && clearAway.status === 503 && clearAway.body.code === "PRIORITY_UNATTRIBUTED"
           && setAwayMcp.isError && /^Refused: a capture-only key's own thoughts are known by its agent id, which the agent registry cannot give this server until an operator acts/.test(setAwayMcp.text),
-        `the registry set up wrong: a capture-only key's set and clear on its own thought answer 503 PRIORITY_UNATTRIBUTED, final, no Retry-After, never ITEM_NOT_YOURS (${setAway.status} ${setAway.body.code} ${setAway.body.cause} | ${clearAway.status} | ${setAwayMcp.text.slice(0, 80)})`);
+        `the registry set up wrong: a capture-only key's set on its own thought answers 503 PRIORITY_UNATTRIBUTED, final, no Retry-After, never ITEM_NOT_YOURS (${setAway.status} ${setAway.body.code} ${setAway.body.cause} | ${setAwayMcp.text.slice(0, 80)})`);
+      // Its clear needs no envelope id: 116 finds the key's statement by the registry's id for its name (review pass 2).
+      assert(clearAway.status === 200 && clearAway.body.outcome === "cleared" && (clearAway.body.assertion as A | undefined)?.maker.name === "hook",
+        `…while its clear closes its own statement, found by the registry's id for its name (${clearAway.status} ${clearAway.body.outcome ?? clearAway.body.code})`);
     } finally {
       await sql`ALTER FUNCTION resolve_agent_smd3664_away(text, text, text) RENAME TO resolve_agent`;
     }
@@ -1448,6 +1450,15 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     }
     const back = await rest("POST", path(hookThought), { level: 3 }, KEYS.hook);
     assert(back.status === 200 && back.body.outcome === "asserted", `…and with the registry back, the capture-only key states it (${back.status} ${back.body.outcome ?? back.body.code})`);
+    // A principal with no agent id by design — a plugin hook's, capture-scoped — is 116's to answer, not "unattributed".
+    const { hookPrincipal } = await import("./core/plugins.ts");
+    const fromHook = await direct.setPriority(hookPrincipal("example"), { kind: "thought", key: hookThought, level: 2 });
+    assert(!fromHook.ok && fromHook.refusal.code === "ITEM_NOT_YOURS",
+      `a plugin hook's principal, no agent id by design, is answered by 116 (ITEM_NOT_YOURS), never told the registry needs an operator (${fromHook.ok ? "ok" : fromHook.refusal.code})`);
+    // A time the schema takes and Postgres cannot read (a year 0000) is the caller's argument, not a fault (review pass 2).
+    const yearZero = await rest("POST", path(item), { level: 2, due_at: "0000-06-01" });
+    assert(yearZero.status === 400 && yearZero.body.code === "REFUSED_PRIORITY_INPUT" && yearZero.body.problem === "time",
+      `a due_at in year 0000 is refused 400 REFUSED_PRIORITY_INPUT, problem time, not a 500 (${yearZero.status} ${yearZero.body.code} ${yearZero.body.problem})`);
   } finally {
     await sql`UPDATE ob1_agents SET kind = NULL WHERE label IN ('writer', 'rival')`;
   }

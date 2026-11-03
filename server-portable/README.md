@@ -1010,8 +1010,8 @@ caller; a hook's principal is capture-scoped.
 | --- | --- | --- |
 | `ITEM_NOT_FOUND` | 404 | The brain holds no such item: `item` names it as 116 keys it (a ticket upper-cased), `which` whether it was the item or the due reference, `openItem` an open item before SMD-3665. `priority_history` answers it for an item nobody stated a priority on. |
 | `ITEM_NOT_YOURS` | 403 | A capture-only key on anything but a thought it captured and nobody took, or a due reference to one. |
-| `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item or half given, `reason`; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
-| `PRIORITY_UNATTRIBUTED` | 503 | A capture-only key whose agent id, which proves its own thoughts, the registry cannot give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. |
+| `REFUSED_PRIORITY_INPUT` | 400 | An argument 116 refuses by its rule; `problem` names which (`kind`, `key`, `level`, `not_before` after `due_at`, `due_ref` naming its own item, half given or malformed, `reason`, `time` — a due time Postgres cannot read, such as a year 0000; `key_name` is the deployment's to fix; `other`). A level off the scale is the schema's 400 first. |
+| `PRIORITY_UNATTRIBUTED` | 503 | `set_priority` by a capture-only key whose agent id, which proves its own thoughts, the registry was asked for and did not give: `cause` `registry_away` (retryable, with Retry-After) or the registry set up wrong (an operator acts). Answered before the call, for any item. A principal with no agent id by design (a plugin hook's) is answered by 116; `clear_priority` needs none, since 116 finds a key's statements by the registry's id for its name. |
 | `READ_ONLY_KEY` | 403 | A read key's principal reaching a writer through a caller of the core's own; the manifest gives a read key neither writer. |
 
 Each writer is one statement, its own READ COMMITTED transaction holding its item's
