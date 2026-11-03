@@ -410,8 +410,8 @@ function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | 
  * "what next" from any search or list sees held work before it calls list_claims. It is a prompt, not the check: a
  * released claim, a branch or an open PR with no claim, and a claim whose PR merged are AGENTS.md's to find. One read
  * for the whole page, none when no result names a ticket. Unlike `moved`, a ticket's own row and a superseded thought
- * are labelled too: who holds a ticket is a fact about now. Best-effort, as movedOf: a brain before 115, or a read
- * that fails, gives null — not checked, which the replies say; a result naming no claimed ticket, `[]`. It labels
+ * are labelled too: who holds a ticket is a fact about now. Best-effort, as movedOf: a brain before 115, a server role
+ * without the claims grant, or a read that fails, gives null — not checked, which the replies say; a result naming no claimed ticket, `[]`. It labels
  * and never ranks.
  */
 export async function claimedOf(store: Pick<ThoughtStore, "unreleasedClaimsOn">, principal: Principal, hits: readonly { id: string; content: string; metadata?: Record<string, unknown> | null }[]): Promise<Record<string, ClaimedHit> | null> {

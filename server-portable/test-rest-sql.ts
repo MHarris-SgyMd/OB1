@@ -1360,11 +1360,11 @@ console.log("\n[11] The claimed label (SMD-3599): a live claim on a ticket a res
   const lapsed = await reads();
   const none = (r: typeof held) => r.rest.every((x) => x !== undefined && (x.claimed === undefined || (Array.isArray(x.claimed) && x.claimed.length === 0)))
     && !r.compatTitle.startsWith("[claimed") && !r.fetchTitle.startsWith("[claimed") && r.texts.every((t) => !t.includes("⚠ Claimed"));
-  const lapsedLine = new RegExp(`⚠ Claimed: SMD-9320 by rival since \\S+, lapsed at \\S+, never released \\(claim ${againId}\\)\\. A lapsed claim never released, unless it is yours as below, may be work paused elsewhere`);
+  const lapsedLine = new RegExp(`⚠ Claimed: SMD-9320 by rival since \\S+, lapsed at \\S+, never released \\(claim ${againId}\\)\\.\\n`);
   assert(again.status === 200 && none(released),
     `a released claim is on no read: no field, no title prefix, no line (${JSON.stringify(released.rest.map((r) => r?.claimed))})`);
   assert(lapsed.rest.every((r) => r?.claimed?.length === 1 && r.claimed[0].id === againId && r.claimed[0].state === "lapsed")
-      && /^\[claimed: SMD-9320 by rival, lapsed at \S+\] /.test(lapsed.compatTitle) && /^\[claimed: SMD-9320 by rival, lapsed at \S+\] /.test(lapsed.fetchTitle) && lapsed.texts.every((t) => lapsedLine.test(t)),
+      && /^\[claimed: SMD-9320 by rival, lapsed at \S+\] /.test(lapsed.compatTitle) && /^\[claimed: SMD-9320 by rival, lapsed at \S+\] /.test(lapsed.fetchTitle) && lapsed.texts.every((t) => lapsedLine.test(t) && t.includes("Any other lapsed claim, never released, may be work paused elsewhere")),
     `a lapsed claim never released is on every read as lapsed: its state, its title's "lapsed at", the text's line and its reading (${(lapsed.texts[0].match(/⚠ Claimed: .*/) ?? ["none"])[0].slice(0, 160)} | ${lapsed.compatTitle.slice(0, 70)})`);
   await rest("POST", `/v1/claims/${againId}/release`, { token: again.body.token, reason: "done" }, KEYS.rival);
   // The bound: the first 50 tickets a result names are read, the rest counted.

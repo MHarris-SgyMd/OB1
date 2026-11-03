@@ -681,6 +681,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
+    if (data.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -750,7 +751,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -790,7 +791,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -1805,7 +1806,7 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 /** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
-const CLAIMS_UNREAD_WHY = "The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result";
+const CLAIMS_UNREAD_WHY = "The work claims on the tickets named here could not be read (for instance, a brain before migration 115, or a server role without the claims grant): a result";
 const CLAIMS_UNREAD_CHECK = "may still be claimed — check the brain's list_claims before starting work.";
 const CLAIMS_UNREAD = `⚠ ${CLAIMS_UNREAD_WHY} without a \`⚠ Claimed\` line ${CLAIMS_UNREAD_CHECK}`;
 /** The compat pair's note: their claims ride the title, not a line (review pass 3). */
@@ -1818,7 +1819,7 @@ const CLAIMED_IN_TITLE = 2;
  * A result's claims in words (SMD-3599), each as heldLine says a claim in the way — a lapsed one never released said
  * so — with its label quoted and cut, the holder's words, as its piece is. A title's (`title`) say only who holds
  * what since when, or that it lapsed: the first two, no label, which every ChatGPT surface hands the model as the
- * result's own words. The text's add AGENTS.md's readings of the caller's own key's claims and of a lapsed claim.
+ * result's own words. The text's state facts only; CLAIMED_KEY, once per reply, says how to read them (review pass 4).
  * The rest past the shown counted; the tickets not read counted, with no claim shown too (review pass 1). Null when
  * there is nothing to say.
  */
@@ -1836,16 +1837,16 @@ function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0
     return `${who} since ${c.claimedAt}, ${when} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
   };
   const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which ${title ? "the brain's " : ""}list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
-  if (title) return words;
-  // AGENTS.md's readings, steps 1, 2 and 4: a claim of the caller's own key is this session's — or its caller's, for a
-  // subagent the task names it to — by its id in .work-claims/, a lapsed one renewed; any other lapsed claim, the key's
-  // own another session's included, may be paused work unless its PR merged or closed (review pass 3: an own key's
-  // was told to be left alone, a merged PR's stale claim blocking its ticket on a one-key install); and another
-  // session's live claim holds its work.
-  const lapsed = all.some((c) => c.state === "lapsed") ? " A lapsed claim never released, unless it is yours as below, may be work paused elsewhere, unless its PR (the branch in its label) merged or closed: ask the user before starting that piece." : "";
-  const own = all.some((c) => c.ownKey) ? " A claim by your own key is this session's, or your caller's, when its id is in your worktree's .work-claims/ or your task names it (renew a lapsed one with the token file's lease); otherwise a live one is another session's: leave that work alone and tell the user its label or claim id." : "";
-  return `${words}.${lapsed}${own}`;
+  return title ? words : `${words}.`;
 }
+/**
+ * How to read a `⚠ Claimed` line, once per reply that shows one (review pass 4, the maintainer's call): the same text
+ * every time, its rulings keyed on facts the line states — the claim id, its holder, live or lapsed — so no reading
+ * depends on which claims a page happens to hold. Passes 1 to 3 built per-result sentences from the kinds present, and
+ * each combination left a case unsaid or misread (an own key's lapsed claim, another key's live one, a subagent's
+ * caller's). AGENTS.md's "Claim your work" rules, in words a client without it can follow.
+ */
+const CLAIMED_KEY = "How to read ⚠ Claimed: a claim whose id is in your worktree's .work-claims/, or that your task names, is yours — renew a lapsed one with the token file's lease and read the renewal's reply (a subagent tells its caller instead). Any other live claim holds its work, another session's of your own key included, or this one's if it lost its token: leave that work alone and tell the user its label or claim id. Any other lapsed claim, never released, may be work paused elsewhere unless its PR merged or closed (the branch in its label; with none, ask): ask the user before starting that work. A result without the line says nothing either way: check the brain's list_claims and the ticket's branches and PRs before starting work.";
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);

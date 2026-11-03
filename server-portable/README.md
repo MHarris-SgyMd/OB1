@@ -486,9 +486,12 @@ holder is the caller's own key, label, times and `state`, the first ten
 (`claimedMore` the rest). Over MCP `search_thoughts`, `search_thoughts_keyword`
 and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
 …, until … (claim …, label "…")` — `lapsed at …, never released` for a lapsed
-one — the piece and label quoted on one line as the holder's own words, with
-AGENTS.md's readings of a lapsed claim and of the caller's own key; their
-structured values keep ids, tickets, holders, states and times. `search` and
+one — the piece and label quoted on one line as the holder's own words, and
+once per reply that shows one, the same fixed key to reading it: yours when its
+id is in your `.work-claims/` or your task names it (a subagent tells its caller
+rather than renew it), any other live claim holds its work, any other lapsed one
+may be paused unless its PR merged or closed; their structured values keep ids,
+tickets, holders, states and times. `search` and
 `fetch` start the title `[claimed: SMD-3379 (a piece) by codex, since …]`
 after any moved prefix — the first two, never the piece or the label — and
 their JSON, the ChatGPT shape, carries the fields only beside a claimed ticket
