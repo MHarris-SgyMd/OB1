@@ -2,6 +2,8 @@
 
 A guide to building scoped MCP servers that give other people limited access to specific parts of your Open Brain.
 
+> **This fork (SMD-2311):** the one server in this tree that followed this guide, meal-planning's `shared-server.ts`, is retired: the meal planner is a plugin of the brain's, whose operations take the brain's own scopes (SMD-2920). The guide stands as the pattern for a server of your own; its meal-planning example describes the server as it was.
+
 ## When You Need This
 
 You've built your Open Brain—a personal knowledge system with thoughts, contacts, goals, and work data. But now you want to share *part* of it with someone else:
@@ -265,7 +267,7 @@ MCP_HOUSEHOLD_ACCESS_KEYS='partner:read:<sha256-of-the-shared-key>' \
 PORT=8788 bun extensions/<name>/shared-server.ts
 ```
 
-`bun extensions/meal-planning/shared-server.ts` is the real one (`extensions/test-auth.ts` starts it under `bun` in CI). The other person connects via Claude Desktop:
+Meal-planning's `shared-server.ts` was this tree's one, until it retired with SMD-2311. The other person connects via Claude Desktop:
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
@@ -469,7 +471,7 @@ For Supabase: Create a custom JWT with limited claims, or use connection pooling
 
 ## Extensions That Use This
 
-- [Meal Planning](../../extensions/meal-planning/) — Includes a dedicated shared-server.ts for household grocery list and meal plan access
+None in this tree since SMD-2311: [Meal Planning](../../extensions/meal-planning/)'s shared server, the one that did, retired when the meal planner became a plugin.
 
 ## Next Steps
 

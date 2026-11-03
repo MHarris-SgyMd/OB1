@@ -606,7 +606,7 @@ jobs:
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check && bun admin.ts --self-check
 
       # Every vendored server is a consumer of this server's auth module — the
-      # extensions (change 64; four of the seven servers, three plugins since SMD-2311) and the recipes' and integrations' MCP
+      # extensions (change 64; two of the seven servers, four plugins since SMD-2311 and one retired) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. One MCP stack across the
       # tree's installs — the test fails if server-portable's or mcp-server's
@@ -1430,7 +1430,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the four servers on the SQL shim, called through
+      # Every tool of the two servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this

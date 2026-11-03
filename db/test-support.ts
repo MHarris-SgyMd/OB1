@@ -1371,7 +1371,6 @@ export const CONTRIB_DIR = join(HERE, "..");
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
   "extensions/job-hunt/schema.sql",
-  "extensions/meal-planning/schema.sql",
   "extensions/professional-crm/schema.sql",
   "recipes/adaptive-capture-classification/schema.sql",
   "recipes/brain-health-monitoring/ops-views.sql",

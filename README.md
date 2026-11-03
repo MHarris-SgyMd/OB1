@@ -76,7 +76,7 @@ Some concepts show up in multiple extensions. Learn them once, apply them everyw
 | [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | All extensions |
 | [Common Troubleshooting](primitives/troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
 | [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Extensions 4, 5, 6, as background |
-| [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4 |
+| [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4, until SMD-2311 |
 
 ## Community Contributions
 
