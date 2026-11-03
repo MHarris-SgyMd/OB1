@@ -23,7 +23,7 @@ export type SetPriorityResult = { outcome: "asserted" | "unchanged"; assertion: 
 export type SetPriorityCode = "ITEM_NOT_FOUND" | "ITEM_NOT_YOURS" | "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY" | "PRIORITY_UNATTRIBUTED";
 /** clear_priority's value: the caller's statement it closed (none: it had none open), and the winner after, as set_priority's. */
 export type ClearPriorityResult = { outcome: "cleared" | "nothing_to_clear"; assertion: PriorityAssertion | null; winner: PriorityAssertion | null; winnerShown: boolean };
-export type ClearPriorityCode = "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY";
+export type ClearPriorityCode = "REFUSED_PRIORITY_INPUT" | "READ_ONLY_KEY" | "PRIORITY_UNATTRIBUTED";
 /** priority_history's value: the item as 116 normalised it, its winner and level (null: unknown, not low), and every statement in the order written. */
 export type PriorityHistoryResult = PriorityRecord;
 export type PriorityHistoryCode = "REFUSED_PRIORITY_INPUT" | "ITEM_NOT_FOUND";
@@ -59,8 +59,10 @@ const inputRefused = (e: PriorityRefused) => refuse({ code: "REFUSED_PRIORITY_IN
  * that, before the call, never as ITEM_NOT_YOURS: a key told its own thought is not its own does not retry (review
  * pass 1). Asked of no item, so it tells the key nothing about what exists. Only when the registry was asked and
  * failed (`agentUnresolved`): a principal that has no agent id by design — a plugin hook's, `hook:<plugin>` — is
- * 116's to answer, and its words are not "an operator must act" (review pass 2). set_priority alone: clear_priority
- * finds a key's statements by the registry's id for its name too (116's ob1_priority_actor), so needs no envelope id.
+ * 116's to answer, and its words are not "an operator must act" (review pass 2). clear_priority is run first: 116
+ * finds a key's statements by the registry's id for its name too (ob1_priority_actor), so it may close one; only one
+ * that closed nothing is said as unattributed, since a key renamed since the registry last saw it is found by
+ * neither id (review pass 3: "nothing to clear" for a statement still open).
  */
 function unattributed(principal: Principal) {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
@@ -70,12 +72,13 @@ function unattributed(principal: Principal) {
 }
 
 /**
- * The item a refusal names, as 116 keys it and whether the brain holds it — read with 116's own functions, on the
- * refusal's path alone (review pass 1: a copy of its normalising here drifted from it). A read that fails is the
- * call's fault, not a guess at the key (review pass 2).
+ * The item a refusal names and its due reference, as 116 keys them and whether the brain holds each — read with
+ * 116's own functions, on the refusal's path alone (review pass 1: a copy of its normalising here drifted from it),
+ * at once. A read that fails is the call's fault, not a guess at the key (review pass 2).
  */
-async function keyed(ctx: Ctx, kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }> {
-  return (await ctx.store()).priorityItem(kind, key);
+async function keyed(ctx: Ctx, input: Input<"set_priority">) {
+  const store = await ctx.store();
+  return Promise.all([store.priorityItem(input.kind, input.key), input.due_ref ? store.priorityItem(input.due_ref.kind, input.due_ref.key) : null]);
 }
 
 /** A refusal 116 answered as a value: by its code, the item it is about named as 116 keys it, read only where named. */
@@ -85,12 +88,12 @@ async function refusedBy(ctx: Ctx, a: PriorityAnswer, principal: Principal, inpu
       // 116 checks the item, then the due reference. Which was missing is read from the brain, not 116's words
       // (review pass 1): the due reference when it is not held and the item is — both read, so an item written
       // between 116's check and this read does not turn the item's absence into the reference's (review pass 2).
-      const [item, dueRef] = await Promise.all([keyed(ctx, input.kind, input.key), input.due_ref ? keyed(ctx, input.due_ref.kind, input.due_ref.key) : null]);
+      const [item, dueRef] = await keyed(ctx, input);
       const named = dueRef && !dueRef.exists && item.exists ? { which: "due_ref" as const, item: dueRef.item } : { which: "item" as const, item: item.item };
       return refuse({ code: "ITEM_NOT_FOUND", retryable: false, which: named.which, item: named.item, openItem: named.item.kind === "item" });
     }
     case "ITEM_NOT_YOURS": {
-      const [item, dueRef] = await Promise.all([keyed(ctx, input.kind, input.key), input.due_ref ? keyed(ctx, input.due_ref.kind, input.due_ref.key) : null]);
+      const [item, dueRef] = await keyed(ctx, input);
       return refuse({ code: "ITEM_NOT_YOURS", retryable: false, item: item.item, dueRef: dueRef?.item ?? null });
     }
     case "READ_ONLY_KEY":
@@ -106,7 +109,7 @@ async function refusedBy(ctx: Ctx, a: PriorityAnswer, principal: Principal, inpu
  */
 async function argumentRefused(ctx: Ctx, e: PriorityRefused, input: Input<"set_priority">) {
   if (input.due_ref && (e.problem === "key" || e.problem === "kind")) {
-    const itemKeys = await keyed(ctx, input.kind, input.key).then(() => true, (err: unknown) => (err instanceof PriorityRefused ? false : Promise.reject(err)));
+    const itemKeys = await (await ctx.store()).priorityItem(input.kind, input.key).then(() => true, (err: unknown) => (err instanceof PriorityRefused ? false : Promise.reject(err)));
     if (itemKeys) return refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: "due_ref", message: e.message });
   }
   return inputRefused(e);
@@ -134,6 +137,8 @@ export async function clearPriority(ctx: Ctx, principal: Principal, input: Input
   if (!scope) return refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
   const a = await asked(async () => (await ctx.store()).clearPriority({ kind: input.kind, key: input.key, actor: actorOf(ctx, principal), scope }));
   if (a instanceof PriorityRefused) return inputRefused(a);
+  const away = a.outcome === "nothing_to_clear" ? unattributed(principal) : null;
+  if (away) return away;
   if (a.outcome === "cleared" || a.outcome === "nothing_to_clear") return ok({ outcome: a.outcome, assertion: a.assertion, winner: a.winner, winnerShown: scope === "write" });
   if (a.outcome === "refused" && a.code === "READ_ONLY_KEY") return refuse({ code: "READ_ONLY_KEY", retryable: false, key: principal.name });
   throw new Error("clear_priority answered an outcome this server does not read");

@@ -1434,6 +1434,11 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
       // Its clear needs no envelope id: 116 finds the key's statement by the registry's id for its name (review pass 2).
       assert(clearAway.status === 200 && clearAway.body.outcome === "cleared" && (clearAway.body.assertion as A | undefined)?.maker.name === "hook",
         `…while its clear closes its own statement, found by the registry's id for its name (${clearAway.status} ${clearAway.body.outcome ?? clearAway.body.code})`);
+      // A clear that closes nothing while the registry failed is not said as nothing to clear: the key's statement may
+      // stand under an id the registry could not give (review pass 3).
+      const clearNone = await rest("DELETE", path(hookThought), undefined, KEYS.hook);
+      assert(clearNone.status === 503 && clearNone.body.code === "PRIORITY_UNATTRIBUTED" && clearNone.body.cause === "registry_misconfigured",
+        `…and a clear that closes nothing then answers 503 PRIORITY_UNATTRIBUTED, not nothing to clear (${clearNone.status} ${clearNone.body.outcome ?? clearNone.body.code})`);
     } finally {
       await sql`ALTER FUNCTION resolve_agent_smd3664_away(text, text, text) RENAME TO resolve_agent`;
     }
@@ -1457,6 +1462,9 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
       `a plugin hook's principal, no agent id by design, is answered by 116 (ITEM_NOT_YOURS), never told the registry needs an operator (${fromHook.ok ? "ok" : fromHook.refusal.code})`);
     // A time the schema takes and Postgres cannot read (a year 0000) is the caller's argument, not a fault (review pass 2).
     const yearZero = await rest("POST", path(item), { level: 2, due_at: "0000-06-01" });
+    // A NUL character Postgres's text cannot hold is the schema's 400, not the database's 22021 as a 500 (review pass 3).
+    const nul = await rest("POST", path(item), { level: 2, reason: `a${String.fromCharCode(0)}b` });
+    assert(nul.status === 400 && nul.body.code === "REFUSED_INPUT", `a reason holding a NUL character is the schema's 400 (${nul.status} ${nul.body.code})`);
     assert(yearZero.status === 400 && yearZero.body.code === "REFUSED_PRIORITY_INPUT" && yearZero.body.problem === "time",
       `a due_at in year 0000 is refused 400 REFUSED_PRIORITY_INPUT, problem time, not a 500 (${yearZero.status} ${yearZero.body.code} ${yearZero.body.problem})`);
   } finally {

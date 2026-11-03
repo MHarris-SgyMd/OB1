@@ -22,7 +22,7 @@
 				</p>
 			{/if}
 			<p class="text-sm text-text-muted mb-8">
-				Paste an access key for this brain. A read key or a write key opens the dashboard; a capture-only key may add thoughts and nothing else, so it is refused here.
+				Paste an access key for this brain. A read key or a write key opens the dashboard; a capture-only key may add thoughts, and rank its own, and read nothing, so it is refused here.
 			</p>
 
 			<form

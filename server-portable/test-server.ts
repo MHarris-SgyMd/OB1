@@ -6715,7 +6715,11 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
       && thrown(() => normalisePriorityAnswer({ outcome: "stolen" }, "assert_priority")) === "assert_priority answered no envelope this server reads"
       && thrown(() => normalisePriorityAnswer({ outcome: "refused", code: "NOPE" }, "assert_priority")) === "assert_priority answered no envelope this server reads"
       && thrown(() => normalisePriorityAssertion({ ...json, tier: 9 }, "priority_history")) === "priority_history answered an assertion this server cannot read"
-      && thrown(() => normalisePriorityAssertion({ ...json, item: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read",
+      && thrown(() => normalisePriorityAssertion({ ...json, item: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
+      // Review pass 3: a missing time, a due reference of no kind 116 has, a tier name not 116's — refused, never a null in place.
+      && thrown(() => normalisePriorityAssertion({ ...json, asserted_at: undefined }, "priority_history")) === "priority_history answered an assertion this server cannot read"
+      && thrown(() => normalisePriorityAssertion({ ...json, due_ref: { kind: "plugin", key: T } }, "priority_history")) === "priority_history answered an assertion this server cannot read"
+      && thrown(() => normalisePriorityAssertion({ ...json, tier_name: "boss" }, "priority_history")) === "priority_history answered an assertion this server cannot read",
     "116's assertion read into the value's names; an outcome, code, tier or item kind 116 does not give is a fault");
   const problems = ["not an item kind: 'x' (thought, ticket, entity or item)", "not a entity id: 'x' (a uuid)", "not a ticket key: 'x'", "a priority level is 0 (none) to 5 (critical); 9 is not", "not_before is after due_at: the item could not start before it is due",
     "a due reference takes both a kind and a key, or neither", "an item's due reference may not name itself", "a reason is at most 1000 characters; this one has 1001", "assert_priority: a maker's key name is at most 200 characters; this one has 201", "something else"].map(priorityProblemOf);

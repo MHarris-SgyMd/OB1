@@ -28,6 +28,9 @@ export type ToolSpec = {
  */
 export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
+/** Postgres's text holds no NUL character, and refuses one as a 22021 the store would raise as a fault (review pass 3). */
+const NO_NUL = (s: string) => !s.includes(String.fromCharCode(0));
+const PRIORITY_KEY = z.string().min(1).max(200).refine(NO_NUL, "may not hold a NUL character");
 /** A priority's time (SMD-3664): an instant with its offset, or a date alone, which the operation reads as the start of that day in UTC. */
 const PRIORITY_TIME = z.union([z.iso.datetime({ offset: true }), z.iso.date()]);
 // A shape zod takes and Postgres cannot (a year 0000) is refused by the store as REFUSED_PRIORITY_INPUT, problem time.
@@ -568,15 +571,15 @@ export const SPECS = {
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity, or item (an open item, refused until SMD-3665)"),
-      key: z.string().min(1).max(200).describe("The item's key: a thought's or an entity's id (a uuid), or a ticket's key such as SMD-3664 (case and surrounding white space don't matter)"),
+      key: PRIORITY_KEY.describe("The item's key: a thought's or an entity's id (a uuid), or a ticket's key such as SMD-3664 (case and surrounding white space don't matter)"),
       level: z.number().int().min(0).max(5).describe("0 none, 1 low, 2 medium, 3 high, 4 urgent, 5 critical"),
       due_at: PRIORITY_TIME.optional().describe("When the item is due: a time with its offset (2027-03-01T17:00:00Z), or a date (2027-03-01, the start of that day in UTC)"),
       not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms; never after due_at"),
-      due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: z.string().min(1).max(200) }).strict().optional()
+      due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: PRIORITY_KEY }).strict().optional()
         .describe("Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself"),
       // 116 counts a reason's characters once cleaned; the schema's cap only bounds the request, four UTF-16 units a
       // character, so an astral character (two units) is never refused here (review pass 1).
-      reason: z.string().max(4000).optional().describe("Why it matters, at most 1000 characters: free text, shown to every key that reads the item's priority"),
+      reason: z.string().max(4000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Why it matters, at most 1000 characters: free text, shown to every key that reads the item's priority"),
       inferred: z.boolean().optional().describe("True when this is your inference, not a statement you were given: lowers your statement to the inferred tier"),
     },
   },
@@ -587,7 +590,7 @@ export const SPECS = {
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
-      key: z.string().min(1).max(200).describe("The item's key: a uuid, or a ticket's key"),
+      key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
     },
   },
   priority_history: {
@@ -597,7 +600,7 @@ export const SPECS = {
     annotations: { readOnlyHint: true },
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
-      key: z.string().min(1).max(200).describe("The item's key: a uuid, or a ticket's key"),
+      key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
     },
   },
 } satisfies Record<ToolName, ToolSpec>;

@@ -3042,7 +3042,7 @@ if (configFailed) {
          */
         {
           const PRIORITY_FNS = ["assert_priority(text,text,integer,timestamptz,timestamptz,text,text,text,boolean,jsonb)", "clear_priority(text,text,jsonb)",
-            "priority_history(text,text)", "ob1_priority_item(text,text)", "ob1_priority_item_exists(text,text)", "ob1_priority_winner(text,text)", "ob1_priority_json(priority_assertions)"];
+            "priority_history(text,text)", "ob1_priority_item(text,text)", "ob1_priority_item_exists(text,text)", "ob1_priority_winner(text,text)", "ob1_priority_json(public.priority_assertions)"];
           // The group's grants, each table and privilege a pair, read from db/config.mjs's ROLE_GRANTS — the list
           // `migrate.ts --grant` grants — not copied here (review pass 1: a copy drifts from a group that grows).
           const PRIORITY_GRANTS = ROLE_GRANTS.priority.flatMap((g) => (g.table ? g.privileges.map((p) => [g.table as string, p] as const) : []));
@@ -3065,7 +3065,10 @@ if (configFailed) {
             add("priority", "fail", `migration 116's ${pr.missing.join(", ")} missing under 116's signature; set_priority, clear_priority and priority_history call them`,
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
-            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: set_priority, clear_priority and priority_history fail naming the table, and nothing else does`,
+            // A read (priority_history) needs SELECT on the assertions and on what keys an item (ob1_entities); the
+            // writers need every grant (review pass 3: the history was said to fail for a missing write).
+            const failing = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
+            add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");

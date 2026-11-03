@@ -1355,7 +1355,7 @@ export function priorityProblemOf(message: string): PriorityProblem {
 
 const PRIORITY_OUTCOMES = new Set(["asserted", "unchanged", "cleared", "nothing_to_clear", "refused"]);
 const PRIORITY_CODES = new Set(["READ_ONLY_KEY", "ITEM_NOT_YOURS", "ITEM_NOT_FOUND"]);
-const TIER_NAMES = ["operator", "source", "agent", "inferred"] as const;
+const TIER_NAMES = new Set(["operator", "source", "agent", "inferred"]);
 
 const priorityItemOf = (v: unknown): PriorityItem | null => {
   const o = v !== null && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
@@ -1370,16 +1370,20 @@ export function normalisePriorityAssertion(r: unknown, what: string): PriorityAs
   const time = (v: unknown): string | null => (v === null || v === undefined ? null : isoTimestamp(v as string | Date));
   const item = priorityItemOf(o?.item);
   const tier = Number(o?.tier);
+  const dueRef = o?.due_ref === null || o?.due_ref === undefined ? null : priorityItemOf(o.due_ref);
+  // Every field read, or the row refused: a missing time or a due reference of no kind 116 has is no row to show
+  // with a null in its place (review pass 3). The tier's name is 116's own (tier_name), held to the four.
   if (!o || !m || typeof o.id !== "string" || !item || typeof o.level !== "number" || typeof m.name !== "string" || ![1, 2, 3, 4].includes(tier)
+      || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (o.due_ref !== null && o.due_ref !== undefined && !dueRef)
       || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared")) {
     throw new Error(`${what} answered an assertion this server cannot read`);
   }
   return {
     id: o.id, item, level: o.level, dueAt: time(o.due_at), notBefore: time(o.not_before),
-    dueRef: o.due_ref === null || o.due_ref === undefined ? null : priorityItemOf(o.due_ref),
+    dueRef,
     reason: text(o.reason), inferred: o.inferred === true,
     maker: { name: m.name, agentId: text(m.agent_id), kind: text(m.kind), trust: text(m.trust), scope: text(m.scope), source: m.source === true },
-    tier: tier as PriorityAssertion["tier"], tierName: TIER_NAMES[tier - 1],
+    tier: tier as PriorityAssertion["tier"], tierName: o.tier_name as PriorityAssertion["tierName"],
     assertedAt: time(o.asserted_at) as string, closedAt: time(o.closed_at), closeReason: (o.close_reason ?? null) as PriorityAssertion["closeReason"], closedBy: text(o.closed_by),
   };
 }

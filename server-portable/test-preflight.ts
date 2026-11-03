@@ -3255,7 +3255,7 @@ else {
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
       // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
-      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority, clear_priority and priority_history fail naming the table, and nothing else does/.test(missingBoth.out)
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
              "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
       // 060's snapshot writes are named too, with the trigger that makes them
