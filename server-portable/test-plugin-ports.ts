@@ -22,6 +22,7 @@ import { createAssert, dropSchema, pollUntil } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import { EMBEDDING_DIM, EMBEDDING_MODEL, pluginIdents } from "../db/config.mjs";
 import { PLUGINS as REGISTRY } from "../plugins/registry.ts";
+import { keepsMark, listSource, shoppingItems } from "../plugins/meal-planning/index.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 
 const URL_ = process.env.DATABASE_URL;
@@ -33,7 +34,7 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 /** The ported plugins, as each PR of SMD-2311 adds one: its section below drives it. */
-const PORTED = ["family-calendar", "home-maintenance", "household-knowledge"] as const;
+const PORTED = ["family-calendar", "home-maintenance", "household-knowledge", "meal-planning"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 
 const { assert, report } = createAssert();
@@ -843,6 +844,404 @@ console.log("\n[household-knowledge] its items and vendors");
   assert(tenK.status === 200, `details of exactly 10,000 characters as JSON are stored (${tenK.status})`);
   await c("add_household_item", { name: "Paint 50% off" });
   assert((await search({ query: "50%" })) === "Paint 50% off" && (await search({ query: "_" })) === "" && (await search({ category: "_" })) === "", "a %, or an _ in a query or a category, matches itself, not any text");
+}
+
+// ── plugins/meal-planning ────────────────────────────────────────────────────
+
+console.log("\n[meal-planning] its recipes, the week's meals and the shopping list");
+{
+  const P = "meal-planning";
+  const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
+  const names = (r: Called, field = "recipes") => ((r.body[field] ?? []) as { name: string }[]).map((t) => t.name).join();
+  const CHANGES_HINT = JSON.stringify({ destructiveHint: true, openWorldHint: false });
+  const scopes = scopesOf(P);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_recipe: "write", search_recipes: "read", update_recipe: "write", create_meal_plan: "write", get_meal_plan: "read", generate_shopping_list: "write", get_shopping_list: "read", mark_item_purchased: "write" }),
+    `its eight operations' scopes: the three reads read, the five writes write (${JSON.stringify(scopes)})`);
+  const routes = Object.fromEntries(Object.entries(REGISTRY.find((p) => p.name === P)!.operations).map(([k, op]) => [k, `${op.method} ${op.path}`]));
+  assert(JSON.stringify(routes) === JSON.stringify({ add_recipe: "POST /recipes", search_recipes: "GET /recipes", update_recipe: "PATCH /recipes/{recipe_id}", create_meal_plan: "POST /meal-plans",
+    get_meal_plan: "GET /meal-plans", generate_shopping_list: "POST /shopping-lists", get_shopping_list: "GET /shopping-lists", mark_item_purchased: "PATCH /shopping-list-items/{item_id}" }),
+    `…and their routes, as the README's table gives them (${JSON.stringify(routes)})`);
+  const hints = await hintsOf(P);
+  const wantHint = (k: string) => (scopes[k] === "read" ? READ_HINT : ["update_recipe", "create_meal_plan", "generate_shopping_list"].includes(k) ? CHANGES_HINT : ADDS_HINT);
+  assert(Object.keys(hints).length === 8 && Object.entries(hints).every(([k, h]) => h === wantHint(k)), `its hints, all eight: a change that overwrites is destructive, an add is not, a read is read-only (${JSON.stringify(hints).slice(0, 240)})`);
+
+  // Recipes: their quantities as written, for the shopping list to sum.
+  const pasta = await c("add_recipe", { name: "Pasta al limone", cuisine: "Italian", prep_time_minutes: 10, cook_time_minutes: 20, servings: 4,
+    ingredients: [{ name: "spaghetti", quantity: "400", unit: "g" }, { name: "olive oil", quantity: "2", unit: "tbsp" }, { name: "salt", quantity: "1" }],
+    instructions: ["boil", "toss"], tags: ["Quick", "vegetarian", " quick "], rating: 5, notes: "a lemon a person" });
+  const { id: pastaId, created_at: _pc, updated_at: pastaUpdated, ...pastaRest } = pasta.body.recipe ?? {};
+  assert(pasta.status === 200 && UUID.test(pastaId) && ISO.test(String(pastaUpdated)) && ISO.test(String(_pc)) && canon(pastaRest) === canon({ name: "Pasta al limone", cuisine: "Italian", prep_time_minutes: 10, cook_time_minutes: 20, servings: 4,
+    ingredients: [{ name: "spaghetti", quantity: "400", unit: "g" }, { name: "olive oil", quantity: "2", unit: "tbsp" }, { name: "salt", quantity: "1" }], instructions: ["boil", "toss"], tags: ["quick", "vegetarian"], rating: 5, notes: "a lemon a person" }),
+    `add_recipe stores every field as given, the tags lower-case and each once (${String(JSON.stringify(pasta.body)).slice(0, 240)})`);
+  const salad = await c("add_recipe", { name: "Green salad", cuisine: "French", ingredients: [{ name: "lettuce", quantity: "1", unit: "head" }, { name: "Olive Oil", quantity: "1", unit: "TBSP" }, { name: "stock", quantity: "1/2", unit: "cup" }], instructions: [] }, { door: "mcp" });
+  const soup = await c("add_recipe", { name: "Stock soup", ingredients: [{ name: "stock", quantity: "1 1/2", unit: "cup" }, { name: "salt", quantity: "a pinch" }], instructions: ["simmer"] });
+  const toast = await c("add_recipe", { name: "Toast", ingredients: [{ name: "bread", quantity: "2", unit: "slices" }], instructions: ["toast"] });
+  assert([salad, soup, toast].every((r) => r.status === 200 && UUID.test(r.body.recipe?.id)) && JSON.stringify(toast.body.recipe?.tags) === "[]" && JSON.stringify(salad.body.recipe?.instructions) === "[]",
+    "…over MCP too; tags left out and no instructions are empty lists");
+  const ids = { pasta: String(pastaId), salad: String(salad.body.recipe?.id), soup: String(soup.body.recipe?.id), toast: String(toast.body.recipe?.id) };
+
+  const search = async (input: Body) => names(await c("search_recipes", input));
+  assert((await search({})) === "Toast,Stock soup,Green salad,Pasta al limone" && (await search({ query: "limone PASTA" })) === "Pasta al limone" && (await search({ query: "spaghetti" })) === "Pasta al limone"
+         && (await search({ query: "vegetarian" })) === "Pasta al limone" && (await search({ query: "lemon\u00a0person" })) === "Pasta al limone" && (await search({ query: "limoneitalian" })) === "",
+    "search_recipes: every recipe newest first; a query's words matched apart across the name, the ingredients, the tags and the notes, a no-break space splitting them, and no word across two fields");
+  assert((await search({ cuisine: "ITAL" })) === "Pasta al limone" && (await search({ tag: "QUICK" })) === "Pasta al limone" && (await search({ tag: "qui" })) === ""
+         && (await search({ ingredient: "OIL" })) === "Green salad,Pasta al limone" && (await search({ ingredient: "lettuce" })) === "Green salad" && (await search({ ingredient: "olive oil, extra virgin" })) === "",
+    "…by part of the cuisine, by a whole tag, and by part of an ingredient's name, each in any case (the old server's ingredient search took the exact name)");
+  assert((await search({ query: "spaghetti lettuce" })) === "" && (await search({ query: "olive lettuce" })) === "Green salad" && (await search({ query: "french" })) === "Green salad"
+         && (await search({ cuisine: "%" })) === "" && (await search({ query: "_" })) === "" && (await search({ ingredient: "_" })) === "",
+    "…every word of a query needed, the cuisine among the fields; a % or an _ matches itself in a query, a cuisine and an ingredient");
+  const slash = await c("search_recipes", { query: "\\b" });
+  assert(slash.status === 200 && names(slash) === "" && (await search({ ingredient: "\\b" })) === "", `…and a backslash matches itself, not as an escape making "\\b" match the toast's bread (${slash.status} ${names(slash)})`);
+  const ordered = await c("add_recipe", { name: "  Tag order ", ingredients: [{ name: " salt ", quantity: " 1 ", unit: " tsp " }], instructions: [" stir "], tags: ["vegetarian", "Quick"] });
+  assert(JSON.stringify(ordered.body.recipe?.tags) === '["vegetarian","quick"]', `…tags kept in the order given (${JSON.stringify(ordered.body.recipe?.tags)})`);
+  assert(ordered.body.recipe?.name === "Tag order" && JSON.stringify(ordered.body.recipe?.ingredients) === '[{"name":"salt","quantity":"1","unit":"tsp"}]' && JSON.stringify(ordered.body.recipe?.instructions) === '["stir"]',
+    `…and text trimmed, the name, an ingredient's fields and a step (${JSON.stringify(ordered.body.recipe).slice(0, 200)})`);
+  const firstPage = await c("search_recipes", { limit: 1 });
+  assert((firstPage.body.recipes as unknown[]).length === 1 && firstPage.body.truncated === true && (await c("search_recipes", { limit: 5 })).body.truncated === false, "…limit applies, truncated when more matched and not when exactly limit did");
+
+  const updated = await c("update_recipe", { recipe_id: ids.pasta, tags: ["Weeknight"], rating: 4, cuisine: null, notes: "less lemon" });
+  assert(updated.status === 200 && JSON.stringify(updated.body.recipe?.tags) === '["weeknight"]' && updated.body.recipe?.rating === 4 && updated.body.recipe?.cuisine === null && updated.body.recipe?.notes === "less lemon"
+         && updated.body.recipe?.name === "Pasta al limone" && updated.body.recipe?.servings === 4 && String(updated.body.recipe?.updated_at) > String(pastaUpdated),
+    `update_recipe changes the fields given, clears one given null, leaves the rest, and moves updated_at (${JSON.stringify(updated.body.recipe).slice(0, 200)})`);
+  const everything = await c("update_recipe", { recipe_id: ids.toast, name: "Buttered toast", cuisine: "British", prep_time_minutes: 2, cook_time_minutes: 3, servings: 1,
+    ingredients: [{ name: "bread", quantity: "2", unit: "slice" }, { name: "butter", quantity: "1", unit: "tbsp" }], instructions: ["toast", "butter"], tags: ["breakfast"], rating: 3, notes: "salted butter" });
+  const t = everything.body.recipe ?? {};
+  assert(canon({ name: t.name, cuisine: t.cuisine, prep: t.prep_time_minutes, cook: t.cook_time_minutes, servings: t.servings, ingredients: t.ingredients, instructions: t.instructions, tags: t.tags, rating: t.rating, notes: t.notes })
+         === canon({ name: "Buttered toast", cuisine: "British", prep: 2, cook: 3, servings: 1, ingredients: [{ name: "bread", quantity: "2", unit: "slice" }, { name: "butter", quantity: "1", unit: "tbsp" }], instructions: ["toast", "butter"], tags: ["breakfast"], rating: 3, notes: "salted butter" }),
+    `…every field given is changed (${JSON.stringify(t).slice(0, 200)})`);
+  const nameOnly = await c("update_recipe", { recipe_id: ids.toast, name: "Toast" });
+  const n = nameOnly.body.recipe ?? {};
+  assert(canon({ cuisine: n.cuisine, prep: n.prep_time_minutes, cook: n.cook_time_minutes, servings: n.servings, ingredients: n.ingredients, instructions: n.instructions, tags: n.tags, rating: n.rating, notes: n.notes })
+         === canon({ cuisine: "British", prep: 2, cook: 3, servings: 1, ingredients: [{ name: "bread", quantity: "2", unit: "slice" }, { name: "butter", quantity: "1", unit: "tbsp" }], instructions: ["toast", "butter"], tags: ["breakfast"], rating: 3, notes: "salted butter" }),
+    `…and a change of the name alone leaves every other field as it was (${JSON.stringify(n).slice(0, 200)})`);
+  const notesOnly = await c("update_recipe", { recipe_id: ids.toast, notes: "unsalted" });
+  const tagsOnly = await c("update_recipe", { recipe_id: ids.toast, tags: ["Zeta", "alpha", "zeta"] });
+  assert(notesOnly.status === 200 && notesOnly.body.recipe?.notes === "unsalted" && notesOnly.body.recipe?.rating === 3 && JSON.stringify(tagsOnly.body.recipe?.tags) === '["zeta","alpha"]' && tagsOnly.body.recipe?.notes === "unsalted",
+    `…notes alone are a change; tags given replace the list, lower-case, each once, in the order given (${notesOnly.status}, ${JSON.stringify(tagsOnly.body.recipe?.tags)})`);
+  const nothing = await c("update_recipe", { recipe_id: ids.pasta });
+  const noRecipe = await c("update_recipe", { recipe_id: NO_ROW, name: "x" });
+  const noRecipeMcp = await c("update_recipe", { recipe_id: NO_ROW, name: "x" }, { door: "mcp" });
+  assert(nothing.status === 422 && nothing.body.code === "NOTHING_TO_CHANGE" && noRecipe.status === 404 && noRecipe.body.code === "NO_SUCH_RECIPE" && /search_recipes/.test(String(noRecipe.body.message))
+         && noRecipeMcp.viaMcp.result?.isError === true && JSON.stringify(noRecipeMcp.viaMcp).includes("NO_SUCH_RECIPE"),
+    `…no field to change: 422 NOTHING_TO_CHANGE; a recipe that is not there: 404 NO_SUCH_RECIPE over both doors, saying where the ids are (${nothing.status}, ${noRecipe.status})`);
+
+  // The week of Monday 2026-09-21.
+  const WEEK = "2026-09-21";
+  const plan = await c("create_meal_plan", { week_start: WEEK, meals: [
+    { day_of_week: "friday", meal_type: "breakfast", recipe_id: ids.toast },
+    { day_of_week: "monday", meal_type: "dinner", recipe_id: ids.pasta, servings: 4 },
+    { day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad, notes: "light" },
+    { day_of_week: "tuesday", meal_type: "lunch", custom_meal: "leftovers" },
+  ] });
+  const planned = (plan.body.meals ?? []) as { week_start: string; created_at: string; day_of_week: string; meal_type: string; on_date: string; recipe: { name: string } | null; custom_meal: string | null }[];
+  assert(planned.length === 4 && planned.every((m) => m.week_start === WEEK && ISO.test(m.created_at)), `…each meal naming its week, and made at an ISO time (${JSON.stringify(planned[0]).slice(0, 200)})`);
+  assert(plan.status === 200 && planned.map((m) => `${m.day_of_week}/${m.meal_type}@${m.on_date}`).join() === "monday/dinner@2026-09-21,tuesday/lunch@2026-09-22,tuesday/dinner@2026-09-22,friday/breakfast@2026-09-25",
+    `create_meal_plan answers the meals by day and then by meal, each with the date it falls on (${planned.map((m) => `${m.day_of_week}/${m.meal_type}@${m.on_date}`).join()})`);
+  const tuesdayDinner = (plan.body.meals as { day_of_week: string; meal_type: string; notes: string | null; servings: number | null; recipe: { cuisine: string | null } | null }[]).find((m) => m.day_of_week === "tuesday" && m.meal_type === "dinner");
+  assert(tuesdayDinner?.notes === "light" && tuesdayDinner?.recipe?.cuisine === "French" && (plan.body.meals as { servings: number | null }[])[0].servings === 4, `…each meal's notes and servings, and its recipe's cuisine (${JSON.stringify(tuesdayDinner).slice(0, 160)})`);
+  assert(canon((plan.body.meals as { recipe: unknown }[])[0].recipe) === canon({ id: ids.pasta, name: "Pasta al limone", cuisine: null, prep_time_minutes: 10, cook_time_minutes: 20, servings: 4 }) && planned[1].recipe === null && planned[1].custom_meal === "leftovers",
+    "…each with its recipe's name, cuisine, times and servings, or null for a custom meal");
+  const week = await c("get_meal_plan", { week_start: WEEK });
+  assert(week.status === 200 && JSON.stringify(week.body.meals) === JSON.stringify(plan.body.meals), "get_meal_plan answers the same meals in the same order (the old server sorted days and meals alphabetically: friday before monday)");
+  // A slot sent again is replaced, not doubled; two meals for one slot are both kept; slots not sent stay.
+  const again = await c("create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.salad }, { day_of_week: "monday", meal_type: "dinner", custom_meal: "garlic bread" }] });
+  const weekAgain = ((await c("get_meal_plan", { week_start: WEEK })).body.meals ?? []) as { day_of_week: string; meal_type: string; recipe: { name: string } | null; custom_meal: string | null }[];
+  assert(again.status === 200 && weekAgain.map((m) => `${m.day_of_week}/${m.meal_type}:${m.recipe?.name ?? m.custom_meal}`).join() === "monday/dinner:Green salad,monday/dinner:garlic bread,tuesday/lunch:leftovers,tuesday/dinner:Green salad,friday/breakfast:Toast",
+    `…a slot planned again holds the meals sent for it, both kept in the order sent, and the slots not sent are left (${weekAgain.map((m) => `${m.day_of_week}/${m.meal_type}:${m.recipe?.name ?? m.custom_meal}`).join()})`);
+  const replacedMeals = (again.body.replaced ?? []) as { day_of_week: string; meal_type: string; recipe: { name: string } | null }[];
+  assert(replacedMeals.map((m) => `${m.day_of_week}/${m.meal_type}:${m.recipe?.name}`).join() === "monday/dinner:Pasta al limone" && JSON.stringify(plan.body.replaced) === "[]",
+    `…and the answer's replaced lists what the slot held before, so "add a salad to Monday" sent alone says the pasta went (${JSON.stringify(replacedMeals).slice(0, 160)})`);
+  const missing = await c("create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.pasta }, { day_of_week: "monday", meal_type: "dinner", recipe_id: NO_ROW }] });
+  const weekAfterMissing = ((await c("get_meal_plan", { week_start: WEEK })).body.meals ?? []) as unknown[];
+  assert(missing.status === 404 && missing.body.code === "NO_SUCH_RECIPE" && JSON.stringify(missing.body.recipe_ids) === JSON.stringify([NO_ROW]) && weekAfterMissing.length === 5,
+    `…a recipe that is not there beside one that is: 404 NO_SUCH_RECIPE naming the missing one alone, and the plan as it was (${JSON.stringify(missing.body).slice(0, 160)})`);
+  // A week is named by its Monday: a plan under any other day would hold the same dates under a second name.
+  const notMonday: string[] = [];
+  for (const [key, input] of [["create_meal_plan", { week_start: "2026-09-23", meals: [{ day_of_week: "monday", meal_type: "lunch", custom_meal: "picnic" }] }], ["get_meal_plan", { week_start: "2026-09-20" }],
+                              ["generate_shopping_list", { week_start: "2026-09-22" }], ["get_shopping_list", { week_start: "2026-09-27" }]] as const) {
+    const r = await c(key, input as Body);
+    if (r.status !== 400) notMonday.push(`${key}: ${r.status}`);
+  }
+  assert(notMonday.length === 0, `…a week_start that is not a Monday is refused at 400 by every operation that takes one (${notMonday.join("; ") || "all four"})`);
+  assert(JSON.stringify((await c("get_meal_plan", { week_start: "2020-01-06" })).body.meals) === "[]" && (await c("get_meal_plan", { week_start: "9999-12-20" })).status === 200,
+    "an unplanned week is no meals; the last week ending in the year 9999 is a week");
+
+  // The shopping list, from the week of Monday 2026-10-05: pasta twice, the salad, the soup, and a custom meal.
+  const LIST_WEEK = "2026-10-05";
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [
+    { day_of_week: "monday", meal_type: "dinner", recipe_id: ids.pasta }, { day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad },
+    { day_of_week: "wednesday", meal_type: "dinner", recipe_id: ids.pasta }, { day_of_week: "thursday", meal_type: "dinner", recipe_id: ids.soup },
+    { day_of_week: "thursday", meal_type: "lunch", custom_meal: "out" },
+  ] });
+  assert(((await c("get_meal_plan", { week_start: WEEK })).body.meals as unknown[]).length === 5, "…planning another week leaves this week's slots as they were");
+  await c("create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad, notes: "light" }] });
+  const tuesday = ((await c("get_meal_plan", { week_start: WEEK })).body.meals as { day_of_week: string; meal_type: string }[]).filter((m) => m.day_of_week === "tuesday").map((m) => m.meal_type).join();
+  assert(tuesday === "lunch,dinner", `…and replacing one meal of a day leaves the day's other meals (${tuesday})`);
+  const made = await c("generate_shopping_list", { week_start: LIST_WEEK });
+  const items = (made.body.shopping_list?.items ?? []) as { id: string; name: string; quantity: string | null; unit: string | null; purchased: boolean; recipe_ids: string[] }[];
+  assert(made.status === 200 && UUID.test(made.body.shopping_list?.id) && items.map((i) => `${i.name}:${i.quantity}${i.unit ? ` ${i.unit}` : ""}`).join() === "spaghetti:800 g,olive oil:5 tbsp,salt:2 + a pinch,lettuce:1 head,stock:2 cup",
+    `generate_shopping_list: each ingredient once by name and unit in any case, in the order the week first names it; numbers summed (a recipe twice counts twice, 1/2 and 1 1/2 make 2), words after the sum (${items.map((i) => `${i.name}:${i.quantity} ${i.unit ?? ""}`).join()})`);
+  assert(JSON.stringify(items.find((i) => i.name === "olive oil")?.recipe_ids) === JSON.stringify([ids.pasta, ids.salad]) && items.every((i) => i.purchased === false && UUID.test(i.id)),
+    "…each item naming the recipes it is for, none purchased");
+  const oil = items.find((i) => i.name === "olive oil")!;
+  const lettuce = items.find((i) => i.name === "lettuce")!;
+  const marked = await c("mark_item_purchased", { item_id: oil.id });
+  await c("mark_item_purchased", { item_id: lettuce.id });
+  assert(marked.status === 200 && marked.body.item?.purchased === true && marked.body.item?.bought_quantity === "5" && marked.body.item?.id === oil.id && items.every((i) => (i as { bought_quantity?: unknown }).bought_quantity === null),
+    `mark_item_purchased marks it bought at its quantity; an item not bought has none (${JSON.stringify(marked.body).slice(0, 160)})`);
+  assert(made.body.shopping_list?.stale === false, "…a list just made is not stale");
+  const listed = await c("get_shopping_list", { week_start: LIST_WEEK });
+  assert(ISO.test(String(listed.body.shopping_list?.updated_at)) && String(listed.body.shopping_list?.updated_at) > String(made.body.shopping_list?.updated_at), "…a mark moves the list's updated_at on");
+  assert(listed.status === 200 && ((listed.body.shopping_list?.items ?? []) as { name: string; purchased: boolean }[]).find((i) => i.name === "olive oil")?.purchased === true && listed.body.shopping_list?.id === made.body.shopping_list?.id,
+    "get_shopping_list answers the week's list as it now is, the mark kept");
+  // The plan changed: Wednesday's pasta gone. The list says it is stale; made again, it follows the plan, and lettuce
+  // (the same quantity) and olive oil (5 tbsp bought, now 3: less than was bought) stay bought.
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "wednesday", meal_type: "dinner", custom_meal: "takeaway" }] });
+  const staleNow = async (week = LIST_WEEK) => (await c("get_shopping_list", { week_start: week })).body.shopping_list?.stale;
+  assert((await staleNow()) === true, "…once the plan changes, the list made before it says it is stale");
+  const remade = await c("generate_shopping_list", { week_start: LIST_WEEK }, { door: "mcp" });
+  const remadeItems = (remade.body.shopping_list?.items ?? []) as { id: string; name: string; quantity: string | null; purchased: boolean; bought_quantity: string | null }[];
+  const was = (its: typeof remadeItems, name: string) => its.find((i) => i.name === name);
+  assert(remade.body.shopping_list?.id === made.body.shopping_list?.id && remade.body.shopping_list?.stale === false && was(remadeItems, "spaghetti")?.quantity === "400" && was(remadeItems, "spaghetti")?.purchased === false
+         && was(remadeItems, "olive oil")?.quantity === "3" && was(remadeItems, "olive oil")?.purchased === true && was(remadeItems, "olive oil")?.bought_quantity === "5" && was(remadeItems, "lettuce")?.purchased === true,
+    `…made again, the same list follows the plan; a mark stays on an item whose quantity is the same or smaller (the old server's regeneration wiped every mark) (${remadeItems.map((i) => `${i.name}:${i.quantity}:${i.purchased}`).join()})`);
+  const remarked = await c("mark_item_purchased", { item_id: String(was(remadeItems, "olive oil")?.id) });
+  assert(remarked.body.item?.purchased === true && remarked.body.item?.bought_quantity === "5", `…an item marked again keeps what was first bought, not its smaller quantity now (${JSON.stringify(remarked.body.item)})`);
+  assert(String(remade.body.shopping_list?.updated_at) > String(listed.body.shopping_list?.updated_at) && String(remade.body.shopping_list?.created_at) === String(made.body.shopping_list?.created_at),
+    "…making it again moves updated_at on and keeps created_at");
+  // Stale is whether a list made now would say otherwise: a recipe's notes and rating, the same meal planned again in
+  // its slot, and a custom meal change nothing it says.
+  await c("update_recipe", { recipe_id: ids.salad, notes: "with croutons", rating: 4 });
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad }, { day_of_week: "friday", meal_type: "lunch", custom_meal: "picnic" }] });
+  assert((await staleNow()) === false, "…a planned recipe's notes and rating, the same meal planned again in its slot, and a custom meal leave the list current");
+  // A planned recipe's ingredients changed: stale, and a mark after it leaves it stale (pass 1's stale was by the list's
+  // updated_at, which a mark moves on).
+  await c("update_recipe", { recipe_id: ids.soup, ingredients: [{ name: "stock", quantity: "2", unit: "cup" }, { name: "salt", quantity: "a pinch" }] });
+  await c("mark_item_purchased", { item_id: String(was(remadeItems, "spaghetti")?.id) });
+  assert((await staleNow()) === true, "…a planned recipe's ingredients changed make it stale, and a mark after it leaves it stale");
+  // Wednesday's pasta back: spaghetti, 400 g bought, is now 800 g, and to buy again; olive oil, 5 tbsp bought, is 5 again,
+  // still bought (pass 2 judged it by the 3 it had shrunk to, and asked to buy it again).
+  await c("create_meal_plan", { week_start: LIST_WEEK, meals: [{ day_of_week: "wednesday", meal_type: "dinner", recipe_id: ids.pasta }] });
+  const grownItems = ((await c("generate_shopping_list", { week_start: LIST_WEEK })).body.shopping_list?.items ?? []) as typeof remadeItems;
+  assert(was(grownItems, "spaghetti")?.quantity === "800" && was(grownItems, "spaghetti")?.purchased === false && was(grownItems, "spaghetti")?.bought_quantity === null
+         && was(grownItems, "olive oil")?.quantity === "5" && was(grownItems, "olive oil")?.purchased === true && was(grownItems, "olive oil")?.bought_quantity === "5"
+         && was(grownItems, "lettuce")?.purchased === true && was(grownItems, "stock")?.quantity === "2 1/2",
+    `…a quantity that grew past what was bought is to buy again, and one back to what was bought is still bought (${grownItems.map((i) => `${i.name}:${i.quantity}:${i.purchased}`).join()})`);
+  // An item first named in capitals ("Olive Oil", the salad's) keeps its mark when the list is made again unchanged.
+  const CAPS_WEEK = "2026-10-12";
+  await c("create_meal_plan", { week_start: CAPS_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.salad }] });
+  const capsList = await c("generate_shopping_list", { week_start: CAPS_WEEK });
+  const capsOil = ((capsList.body.shopping_list?.items ?? []) as { id: string; name: string }[]).find((i) => i.name === "Olive Oil");
+  await c("mark_item_purchased", { item_id: String(capsOil?.id) });
+  const capsAgain = ((await c("generate_shopping_list", { week_start: CAPS_WEEK })).body.shopping_list?.items ?? []) as { name: string; purchased: boolean }[];
+  assert(capsOil !== undefined && capsAgain.find((i) => i.name === "Olive Oil")?.purchased === true, `…an item first named in capitals keeps its mark (${JSON.stringify(capsAgain).slice(0, 160)})`);
+  await sql`UPDATE plugin_meal_planning.shopping_lists SET made_from = NULL WHERE week_start = ${CAPS_WEEK}::date`;
+  const copied = await c("get_shopping_list", { week_start: CAPS_WEEK });
+  assert(copied.status === 200 && copied.body.shopping_list?.stale === true, `…a list copied from the standalone server, never made here (no made_from), reads stale (${copied.status} ${String(copied.body.shopping_list?.stale)})`);
+  // A name JavaScript and Postgres lower-case apart ("ΑΣ" is "ας" to one, "ασ" to the other) keeps its mark too: the
+  // keys are made in one place.
+  const greek = await c("add_recipe", { name: "Greek plate", ingredients: [{ name: "\u0391\u03a3", quantity: "1" }], instructions: [] });
+  const GREEK_WEEK = "2026-10-19";
+  await c("create_meal_plan", { week_start: GREEK_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: String(greek.body.recipe?.id) }] });
+  const greekItem = (((await c("generate_shopping_list", { week_start: GREEK_WEEK })).body.shopping_list?.items ?? []) as { id: string }[])[0];
+  await c("mark_item_purchased", { item_id: String(greekItem?.id) });
+  const greekAgain = (((await c("generate_shopping_list", { week_start: GREEK_WEEK })).body.shopping_list?.items ?? []) as { purchased: boolean }[])[0];
+  assert(greekAgain?.purchased === true, `…and so does a name whose lower case JavaScript and Postgres disagree on (${JSON.stringify(greekAgain)})`);
+  // The list in the week's order, whatever order the plan was sent in: Monday's breakfast, Monday's dinner, Tuesday's.
+  const ORDER_WEEK = "2026-11-02";
+  await c("create_meal_plan", { week_start: ORDER_WEEK, meals: [{ day_of_week: "tuesday", meal_type: "breakfast", recipe_id: ids.toast }, { day_of_week: "monday", meal_type: "dinner", recipe_id: ids.pasta },
+    { day_of_week: "monday", meal_type: "breakfast", recipe_id: ids.soup }] });
+  const inOrder = (((await c("generate_shopping_list", { week_start: ORDER_WEEK })).body.shopping_list?.items ?? []) as { name: string }[]).map((i) => i.name).join();
+  assert(inOrder === "stock,salt,spaghetti,olive oil,bread,butter", `…its items in the order the week names them, by day and then meal, not the order the plan was sent in (${inOrder})`);
+  // Sunday and a snack last of their kind; five meals of one slot in the order sent (one or two would pass by luck).
+  await c("create_meal_plan", { week_start: ORDER_WEEK, meals: [{ day_of_week: "sunday", meal_type: "snack", custom_meal: "popcorn" }, { day_of_week: "monday", meal_type: "snack", custom_meal: "fruit" },
+    ...["a", "b", "c", "d", "e"].map((x) => ({ day_of_week: "wednesday" as const, meal_type: "lunch" as const, custom_meal: x }))] });
+  const orderWeek = (((await c("get_meal_plan", { week_start: ORDER_WEEK })).body.meals ?? []) as { day_of_week: string; meal_type: string; recipe: { name: string } | null; custom_meal: string | null }[])
+    .map((m) => `${m.day_of_week}/${m.meal_type}:${m.recipe?.name ?? m.custom_meal}`).join();
+  assert(orderWeek === "monday/breakfast:Stock soup,monday/dinner:Pasta al limone,monday/snack:fruit,tuesday/breakfast:Toast,wednesday/lunch:a,wednesday/lunch:b,wednesday/lunch:c,wednesday/lunch:d,wednesday/lunch:e,sunday/snack:popcorn",
+    `…a Sunday and a snack planned, each last of its kind, and five meals of a slot in the order sent (${orderWeek})`);
+  const swapped = await c("create_meal_plan", { week_start: ORDER_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.salad }] });
+  const swappedOut = ((swapped.body.replaced ?? []) as { week_start: string; day_of_week: string; meal_type: string; recipe: { name: string } | null }[]).map((m) => `${m.week_start} ${m.day_of_week}/${m.meal_type}:${m.recipe?.name}`).join();
+  assert(swappedOut === `${ORDER_WEEK} monday/dinner:Pasta al limone`, `…replaced is the slot's meals alone: not the day's other meals, nor the same slot in other weeks (${swappedOut})`);
+  const unmarked = await c("mark_item_purchased", { item_id: String(was(grownItems, "lettuce")?.id), purchased: false });
+  assert(unmarked.body.item?.purchased === false && unmarked.body.item?.bought_quantity === null, "…and purchased false takes the mark off, and what was bought with it");
+
+  // A mark and a list made again at once, forced to race: a lock held on the item stops the mark at it, and the list
+  // made again then waits too. Pass 1's mark took the item before the list, and the list's maker the list before the
+  // items: released, the two deadlocked (a 500), or the new items took the mark's item away. The mark now takes the
+  // list first, so the maker waits for it, and keeps the mark.
+  const RACE_WEEK = "2026-10-26";
+  await c("create_meal_plan", { week_start: RACE_WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: ids.toast }] });
+  const bread = (((await c("generate_shopping_list", { week_start: RACE_WEEK })).body.shopping_list?.items ?? []) as { id: string }[])[0];
+  const waiting = async () => Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = 'ob1_plugins_meal_planning' AND wait_event_type = 'Lock'`) as { n: number }[])[0].n);
+  const holdWhile = async (lock: string, id: string, race: () => Promise<boolean>) => {
+    const holder = new SQL({ url: URL_, max: 1 });
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => (held = r));
+    const holding = holder.begin(async (tx) => {
+      await tx.unsafe(lock, [id]);
+      held();
+      await released;
+    });
+    await isHeld;
+    try {
+      return await race();
+    } finally {
+      release();
+      await holding;
+      await holder.close();
+    }
+  };
+  let marking!: Promise<Called>, making!: Promise<Called>;
+  const bothWait = await holdWhile("SELECT 1 FROM plugin_meal_planning.shopping_list_items WHERE id = $1 FOR UPDATE", bread.id, async () => {
+    marking = c("mark_item_purchased", { item_id: bread.id });
+    const markWaits = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    making = c("generate_shopping_list", { week_start: RACE_WEEK });
+    return markWaits && (await pollUntil(async () => (await waiting()) === 2, 10_000));
+  });
+  const [markDone, makeDone] = await Promise.all([marking, making]);
+  const raced = (((await c("get_shopping_list", { week_start: RACE_WEEK })).body.shopping_list?.items ?? []) as { purchased: boolean }[])[0];
+  assert(bothWait && markDone.status === 200 && makeDone.status === 200 && raced?.purchased === true,
+    `a mark and a list made again at once, both waiting on a held item and released together: both succeed and the new list keeps the mark (${bothWait}, ${markDone.status} ${String(markDone.body.code ?? "")}, ${makeDone.status} ${String(makeDone.body.code ?? "")}, ${JSON.stringify(raced)})`);
+  // The same plan sent twice at once (a client's retry), forced: a lock held on the soup's row stops the first at its
+  // foreign-key check, and the second is sent while it waits. Pass 2 let the second empty the slot before the first's
+  // meal was in, and both were kept; a lock on the week now makes the second wait and replace it.
+  const TWICE_WEEK = "2026-11-09";
+  const twice = { week_start: TWICE_WEEK, meals: [{ day_of_week: "monday" as const, meal_type: "dinner" as const, recipe_id: ids.soup }] };
+  let first!: Promise<Called>, second!: Promise<Called>;
+  const twiceWait = await holdWhile("SELECT 1 FROM plugin_meal_planning.recipes WHERE id = $1 FOR UPDATE", ids.soup, async () => {
+    first = c("create_meal_plan", twice);
+    const one = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    second = c("create_meal_plan", twice);
+    return one && (await pollUntil(async () => (await waiting()) === 2, 10_000));
+  });
+  const [firstDone, secondDone] = await Promise.all([first, second]);
+  const twiceMeals = ((await c("get_meal_plan", { week_start: TWICE_WEEK })).body.meals ?? []) as unknown[];
+  assert(twiceWait && firstDone.status === 200 && secondDone.status === 200 && twiceMeals.length === 1,
+    `the same plan sent twice at once, both waiting and released together: planned once (${twiceWait}, ${firstDone.status} ${secondDone.status}, ${twiceMeals.length} meal(s))`);
+  // A plan committing while a list is made, forced: a lock held on the salad's row stops a plan of it at its
+  // foreign-key check, its meal already stamped, and the list is made meanwhile without the salad. Pass 1's stale
+  // compared stamps, the meal's older than the list's, and read current; it now compares what the list says.
+  let planning!: Promise<Called>;
+  let meanwhile!: Called;
+  const planWaits = await holdWhile("SELECT 1 FROM plugin_meal_planning.recipes WHERE id = $1 FOR UPDATE", ids.salad, async () => {
+    planning = c("create_meal_plan", { week_start: RACE_WEEK, meals: [{ day_of_week: "tuesday", meal_type: "dinner", recipe_id: ids.salad }] });
+    const waits = await pollUntil(async () => (await waiting()) === 1, 10_000);
+    meanwhile = await c("generate_shopping_list", { week_start: RACE_WEEK });
+    return waits;
+  });
+  const planDone = await planning;
+  const meanwhileNames = ((meanwhile.body.shopping_list?.items ?? []) as { name: string }[]).map((i) => i.name).join();
+  const lateStale = await staleNow(RACE_WEEK);
+  assert(planWaits && meanwhile.status === 200 && !meanwhileNames.includes("lettuce") && planDone.status === 200 && lateStale === true,
+    `…and a plan that commits after a list made while it was open leaves that list stale (${planWaits}, ${meanwhile.status} ${meanwhileNames}, ${planDone.status}, stale ${lateStale})`);
+  const noList = await c("get_shopping_list", { week_start: "2020-01-06" });
+  const noItem = await c("mark_item_purchased", { item_id: NO_ROW });
+  const emptyList = await c("generate_shopping_list", { week_start: "2020-01-13" });
+  assert(noList.status === 404 && noList.body.code === "NO_SUCH_LIST" && /generate_shopping_list/.test(String(noList.body.message)) && noItem.status === 404 && noItem.body.code === "NO_SUCH_ITEM"
+         && emptyList.status === 200 && JSON.stringify(emptyList.body.shopping_list?.items) === "[]",
+    `a week with no list: 404 NO_SUCH_LIST saying how to make one; an item that is not there: 404 NO_SUCH_ITEM; a week with no planned recipe makes an empty list (${noList.status}, ${noItem.status}, ${emptyList.status})`);
+
+  // The list's arithmetic, on its own: what agents write in quantity and unit.
+  const list = (meals: { recipe_id: string; ingredients: { name: string; quantity?: string | null; unit?: string | null }[] }[]) => shoppingItems(meals).map((i) => `${i.name}:${i.quantity ?? ""}${i.unit ? ` ${i.unit}` : ""}`).join(" | ");
+  const r1 = "11111111-1111-4111-8111-111111111111", r2 = "22222222-2222-4222-8222-222222222222";
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "milk", quantity: "\u00bd", unit: "cup" }, { name: "beef", quantity: "1 lb" }, { name: "flour", quantity: "2-3", unit: "cups" }, { name: "cream", quantity: "1/3", unit: "cup" }] },
+               { recipe_id: r2, ingredients: [{ name: "Milk", quantity: ".5", unit: "Cups" }, { name: "beef", quantity: "2", unit: "lbs" }, { name: "flour", quantity: "2-3", unit: "cup" }, { name: "cream", quantity: "1/3", unit: "cup" }, { name: "beef", quantity: "1\u00bd", unit: "pounds" }] }])
+         === "milk:1 cup | beef:4 1/2 lb | flour:2-3 \u00d72 cup | cream:2/3 cup",
+    `shoppingItems: a half as ½ or .5 summed, "1 lb" with its unit in the quantity, "lbs" and "pounds" one unit, a third shown as a fraction, and words kept with how many times they came (${list([{ recipe_id: r1, ingredients: [{ name: "milk", quantity: "\u00bd", unit: "cup" }] }])})`);
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "salt", quantity: "a pinch" }, { name: "salt", quantity: "1" }, { name: "pepper" }] }]) === "salt:1 + a pinch | pepper:"
+         && shoppingItems([{ recipe_id: r1, ingredients: [{ name: "pepper" }] }])[0].quantity === null,
+    "…a number and a word together, the number first; an ingredient with no quantity listed with none (null, not empty text)");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "oil", quantity: "2", unit: "tbsp" }, { name: "oil", quantity: "1", unit: "cup" }, { name: "x", quantity: "0.5" }, { name: "x", quantity: "1.5" },
+                                              { name: "y", quantity: "0.1" }, { name: "y", quantity: "0.2" }, { name: "z", quantity: "1/0" }] }])
+         === "oil:2 tbsp | oil:1 cup | x:2 | y:0.3 | z:1/0",
+    "…two units of one ingredient listed apart; 0.5 and 1.5 make 2; 0.1 and 0.2 make 0.3, not its float; a division by zero is a word, not Infinity");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "eggs", quantity: "2 large" }, { name: "eggs", quantity: "3" }, { name: "oil", quantity: "1", unit: "T" }, { name: "oil", quantity: "1", unit: "t" },
+                                              { name: "milk", quantity: "1", unit: "c" }, { name: "milk", quantity: "1", unit: "cup" }, { name: "thyme", quantity: "1", unit: "Sprig" }, { name: "thyme", quantity: "2", unit: "sprig" }] }])
+         === "eggs:3 + 2 large | oil:1 tbsp | oil:1 tsp | milk:2 cup | thyme:3 Sprig",
+    "…a word after a number that is no unit stays part of the quantity; T and t are a tablespoon and a teaspoon, apart; c is a cup; an unknown unit merges in any case");
+  const pinch = { recipe_id: r1, ingredients: [{ name: "salt", quantity: "a pinch" }, { name: "Oil", quantity: "1" }] }, taste = { recipe_id: r2, ingredients: [{ name: "oil", quantity: "2" }, { name: "salt", quantity: "to taste" }] };
+  assert(list([pinch, taste]) === "salt:a pinch + to taste | Oil:3" && list([taste, pinch]) === "oil:3 | salt:a pinch + to taste",
+    "…the words in one order whatever the meals' order, so a mark made at them holds when two meals swap");
+  assert(listSource(shoppingItems([pinch, taste])) === listSource(shoppingItems([taste, pinch])) && listSource(shoppingItems([pinch, taste])) !== listSource(shoppingItems([pinch, pinch])) && listSource(shoppingItems([pinch])) !== listSource(shoppingItems([{ ...pinch, recipe_id: r2 }])),
+    "listSource: two lists saying the same with their items in another order and case are one source; another quantity is another, and so is the same from another recipe");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "a", quantity: "0.004", unit: "kg" }, { name: "b", quantity: "9".repeat(50) }, { name: "c", quantity: "1 \u00bd cup" }, { name: "d", quantity: "\u2159" }, { name: "d", quantity: "\u2159" },
+                                              { name: "e", quantity: "2", unit: "Tbs" }, { name: "e", quantity: "1", unit: "tbsp" }, { name: "f", quantity: "1/16" }, { name: "g", quantity: "1/6" }] }])
+         === `a:0.004 kg | b:${"9".repeat(50)} | c:1 1/2 cup | d:1/3 | e:3 tbsp | f:0.063 | g:1/6`,
+    "…a sum below a hundredth in two figures, not 0; a number past a billion kept as written, not 1e+50; \"1 \u00bd cup\" read; \u2159 a sixth; Tbs a tablespoon; 1/16 as 0.063, a sixth as 1/6");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "a", quantity: "x2\u00bd" }, { name: "a2", quantity: "1.5\u00bd" }, { name: "b", quantity: "1  1/2" }, { name: "c", quantity: "\u215b" }, { name: "c", quantity: "\u215b" }, { name: "d", quantity: "1000000000" }, { name: "d", quantity: "1000000000" },
+                                              { name: "e", quantity: "1", unit: "C" }, { name: "e", quantity: "1", unit: "cup" }, { name: "f", quantity: "1", unit: "T." }, { name: "f", quantity: "1", unit: "tbsp" }, { name: "g", quantity: "1", unit: "Lbs." }, { name: "g", quantity: "1", unit: "lb" }] }])
+         === "a:x2\u00bd | a2:1.5\u00bd | b:1 1/2 | c:1/4 | d:2000000000 | e:2 cup | f:2 tbsp | g:2 lb",
+    "…a fraction after text that is no number kept as written; two spaces in a mixed number; \u215b an eighth; a billion still a number; C a cup; a trailing dot on a unit, letter or word");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "h", quantity: "1 lb", unit: "cup" }, { name: "i", quantity: "few cloves" }, { name: "j", quantity: "1 lbs." }, { name: "j", quantity: "1", unit: "lb" },
+                                              { name: "k", quantity: " " }, { name: "m", quantity: "0.0000000001" }] }])
+         === "h:1 lb cup | i:few cloves | j:2 lb | k: | m:0",
+    "…a unit given beside a quantity holding one is kept as given; a unit after no number stays in the quantity; \"1 lbs.\" a pound; a blank quantity none; a sum next to nothing 0, not 1e-10");
+  assert(list([{ recipe_id: r1, ingredients: [{ name: "n", quantity: "1.04" }, { name: "o", quantity: "3/8" }, { name: "p", quantity: "1.998" }, { name: "q", quantity: "0.33" }, { name: "r", quantity: "1.1" }, { name: "r", quantity: "2.2" },
+                                              { name: " s ", quantity: "1" }, { name: "s", quantity: "1" }] }])
+         === "n:1.04 | o:3/8 | p:2 | q:1/3 | r:3.3 | s:2",
+    "…1.04 is not 1; three eighths as 3/8; 1.998 as 2, not 1 1/1; 0.33 near enough a third; 1.1 and 2.2 make 3.3, not its float; a name with spaces about it is the name");
+  const SPELLINGS: Record<string, string[]> = {
+    lb: ["lb", "lbs", "pound", "pounds"], oz: ["oz", "ozs", "ounce", "ounces"], g: ["g", "gram", "grams"], kg: ["kg", "kgs", "kilogram", "kilograms"],
+    ml: ["ml", "milliliter", "milliliters", "millilitre", "millilitres"], l: ["l", "liter", "liters", "litre", "litres"],
+    tsp: ["tsp", "tsps", "teaspoon", "teaspoons", "t"], tbsp: ["tbsp", "tbsps", "tbs", "tbl", "tablespoon", "tablespoons", "T"], cup: ["cup", "cups", "c", "C"],
+    clove: ["clove", "cloves"], slice: ["slice", "slices"], can: ["can", "cans"], jar: ["jar", "jars"], head: ["head", "heads"],
+    pint: ["pint", "pints"], quart: ["quart", "quarts"], piece: ["piece", "pieces"], bunch: ["bunch", "bunches"],
+  };
+  const spelled = Object.entries(SPELLINGS).flatMap(([unit, sps]) => sps.flatMap((sp) => (sp.length > 1 ? [sp, sp[0].toUpperCase() + sp.slice(1)] : [sp])).filter((sp) => shoppingItems([{ recipe_id: r1, ingredients: [{ name: "x", quantity: "1", unit: sp }] }])[0].unit !== unit).map((sp) => `${sp} → ${unit}`));
+  assert(spelled.length === 0, `…every unit's spellings, and each capitalised, in its one spelling (${spelled.join("; ") || "all of them"})`);
+  const marks: [string | null, string | null, boolean][] = [["800", "800", true], ["800", "400", true], ["400", "800", false], ["1 1/2", "1/2", true], ["a pinch", "a pinch", true], ["2 + a pinch", "1 + a pinch", false], [null, null, true], [null, "1", false], ["1.5", "1 1/2", true], ["2", "2 + a pinch", false], ["2", null, false], ["a pinch", "0", false]];
+  const markMisses = marks.filter(([a, b, want]) => keepsMark(a, b) !== want).map(([a, b, want]) => `${a} → ${b}: ${!want}`);
+  assert(markMisses.length === 0, `keepsMark: a mark holds at the same quantity or a smaller number, and goes from more, or a changed quantity not a number (${markMisses.join("; ") || "all twelve"})`);
+
+  const missed = await outOfBounds(c, [
+    ["a name of 201 characters", "add_recipe", { name: "x".repeat(201), ingredients: [], instructions: [] }], ["no ingredients list", "add_recipe", { name: "x", instructions: [] }],
+    ["servings of 0", "add_recipe", { name: "x", ingredients: [], instructions: [], servings: 0 }], ["a prep time of -1", "add_recipe", { name: "x", ingredients: [], instructions: [], prep_time_minutes: -1 }],
+    ["a rating of 6", "add_recipe", { name: "x", ingredients: [], instructions: [], rating: 6 }], ["31 tags", "add_recipe", { name: "x", ingredients: [], instructions: [], tags: Array.from({ length: 31 }, (_, i) => `t${i}`) }],
+    ["an ingredient with no name", "add_recipe", { name: "x", ingredients: [{ name: "", quantity: "1" }], instructions: [] }], ["a NUL in the name", "add_recipe", { name: "x\u0000", ingredients: [], instructions: [] }],
+    ["a day not lower-case", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "Monday", meal_type: "dinner", custom_meal: "x" }] }],
+    ["a meal type of brunch", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "brunch", custom_meal: "x" }] }],
+    ["a meal with neither recipe nor custom meal", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner" }] }],
+    ["no meals", "create_meal_plan", { week_start: WEEK, meals: [] }], ["a recipe id that is no uuid", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "dinner", recipe_id: "pasta" }] }],
+    ["a week in the year 0000", "get_meal_plan", { week_start: "0000-01-03" }], ["a week ending in the year 10000", "get_meal_plan", { week_start: "9999-12-27" }], ["a limit of 0", "search_recipes", { limit: 0 }], ["an empty query", "search_recipes", { query: "" }],
+    ["an item id that is no uuid", "mark_item_purchased", { item_id: "oil" }], ["servings of 1001", "add_recipe", { name: "x", ingredients: [], instructions: [], servings: 1001 }],
+    ["a cook time of 10081", "add_recipe", { name: "x", ingredients: [], instructions: [], cook_time_minutes: 10081 }], ["a rating of 0", "add_recipe", { name: "x", ingredients: [], instructions: [], rating: 0 }],
+    ["an empty quantity", "add_recipe", { name: "x", ingredients: [{ name: "salt", quantity: "" }], instructions: [] }], ["101 steps", "add_recipe", { name: "x", ingredients: [], instructions: Array.from({ length: 101 }, () => "stir") }],
+    ["a recipe id that is no uuid", "update_recipe", { recipe_id: "pasta", name: "x" }],
+    ["an empty unit", "add_recipe", { name: "x", ingredients: [{ name: "salt", quantity: "1", unit: "" }], instructions: [] }],
+    ["a quantity of 51 characters", "add_recipe", { name: "x", ingredients: [{ name: "salt", quantity: "1".repeat(51) }], instructions: [] }],
+    ["201 ingredients", "add_recipe", { name: "x", ingredients: Array.from({ length: 201 }, () => ({ name: "salt" })), instructions: [] }],
+    ["notes of 5001 characters", "add_recipe", { name: "x", ingredients: [], instructions: [], notes: "n".repeat(5001) }],
+    ["a limit of 201", "search_recipes", { limit: 201 }],
+    ["51 meals", "create_meal_plan", { week_start: WEEK, meals: Array.from({ length: 51 }, () => ({ day_of_week: "monday", meal_type: "snack", custom_meal: "x" })) }],
+    ["an empty custom meal beside a recipe", "create_meal_plan", { week_start: WEEK, meals: [{ day_of_week: "monday", meal_type: "snack", recipe_id: ids.toast, custom_meal: "" }] }],
+  ]);
+  assert(missed.length === 0, `each input out of its bounds is refused at 400, before the database (not: ${missed.join("; ") || "none"})`);
+  const strays = await one<{ n: number }>(sql`SELECT (SELECT count(*) FROM plugin_meal_planning.recipes WHERE name = 'x') + (SELECT count(*) FROM plugin_meal_planning.meal_plans WHERE custom_meal = 'x') AS n`);
+  assert(Number(strays.n) === 0, "none of them stored a row");
+  const misses = await tableMisses([
+    [`INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type) VALUES ('${WEEK}', 'monday', 'dinner')`, /meal_plans_recipe_or_custom/],
+    [`INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type, custom_meal) VALUES ('${WEEK}', 'Monday', 'dinner', 'x')`, /day_of_week_check/],
+    [`INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type, custom_meal) VALUES ('${WEEK}', 'monday', 'brunch', 'x')`, /meal_type_check/],
+    [`INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type, recipe_id) VALUES ('${WEEK}', 'monday', 'dinner', '00000000-0000-4000-8000-00000000dead')`, /foreign key/],
+    ["INSERT INTO plugin_meal_planning.recipes (name, ingredients) VALUES ('t', '{}')", /recipes_ingredients_shape/],
+    [`INSERT INTO plugin_meal_planning.recipes (name, ingredients) VALUES ('t', '[{"name": "beef", "quantity": 2}]')`, /recipes_ingredients_shape/],
+    [`INSERT INTO plugin_meal_planning.recipes (name, ingredients) VALUES ('t', '[{"quantity": "2"}]')`, /recipes_ingredients_shape/],
+    [`INSERT INTO plugin_meal_planning.recipes (name, ingredients) VALUES ('t', '[{"name": 2}]')`, /recipes_ingredients_shape/],
+    [`INSERT INTO plugin_meal_planning.recipes (name, ingredients) VALUES ('t', '[{"name": "beef", "unit": 1}]')`, /recipes_ingredients_shape/],
+    [`INSERT INTO plugin_meal_planning.recipes (name, instructions) VALUES ('t', '[1]')`, /recipes_instructions_shape/],
+    ["INSERT INTO plugin_meal_planning.recipes (name) VALUES ('')", /name_check/],
+    ["INSERT INTO plugin_meal_planning.recipes (name, servings) VALUES ('t', 0)", /servings_check/],
+    [`INSERT INTO plugin_meal_planning.shopping_list_items (list_id, name, position) VALUES ('00000000-0000-4000-8000-00000000dead', 'x', 0)`, /foreign key/],
+    ["INSERT INTO plugin_meal_planning.recipes (name, rating) VALUES ('t', 6)", /rating_check/],
+    [`INSERT INTO plugin_meal_planning.shopping_lists (week_start) VALUES ('${LIST_WEEK}')`, /shopping_lists_week_start_key/],
+    ["INSERT INTO plugin_meal_planning.meal_plans (week_start, day_of_week, meal_type, custom_meal) VALUES ('2026-09-23', 'monday', 'dinner', 'x')", /meal_plans_week_monday/],
+    ["INSERT INTO plugin_meal_planning.shopping_lists (week_start) VALUES ('2026-09-23')", /shopping_lists_week_monday/],
+    [`UPDATE plugin_meal_planning.shopping_list_items SET bought_quantity = '1' WHERE id = '${String(was(grownItems, "spaghetti")?.id)}'`, /shopping_list_items_bought_when_purchased/],
+  ]);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all eighteen"})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

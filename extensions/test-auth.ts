@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
  * test-auth.ts — every vendored server authenticates through the core server's
- * auth path: the extension servers (SMD-1252, FORK.md change 64; four of the
- * seven, family-calendar, home-maintenance and household-knowledge plugins
- * since SMD-2311) and the
+ * auth path: the extension servers (SMD-1252, FORK.md change 64; two of the
+ * seven, four plugins since SMD-2311 and meal-planning's shared server
+ * retired with them) and the
  * recipes and integrations that compared a key the same way — six more MCP
  * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
  * change 67).
@@ -154,16 +154,12 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
 const SERVERS: Server[] = [
-  // The extension servers (change 64): four of the seven, family-calendar, home-maintenance and household-knowledge plugins since SMD-2311.
+  // The extension servers (change 64): two of the seven, four plugins since SMD-2311 and meal-planning's shared server retired with them.
   ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
     ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
      "log_interview_notes", "link_contact_to_professional_crm"], { health: "/" }),
-  ext("meal-planning/index.ts", ["search_recipes", "get_meal_plan"],
-    ["add_recipe", "update_recipe", "create_meal_plan", "generate_shopping_list"]),
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
-  ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
-    { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],

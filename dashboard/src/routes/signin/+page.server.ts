@@ -55,7 +55,7 @@ export const actions: Actions = {
 			return fail(502, { error: 'Sign-in failed. The dashboard log has the reason.' });
 		}
 		if (!who.operations.includes(FIRST_READ)) {
-			return fail(403, { error: 'This key cannot read: the dashboard needs a read- or write-scoped key. A capture-only key may add thoughts and nothing else.' });
+			return fail(403, { error: 'This key cannot read: the dashboard needs a read- or write-scoped key. A capture-only key may add thoughts, and rank its own, and read nothing.' });
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach. This listener's own (locals.session, under its own cookie name).
 		closeSession(locals.session?.id);

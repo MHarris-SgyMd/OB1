@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and fifteen (115) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and sixteen (116) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2339,6 +2339,88 @@ label on results is SMD-3599. test-schema [103] (the rules, the cleaning, the re
 the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
 (onto a populated brain at 114).
 
+Migration 116 adds priority assertions: a key states how much an item matters,
+by when and why, and every statement is kept (SMD-3663, docs/priority.md's
+decisions 1, 2, 4 and 10). An **item** is `(kind, key)`: a `thought` or an
+`entity` by its id, a `ticket` by its key (normalised as `work_claims.issue`
+is), or an `item`, an open item, refused until SMD-3665 adds its table.
+`assert_priority` checks the item exists (a ticket by its head row, 068). A
+**level** is 0 none to 5 critical, anything else raised (22023); unknown is no
+assertion at all, never low. An assertion may carry `due_at`, `not_before`, a
+due reference (another item whose due time it takes, never itself), a reason
+(free text, at most 1000 characters, cleaned as 115 cleans a label) and
+`inferred`. The **maker** is stamped from the actor envelope (`p_actor`, which
+the server passes for the key) and the registry, never from an argument or from
+what the envelope says of its own kind or trust: the key's name and agent id,
+its kind, its trust (046's ceiling of the kind; an unclassified key has none),
+its scope, and whether the operator declared it a priority source. Those set its
+**tier**, which decides whose statement wins: 1 operator trust (declared a
+source or not: a declaration only raises), 2 a declared source, 3 agent trust, 4
+inferred (flagged so by its maker, ingested trust from an undeclared key, or no
+trust); the lowest tier wins, then the newest within it — the later written
+(`seq`, the order the writers took the item's lock in; the clock's `asserted_at`
+is for display). A maker may lower its own tier, never raise it. The maker is
+the key: the envelope's agent id, else the registry's for its name, so a key
+seen with its id and without it is one maker, and a statement it made by name
+before the registry knew it is still its own to replace or clear (115's
+`is_holder` rule). A key's new statement on an item closes its open one as
+`replaced`, naming the new one; the same statement again (level, times,
+reference, reason, flag and tier) answers `unchanged` and writes nothing (a key
+that has since gained an id, or changed its scope, kind or declaration, states
+it afresh), so a source restating every pass adds no rows; `clear_priority`
+closes the caller's own as `cleared` and no other key's. `not_before` after
+`due_at` is refused. `priority_assertions` is append-only: a trigger refuses any
+UPDATE but an open row closing once (every other column as it was, compared as
+the whole row, so a column added later is held too), every DELETE and TRUNCATE,
+for the owner too. The scope rule **fails closed**: the envelope must state
+`write` (any item) or `capture`; a read key's scope, or none at all, is refused
+(`READ_ONLY_KEY`). The server's envelopes carry a scope only for a capture key
+today, so the operations (SMD-3664) state `write` for a write key and `capture`
+for a capture-only key. A **capture-only key** may state
+a priority only on a thought its agent captured and nobody has taken since
+(082's `ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope
+itself carries, never one read by name, and asked once, under a share lock on
+the thought), and take a due time only from another such thought — never a
+ticket, an entity or another key's thought. That is asked before any existence
+answer and refused alike for an item that is not there (`ITEM_NOT_YOURS`), so
+the refusal tells it nothing about what exists; neither writer shows it the
+item's winner. `priority_of` and `priority_history` take no actor: who may read
+them is the operations layer's (`priority_history`, a read tool, which a
+capture-only key is never given; SMD-3664). With both `due_at` and a due reference, the item's own `due_at`
+is its due time. A deleted item's assertions stay as they were (SMD-3711, beside
+SMD-1723). The refusals are outcomes, as an unknown item is (`ITEM_NOT_FOUND`).
+`priority_of` reads a JSON array of items (at most 1000): each item's winning
+level, the winner and every open assertion, the winner first, all read by the
+rule in one statement so a reply never contradicts itself; `priority_history`
+reads every statement on one item, closed ones included, in the order written.
+`priority_current` is the projection, one row per item with an open assertion,
+kept current in the write's transaction; `ob1_priority_projection_drift()`
+checks it with its own copy of the winner's rule (068's) and
+`ob1_rebuild_priority_projection()` repairs it after a raw write.
+`declare_priority_source(label, declared)` is the operator's, beside
+`set_agent_kind`: the priority group grants only `SELECT` on `priority_sources`,
+so the server's operations cannot declare a source. That is the server's
+surface, not a wall — a role holding the server group can classify a key
+(`set_agent_kind`), and a role holding the priority group can write the tables
+directly; the rules hold for callers of the functions, as 115's do. Two
+declarations of one key at once wait on an advisory lock on it. Each declaration
+is a row of its own, closed by its withdrawal and never rewritten, and always
+names the key's agent id — a declaration makes the registry row for a label the
+registry does not know yet, as `set_agent_kind` does. Makers, declarations and
+withdrawals are matched by that id alone, so a renamed source stays one (and is
+withdrawn by its new name) and a new key given the old name is not one until
+declared itself. The statements made under a declaration keep their tier. Each
+writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
+lock on its item; make one writer call per transaction, or take items in key
+order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach
+the rows on a forgotten item, and relaxes the trigger to do so. The **priority**
+grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
+082 and 115; a re-apply is a no-op. The REST and MCP operations are
+`set_priority`, `clear_priority` and `priority_history` (SMD-3664;
+server-portable/README.md, Priority assertions).
+test-schema [104] (the rules, the tiers, the refusals, the projection, the
+group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2458,6 +2540,10 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
 | **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **priority** — priority assertions (116, SMD-3663): a role whose clients state priorities through `assert_priority` and `clear_priority`, or read them through `priority_of` and `priority_history` (SECURITY INVOKER; PUBLIC's EXECUTE). The maker's kind is read from `ob1_agents`, and a thought's and a ticket's existence from `thoughts` and `ob1_ticket_head`, the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `priority_assertions` (116; append-only but for closing a window — any other UPDATE, a DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT, UPDATE` |
+| | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
+| | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2475,8 +2561,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): three of the six, family-calendar's, home-maintenance's and household-knowledge's plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
+| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): two of the six, professional-crm's and job-hunt's; the other four are plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
@@ -2528,8 +2613,9 @@ needs the privileges a real run does and shows what that run would refuse. A rol
 ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
-for a role that writes pages (064), and **claims** for a role whose clients
-claim work (115). The
+for a role that writes pages (064), **claims** for a role whose clients
+claim work (115), and **priority** for a role whose clients state priorities
+(116). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply

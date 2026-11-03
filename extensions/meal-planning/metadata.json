@@ -1,22 +1,25 @@
 {
   "name": "Meal Planning",
-  "description": "Recipes, weekly meal plans, and shared shopping lists with a dedicated shared MCP server for household access.",
+  "description": "Recipes, weekly meal plans, and shopping lists made from them. On this fork it is the meal-planning plugin, turned on in the brain itself (SMD-2311); upstream's shared household server is retired.",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",
     "github": "NateBJones"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Bun 1.4+"]
+    "tools": []
   },
-  "requires_primitives": ["deploy-remote-mcp", "remote-mcp", "rls", "shared-mcp"],
   "learning_order": 4,
-  "tags": ["meal-planning", "recipes", "shopping", "sharing", "rls"],
+  "tags": [
+    "meal-planning",
+    "recipes",
+    "shopping"
+  ],
   "difficulty": "intermediate",
-  "estimated_time": "1 hour",
+  "estimated_time": "15 minutes",
   "created": "2026-03-12",
-  "updated": "2026-03-12"
+  "updated": "2026-11-02"
 }
