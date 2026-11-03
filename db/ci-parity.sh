@@ -331,6 +331,14 @@ live_rows() {
   else
     echo "ci-parity.sh --live takes rest, sleep, long or extract, not '$1'" >&2; return 2
   fi
+  # The lane ran its own shard's row, or it fails: check 35 and the sed below
+  # read lines, and a row bash never reaches (dead code, after an exit, in a
+  # heredoc) or reaches in another shard's branch would pass them both and run
+  # nothing, or the wrong shard (review pass 3).
+  case "${LAST_ROW:-}" in
+    "OB1_LIVE_SHARD=$1 db/test-live.ts "*) ;;
+    *) echo "ci-parity.sh --live $1 ran no OB1_LIVE_SHARD=$1 row (its last: ${LAST_ROW:-none})" >&2; FAILED=1 ;;
+  esac
   at_row ''
   return "$FAILED"
 }
@@ -339,7 +347,8 @@ live_rows() {
 # workflow (review pass 1: a shard left off a list typed here passed check 35
 # and never ran). Check 35 also holds each such row to this sed's one shape,
 # each shard once (review pass 2: an aligned or commented row passed it and
-# was read here as no row).
+# was read here as no row), and this line itself to the text it has (review
+# pass 3: a narrower sed dropped a shard with check 35 passing).
 LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z][a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
 [ -n "$LIVE_SHARDS" ] || { echo "ci-parity.sh reads no OB1_LIVE_SHARD row in live_rows, so would start no test-live shard" >&2; exit 2; }
 
@@ -361,12 +370,12 @@ start_lanes() {
   echo "  … the other lanes write to $LANES: live-<shard>.out each test-live shard's row, pair.out test-upgrade's and test-preflight's, free.out the database-free lane's rows"
   for shard in $LIVE_SHARDS; do
     "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --live "$shard" "$LANES/live-$shard.now" < /dev/null > "$LANES/live-$shard.out" 2>&1 &
-    LIVE_PIDS="$LIVE_PIDS $!"
+    LIVE_PIDS="$LIVE_PIDS $!" LANE_NAMES="$LANE_NAMES $!:live-$shard"
   done
   "$ROOT/db/with-postgres.sh" "$ROOT/db/${0##*/}" --pair "$LANES/pair.now" < /dev/null > "$LANES/pair.out" 2>&1 &
-  PAIR_PID=$!
+  PAIR_PID=$! LANE_NAMES="$LANE_NAMES $!:pair"
   free_rows "$LANES/free.now" > "$LANES/free.out" 2>&1 &
-  FREE_PID=$!
+  FREE_PID=$! LANE_NAMES="$LANE_NAMES $!:database-free"
 }
 stop_tree() {
   local child
@@ -378,22 +387,21 @@ stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
   # Each with-postgres.sh removes its container as it exits, ignoring signals
-  # meanwhile: waited for, so none outlives the script (review pass 1), up to
-  # 30 s a lane, so a stuck removal cannot hold the prompt (review pass 2). A
-  # lane that has exited is a zombie until waited for, so its state is read.
-  local n
+  # meanwhile, all at once: waited for, so none outlives the script (review
+  # pass 1), within one 30 s deadline, so a stuck removal cannot hold the
+  # prompt (review passes 2 and 3). bash reaps an exited lane itself and keeps
+  # its status, so ps shows it no longer and wait returns at once.
+  local deadline=$((SECONDS + 30)) name
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do
-    n=0
-    while [ "$n" -lt 30 ]; do
-      case "$(ps -o stat= -p "$pid" 2>/dev/null)" in
-        '' | Z*) break ;;
+    while ps -p "$pid" > /dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done
+    if ps -p "$pid" > /dev/null 2>&1; then
+      name=lane
+      case "$LANE_NAMES " in
+        *" $pid:"*) name=${LANE_NAMES##* $pid:}; name="${name%% *} lane" ;;
       esac
-      sleep 1; n=$((n + 1))
-    done
-    if [ "$n" -lt 30 ]; then
-      wait "$pid" 2>/dev/null
+      echo "  … the $name (pid $pid) is still ending after 30 s; a container it holds shows in podman ps or docker ps" >&2
     else
-      echo "  … lane $pid is still removing its container after 30 s; check podman ps" >&2
+      wait "$pid" 2>/dev/null
     fi
   done
   drop_lanes
@@ -422,7 +430,7 @@ wait_lane() {
 
 main() {
   FAILED=0
-  FREE_PID='' PAIR_PID='' LIVE_PIDS='' LANES=''
+  FREE_PID='' PAIR_PID='' LIVE_PIDS='' LANE_NAMES='' LANES=''
   BASE_ENV=$(env | LC_ALL=C sort)
   # A closed terminal's hangup reaches every process of this script's group,
   # the lanes and their with-postgres.sh runs among them, and limit's trap

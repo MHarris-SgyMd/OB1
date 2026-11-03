@@ -10516,6 +10516,8 @@ const PARITY_SCRIPT = "db/ci-parity.sh";
  * never run.
  */
 const LIVE_SHARD_ROW = /^ *OB1_LIVE_SHARD=([a-z]+) run db test-live\.ts$/;
+/** ci-parity.sh's line that reads LIVE_SHARD_ROW's shards, held to this text so the two cannot drift apart (SMD-3688 review pass 3). */
+const LIVE_SHARDS_LINE = `LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\\([a-z][a-z]*\\) run db test-live\\.ts$/\\1/p' "$ROOT/db/\${0##*/}" | tr '\\n' ' ')`;
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
@@ -10677,7 +10679,11 @@ function checkCiParity() {
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
   // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
+  if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
+    fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");
   const parityText = readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n");
+  if (parityText.filter((l) => l === LIVE_SHARDS_LINE).length !== 1)
+    fail(PARITY_SCRIPT, `has not exactly one line \`${LIVE_SHARDS_LINE}\`, the sed that reads the rows check 35 holds: another reads other shards than those (check 35, SMD-3688)`);
   const laneShards = new Set<string>();
   for (const r of parity.runs.filter((p) => p.script === "test-live.ts")) {
     const m = LIVE_SHARD_ROW.exec(parityText[r.line - 1]);
