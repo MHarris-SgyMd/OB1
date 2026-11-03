@@ -19209,6 +19209,18 @@ if (want("38")) {
   // and reset. test-worker-bootstrap.ts holds the shipped 5 s and 10 s
   // (SMD-3196; they read the real schedule before it).
   let restoreOutage = shortenOutage();
+  /**
+   * The timed cases' clock (SMD-3714), as [38b]'s SCALE: a case's quiet, poll,
+   * capture and clock, the stub's hold and the waits the case makes around
+   * them, each at this share of the milliseconds it was written in, so their
+   * ratios hold. A pass's own start doesn't scale, so a case whose margin rests
+   * on one keeps its seconds. sleepRun's quiet and poll are whole seconds, so a
+   * scaled case passes quietMs and pollMs.
+   */
+  const SCALE = 0.6;
+  const scaled = (ms: number) => Math.round(ms * SCALE);
+  /** A scaled capture as the scheduler prints it, for a line's regex: 6000 ms reads "3.6". */
+  const capS = (ms: number) => String(scaled(ms) / 1000).replace(".", "\\.");
   try {
     // The live reads at the database's full precision (SMD-3245, SMD-3379 PR
     // 1c-4a): a live write at an instant with microseconds is outside a read
@@ -19416,7 +19428,7 @@ if (want("38")) {
     // asleep, and the passes go on once the capture has passed with no live write.
     lines.length = 0;
     for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
-    sw.slow = 5000;
+    sw.slow = scaled(5000);
     const ac = new AbortController();
     const callsBefore = modelCalls.length;
     // A 6 s capture in a 7 s quiet: the call in hand ends about 2.5 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s).
@@ -19429,34 +19441,34 @@ if (want("38")) {
       },
     }) as unknown as SQL;
     // The row on the shipped minute's stamp: the pause and the resume each write it at once (review pass 1).
-    const following = sleepRun({ follow: true, quiet: 7, captureMs: 6000, sql: poolCounting, signal: ac.signal });
+    const following = sleepRun({ follow: true, quietMs: scaled(7000), pollMs: scaled(1000), captureMs: scaled(6000), sql: poolCounting, signal: ac.signal });
     await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
     const asleepBeat = await beat();
     const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
     // A logged search, two polls and a half inside the 5 s call: the lease stays where it is.
     await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a search during a pass')`;
-    await Bun.sleep(2500);
+    await Bun.sleep(scaled(2500));
     const [searchedHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
     const searchWoke = lines.some((l) => /awake:|paused:/.test(l));
     assert(searchedHand?.id === inHand?.id && !searchWoke,
       `a search during a pass leaves it running, the thought in hand still claimed and no pause said (${searchedHand?.id === inHand?.id ? "same claim" : `claim ${searchedHand?.id ?? "none"}`}; paused ${searchWoke})`);
     const pausedAt = Date.now();
     await liveWrite(sql, "a live write");
-    const pauseSaid = await pollUntil(async () => lines.some((l) => /^  paused: a live write at .* — the passes wait between thoughts, windows and pairs until no live write for 6 s$/.test(l)), 10_000);
+    const pauseSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  paused: a live write at .* — the passes wait between thoughts, windows and pairs until no live write for ${capS(6000)} s$`).test(l)), 10_000);
     const pauseMs = Date.now() - pausedAt;
     let pausedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (pausedBeat = await beat())?.paused !== undefined, 3_000);
     // The call in hand runs on and its thought is done; no claim follows while the gate is closed.
     const handDone = await pollUntil(async () => !(await claims(EX)).claimed, 10_000);
     const doneThought = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ${inHand?.id ?? null}::uuid`)[0]?.status;
-    await Bun.sleep(800);
+    await Bun.sleep(scaled(800));
     const heldBack = (await claims(EX)).claimed ?? 0;
     const resumedEarly = lines.some((l) => /resumed:/.test(l));
-    assert(asleepBeat?.running === true && pauseSaid && pauseMs < 3000 && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
+    assert(asleepBeat?.running === true && pauseSaid && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
         && handDone && doneThought === "succeeded" && heldBack === 0 && !resumedEarly,
       `a live write pauses a sleep with a 5 s call in hand: said within the poll, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
     // The capture passed with no live write: the passes go on, the row paused no more.
-    const resumedSaid = await pollUntil(async () => lines.some((l) => /^  resumed: no live write for 6 s — the passes go on \(paused \d+ s\)$/.test(l)), 15_000);
+    const resumedSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  resumed: no live write for ${capS(6000)} s — the passes go on \\(paused \\d+ s\\)$`).test(l)), 15_000);
     let resumedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (resumedBeat = await beat())?.paused === undefined, 3_000);
     const wakeLines = lines.join("\n");
@@ -19472,17 +19484,17 @@ if (want("38")) {
     const extendFrom = lines.length;
     await liveWrite(sql, "a first live write of two");
     const extendPaused = await pollUntil(async () => lines.slice(extendFrom).some((l) => /paused: a live write/.test(l)), 10_000);
-    await Bun.sleep(1500);
+    await Bun.sleep(scaled(1500));
     const secondAt = Date.now();
     await liveWrite(sql, "a second live write, mid-pause");
-    const extendedResume = await pollUntil(async () => lines.slice(extendFrom).some((l) => /resumed: no live write for 6 s/.test(l)), 15_000);
+    const extendedResume = await pollUntil(async () => lines.slice(extendFrom).some((l) => new RegExp(`resumed: no live write for ${capS(6000)} s`).test(l)), 15_000);
     const resumedAfter = Date.now() - secondAt;
     const pausesSaid = lines.slice(extendFrom).filter((l) => /paused: a live write/.test(l)).length;
     // Its second write read while closed reads no pool either: the idle end is an open gate's (review pass 1).
     const extendPause = lines.findIndex((l, i) => i >= extendFrom && /^  paused: a live write/.test(l));
     const extendResume = lines.findIndex((l, i) => i > extendPause && /^  resumed: no live write/.test(l));
     const readExtended = poolReadAt.filter((n) => n > extendPause && n <= extendResume).length;
-    assert(extendPaused && extendedResume && resumedAfter >= 5500 && pausesSaid === 1 && extendPause >= 0 && extendResume > extendPause && readExtended === 0,
+    assert(extendPaused && extendedResume && resumedAfter >= scaled(5500) && pausesSaid === 1 && extendPause >= 0 && extendResume > extendPause && readExtended === 0,
       `…a second live write mid-pause extends it, said once, the passes going on the capture after the newest, no pool read meanwhile (${resumedAfter} ms after the second; ${pausesSaid} pause line(s); ${readExtended} pool read(s))`);
     // On, it extracts the backlog; a sync write (a key classified 'ingested')
     // does not pause it, a live write does.
@@ -19500,7 +19512,7 @@ if (want("38")) {
     const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
       ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-embed'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
     const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
-    await Bun.sleep(2500);
+    await Bun.sleep(scaled(2500));
     const wakesAfterSync = lines.filter((l) => /paused: a live|awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
     // A line of its own: the planted write's above says "a live write" too (SMD-3315). It pauses the sleep, or,
@@ -19533,14 +19545,14 @@ if (want("38")) {
     // The backlog drained first, by a one-shot sleep: the note in hand is then the only work.
     // N12's bound from --abort-after, said at the start (SMD-3379 PR 1c-4a): the setting reaches the run, not the hook alone.
     const abortFrom = lines.length;
-    const drainedFirst = await sleepRun({ quiet: 1, abortAfter: 90 });
+    const drainedFirst = await sleepRun({ quietMs: scaled(1000), pollMs: scaled(1000), abortAfter: 90 });
     assert(lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
       `--abort-after sets N12's bound, said at the start (${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     lines.length = 0;
     const inHandNote = await capture("A note whose call is in hand when a live write touches it.", "sync-sleep", 0, 44);
-    sw.slow = 5000;
+    sw.slow = scaled(5000);
     const acOwn = new AbortController();
-    const ownRun = sleepRun({ follow: true, quiet: 2, passFollowS: 30, minStampEveryS: 1, signal: acOwn.signal });
+    const ownRun = sleepRun({ follow: true, quietMs: scaled(2000), pollMs: scaled(1000), passFollowS: 30, minStampEveryS: 1, signal: acOwn.signal });
     let touchedPaused = false, touchedEnded = true, ownEnded = false, ownClaim: string | undefined, earlierPaused = false, earlierEnded = false, earlierRan = false;
     try {
       await pollUntil(async () => (await sql`SELECT 1 FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ${inHandNote}::uuid AND status = 'claimed'`).length === 1, 20_000);
@@ -19556,7 +19568,7 @@ if (want("38")) {
         return r.busy === 0 && r.unpooled === 0 && lines.some((l) => /^  resumed:/.test(l));
       };
       if (await pollUntil(drainedNow, 30_000)) {
-        await Bun.sleep(1000);
+        await Bun.sleep(scaled(1000));
         const ownAt = lines.length;
         const ownNote = await capture("One operator's capture that ends the drained sleep.", "op-sleep", 0, 45);
         ownEnded = await pollUntil(async () => lines.slice(ownAt).some((l) => /^  awake: a live write at .*, the pools drained/.test(l)), 8_000);
@@ -19566,7 +19578,7 @@ if (want("38")) {
         if (ownEnded && await pollUntil(drainedNow, 30_000)) {
           earlierRan = true;
           const earlier = await capture("A sync's note a live write touches while it waits.", "sync-sleep", 0, 47);
-          await Bun.sleep(1000);
+          await Bun.sleep(scaled(1000));
           const earlierAt = lines.length;
           await sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (${earlier}::uuid, 'update', 'op-sleep', ${{ note: "a live write on a waiting thought" }}::jsonb)`;
           earlierPaused = await pollUntil(async () => lines.slice(earlierAt).some((l) => /^  paused: a live write/.test(l)), 8_000);
@@ -19587,22 +19599,23 @@ if (want("38")) {
       `…but a live write on a thought whose claim was queued before it pauses the sleep: that work is the sleep's (${earlierRan ? `paused ${earlierPaused}, ended ${earlierEnded}` : "not reached: the capture's end or the drain before it failed"})`);
 
     // Paused time is not the clock's (SMD-3379 PR 1c-3b, the maintainer's choice): a 4 s clock with a pause of
-    // about 3 s inside it is spent about 7 s after the sleep began, not at 4.
+    // about 3 s inside it is spent about 7 s after the sleep began, not at 4. The slack below stays 1.2 s
+    // unscaled, as it covers the pause's rounding to a whole second (SMD-3714).
     lines.length = 0;
     for (let i = 0; i < 4; i++) await capture(`A note under a paused clock, number ${i}.`, "sync-sleep", 0, 30 + i);
-    sw.slow = 1500;
+    sw.slow = scaled(1500);
     const acPausedClock = new AbortController();
-    const pausedClockRun = sleepRun({ follow: true, quiet: 3, captureMs: 3000, budgetMs: 4000, minStampEveryS: 1, signal: acPausedClock.signal });
+    const pausedClockRun = sleepRun({ follow: true, quietMs: scaled(3000), pollMs: scaled(1000), captureMs: scaled(3000), budgetMs: scaled(4000), minStampEveryS: 1, signal: acPausedClock.signal });
     let clockAsleepAt = 0, clockSpentAt = 0, sleptAgain = true;
     try {
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
       clockAsleepAt = Date.now();
-      await Bun.sleep(800);
+      await Bun.sleep(scaled(800));
       await liveWrite(sql, "a live write inside the clock");
-      await pollUntil(async () => lines.some((l) => /the sleep's budget is spent \(4000 ms\)|the sleep's clock is spent \(4000 ms\)/.test(l)) && (clockSpentAt = Date.now()) > 0, 20_000);
+      await pollUntil(async () => lines.some((l) => l.includes(`the sleep's budget is spent (${scaled(4000)} ms)`) || l.includes(`the sleep's clock is spent (${scaled(4000)} ms)`)) && (clockSpentAt = Date.now()) > 0, 20_000);
       // The write that paused it is no wake: past the 3 s quiet and a poll, no sleep begins again (review pass 1).
       const spentLine = lines.length;
-      await Bun.sleep(4000);
+      await Bun.sleep(scaled(4000));
       sleptAgain = lines.slice(spentLine).some((l) => /asleep:/.test(l));
     } finally {
       sw.slow = 0;
@@ -19610,8 +19623,8 @@ if (want("38")) {
       await pausedClockRun;
     }
     const clockPaused = Number(lines.find((l) => /resumed: no live write/.test(l))?.match(/paused (\d+) s/)?.[1] ?? 0);
-    assert(clockSpentAt > 0 && clockPaused >= 2 && clockSpentAt - clockAsleepAt >= 4000 + clockPaused * 1000 - 1200,
-      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its 4 s by the ${clockPaused} s paused`);
+    assert(clockSpentAt > 0 && clockPaused >= 1 && clockSpentAt - clockAsleepAt >= scaled(4000) + clockPaused * 1000 - 1200,
+      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its ${scaled(4000)} ms by the ${clockPaused} s paused`);
     assert(clockSpentAt > 0 && !sleptAgain, `…and the live write that paused it does not end the budget's rest: no sleep begins again without a newer one (${sleptAgain ? "slept again" : "resting"})`);
 
     // A live write in the clock's grace still ends the sleep as a wake did: the
@@ -20258,20 +20271,24 @@ if (want("38")) {
     // Woken while extraction waits at its start (the provider down, no pass
     // begun), then refused at the next start: it never got past its start in
     // this process, so the refusal is the configuration's (review pass 3).
+    // Since SMD-3379 PR 1c-3b the capture pauses the sleep, its own extraction
+    // work queued, where it woke it: the case waited 10 s for an "awake:" line
+    // that no longer comes, then for the outage schedule's next probe. It reads
+    // the pause or the wake, and asserts it saw one (SMD-3714).
     lines.length = 0;
     sw.unavailable = true;
     const acProbe = new AbortController();
     const probeRun = sleepRun({ follow: true, signal: acProbe.signal, minStampEveryS: 1 });
     await pollUntil(async () => lines.some((l) => /provider is not answering at start/.test(l)), 20_000);
     await capture("A note that wakes it while it waits at the start.", "op-sleep", 0, 9);
-    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
+    const interrupted = await pollUntil(async () => lines.some((l) => /^  (paused|awake): a live write/.test(l)), 10_000);
     sw.unavailable = false;
     sw.missing = true;
     const refusedNeverStarted = await Promise.race([probeRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedNeverStarted === "hung") { acProbe.abort(); await probeRun; }
     sw.missing = false;
-    assert(refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)) && lines.some((l) => /extract's start is refused \(model\) — it had not got through its start in this process, so the scheduler ends/.test(l)),
-      `woken while waiting at its start, then refused at the next: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted})`);
+    assert(interrupted && refusedNeverStarted === 2 && !lines.some((l) => /tries it again/.test(l)) && lines.some((l) => /extract's start is refused \(model\) — it had not got through its start in this process, so the scheduler ends/.test(l)),
+      `paused or woken while waiting at its start, then refused at its start: it never got past its start, so --follow ends with 2 (exit ${refusedNeverStarted}; ${interrupted ? "interrupted" : "no pause or wake line"})`);
     // A pass that throws (here its Writer, at its first line) rejects the
     // scheduler with its error once the other pass stops, and leaves no
     // unhandled rejection for the host (review pass 4).
