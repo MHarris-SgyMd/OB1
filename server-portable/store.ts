@@ -21,6 +21,7 @@ import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
+import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
 
 export type ThoughtMatch = {
   id: string;
@@ -1282,6 +1283,127 @@ export function normaliseClaimAnswer(r: unknown, what: string): ClaimAnswer {
   };
 }
 
+/** An item a priority is stated on (migration 116, SMD-3663): its kind and its key, as 116 normalised them. */
+export type PriorityItem = { kind: PriorityKind; key: string };
+export { PRIORITY_KINDS };
+/**
+ * One priority assertion as 116's ob1_priority_json answers it (SMD-3664): the
+ * item, the level and times, the reason (the maker's free text, data), the
+ * maker as the registry stamped it at the write, its tier, and its window.
+ * Nothing in it proves a key.
+ */
+export type PriorityAssertion = {
+  id: string;
+  item: PriorityItem;
+  level: number;
+  dueAt: string | null;
+  notBefore: string | null;
+  dueRef: PriorityItem | null;
+  reason: string | null;
+  inferred: boolean;
+  maker: { name: string; agentId: string | null; kind: string | null; trust: string | null; scope: string | null; source: boolean };
+  tier: 1 | 2 | 3 | 4;
+  tierName: "operator" | "source" | "agent" | "inferred";
+  assertedAt: string;
+  closedAt: string | null;
+  closeReason: "replaced" | "cleared" | null;
+  closedBy: string | null;
+};
+/** The refusal codes 116's writers answer with. */
+export type PriorityRefusalCode = "READ_ONLY_KEY" | "ITEM_NOT_YOURS" | "ITEM_NOT_FOUND";
+/** One of 116's writers' jsonb answers, read: assert_priority's and clear_priority's outcomes share it. */
+export type PriorityAnswer = {
+  outcome: "asserted" | "unchanged" | "cleared" | "nothing_to_clear" | "refused";
+  code: PriorityRefusalCode | null;
+  /** The database's words for a refusal; null otherwise. */
+  message: string | null;
+  assertion: PriorityAssertion | null;
+  replaced: PriorityAssertion | null;
+  winner: PriorityAssertion | null;
+};
+/**
+ * One item's record, read in one statement: the rule's winner (ob1_priority_winner), its level, and every statement
+ * in the order written (priority_history); `exists`, whether the brain holds the item now (116's own test) — a thought deleted since
+ * keeps its statements (116's section 8).
+ */
+export type PriorityRecord = { item: PriorityItem; exists: boolean; level: number | null; winner: PriorityAssertion | null; history: PriorityAssertion[] };
+
+/**
+ * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
+ * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
+ * is the database's, which quotes the argument it could not read, cut. Any other
+ * raise stays the store's fault.
+ */
+export class PriorityRefused extends Error {
+  constructor(readonly problem: PriorityProblem, message: string) {
+    super(message);
+    this.name = "PriorityRefused";
+  }
+}
+export type PriorityProblem = "kind" | "key" | "level" | "not_before" | "due_ref" | "reason" | "key_name" | "time" | "other";
+
+/** Which argument a 22023 from 116 names, by its message's opening words (116's and 115's own wording, one rule each). */
+export function priorityProblemOf(message: string): PriorityProblem {
+  if (/^not an item kind\b/.test(message)) return "kind";
+  if (/^not a (?:thought|entity|item) id\b|^not a ticket key\b/.test(message)) return "key";
+  if (/^a priority level is\b/.test(message)) return "level";
+  if (/^not_before is after due_at\b/.test(message)) return "not_before";
+  if (/^a due reference takes\b|due reference may not name itself/.test(message)) return "due_ref";
+  if (/^a reason is at most\b/.test(message)) return "reason";
+  if (/a maker's key name is at most\b|p_actor must be a JSON object/.test(message)) return "key_name";
+  return "other";
+}
+
+const PRIORITY_OUTCOMES = new Set(["asserted", "unchanged", "cleared", "nothing_to_clear", "refused"]);
+const PRIORITY_CODES = new Set(["READ_ONLY_KEY", "ITEM_NOT_YOURS", "ITEM_NOT_FOUND"]);
+const TIER_NAMES = new Set(["operator", "source", "agent", "inferred"]);
+
+const priorityItemOf = (v: unknown): PriorityItem | null => {
+  const o = v !== null && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+  return o && (PRIORITY_KINDS as readonly unknown[]).includes(o.kind) && typeof o.key === "string" ? { kind: o.kind as PriorityItem["kind"], key: o.key } : null;
+};
+
+/** One assertion from 116's ob1_priority_json; a row that is not one throws, naming the call and nothing of the row. */
+export function normalisePriorityAssertion(r: unknown, what: string): PriorityAssertion {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const m = o?.maker !== null && typeof o?.maker === "object" ? (o.maker as Record<string, unknown>) : undefined;
+  const text = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const time = (v: unknown): string | null => (v === null || v === undefined ? null : isoTimestamp(v as string | Date));
+  const item = priorityItemOf(o?.item);
+  const tier = Number(o?.tier);
+  const refGiven = o?.due_ref !== null && o?.due_ref !== undefined;
+  const dueRef = refGiven ? priorityItemOf(o?.due_ref) : null;
+  // Every field read, or the row refused: a missing time or a due reference of no kind 116 has is no row to show
+  // with a null in its place (review pass 3). The tier's name is 116's own (tier_name), held to the four.
+  if (!o || !m || typeof o.id !== "string" || !item || typeof o.level !== "number" || typeof m.name !== "string" || ![1, 2, 3, 4].includes(tier)
+      || !TIER_NAMES.has(o.tier_name as string) || o.asserted_at === null || o.asserted_at === undefined || (refGiven && !dueRef)
+      || (o.close_reason !== null && o.close_reason !== "replaced" && o.close_reason !== "cleared")) {
+    throw new Error(`${what} answered an assertion this server cannot read`);
+  }
+  return {
+    id: o.id, item, level: o.level, dueAt: time(o.due_at), notBefore: time(o.not_before), dueRef,
+    reason: text(o.reason), inferred: o.inferred === true,
+    maker: { name: m.name, agentId: text(m.agent_id), kind: text(m.kind), trust: text(m.trust), scope: text(m.scope), source: m.source === true },
+    tier: tier as PriorityAssertion["tier"], tierName: o.tier_name as PriorityAssertion["tierName"],
+    assertedAt: time(o.asserted_at) as string, closedAt: time(o.closed_at), closeReason: (o.close_reason ?? null) as PriorityAssertion["closeReason"], closedBy: text(o.closed_by),
+  };
+}
+
+/** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
+export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswer {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  if (!o || !PRIORITY_OUTCOMES.has(o.outcome as string) || (o.code !== null && o.code !== undefined && !PRIORITY_CODES.has(o.code as string))) {
+    throw new Error(`${what} answered no envelope this server reads`);
+  }
+  const one = (v: unknown) => (v === null || v === undefined ? null : normalisePriorityAssertion(v, what));
+  return {
+    outcome: o.outcome as PriorityAnswer["outcome"],
+    code: (o.code ?? null) as PriorityRefusalCode | null,
+    message: typeof o.message === "string" ? o.message : null,
+    assertion: one(o.assertion), replaced: one(o.replaced), winner: one(o.winner),
+  };
+}
+
 /**
  * What a re-capture did to a capture-only key's label (migration 090,
  * SMD-2898). `moved`: the label moved to the caller — `stamp` the caller's,
@@ -1956,6 +2078,24 @@ export interface ThoughtStore {
    */
   claimsMadeSince(id: string, since: string, limit: number): Promise<{ claims: WorkClaim[]; total: number }>;
   /**
+   * Priority assertions (migration 116, SMD-3664): assert_priority and
+   * clear_priority, each one statement in its own transaction (the functions
+   * refuse above READ COMMITTED and lock their item), the actor as the maker's
+   * envelope with `scope` stated — `write` for a write key, `capture` for a
+   * capture-only key — since 116 refuses an envelope stating neither. A
+   * malformed argument throws PriorityRefused; any other raise is the store's
+   * fault. A database before 116 throws.
+   */
+  assertPriority(opts: {
+    kind: string; key: string; level: number; dueAt?: string; notBefore?: string; dueRef?: { kind: string; key: string }; reason?: string; inferred?: boolean;
+    actor?: Actor; scope: "write" | "capture";
+  }): Promise<PriorityAnswer>;
+  clearPriority(opts: { kind: string; key: string; actor?: Actor; scope: "write" | "capture" }): Promise<PriorityAnswer>;
+  /** An item's priority record: the rule's winner and its level and priority_history's statements, in one statement. Throws PriorityRefused for a malformed item. */
+  priorityRecord(kind: string, key: string): Promise<PriorityRecord>;
+  /** An item as 116 keys it (ob1_priority_item) and whether the brain holds it (ob1_priority_item_exists): what a refusal names. Throws PriorityRefused for a malformed item. */
+  priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }>;
+  /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
    * lapse cleared (082) and the reviewer the row records (114), in one
@@ -2227,7 +2367,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

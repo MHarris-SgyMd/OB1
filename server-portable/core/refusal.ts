@@ -5,7 +5,7 @@
 // as JSON. A refusal is what the principal may be told: a field the existence-
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
-import type { Citation, ClaimProblem } from "../store.ts";
+import type { Citation, ClaimProblem, PriorityItem, PriorityProblem } from "../store.ts";
 import type { StandingFlag } from "../standing.ts";
 import type { ProposalSelection } from "./list-cursor.ts";
 
@@ -60,6 +60,14 @@ export type Refusal =
   | { code: "REFUSED_CLAIM_KEY"; retryable: false; key: string }     // a key the registry calls ingested (an importer's) cannot claim
   | { code: "CLAIM_UNATTRIBUTED"; retryable: true; cause: "registry_away"; id: string; forced: boolean } // this key's agent id is not to hand while the registry may answer: its own claim made under it, by its token (forced: false), or a force, which the id classifies
   | { code: "CLAIM_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" | "registry_unknown"; id: string; forced: boolean } // …and the registry cannot answer this server until an operator acts
+  // Priority assertions (116, SMD-3664): set_priority, clear_priority, priority_history. `item` is 116's normalised
+  // form of the caller's own input, so neither refusal tells a capture-only key what exists.
+  | { code: "ITEM_NOT_FOUND"; retryable: false; which: "item" | "due_ref"; item: PriorityItem; openItem: boolean } // the brain holds no such item (or due reference, `which`); an open item (kind item) none until SMD-3665
+  | { code: "ITEM_NOT_YOURS"; retryable: false; item: PriorityItem; dueRef: PriorityItem | null } // a capture-only key on anything but a thought it captured and nobody took (or a due reference to one) — answered alike whether it exists or not
+  | { code: "REFUSED_PRIORITY_INPUT"; retryable: false; problem: PriorityProblem; message: string } // an argument 116 refused by its rule (SQLSTATE 22023); message: the database's words
+  | { code: "PRIORITY_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // a capture-only key's agent id, which proves its own thoughts, is not to hand while the registry may answer
+  | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  | { code: "READ_ONLY_KEY"; retryable: false; key: string }       // a key with neither write nor capture scope — 116's refusal, met by the core's own callers alone (the manifest gives a read key no writer)
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -150,6 +158,12 @@ const FACTS: Facts = {
   REFUSED_CLAIM_INPUT: (r) => ({ problem: r.problem }),
   REFUSED_CLAIM_KEY: none,
   CLAIM_UNATTRIBUTED: (r) => ({ cause: r.cause, id: r.id, forced: r.forced }),
+  // The item as 116 keys it — a uuid or a ticket key, the caller's own input normalised — and which argument named it.
+  ITEM_NOT_FOUND: (r) => ({ which: r.which, item: r.item, openItem: r.openItem }),
+  ITEM_NOT_YOURS: (r) => ({ item: r.item, dueRef: r.dueRef }),
+  REFUSED_PRIORITY_INPUT: (r) => ({ problem: r.problem }),
+  READ_ONLY_KEY: none,
+  PRIORITY_UNATTRIBUTED: (r) => ({ cause: r.cause }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),

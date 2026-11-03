@@ -48,6 +48,9 @@ export const CALLS = {
   renew_claim: (c, p, i) => c.renewClaim(p, i),
   release_claim: (c, p, i) => c.releaseClaim(p, i),
   list_claims: (c, p, i) => c.listClaims(p, i),
+  set_priority: (c, p, i) => c.setPriority(p, i),
+  clear_priority: (c, p, i) => c.clearPriority(p, i),
+  priority_history: (c, p, i) => c.priorityHistory(p, i),
 } satisfies { [K in ToolName]: Call<K> };
 
 /** The `{field}` names a route's path fills, in order: a core route's (rest/routes.ts) or a plugin operation's. */

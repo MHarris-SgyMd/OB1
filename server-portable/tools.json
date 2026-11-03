@@ -66,7 +66,19 @@
       "scope": "read"
     },
     {
+      "name": "priority_history",
+      "scope": "read"
+    },
+    {
       "name": "capture_thought",
+      "scope": "capture"
+    },
+    {
+      "name": "set_priority",
+      "scope": "capture"
+    },
+    {
+      "name": "clear_priority",
       "scope": "capture"
     },
     {

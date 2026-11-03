@@ -1,0 +1,25 @@
+{
+  "name": "Meal Planning Plugin",
+  "description": "Recipes, a week's planned meals and the shopping list made from them, in tables of the plugin's own: recipes searched by words, cuisine, tag or ingredient; a week's slots set, not appended to, read day by day; a list whose numeric quantities are summed and whose bought items stay bought when it is made again. The learning path's Extension 4, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": [
+    "plugin",
+    "meal-planning",
+    "recipes",
+    "shopping"
+  ],
+  "difficulty": "intermediate",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-02",
+  "updated": "2026-11-02"
+}
