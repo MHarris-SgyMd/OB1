@@ -10,7 +10,7 @@
 // plugin's SQL reaches nothing of the core's.
 
 import { definePlugin, ok, operation, refuse, z } from "../../server-portable/plugin-sdk.ts";
-import type { PluginSql } from "../../server-portable/plugin-sdk.ts";
+import type { PluginContext, PluginSql } from "../../server-portable/plugin-sdk.ts";
 
 const INTERACTIONS = ["meeting", "email", "call", "coffee", "event", "linkedin", "other"] as const;
 const STAGES = ["identified", "in_conversation", "proposal", "negotiation", "won", "lost"] as const;
@@ -69,7 +69,7 @@ async function postgresKnows(sql: PluginSql, tz: string): Promise<boolean> {
 const unknownZone = (time_zone: string) =>
   refuse(400, "UNKNOWN_TIME_ZONE", { time_zone, message: "the database knows no time zone by this name: give an IANA name, such as America/Los_Angeles or Europe/London" });
 /** Whether a time zone given is one Postgres knows; none given is UTC. */
-const zoneOk = (ctx: { db: { tx<T>(fn: (sql: PluginSql) => Promise<T>): Promise<T> } }, tz: string | undefined) =>
+const zoneOk = (ctx: Pick<PluginContext, "db">, tz: string | undefined) =>
   tz === undefined ? Promise.resolve(true) : ctx.db.tx((sql) => postgresKnows(sql, tz));
 /** A string's length in characters (code points), as the inputs' bounds count it: an emoji is one, not two. */
 const charCount = (s: string) => [...s].length;
@@ -95,8 +95,10 @@ const Interaction = z.object({
   id: z.string(), contact_id: z.string(), interaction_type: z.enum(INTERACTIONS), occurred_at: z.string(), summary: z.string(),
   follow_up_needed: z.boolean(), follow_up_notes: z.string().nullable(), created_at: z.string(),
 });
+/** A contact named in another answer: its id and name. */
+const ContactRef = z.object({ id: z.string(), name: z.string() });
 const Opportunity = z.object({
-  id: z.string(), contact_id: z.string().nullable(), contact: z.object({ id: z.string(), name: z.string() }).nullable(), title: z.string(),
+  id: z.string(), contact_id: z.string().nullable(), contact: ContactRef.nullable(), title: z.string(),
   description: z.string().nullable(), stage: z.enum(STAGES), open: z.boolean(), value: z.number().nullable(), expected_close_date: z.string().nullable(),
   notes: z.string().nullable(), created_at: z.string(), updated_at: z.string(),
 });
@@ -107,7 +109,7 @@ const ContactDays = Contact.extend({ days_since_contact: z.number().int().nullab
 /** A contact due a follow-up: days_until its follow_up_date from the user's today, negative when it is overdue. */
 const FollowUp = Contact.extend({ days_until: z.number().int() });
 /** A follow-up promised in an interaction and not yet followed: the interaction, with its contact's id and name. */
-const Promised = z.object({ contact: z.object({ id: z.string(), name: z.string() }), interaction: Interaction });
+const Promised = z.object({ contact: ContactRef, interaction: Interaction });
 
 /** MCP hints: every operation reaches the plugin's own tables alone, or the core through ctx.call as its caller. An add destroys nothing; a change overwrites what was there. A read is read-only already. */
 const CLOSED = { openWorldHint: false } as const;
@@ -269,7 +271,7 @@ export default definePlugin({
       input: {
         contact_id: z.string().uuid().describe("The contact's id"),
         interaction_type: z.enum(INTERACTIONS).describe("meeting, email, call, coffee, event, linkedin or other"),
-        occurred_at: Moment.optional().describe("When it happened, ISO 8601 with its offset; now unless given"),
+        occurred_at: Moment.optional().describe("When it happened, ISO 8601 with seconds and its offset; now unless given"),
         summary: text(5000).min(1).describe("What it was about"),
         follow_up_needed: z.boolean().optional().describe("Whether something was promised to follow up on; true when follow_up_notes are given, unless false"),
         follow_up_notes: text(2000).min(1).nullish().describe("What was promised"),
