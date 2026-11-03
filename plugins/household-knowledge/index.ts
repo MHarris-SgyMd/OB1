@@ -18,7 +18,23 @@ const text = (max: number) => z.string().trim().max(max).refine((s) => !s.includ
  */
 const Details = z.record(z.string(), z.unknown())
   .refine((d) => JSON.stringify(d).length <= 10_000, "at most 10,000 characters as JSON")
-  .refine((d) => !JSON.stringify(d).includes("\\u0000"), "no NUL character");
+  .refine((d) => stringsOf(d).every((s) => !s.includes("\u0000") && wellFormed(s)), "no NUL character and no lone surrogate, which Postgres's jsonb will not store");
+/** Whether a string is whole UTF-16, no lone surrogate in it: encodeURIComponent refuses one. */
+function wellFormed(s: string): boolean {
+  try {
+    encodeURIComponent(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** Every key and string value in a JSON value, however deep. */
+function stringsOf(v: unknown): string[] {
+  if (typeof v === "string") return [v];
+  if (Array.isArray(v)) return v.flatMap(stringsOf);
+  if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => [k, ...stringsOf(x)]);
+  return [];
+}
 
 const Item = z.object({
   id: z.string(), name: z.string(), category: z.string().nullable(), location: z.string().nullable(),
@@ -45,6 +61,8 @@ const likePattern = (s: string) => `%${likeText(s)}%`;
  * Bosch), so a phrase an agent types never misses for its word order.
  */
 const likeText = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+/** A query's words: split on any whitespace (a no-break space included), joined by one space, each escaped for ILIKE. */
+const wordsOf = (q: string) => likeText(q.split(/\s+/).filter(Boolean).join(" "));
 
 export default definePlugin({
   name: "household-knowledge",
@@ -92,13 +110,13 @@ export default definePlugin({
       },
       output: { items: z.array(Item), truncated: z.boolean() },
       async handler(ctx, { query, category, location, limit }) {
-        const words = query === undefined ? null : likeText(query);
+        const words = query === undefined ? null : wordsOf(query);
         const kind = category === undefined ? null : likePattern(category);
         const place = location === undefined ? null : likePattern(location);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Item>>>`
           SELECT answer FROM item_rows
            WHERE (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', name, category, location, notes, details_text) ILIKE '%' || w || '%')
-                                             FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
+                                             FROM unnest(regexp_split_to_array(${words}::text, ' ')) w))
              AND (${kind}::text IS NULL OR category ILIKE ${kind}::text)
              AND (${place}::text IS NULL OR location ILIKE ${place}::text)
            ORDER BY created_at DESC, id
@@ -172,12 +190,12 @@ export default definePlugin({
       output: { vendors: z.array(Vendor), truncated: z.boolean() },
       async handler(ctx, { service_type, query, limit }) {
         const kind = service_type === undefined ? null : likePattern(service_type);
-        const words = query === undefined ? null : likeText(query);
+        const words = query === undefined ? null : wordsOf(query);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Vendor>>>`
           SELECT answer FROM vendor_rows
            WHERE (${kind}::text IS NULL OR service_type ILIKE ${kind}::text)
              AND (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', name, service_type, notes, phone, email, website) ILIKE '%' || w || '%')
-                                             FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
+                                             FROM unnest(regexp_split_to_array(${words}::text, ' ')) w))
            ORDER BY name, created_at, id
            LIMIT ${limit + 1}`);
         return ok({ vendors: rows.slice(0, limit).map((r) => r.answer), truncated: rows.length > limit });

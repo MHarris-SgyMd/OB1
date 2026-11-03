@@ -17,7 +17,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
 | Schedule an activity | `family_calendar_add_activity` | `POST /v1/plugins/family-calendar/activities` | `write` | `title`; `family_member_id`, `activity_type`, `day_of_week`, `start_time`, `end_time`, `start_date`, `end_date`, `location`, `notes` optional | `{ activity }` |
 | The week's schedule | `family_calendar_get_week_schedule` | `GET /v1/plugins/family-calendar/week` | `read` | `week_start`; `family_member_id` optional | `{ week_start, week_end, activities }`, each with `on_date` |
 | Search activities | `family_calendar_search_activities` | `GET /v1/plugins/family-calendar/activities` | `read` | `query`, `activity_type`, `family_member_id` optional; `limit`, 1 to 200, default 50 | `{ activities, truncated }` |
-| Add a date to remember | `family_calendar_add_important_date` | `POST /v1/plugins/family-calendar/dates` | `write` | `title`, `date_value`; `family_member_id`, `recurring_yearly` (default false), `reminder_days_before` (0 to 365, default 7), `notes` optional | `{ important_date }`, with `next_date` |
+| Add a date to remember | `family_calendar_add_important_date` | `POST /v1/plugins/family-calendar/dates` | `write` | `title`, `date_value`; `family_member_id`, `recurring_yearly` (default false), `reminder_days_before` (0 to 365, default 7), `notes`, `today` optional | `{ important_date }`, with `next_date` |
 | Upcoming dates | `family_calendar_get_upcoming_dates` | `GET /v1/plugins/family-calendar/dates` | `read` | `days_ahead`, 0 to 366, default 30; `today` optional | `{ today, dates }` |
 
 - **Formats.** Dates are `YYYY-MM-DD` from the year 0001, and times `HH:MM` on the 24-hour clock, both in and out. `day_of_week` is a lower-case day name (`monday`). Text is trimmed and holds no NUL.
@@ -36,7 +36,7 @@ Three tables of its own, in the schema `plugin_family_calendar`, made by `migrat
   - A yearly date counts on its next anniversary, reckoned from its month and day whatever year it was stored under: a birth year, or next year's. A 29 February falls on the 28th in other years.
   - A one-time date before today is never listed. `add_important_date` answers its `next_date` as `null`, so an agent can say so.
   - Each listed date carries `next_date`, `days_until`, and `remind`: whether it is within its `reminder_days_before`.
-  - "Today" is the user's date when the agent gives it as `today`, else the date in UTC. The answer says which day it counted from.
+  - "Today" is the user's date when the agent gives it as `today`, on the read or on the add's `next_date`, else the date in UTC. The read's answer says which day it counted from. A `today` more than a day from the date in UTC is refused at 400.
 - **Refusals.**
   - An activity with neither a `day_of_week` nor a `start_date`: `422 NO_WHEN`.
   - A `family_member_id` that names no member, on an add or a filter: `404 NO_SUCH_MEMBER`, saying where the ids are.

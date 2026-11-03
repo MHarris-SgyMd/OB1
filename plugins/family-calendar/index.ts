@@ -58,6 +58,20 @@ const noSuchMember = (family_member_id: string | null) =>
  * word apart, so "swim Ada" finds Ada's swimming, and "50%" finds "50%".
  */
 const likeText = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+/**
+ * The day an agent says is the user's today, or the date in UTC without one:
+ * days_until and the like count from it. Within a day of the date in UTC
+ * either way, as every time zone's date is (UTC-12 to UTC+14): a date
+ * further off is a typo that would date a stored row wrongly for good.
+ */
+const TodayInput = z.iso.date()
+  .refine((d) => Math.abs(Date.parse(`${d}T00:00:00Z`) - Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)) <= 86_400_000,
+    "the user's own date today, within a day of the date in UTC")
+  .optional()
+  .describe("The user's own date today, YYYY-MM-DD; the date in UTC unless given, which is a day off for part of each day in most time zones");
+
+/** A query's words: split on any whitespace (a no-break space included), joined by one space, each escaped for ILIKE. */
+const wordsOf = (q: string) => likeText(q.split(/\s+/).filter(Boolean).join(" "));
 
 export default definePlugin({
   name: "family-calendar",
@@ -197,7 +211,7 @@ export default definePlugin({
       },
       output: { activities: z.array(Activity), truncated: z.boolean() },
       async handler(ctx, { query, activity_type, family_member_id, limit }) {
-        const words = query === undefined ? null : likeText(query);
+        const words = query === undefined ? null : wordsOf(query);
         const type = activity_type ?? null;
         const member = family_member_id ?? null;
         const rows = await ctx.db.tx(async (sql) => {
@@ -205,7 +219,7 @@ export default definePlugin({
           return sql<Answer<z.input<typeof Activity>>>`
             SELECT answer FROM activity_rows
              WHERE (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', title, member_name, location, notes) ILIKE '%' || w || '%')
-                                               FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
+                                               FROM unnest(regexp_split_to_array(${words}::text, ' ')) w))
                AND (${type}::text IS NULL OR lower(activity_type) = lower(${type}::text))
                AND (${member}::uuid IS NULL OR family_member_id = ${member}::uuid)
              ORDER BY starts DESC NULLS LAST, created_at DESC, id
@@ -229,6 +243,7 @@ export default definePlugin({
         recurring_yearly: z.boolean().default(false).describe("Whether it comes round each year: true for a birthday or an anniversary"),
         reminder_days_before: z.number().int().min(0).max(365).default(7).describe("How many days ahead to flag it, 0 to 365"),
         notes: text(5000).nullish().describe("Anything else worth keeping"),
+        today: TodayInput,
       },
       output: { important_date: AddedDate },
       async handler(ctx, d) {
@@ -239,8 +254,20 @@ export default definePlugin({
             INSERT INTO important_dates (family_member_id, title, date_value, recurring_yearly, reminder_days_before, notes)
             VALUES (${memberId}, ${d.title}, ${d.date_value}::date, ${d.recurring_yearly}, ${d.reminder_days_before}, ${d.notes ?? null})
             RETURNING id`;
+          // next_date from the user's today, by the view's own rule (as get_upcoming_dates reckons it).
           const [full] = await sql<Answer<z.input<typeof AddedDate>>>`
-            SELECT answer || jsonb_build_object('next_date', next_date::text) AS answer FROM important_date_rows WHERE id = ${id}`;
+            SELECT d.answer || jsonb_build_object('next_date', n.next_date::text) AS answer
+              FROM important_date_rows d
+              CROSS JOIN LATERAL (SELECT coalesce(${d.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date) AS today) td
+              CROSS JOIN LATERAL (SELECT (d.answer->>'date_value')::date AS day, extract(year FROM td.today)::int AS year) t
+              CROSS JOIN LATERAL (
+                SELECT CASE
+                         WHEN NOT d.recurring_yearly THEN CASE WHEN t.day >= td.today THEN t.day END
+                         WHEN (t.day + make_interval(years => t.year - extract(year FROM t.day)::int))::date >= td.today
+                           THEN (t.day + make_interval(years => t.year - extract(year FROM t.day)::int))::date
+                         ELSE (t.day + make_interval(years => t.year - extract(year FROM t.day)::int + 1))::date
+                       END AS next_date) n
+             WHERE d.id = ${id}`;
           return full;
         });
         if (!row) return noSuchMember(memberId);
@@ -256,7 +283,7 @@ export default definePlugin({
       path: "/dates",
       input: {
         days_ahead: z.number().int().min(0).max(366).default(30).describe("How many days ahead to look, 0 to 366"),
-        today: Day.optional().describe("The user's own date today, YYYY-MM-DD; the date in UTC unless given, which is a day off for part of each day in most time zones"),
+        today: TodayInput,
       },
       output: { today: z.string(), dates: z.array(UpcomingDate) },
       async handler(ctx, { days_ahead, today: given }) {

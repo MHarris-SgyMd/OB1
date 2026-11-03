@@ -52,7 +52,13 @@ CREATE INDEX IF NOT EXISTS household_vendors_by_service ON household_vendors (se
 -- named columns, never `*`, so a column added here later changes no prepared
 -- statement's result (check 41).
 CREATE OR REPLACE VIEW item_rows AS
-  SELECT i.id, i.name, i.category, i.location, i.notes, i.details::text AS details_text, i.created_at,
+  SELECT i.id, i.name, i.category, i.location, i.notes, i.created_at,
+         -- What a search reads of the details: every key and every value, as
+         -- text and unescaped (a quote is a quote), not the JSON's syntax.
+         concat_ws(' ',
+           (SELECT string_agg(k #>> '{}', ' ') FROM jsonb_path_query(i.details, 'strict $.** ? (@.type() == "object").keyvalue().key') k),
+           (SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(i.details, 'strict $.**') v WHERE jsonb_typeof(v) NOT IN ('object', 'array'))
+         ) AS details_text,
          jsonb_build_object(
            'id', i.id, 'name', i.name, 'category', i.category, 'location', i.location, 'details', i.details, 'notes', i.notes,
            'created_at', to_char(i.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),

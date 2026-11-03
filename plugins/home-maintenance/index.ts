@@ -52,9 +52,19 @@ const likePattern = (s: string) => `%${likeText(s)}%`;
  * filter"), so a phrase an agent types never misses for its word order.
  */
 const likeText = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
-/** The day an agent says is the user's today, or the date in UTC: a read's days_until counts from it. */
-const TodayInput = z.iso.date().refine((d) => !d.startsWith("0000-"), "a date from the year 0001").optional()
+/**
+ * The day an agent says is the user's today, or the date in UTC without one:
+ * days_until and the like count from it. Within a day of the date in UTC
+ * either way, as every time zone's date is (UTC-12 to UTC+14): a date
+ * further off is a typo that would date a stored row wrongly for good.
+ */
+const TodayInput = z.iso.date()
+  .refine((d) => Math.abs(Date.parse(`${d}T00:00:00Z`) - Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)) <= 86_400_000,
+    "the user's own date today, within a day of the date in UTC")
+  .optional()
   .describe("The user's own date today, YYYY-MM-DD; the date in UTC unless given, which is a day off for part of each day in most time zones");
+/** A query's words: split on any whitespace (a no-break space included), joined by one space, each escaped for ILIKE. */
+const wordsOf = (q: string) => likeText(q.split(/\s+/).filter(Boolean).join(" "));
 
 export default definePlugin({
   name: "home-maintenance",
@@ -109,13 +119,13 @@ export default definePlugin({
       },
       output: { tasks: z.array(Task), truncated: z.boolean() },
       async handler(ctx, { query, category, include_done, limit, today }) {
-        const words = query === undefined ? null : likeText(query);
+        const words = query === undefined ? null : wordsOf(query);
         const kind = category === undefined ? null : likePattern(category);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof Task>>>`
           SELECT answer || jsonb_build_object('days_until', next_due - coalesce(${today ?? null}::date, (now() AT TIME ZONE 'UTC')::date)) AS answer
             FROM task_rows
            WHERE (${words}::text IS NULL OR (SELECT bool_and(concat_ws(' ', name, category, notes) ILIKE '%' || w || '%')
-                                             FROM unnest(regexp_split_to_array(${words}::text, '[[:space:]]+')) w))
+                                             FROM unnest(regexp_split_to_array(${words}::text, ' ')) w))
              AND (${kind}::text IS NULL OR category ILIKE ${kind}::text)
              AND (${include_done}::boolean OR NOT done)
            ORDER BY done, next_due NULLS LAST, priority_rank, name, id
@@ -137,6 +147,7 @@ export default definePlugin({
         cost: z.number().min(0).max(99999999.99).nullish().describe("What it cost, in your currency, kept to two decimal places"),
         notes: text(5000).nullish().describe("What was done"),
         next_action: text(2000).nullish().describe("What the person who did it recommended for next time"),
+        today: TodayInput,
       },
       output: { log: Log, task: Task },
       async handler(ctx, l) {
@@ -165,7 +176,9 @@ export default definePlugin({
                    updated_at = now()
              WHERE t.id = ${l.task_id}`;
           const [log] = await sql<Answer<z.input<typeof Log>>>`SELECT answer FROM log_rows WHERE id = ${id}`;
-          const [task] = await sql<Answer<z.input<typeof Task>>>`SELECT answer FROM task_rows WHERE id = ${l.task_id}`;
+          const [task] = await sql<Answer<z.input<typeof Task>>>`
+            SELECT answer || jsonb_build_object('days_until', next_due - coalesce(${l.today ?? null}::date, (now() AT TIME ZONE 'UTC')::date)) AS answer
+              FROM task_rows WHERE id = ${l.task_id}`;
           return { log: log.answer, task: task.answer };
         });
         if (!done) return noSuchTask(l.task_id);
@@ -199,14 +212,14 @@ export default definePlugin({
     }),
     search_maintenance_history: operation({
       title: "Search maintenance history",
-      description: "The work logged: on one task (task_id), on tasks whose name or category holds the text given (any case), and from date_from to date_to, each filter optional and those given all applying. Latest first, each with its task, at most limit of them; count and total_cost are over every log that matched, so a sum of what was spent needs no paging, and truncated says whether more matched than were listed. A task_id that names no task is refused (NO_SUCH_TASK), as is a date_to before date_from (BAD_DATES).",
+      description: "The work logged: on one task (task_id), on tasks whose name holds every word of task_name (any case, any order) or whose category holds the text given, and from date_from to date_to, each filter optional and those given all applying. Latest first, each with its task, at most limit of them; count and total_cost are over every log that matched, so a sum of what was spent needs no paging, and truncated says whether more matched than were listed. A task_id that names no task is refused (NO_SUCH_TASK), as is a date_to before date_from (BAD_DATES).",
       scope: "read",
       annotations: CLOSED,
       method: "GET",
       path: "/history",
       input: {
         task_id: z.string().uuid().optional().describe("One task's log alone, by the id list_maintenance_tasks gives"),
-        task_name: text(200).min(1).optional().describe("Text in the task's name"),
+        task_name: text(200).min(1).optional().describe("Words in the task's name, each matched apart"),
         category: text(100).min(1).optional().describe("Text in the task's category"),
         date_from: Day.optional().describe("The first day, YYYY-MM-DD"),
         date_to: Day.optional().describe("The last day, YYYY-MM-DD"),
@@ -216,7 +229,7 @@ export default definePlugin({
       async handler(ctx, f) {
         if (f.date_from && f.date_to && f.date_to < f.date_from) return refuse(422, "BAD_DATES", { message: `date_to ${f.date_to} is before date_from ${f.date_from}` });
         const task = f.task_id ?? null;
-        const name = f.task_name === undefined ? null : likePattern(f.task_name);
+        const name = f.task_name === undefined ? null : wordsOf(f.task_name);
         const kind = f.category === undefined ? null : likePattern(f.category);
         const found = await ctx.db.tx(async (sql) => {
           if (task && !(await taskExists(sql, task))) return null;
@@ -225,7 +238,7 @@ export default definePlugin({
             WITH matched AS (
               SELECT answer, completed_on, created_at, id, cost FROM log_rows
                WHERE (${task}::uuid IS NULL OR task_id = ${task}::uuid)
-                 AND (${name}::text IS NULL OR task_name ILIKE ${name}::text)
+                 AND (${name}::text IS NULL OR (SELECT bool_and(task_name ILIKE '%' || w || '%') FROM unnest(regexp_split_to_array(${name}::text, ' ')) w))
                  AND (${kind}::text IS NULL OR task_category ILIKE ${kind}::text)
                  AND (${f.date_from ?? null}::date IS NULL OR completed_on >= ${f.date_from ?? null}::date)
                  AND (${f.date_to ?? null}::date IS NULL OR completed_on <= ${f.date_to ?? null}::date))
