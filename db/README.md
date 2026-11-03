@@ -4334,7 +4334,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
-#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held, or no work but a backlog a model switch leaves aside, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
@@ -4401,8 +4401,8 @@ lookup a claim pass: a claim pending or in hand, which a capture queues as it
 lands. So what no claim row shows — a vector come for a thought extracted
 already, a delete's orphans, re-embed's backlog — waits for the rescan, or
 goes with a period other work begins; the next poll reads it whole after a
-live write cut the sweep, a retried start refusal's wait, or a re-embed
-set-aside cleared. The sweep's census reads one window of 10,001 lineage rows
+live write or its limit cut the sweep, a retried start refusal's wait, or a
+re-embed set-aside cleared. The sweep's census reads one window of 10,001 lineage rows
 a whole read, an empty window moving it on, so on an idle brain an orphan
 far into a large table is found one rescan a window later — a one-shot run,
 and `--dry-run`, walk every window, having no later read. A pass held begins none: one a statement held
@@ -4477,8 +4477,9 @@ consolidation run on; the next period tries it again. A statement past its
 timeout holds it until a restart, as it holds any pass (**Its budget**).
 A model switch it will not make —
 the brain recording an embedding model other than the stack's
-`OB1_EMBEDDING_MODEL` — sets it aside, said and on the row (briefly at each
-later period), extraction and consolidation running on; the record is read
+`OB1_EMBEDDING_MODEL` — sets it aside, said and on the row, which reads
+failed (briefly at each later period; idle too, a one-shot run with no other
+work exiting 1), extraction and consolidation running on; the record is read
 again at each period's start and each poll while it is aside, so running
 `reembed.ts --switch-model` clears it — re-embed runs in that period if read
 at its start, else in the next period with work. Putting the variable back instead means

@@ -344,9 +344,10 @@ const providerRows = (passes: readonly string[]) =>
  * sleep (heartbeat:sleep's `aside`, SMD-2679 PR 4b): a refusal's remedy as a
  * re-embed follower's, and the scheduler's own words for the rest.
  */
-const reembedDownRemedy = (kind: ReembedDown, stopped = false): string =>
+const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = false): string =>
   kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it)"
-  : kind === "statement" ? `a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
+  // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out, as the claim passes' held fix says (review pass 3 of SMD-3379 PR 1c-4b).
+  : kind === "statement" ? `a statement passed ${ownTimeout ? "the role's or the database's own statement_timeout" : "its statement_timeout"}, which its log names: ${ownTimeout ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs," : "raise OB1_SLEEP_STATEMENT_TIMEOUT"} in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
   : kind === "failed" ? "it ended by itself, and its log gives the reason"
   // A setting the scheduler reads once, at its start (review pass 3: a follower's words alone) — where a
   // setting can be the cause; a stopped scheduler's restart is its own fix (review pass 4: said twice).
@@ -4463,7 +4464,7 @@ if (configFailed) {
                 const diedFix = l.expired ? reclaim(key).trim() : "";
                 if (runner.down) {
                   add("re-embed pass", "warn", `${words}; re-embed ${runner.down === "statement" ? "held until a restart" : `set down for ${sleeping.running ? "this" : "its last"} period`} (${runner.down})${failedWords}${conflict}${died}`,
-                      fixOf(`${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. ${runner.down === "statement" ? "It is held until the scheduler restarts" : "The next period with work tries it again"}, with no second worker.`, c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
+                      fixOf(`${reembedDownRemedy(runner.down, false, sleeping.budget?.statementTimeoutS === 0).replace(/^./, (ch) => ch.toUpperCase())}. ${runner.down === "statement" ? "It is held until the scheduler restarts" : "The next period with work tries it again"}, with no second worker.`, c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
                 } else if (c.failed || conflict || died) {
                   add("re-embed pass", "warn", `${words}${made}${failedWords}${conflict}${died}`, fixOf(c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
                 } else {
@@ -5153,9 +5154,9 @@ if (configFailed) {
                 ? `The brain records ${!recorded.embedding_model ? "no embedding model now, which is no switch" : `${set.unprintable ? "this stack's model" : cfgModel} now, as this stack is configured`}: the set-aside clears at the scheduler's ${down ? "next sleep once it is started again" : h.running ? "next poll" : "next sleep"}.`
               : set.kind === "model-switch"
                 ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
-                : down ? (set.kind === "outage" ? null : `Its last period ${set.kind === "statement" ? "held re-embed" : "set re-embed down"} (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first period ${set.kind === "statement" ? "holds it again" : "sets re-embed down again"}.`)
+                : down ? (set.kind === "outage" ? null : `Its last period ${set.kind === "statement" ? "held re-embed" : "set re-embed down"} (${set.kind}) — ${reembedDownRemedy(set.kind, true, b?.statementTimeoutS === 0)}; mend that before it starts again, or its first period ${set.kind === "statement" ? "holds it again" : "sets re-embed down again"}.`)
                 : set.kind === "statement"
-                  ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on meanwhile.${otherPass}`
+                  ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind, false, b?.statementTimeoutS === 0)}; extraction and consolidation run on meanwhile.${otherPass}`
                   : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next period with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
             // Under a model name that forms no key its row carries, the
             // scheduler keeps re-embed out, as its start said, and the row

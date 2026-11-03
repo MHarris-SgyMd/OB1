@@ -19693,9 +19693,9 @@ if (want("38")) {
 
     // A sweep its limit cut, its orphans the only work left: the next idle poll reads the work whole, and the
     // next period sweeps the rest — where they waited for the rescan, an hour on (review pass 2 of PR 1c-4b). A
-    // limit of one over two orphans, under --follow.
-    const limitOrphans: string[] = [];
-    for (const text of ["An orphan the limit leaves for the next period.", "An orphan the limit's first period takes."]) limitOrphans.push(await capture(text, "op-sleep", 0, 10));
+    // limit of one over two orphans, under --follow: the wake case's notes, their windows gone already, their work
+    // drained first.
+    const limitOrphans = wakeOrphans;
     const acLimitDrain = new AbortController();
     await bounded(sleepRun({ signal: acLimitDrain.signal }), acLimitDrain);
     for (const id of limitOrphans) {
@@ -19942,16 +19942,20 @@ if (want("38")) {
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
       // A one-shot run walks every window, having no later read: it finds the orphan, and so does its dry run
-      // (review pass 2: both read the first window alone and said "no work").
+      // (review pass 2: both read the first window alone and said "no work") — a capture's work beside it, which
+      // a one-shot run once took alone, its sweep reading the first window (review pass 3).
+      await capture("A note beside the orphan past the first window.", "op-sleep", 0, 11);
       lines.length = 0;
       await sleepRun({ dryRun: true });
-      const deepDry = lines.some((l) => /a period would begin/.test(l)) && !lines.some((l) => /idle: no work/.test(l));
+      const deepDry = lines.some((l) => /a period would begin/.test(l)) && !lines.some((l) => /idle: no work/.test(l))
+        && lines.some((l) => /; one past it, which a one-shot run walks to and --follow reaches a window a rescan/.test(l));
       const acDeepOnce = new AbortController();
       const deepOnceCode = await bounded(sleepRun({ signal: acDeepOnce.signal }), acDeepOnce);
       assert(deepDry && deepOnceCode === 0 && (await rowsBy("zz-deep")) === 0,
-        `a one-shot run, and its dry run, find an orphan past the first window: it is swept (dry run ${deepDry}; exit ${deepOnceCode}; ${await rowsBy("zz-deep")} left)`);
+        `a one-shot run, and its dry run, find an orphan past the first window, a capture's work beside it: it is swept (dry run ${deepDry}; exit ${deepOnceCode}; ${await rowsBy("zz-deep")} left)`);
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
-                VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
+                VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')
+                ON CONFLICT (id) DO NOTHING`;
       lines.length = 0;
       const acIdleDeep = new AbortController();
       const idleDeepRun = sleepRun({ follow: true, minStampEveryS: 1, rescanMs: 2000, signal: acIdleDeep.signal });
@@ -20411,7 +20415,7 @@ if (want("38")) {
     const ended = pausedAgain && await pollUntil(async () => heldAtCap?.aborted !== undefined, 10_000);
     const abortedAgain = lines.slice(capAt).filter((l) => /call\(s\) in hand past/.test(l)).length;
     sw.slowJudge = 0;
-    // Said once a sleep: not again through the second pause (review pass 1).
+    // Said once in the cap's hour: not again through the second pause (review pass 1).
     const capOnce = capLines() === 1;
     assert(capSaid && capOnce && pausedAgain && ended && heldAtCap?.aborted === false && abortedAgain === 0,
       `…and at consolidation's cap, said once, the next pause aborts none of its calls, the judgement in hand answering (cap said ${capSaid}, ${capLines()} cap line(s), resumed ${resumedAt}, held again ${heldAgain}, paused again ${pausedAgain}, the call ${heldAtCap?.aborted === undefined ? "not ended" : heldAtCap.aborted ? "aborted" : "answered"}, ${abortedAgain} aborted)`);
@@ -21528,9 +21532,9 @@ if (want("38r")) {
     assert(clearedCode === 1 && clearedLeft && lines.some((l) => /re-embed's set-aside cleared: .* — the next period with work re-embeds/.test(l)),
       `a one-shot sleep whose re-embed was aside at its start exits 1 though the record was put right within it — re-embed did not run in it (exit ${clearedCode}; left ${clearedLeft})`);
 
-    // A backlog a model switch sets aside is no work: a one-shot run whose only work it is begins no period and
-    // exits 0 at once (SMD-3379 PR 1c-4b, review pass 1: the baseline counted it, the period it began set re-embed
-    // aside, and the run exited 1). Its extraction done, so re-embed's backlog is all there is.
+    // A backlog a model switch sets aside is no work: a one-shot run whose only work it is begins no period (SMD-3379
+    // PR 1c-4b, review pass 1: the baseline counted it, and a period began to set re-embed aside), and says the switch,
+    // exiting 1 as a period that sets it aside does — its pool left (review passes 2 and 3). Its extraction done, so re-embed's backlog is all there is.
     const switchedOld = await reCapture("An old note under a model the record does not name.", 40);
     await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${switchedOld}::uuid])`;
     await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${switchedOld}::uuid`;
@@ -21547,9 +21551,9 @@ if (want("38r")) {
       await sql`DELETE FROM thoughts WHERE id = ${switchedOld}::uuid`;
     }
     // The switch said all the same, as a period's start says it (review pass 2: idle, it went unsaid).
-    assert(switchedCode === 0 && /^idle: no work — a period begins once a pass has some$/.test(switchedDry) && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l))
+    assert(switchedCode === 1 && /^idle: no work — a period begins once a pass has some$/.test(switchedDry) && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l))
         && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)),
-      `a one-shot run whose only work is a backlog a model switch sets aside begins no period and exits 0, the dry run saying no work (exit ${switchedCode}; dry run ${switchedDry}; ${lines.filter((l) => /idle|working|aside/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
+      `a one-shot run whose only work is a backlog a model switch sets aside begins no period, says the switch and exits 1, the dry run saying no work (exit ${switchedCode}; dry run ${switchedDry}; ${lines.filter((l) => /idle|working|aside/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
 
     // Vectors from before migration 021 carry no model: the dry run counts them among re-embed's backlog (review pass 1).
     const unlabelledNote = ((await sql`SELECT upsert_thought(${"A note from before the labels."}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, ${unit(37)}::vector) AS r`)[0].r as { id: string }).id;

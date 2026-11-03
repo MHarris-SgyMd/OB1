@@ -4615,6 +4615,11 @@ else {
       assert(/; re-embed held until a restart \(statement\)$/.test(row(reHeld.out, "sleep"))
           && /Re-embed is held until a restart — a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env, then .*; extraction and consolidation run on meanwhile\./.test(fix(reHeld.out, "sleep")) && !/next period/.test(fix(reHeld.out, "sleep")),
         `re-embed a statement holds is said as held until a restart, with its remedy (${row(reHeld.out, "sleep")} | ${fix(reHeld.out, "sleep")})`);
+      // …under OB1_SLEEP_STATEMENT_TIMEOUT 0, the role's or the database's own named, ours set above theirs (review pass 3).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "statement" } }, holds: [{ pass: "reembed", why: "statement", until: null }], budget: { minutes: 0, statementTimeoutS: 0, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 1 }, slept: { from: await at(130), to: null } }), 10);
+      const reHeldOwn = fix((await run(LOG_ON)).out, "sleep");
+      assert(/Re-embed is held until a restart — a statement passed the role's or the database's own statement_timeout, which its log names: set OB1_SLEEP_STATEMENT_TIMEOUT above theirs \(a startup setting beats it\), or raise theirs, in deploy\/\.env/.test(reHeldOwn),
+        `…and under a timeout of 0, the role's or the database's own named, ours set above theirs (${reHeldOwn})`);
       // A held claim pass's fix stands beside a provider wait's (review pass 2: the wait's alone was said).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waiting: ["consolidate"], holds: [{ pass: "extract", why: "statement", until: null }], budget: { minutes: 0, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 1 }, slept: { from: await at(130), to: null } }), 10);
       const heldWaiting = fix((await run(LOG_ON)).out, "sleep");
