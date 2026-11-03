@@ -963,7 +963,10 @@ export class SqlStore implements ThoughtStore {
   async claimLease(token: string, id?: string, work?: { ticket: string; piece?: string; name: string; agentId?: string }): Promise<{ id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean } | null> {
     // Separate statements, not `$id IS NULL OR id = $id`: a generic plan would lose the primary key. claim_work's form
     // asks, with 115's own functions, whether the claim is the caller's on exactly the work asked: a ticket or piece
-    // 115 would refuse raises here as it would there, and the writer then answers it.
+    // 115 would refuse raises here as it would there, and the writer then answers it; a piece blank once cleaned, which
+    // 115 refuses rather than reading as the whole ticket, is no match (review pass 5). The caller's own: 115's holder
+    // test, or — the registry away, so no agent id — a claim made with an id under the caller's name, as ownWhileAway
+    // reads it for renew_claim (review pass 5: such a call made a new claim again).
     const rows = (id !== undefined
       ? await this.sql`SELECT id, expires_at, released_at, released_by, release_reason FROM work_claims WHERE id = ${id}::uuid AND token_hash = ob1_work_claim_token_hash(${token}::text)`
       : work === undefined
@@ -971,8 +974,10 @@ export class SqlStore implements ThoughtStore {
         : await this.sql`
             SELECT id, expires_at, released_at, released_by, release_reason,
                    (c.issue = ob1_work_claim_issue(${work.ticket}::text)
+                    AND NOT (${work.piece ?? null}::text IS NOT NULL AND ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece') IS NULL)
                     AND c.piece_key = COALESCE(lower(ob1_work_claim_text(${work.piece ?? null}::text, 100, 'a piece')), '')
-                    AND ob1_work_claim_is_holder(c, ${work.name}::text, ${work.agentId ?? null}::uuid, c.token_hash)) AS own_on_this_work
+                    AND (ob1_work_claim_is_holder(c, ${work.name}::text, ${work.agentId ?? null}::uuid, c.token_hash)
+                         OR (${work.agentId ?? null}::uuid IS NULL AND c.holder_agent_id IS NOT NULL AND c.holder_name = ${work.name}::text))) AS own_on_this_work
               FROM work_claims c WHERE token_hash = ob1_work_claim_token_hash(${token}::text)`) as Record<string, unknown>[];
     const r = rows[0];
     if (!r || typeof r.id !== "string" || r.expires_at == null) return null;

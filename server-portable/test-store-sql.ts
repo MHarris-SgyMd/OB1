@@ -1899,6 +1899,27 @@ console.log("\n[21] claimLease reads the lease a renewal starts from by its toke
   const all = await store.claimsMadeSince(String(whole.claim?.id), "2000-01-01T00:00:00Z", 10);
   assert(whole.outcome === "claimed" && first.claims.length === 1 && first.claims[0].id === aId && first.total === 2 && all.claims.length === 2 && all.total === 2,
     `claimsMadeSince: the first of two overlapping claims at limit 1, the total 2 (${JSON.stringify([first.claims.map((c) => c.id), first.total, all.claims.length, all.total])})`);
+  // The caller's own on this work, by agent id (review pass 5: unpinned): a claim made with an id is its key's under
+  // a new name, and under its name with the registry away (no id: ownWhileAway's case), but not another id's. A piece
+  // spelled with doubled spaces is 115's same piece; one blank once cleaned is no match, 115 refusing it.
+  const U = "11111111-2222-4333-8444-555555555555", V = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    await admin`UPDATE work_claims SET holder_agent_id = ${U}::uuid WHERE id = ${aId}::uuid`;
+    const lease = (w: { piece?: string; name: string; agentId?: string }, token = aToken) => store.claimLease(token, undefined, { ticket: "SMD-9310", ...w }).then((l) => l?.ownOnThisWork);
+    const renamed = await lease({ piece: "PR 1", name: "renamed-key", agentId: U });
+    const away = await lease({ piece: "PR 1", name: "smd-3654-store" });
+    const otherId = await lease({ piece: "PR 1", name: "smd-3654-store", agentId: V });
+    const otherName = await lease({ piece: "PR 1", name: "someone-else" });
+    const doubled = await lease({ piece: "PR  1", name: "smd-3654-store", agentId: U });
+    const wholeToken = String(whole.token);
+    const blank = await lease({ piece: "   ", name: "smd-3654-store" }, wholeToken);
+    const noPiece = await lease({ name: "smd-3654-store" }, wholeToken);
+    assert(renamed === true && away === true && otherId === false && otherName === false && doubled === true && blank === false && noPiece === true,
+      `own on this work by agent id under a new name, by name with no id, not another id's or another name's; "PR  1" is PR 1; a blank piece is no whole ticket (${JSON.stringify([renamed, away, otherId, otherName, doubled, blank, noPiece])})`);
+  } finally {
+    await admin.close();
+  }
 }
 
 await store.close();

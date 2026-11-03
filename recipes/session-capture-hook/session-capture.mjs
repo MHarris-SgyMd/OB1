@@ -2961,6 +2961,8 @@ function brainForClaim(claim, brains) {
 const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
 /** A renewal's words when it revived a lapsed claim after claims were made or renewed on its work, or couldn't read them, or couldn't read whether it had lapsed (the server's since SMD-3654). */
 const REVIVED_COVERED_RE = /\b(?:It had lapsed at \S+, and (?:since then .* made or renewed on its work|the claims made or renewed on its work since could not be read)|Whether it had lapsed could not be read)\b/;
+/** A claim's ticket or piece as 115 compares it: control characters made spaces, soft hyphen and zero-width marks gone, runs of white space one, trimmed, case-folded. */
+const cleanWork = (v) => String(v ?? "").replace(/\p{Cc}/gu, " ").replace(/[\u00AD\u200B\u2060\uFEFF]/g, "").replace(/\s+/gu, " ").trim().toLowerCase();
 /** A marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2; WORK_CLAIMED's too, review pass 3). */
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
@@ -2993,7 +2995,7 @@ export async function renewClaim(cfg, claim) {
     const lapsed = result?.structuredContent?.lapsed;
     if (lapsed && (lapsed.at === null || lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
       const said = markerSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
-      return { ...o, blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `${o.line} — but ${said.replace(new RegExp(`^CLAIMED_WHILE_LAPSED: Renewed your claim .*?\\(claim ${UUID}\\)\\.\\s*`, "i"), "")} (renewals wait until the .blocked.json beside its token file is deleted)` };
+      return { ...o, blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `${o.line} — but ${said.replace(new RegExp(`^CLAIMED_WHILE_LAPSED: Renewed your claim .*?\\(claim ${UUID}\\)\\.\\s*`, "i"), "").replace(/^(It|Whether) /, (w) => w.toLowerCase())} (renewals wait until the .blocked.json beside its token file is deleted)` };
     }
     // A lapse with nothing since is said in the log too: the agent's own renewal after it sees a live claim, and the
     // rule's search after a lapse needs to know there was one (review pass 2).
@@ -3185,11 +3187,12 @@ function noteAgentClaimCall(hook, brains) {
   // One claim in the way or several: render.ts says "a live claim" or "N live claims" (review pass 3: several went
   // unmarked). Only a call on the token file's own work — renew_claim of its id, or claim_work of its ticket and piece
   // — marks it: a claim_work for other work carrying the token met a claim of its own, not this one's end (review pass 4).
+  // The ticket and piece cleaned as 115's ob1_work_claim_text cleans them (review pass 5: inner spaces and zero-width
+  // marks read as other work); a token file naming no ticket is taken as this work, the side that marks.
   const input = hook.tool_input ?? {};
   const itsWork = m[2] === "renew_claim"
     ? String(input.id ?? "").toLowerCase() === f.claim.id
-    : String(input.ticket ?? "").trim().toUpperCase() === String(f.claim.ticket ?? "").trim().toUpperCase()
-      && String(input.piece ?? "").trim().toLowerCase() === String(f.claim.piece ?? "").trim().toLowerCase();
+    : (!f.claim.ticket || cleanWork(input.ticket) === cleanWork(f.claim.ticket)) && cleanWork(input.piece) === cleanWork(f.claim.piece);
   if (itsWork && /\bis covered by (?:a live claim|\d+ live claims)\b/.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
     const said = markerSaid(`WORK_CLAIMED: ${scrubTokens(oneLine(text))}`);
     const wrote = writeMarker(f.path, f.claim, "blocked", { code: "WORK_CLAIMED", message: said });
