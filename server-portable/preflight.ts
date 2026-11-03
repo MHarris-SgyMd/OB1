@@ -3053,8 +3053,10 @@ if (configFailed) {
                    CASE WHEN to_regclass('public.priority_assertions') IS NULL THEN NULL
                         ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${PRIORITY_GRANTS.map(([t, p]) => `('${t}', '${p}')`).join(", ")}) g(t, p)
                                     -- CASE, not OR: Postgres keeps no order among OR's arms, and the text form raises for a
-                                    -- table that is not there (review pass 1; the write-privileges row's guard).
-                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN true ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
+                                    -- table that is not there (review pass 1; the write-privileges row's guard). A table
+                                    -- the brain lacks is no grant missing: 117's open_items on a brain at 116 (SMD-3665
+                                    -- review pass 3); 116's own are asked of the functions above.
+                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
             .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const pr = Array.isArray(prRows) ? prRows[0] : null;
           if (!pr) {

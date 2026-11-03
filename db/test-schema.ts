@@ -16807,7 +16807,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   };
   const j = (o: object | null) => (o === null ? null : JSON.stringify(o));
   const open = (text: string, actor: object | null, o: { owner?: string; due_at?: string; thought?: string; row?: string; proposed?: boolean } = {}) =>
-    ans(`SELECT open_item($1, $2, $3::timestamptz, $4::uuid, $5, $6, $7::jsonb) AS r`, [text, o.owner ?? null, o.due_at ?? null, o.thought ?? null, o.row ?? null, o.proposed ?? false, j(actor)]);
+    ans(`SELECT open_item($1, $2, $3, $4::uuid, $5, $6, $7::jsonb) AS r`, [text, o.owner ?? null, o.due_at ?? null, o.thought ?? null, o.row ?? null, o.proposed ?? false, j(actor)]);
   const update = (item: string, changes: object, actor: object) => ans(`SELECT update_item($1, $2::jsonb, $3::jsonb) AS r`, [item, JSON.stringify(changes), j(actor)]);
   const status = (item: string, s: string, actor: object, reason: string | null = null) => ans(`SELECT set_item_status($1, $2, $3, $4::jsonb) AS r`, [item, s, reason, j(actor)]);
   const propose = (item: string, actor: object, o: { status?: string; evidence?: string; label?: string; reason?: string } = {}) =>
@@ -17036,6 +17036,29 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
     update(tid, { due_at: "epoch" }, OP), update(tid, { due_at: " tomorrow" }, OP), update(tid, { due_at: "now" }, OP)]);
   assert(dues.every((d) => d.code === "22023"), `a due time that is no time, an infinite one, or one of Postgres's words for one (epoch, tomorrow, now), raises 22023 from update_item and open_item (${dues.map((d) => d.code).join(",")})`);
 
+  // A proposer whose call carries no agent id (its registry label renamed, so its name resolves to none) is still its proposal's proposer, by its name (review pass 3).
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-ren', 'agent')`);
+  const renItem = await open("[105] an item a renamed key proposes on", OP);
+  const renProp = await propose(renItem.item?.id ?? GHOST, { name: "item-ren", scope: "write", agent_id: await agentOf("item-ren") });
+  await db.exec(`UPDATE ob1_agents SET label = 'item-ren-renamed' WHERE label = 'item-ren'`);
+  const renAccept = await decide(renProp.proposal?.id ?? GHOST, true, { name: "item-ren", scope: "write" });
+  assert(renProp.outcome === "proposed" && renAccept.code === "PROPOSAL_YOURS",
+    `a proposer whose later call carries no agent id is matched by its name: its accept is PROPOSAL_YOURS (${renProp.outcome}, ${renAccept.code})`);
+
+  // A capture-only key may dismiss its own proposed item, never confirm it (review pass 3).
+  const capProposed = await open("[105] the extractor's guess", CAP, { proposed: true });
+  const capConfirm = await status(capProposed.item?.id ?? GHOST, "open", CAP);
+  const capDismiss = await status(capProposed.item?.id ?? GHOST, "dropped", CAP);
+  assert(capProposed.item?.status === "proposed" && capConfirm.code === "CONFIRM_NOT_YOURS" && capDismiss.outcome === "changed" && capDismiss.item?.status === "dropped",
+    `a capture key's proposed item is not confirmed by it (CONFIRM_NOT_YOURS) but may be dismissed (${capConfirm.code}, ${capDismiss.outcome})`);
+
+  // Due times are ISO 8601 alone, through both writers: a relative word anywhere in the text raises (review pass 3); a date, and a time with or without an offset, are kept.
+  const isoBad = await Promise.all([update(tid, { due_at: "2026-11-05 17:00 tomorrow" }, OP), update(tid, { due_at: "17:00 tomorrow" }, OP), open("[105] due now", OP, { due_at: "now" }),
+    open("[105] due a date and a word", OP, { due_at: "2027-03-01 today" })]);
+  const isoGood = await Promise.all([update(tid, { due_at: "2027-03-01" }, OP), update(tid, { due_at: "2027-03-01T17:00:00+01:00" }, OP), open("[105] due a time", OP, { due_at: "2027-03-02 09:30Z" })]);
+  assert(isoBad.every((d) => d.code === "22023") && isoGood.every((d) => d.outcome === "updated" || d.outcome === "opened") && isoGood[1].item?.due_at === "2027-03-01T16:00:00+00:00",
+    `a due time with a relative word anywhere raises 22023 from both writers; a date, a time with an offset and one with Z are kept, the offset honoured (${isoBad.map((d) => d.code).join(",")}; ${isoGood.map((d) => d.outcome).join(",")}, ${isoGood[1].item?.due_at})`);
+
   // Append-only events; proposals decided once — for the owner too.
   const anyEvent = h.events[0].id;
   const edits = await Promise.all([
@@ -17152,7 +17175,7 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const ones = await Promise.all(["open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "open_item_history", "assert_priority"].map(functionsNamed));
   assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
 
-  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read', 'item-late', 'item-ren-renamed')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

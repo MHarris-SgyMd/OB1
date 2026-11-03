@@ -711,7 +711,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // triggers and nineteen functions — refusing by name without 008, 046, 061,
   // 068, 082 or 115 ([20bh]); 117 adds open items — three tables, four
   // refusing triggers and twenty-eight functions, and redefines three of 116's
-  // — refusing by name without 115 or 116 ([20bi]) — all
+  // — refusing by name without 008, 046, 061, 115 or 116 ([20bi]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point

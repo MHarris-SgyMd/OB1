@@ -428,7 +428,7 @@ const FUNCTIONS = [
   // 117 (SMD-3665): open items — the six calls, the drift check, the rebuild,
   // the triggers' functions and the helpers (those taking or returning a row
   // type of 117's go with its table's CASCADE, and are named anyway).
-  "open_item(text, text, timestamp with time zone, uuid, text, boolean, jsonb)",
+  "open_item(text, text, text, uuid, text, boolean, jsonb)",
   "update_item(text, jsonb, jsonb)",
   "set_item_status(text, text, text, jsonb)",
   "propose_item_close(text, text, uuid, text, text, jsonb)",
