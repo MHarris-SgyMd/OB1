@@ -4706,7 +4706,7 @@ of its work, one to three, each `{ pass, why, until }`:
   event rather than a time.
 
 Paused is the state, before running: `brain_info` reads "paused by a live
-call for 40 s; held out: consolidate (provider)", `task_status` reads it
+call for 40 s; held out: reembed (provider)", `task_status` reads it
 running, and preflight's `sleep` row adds "its passes waiting between
 thoughts, going on once the brain is quiet … a live write pauses it". The
 re-embed and consolidate pass rows each name their own pass's hold, or the

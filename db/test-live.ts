@@ -20375,6 +20375,10 @@ if (want("38")) {
     const retryHold = laterBeat?.holds?.find((h) => h.pass === "extract");
     // Still refused at the next try: the wait doubles (2.5 s, then 5 s).
     const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 30_000);
+    // The second wait's hold: written again, until 5 s on, not the first's nor half the wait (review pass 1).
+    const [{ nowIso: secondNow }] = await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "nowIso"`;
+    const secondHold = (await beat())?.holds?.find((h) => h.pass === "extract");
+    const secondLeft = secondHold?.until ? Date.parse(secondHold.until) - Date.parse(secondNow) : NaN;
     // Three seconds into the 5 s wait the row is fresh — re-stamped through
     // the wait — not two of its 1 s intervals old (review pass 2).
     await Bun.sleep(3000);
@@ -20384,8 +20388,9 @@ if (want("38")) {
     const at = lines.length;
     const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
     const holdsRecovered = (await beat())?.holds;
-    assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600 && holdsRecovered === undefined,
-      `a refusal retried under --follow holds the pass on the row until the retry, by the database's clock, and holds none once a sleep runs (${JSON.stringify(laterBeat?.holds)} at ${nowIso}; after ${JSON.stringify(holdsRecovered)})`);
+    assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600
+        && secondHold?.why === "model" && secondLeft > 3500 && secondLeft <= 5100 && holdsRecovered === undefined,
+      `a refusal retried under --follow holds the pass on the row until each retry, by the database's clock, and holds none once a sleep runs (${JSON.stringify(laterBeat?.holds)} at ${nowIso}; the 5 s wait's ${JSON.stringify(secondHold)} ${secondLeft} ms on; after ${JSON.stringify(holdsRecovered)})`);
     assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 2,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
     // A sleep that ran resets the schedule: the next refusal waits 2.5 s again.
@@ -20447,7 +20452,8 @@ if (want("38")) {
     sw.slow = 8000;
     const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
     const cliAt = Date.now();
-    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
+    // --abort-after given too: the CLI hands it to the run, said at its start (SMD-3379 PR 1c-4a, review pass 1).
+    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1", "--abort-after", "90"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
     try {
       // The call in hand at the stub, not the claim alone: a signal between the claim and the call let the soft stop
       // end within the 300 ms, exit 0 (seen once, SMD-2679 PR 4b's merge of main).
@@ -20459,6 +20465,9 @@ if (want("38")) {
       const cliBeat = await beat();
       assert(cliCode === 130 && cliBeat?.ended === true && cliBeat.outcome === "stopped" && !(await claims(EX)).claimed,
         `the CLI signalled twice while asleep exits 130 with its lease returned and heartbeat:sleep ended (exit ${cliCode}; ${JSON.stringify(cliBeat)})`);
+      const cliOut = cliCode === "hung" ? "" : await new Response(cli.stdout).text();
+      assert(/^  pause: .*, a call in hand past 90 s aborted meanwhile/m.test(cliOut),
+        `…and its --abort-after reaches the run, said at the start (${cliOut.split("\n").find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     } finally {
       sw.slow = 0;
       cli.kill("SIGKILL");

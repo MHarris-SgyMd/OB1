@@ -466,7 +466,7 @@ export interface SleepOptions {
   pollMs?: number;
   /** The capture in ms in place of `capture`'s whole seconds, when a test drives it faster. */
   captureMs?: number;
-  /** N12's bound in ms in place of DEFAULT_ABORT_AFTER_S, when a test drives it faster: at or above the stall floor. */
+  /** N12's bound in ms in place of `abortAfter`'s whole seconds, when a test drives it faster: at or above the stall floor. */
   abortAfterMs?: number;
   /** The most of consolidation's calls N12 aborts in one sleep, in place of CONSOLIDATE_ABORTS, when a test reaches the cap sooner. */
   consolidateAborts?: number;
@@ -1118,8 +1118,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * The row's `holds` (SMD-3379 PR 1c-4a, brain-info's SleepHold): re-embed
    * set aside on a model switch, or set down until the next sleep — neither
-   * with a time — and a claim pass held for its start's retry. Only a reason
-   * brain-info reads, which reads none of a list with one it does not.
+   * with a time — and a claim pass held for its start's retry, one whose
+   * refusal names no kind holding nothing. Only a reason brain-info reads,
+   * which reads none of a list with one it does not.
    */
   const holdList = (): SleepHold[] => {
     const list: SleepHold[] = [];
@@ -1831,7 +1832,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     gate = liveGate();
     /** The live read's lower bound: the last poll's now less the slack, so a long sleep's read stays short. */
     let readFrom = from;
-    /** The newest live write seen (ms), and when it landed (the database's ms): the capture counts from the landing. */
+    /** The newest live write seen, and when it landed, in the database's epoch microseconds: the capture counts from the landing. */
     let lastWrite: number | null = null;
     let landedAt = 0;
     let lastNow: number | null = null;
@@ -1844,7 +1845,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let consolidateAborts = 0;
     let saidAbortCap = false;
     /** The rest after a budget stop waits for a live write newer than `w`, the newest this sleep acted on: one that only paused it is no wake (review passes 1 and 2). */
-    const restFrom = (w: number | null) => (w === null ? from : Math.max(from, w + 1));
+    const restFrom = (w: number | null) => (w === null ? from : Math.max(from, w));
     /** The row written now, its outcome only from a pass that stamped one: else it keeps its last word (SMD-2752 PR 3's rule). */
     const sayOutcome = async (): Promise<void> => {
       if (Object.keys(words).length) await stamper.alive(sleepOutcome(), malformed ?? undefined);
@@ -2148,7 +2149,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (readsIdle) gate.close();
       const idle = readsIdle
         ? await reading(async () => {
-          const touched = await liveTouched(sql, seenBefore === null ? readAt : Math.max(readAt, seenBefore + 1));
+          const touched = await liveTouched(sql, seenBefore === null ? readAt : Math.max(readAt, seenBefore));
           return (!reembedRuns() || drained(await reembedPool())) && drained(await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt, touched))
             && drained(await poolOf(sql, "consolidate", JOBS.consolidate, undefined, undefined, false, undefined, touched));
         })
@@ -2584,9 +2585,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
         words[r.pass] = "failed";
         const waitMs = outageWait(refusals++);
-        // Held until the retry, on the row (SMD-3379 PR 1c-4a): when, by the database's clock.
-        const until = await sql`SELECT to_char((now() + make_interval(secs => ${waitMs / 1000})) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS u`
-          .then((rows) => (rows as { u: string }[])[0].u, () => null);
+        // Held until the retry, on the row (SMD-3379 PR 1c-4a): when, by the database's clock, read as its
+        // epoch so no session's TimeZone enters it — or by its last read's, the query refused, so the hold
+        // still reads timed rather than an event (review pass 1).
+        const nowMs = await sql`SELECT (extract(epoch FROM now()) * 1000)::bigint::text AS ms`
+          .then((rows) => Number((rows as { ms: string }[])[0].ms), () => sleptUntil.getTime());
+        const until = new Date(nowMs + waitMs).toISOString();
         retryHold = r.pass === "reembed" || !r.refused ? null : { pass: r.pass, why: r.refused as SleepHoldWhy, until };
         sayAside();
         await stamper.stamp("failed", malformed ?? undefined);
