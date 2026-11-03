@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the six MCP servers with a schema of their
+ * test-tools.ts — every tool of the four MCP servers with a schema of their
  * own on the SQL shim — the extension servers — answers against a real
  * Postgres carrying those schemas. (The ob-graph recipe was the eighth until it
- * retired with SMD-2920, and family-calendar the seventh until it became a
- * plugin with SMD-2311: server-portable/test-plugin-ports.ts drives it now.)
+ * retired with SMD-2920; family-calendar, home-maintenance and
+ * household-knowledge were three more until they became plugins with SMD-2311:
+ * server-portable/test-plugin-ports.ts drives them now.)
  *
  * SMD-1798 added the three servers that were still on supabase-js — family-
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
@@ -42,9 +43,9 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Thirty-nine tools on six servers: twenty-nine on the five
- * change 77 drove (SMD-1588's "twenty-five" counted the four `index.ts` files;
- * the shared meal-planning server's four are the rest) and ten on job-hunt.
+ * it is driven. Thirty tools on four servers: twenty on the three change 77
+ * drove that remain (meal-planning's six, its shared server's four and
+ * professional-crm's ten) and ten on job-hunt.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -67,8 +68,8 @@ const { assert, report } = createAssert();
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The six servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
-const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
+/** The four servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
+const SCHEMAS = ["extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
   "extensions/job-hunt/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 /** What the schemas create, dropped before they are applied and at the end. */
@@ -157,113 +158,6 @@ const eqJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(
 
 // Everything below runs inside one try so the schemas are dropped however it ends.
 try {
-
-// ── extensions/household-knowledge ───────────────────────────────────────────
-
-{
-  const F = "extensions/household-knowledge/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-
-  const paint = await c("add_household_item", { name: "Living Room Paint", category: "paint", location: "Living Room", details: '{"brand":"Sherwin Williams","color":"Sea Salt"}', notes: "two gallons, March" });
-  assert(ok(paint) && UUID.test(paint.body?.item?.id), `add_household_item stores the row (${failure(paint) || paint.body?.item?.id})`);
-  assert(paint.body?.item?.details?.brand === "Sherwin Williams", "…with details parsed into jsonb, not an escaped string");
-  const badJson = await c("add_household_item", { name: "x", details: "not json" });
-  assert(!ok(badJson) && /not valid JSON/.test(failure(badJson)), `…and refuses details that are not JSON with its own message (${failure(badJson).slice(0, 60)})`);
-  const dishwasher = await c("add_household_item", { name: "Dishwasher", category: "appliance", location: "Kitchen" });
-  assert(ok(dishwasher) && eqJson(dishwasher.body?.item?.details, {}), "a second item, details defaulting to {}");
-
-  const plumber = await c("add_vendor", { name: "Ann the Plumber", service_type: "plumber", phone: "555-0100", rating: 5, last_used: "2026-09-01" });
-  assert(ok(plumber) && UUID.test(plumber.body?.vendor?.id) && plumber.body?.vendor?.rating === 5, `add_vendor stores the row (${failure(plumber)})`);
-
-  const byQuery = await c("search_household_items", { query: "paint" });
-  assert(ok(byQuery) && byQuery.body?.count === 1 && byQuery.body?.items?.[0]?.name === "Living Room Paint", `search_household_items by query — the .or() across four columns (${failure(byQuery) || byQuery.body?.count})`);
-  const byFilters = await c("search_household_items", { category: "appl", location: "kitch" });
-  assert(ok(byFilters) && byFilters.body?.count === 1 && byFilters.body?.items?.[0]?.name === "Dishwasher", "…by category and location, ILIKE both");
-  const comma = await c("search_household_items", { query: "Sea, Salt" });
-  assert(!ok(comma) && comma.body?.success === false && /PGRST100/.test(failure(comma)), `…a query with a comma splits the .or() expression as it would through PostgREST (400), and the tool's own error handling reports PostgREST's code — the shim resolved { error }, it did not throw (${failure(comma).slice(0, 80)})`);
-  // An item whose name carries a parenthesis and a quote, found by the unbalanced prefix a person types: under a
-  // splitter that read brackets and quotes inside a value, the terms after the first were swallowed and this was 0.
-  const tap = await c("add_household_item", { name: 'Kitchen (main) 12" tap', category: "plumbing", location: "Kitchen" });
-  assert(ok(tap), "an item named with a parenthesis and a quote is stored");
-  const parenQuery = await c("search_household_items", { query: "Kitchen (main" });
-  assert(ok(parenQuery) && parenQuery.body?.count === 1 && parenQuery.body?.items?.[0]?.name === 'Kitchen (main) 12" tap', `…a query with an unclosed parenthesis is pattern text through all four ILIKE terms and finds it (${failure(parenQuery) || parenQuery.body?.count})`);
-  const quoteQuery = await c("search_household_items", { query: '12" tap' });
-  assert(ok(quoteQuery) && quoteQuery.body?.count === 1, `…as is one with a quote (${failure(quoteQuery) || quoteQuery.body?.count})`);
-  const none = await c("search_household_items", { query: "nothing-of-the-kind" });
-  assert(ok(none) && none.body?.count === 0 && eqJson(none.body?.items, []), "…and none is an empty list");
-  const all = await c("search_household_items", {});
-  assert(ok(all) && all.body?.count === 3 && all.body?.items?.[0]?.name === 'Kitchen (main) 12" tap', "…no filter lists every item, newest first");
-
-  const details = await c("get_item_details", { item_id: paint.body?.item.id });
-  assert(ok(details) && details.body?.item?.name === "Living Room Paint" && typeof details.body?.item?.created_at === "string", `get_item_details finds the row, timestamps as strings (${failure(details)})`);
-  const missing = await c("get_item_details", { item_id: NO_ROW });
-  assert(!ok(missing) && /Failed to get item details: .*rows returned/.test(failure(missing)), `…and a missing id is the tool's own error with PostgREST's message (${failure(missing).slice(0, 70)})`);
-
-  const vendors = await c("list_vendors", {});
-  assert(ok(vendors) && vendors.body?.count === 1 && vendors.body?.vendors?.[0]?.name === "Ann the Plumber", `list_vendors (${failure(vendors)})`);
-  const plumbers = await c("list_vendors", { service_type: "plumb" });
-  assert(ok(plumbers) && plumbers.body?.count === 1, "…filtered by service type, ILIKE");
-  const electricians = await c("list_vendors", { service_type: "electric" });
-  assert(ok(electricians) && electricians.body?.count === 0, "…and none for a type nobody has");
-}
-
-// ── extensions/home-maintenance ──────────────────────────────────────────────
-
-{
-  const F = "extensions/home-maintenance/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-
-  const hvac = await c("add_maintenance_task", { name: "HVAC filter replacement", category: "hvac", frequency_days: 90, next_due: isoDaysFromNow(20), priority: "high", notes: "16x25x1 pleated" });
-  assert(ok(hvac) && UUID.test(hvac.body?.task?.id) && hvac.body?.task?.priority === "high", `add_maintenance_task stores the row (${failure(hvac)})`);
-  assert(typeof hvac.body?.task?.next_due === "string", "…next_due back as a string");
-  const gutter = await c("add_maintenance_task", { name: "Gutter cleaning", category: "exterior" });
-  assert(ok(gutter) && gutter.body?.task?.next_due === null && gutter.body?.task?.frequency_days === null && gutter.body?.task?.priority === "medium", "a one-time task with no due date, priority defaulted");
-  const roof = await c("add_maintenance_task", { name: "Roof inspection", category: "exterior", next_due: isoDaysFromNow(5 * 365) });
-  assert(ok(roof), "a task due years out");
-
-  // .not("next_due", "is", null): the gutter task (no date) is out, the roof (beyond the window) is out.
-  const upcoming = await c("get_upcoming_maintenance", { days_ahead: 30 });
-  assert(ok(upcoming) && upcoming.body?.count === 1 && upcoming.body?.tasks?.[0]?.name === "HVAC filter replacement",
-    `get_upcoming_maintenance lists the task due inside the window and leaves out the undated one — .not("next_due", "is", null) (${failure(upcoming) || JSON.stringify(upcoming.body?.tasks?.map((t: any) => t.name))})`);
-  const farther = await c("get_upcoming_maintenance", { days_ahead: 10 * 365 });
-  assert(ok(farther) && farther.body?.count === 2 && farther.body?.tasks?.[1]?.name === "Roof inspection", "…a wider window takes in the roof, ordered by due date, and still not the undated task");
-
-  const hvacDone = isoDaysFromNow(-10);
-  const logged = await c("log_maintenance", { task_id: hvac.body?.task.id, completed_at: hvacDone, performed_by: "self", cost: 45.5, notes: "changed the filter", next_action: "check the coil" });
-  assert(ok(logged) && UUID.test(logged.body?.log?.id) && logged.body?.log?.cost === "45.50", `log_maintenance stores the log (${failure(logged) || JSON.stringify(logged.body?.log?.cost)})`);
-  // The trigger adds an interval, which is calendar arithmetic in the database's time zone (a DST edge inside the
-  // ninety days is an hour off the client's millisecond sum): the expectation is the database's own answer.
-  const [{ due }] = await sql`SELECT (${hvacDone}::timestamptz + interval '90 days') AS due`;
-  assert(logged.body?.updated_task?.last_completed === hvacDone && logged.body?.updated_task?.next_due === (due as Date).toISOString(),
-    `…and reads the task the trigger moved: last_completed is the log's time, next_due 90 days on (${logged.body?.updated_task?.next_due})`);
-  const gutterDone = isoDaysFromNow(-4);
-  const loggedOnce = await c("log_maintenance", { task_id: gutter.body?.task.id, completed_at: gutterDone, performed_by: "Ann the Plumber" });
-  assert(ok(loggedOnce) && loggedOnce.body?.updated_task?.next_due === null && loggedOnce.body?.updated_task?.last_completed === gutterDone, "a one-time task logged stays undated, last_completed set");
-  const orphan = await c("log_maintenance", { task_id: NO_ROW });
-  assert(!ok(orphan) && /Failed to log maintenance: .*foreign key/.test(failure(orphan)), `a log for no task is the tool's own error with the constraint's message (${failure(orphan).slice(0, 70)})`);
-
-  // The embedded select: `*, maintenance_tasks ( id, name, category )` — the task nested on every log.
-  const history = await c("search_maintenance_history", {});
-  assert(ok(history) && history.body?.count === 2, `search_maintenance_history lists both logs (${failure(history) || history.body?.count})`);
-  const hvacLog = history.body?.logs?.find((l: any) => l.task_id === hvac.body?.task.id);
-  assert(hvacLog?.maintenance_tasks?.name === "HVAC filter replacement" && hvacLog?.maintenance_tasks?.category === "hvac" && Object.keys(hvacLog?.maintenance_tasks ?? {}).sort().join() === "category,id,name",
-    `…each with its task embedded as an object of the three named columns (${JSON.stringify(hvacLog?.maintenance_tasks)})`);
-  assert(history.body?.logs?.[0]?.task_id === gutter.body?.task.id, "…newest completion first");
-  const byName = await c("search_maintenance_history", { task_name: "hvac" });
-  assert(ok(byName) && byName.body?.count === 1 && byName.body?.logs?.[0]?.notes === "changed the filter", "…filtered by task name (the id list through .in())");
-  const byCategory = await c("search_maintenance_history", { category: "exter" });
-  assert(ok(byCategory) && byCategory.body?.count === 1 && byCategory.body?.logs?.[0]?.performed_by === "Ann the Plumber", "…by category");
-  const noTask = await c("search_maintenance_history", { task_name: "zzz" });
-  assert(ok(noTask) && noTask.body?.count === 0 && eqJson(noTask.body?.logs, []), "…a name no task has answers an empty list");
-  const since = await c("search_maintenance_history", { date_from: isoDaysFromNow(-7) });
-  assert(ok(since) && since.body?.count === 1 && since.body?.logs?.[0]?.task_id === gutter.body?.task.id, "…date_from keeps the recent log");
-  const until = await c("search_maintenance_history", { date_to: isoDaysFromNow(-7) });
-  assert(ok(until) && until.body?.count === 1 && until.body?.logs?.[0]?.task_id === hvac.body?.task.id, "…date_to keeps the older one");
-}
 
 // ── extensions/meal-planning: index.ts, then the shared server on the same rows ──
 
@@ -557,7 +451,7 @@ console.log("\n[the servers' clients share one pool]");
 
 console.log("\n[every tool each server registers is driven here]");
 {
-  const files = ["extensions/household-knowledge/index.ts", "extensions/home-maintenance/index.ts", "extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
+  const files = ["extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
     "extensions/job-hunt/index.ts"];
   let total = 0;
   for (const file of files) {
@@ -567,7 +461,7 @@ console.log("\n[every tool each server registers is driven here]");
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 39, `thirty-nine tools on the six servers (${total})`);
+  assert(total === 30, `thirty tools on the four servers (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);

@@ -17,100 +17,68 @@ You're at the paint store and can't remember what shade of blue is in the living
 
 ## What It Does
 
-A database and MCP server for storing and retrieving household facts — paint colors, appliance details, vendor contacts, measurements, warranty info, and anything else about your home and family that you'd otherwise forget.
+A store of household facts — paint colors, appliance details, vendor contacts, measurements, warranty info, and anything else about your home and family that you'd otherwise forget.
+
+On this fork the knowledge base is a **plugin**: [`plugins/household-knowledge`](../../plugins/household-knowledge/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_household_knowledge`, which the brain's migrator makes when you turn the plugin on.
+
+**Tables:**
+- `household_items` — Facts about things in your home, with their particulars (brand, model, colour code) as a flexible JSON object
+- `household_vendors` — Service providers: plumbers, electricians, landscapers
+
+**Tools** (each also a REST route under `/v1/plugins/household-knowledge/`):
+- `household_knowledge_add_household_item` — Store a fact about something in your home
+- `household_knowledge_search_household_items` — Find items by name, category, location, notes or any detail
+- `household_knowledge_get_item_details` — One item in full
+- `household_knowledge_add_vendor` — Track a service provider
+- `household_knowledge_list_vendors` — List providers, by service type or a search
+
+The plugin's [README](../../plugins/household-knowledge/README.md) gives each one's input, output and refusals.
 
 ## What You'll Learn
 
 - Basic table design with PostgreSQL
-- User-scoped data isolation with environment variables
-- Simple MCP tool creation
 - JSONB patterns for flexible metadata storage
-- Text search with ILIKE patterns
-- Building a Postgres-backed MCP server
+- Text search with ILIKE patterns, across columns and inside JSON
+- How a brain's plugin serves tools behind the brain's own keys
 
 ## Prerequisites
 
-- Working Open Brain setup
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
-
-```text
-HOUSEHOLD KNOWLEDGE -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-GENERATED DURING SETUP
-  Default User ID:       ____________
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
-```
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 
 ## Steps
 
-### 1. Set Up the Database Schema
+### 1. Turn on the Plugin
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/household-knowledge/schema.sql`, or paste it into the SQL client you use. This creates two tables, `household_items` and `household_vendors`, each with a `user_id` column the server fills from `DEFAULT_USER_ID`.
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
-
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
-
-```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+```
+OB1_PLUGINS=household-knowledge
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
 ```
 
-Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
-
-### 3. Run the MCP Server
-
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/household-knowledge/index.ts
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+The migrator makes the plugin's tables, and the servers start with its five tools.
 
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all five against a real Postgres carrying this `schema.sql` in CI — `details` into `JSONB`, the four-column search, each filter on its own (FORK.md change 77, SMD-1588; change 74's review had found none of the five failing, and the suite holds it).
+### 2. Check Your AI Sees It
 
-### 4. Connect to Your AI
+Your MCP client lists the `household_knowledge_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the three that read. A write key sees all five.
 
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
+### 3. Test It
 
-| Setting | Value |
-|---------|-------|
-| Connector name | `Household Knowledge` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test the Extension
-
-Try these commands with Claude:
+Try these prompts:
 
 ```
 Add a household item: living room paint is Sherwin Williams Sea Salt SW 6204
 ```
 
 ```
-Search for paint colors in my household items
+What colour is the living room?
 ```
 
 ```
@@ -125,18 +93,16 @@ List all my plumbers
 
 This is the foundation. Future extensions build on the pattern you learn here:
 
-- **JSONB flexibility pattern**: The `details` field in `household_items` uses JSONB to store arbitrary key-value pairs. You'll see this same pattern in Extension 4 (Meal Planning) for recipe ingredients and in Extension 5 (Professional CRM) for contact metadata.
+- **JSONB flexibility pattern**: The `details` field in `household_items` holds arbitrary key-value pairs. You'll see this same pattern in Extension 4 (Meal Planning) for recipe ingredients and in Extension 5 (Professional CRM) for contact metadata.
 
 - **Vendor tracking pattern**: The `household_vendors` table introduces a contact management pattern that evolves into full contact tracking in Extension 5 (Professional CRM).
-
-- **User-scoped data**: Every query filters by `user_id`. This pattern is consistent across all extensions and ensures data isolation in multi-user environments.
 
 ## Expected Outcome
 
 After completing this extension, you should be able to:
 
 1. Store household facts with flexible metadata
-2. Search items by name, category, or location
+2. Search items by name, category, location, or any detail
 3. Track service providers with contact information
 4. Retrieve specific item details on demand
 
@@ -148,14 +114,16 @@ Your agent will be able to answer questions like:
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/household-knowledge/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-**"Permission denied" or foreign key errors on insert**
-- Verify `DEFAULT_USER_ID` is set in the server's environment (the `bun` command in Step 3)
-- The server connects as one role and scopes rows itself, so a permission error usually means a missing env var or a role without grants on the tables
-- If you ran an older version of `schema.sql` that had `REFERENCES auth.users(id)`, drop and recreate the tables with the updated schema
+**No `household_knowledge_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `household-knowledge`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
+
+**An item's details are refused**
+- `details` is a JSON object (`{"brand": "Bosch"}`), not a string holding JSON
 
 ## Next Steps
 
@@ -163,4 +131,4 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 [Continue to Extension 2 →](../home-maintenance/README.md)
 
-> **As you add extensions**, each one adds MCP tool definitions to your AI's context window. By Extension 3–4, it's worth thinking about which servers you keep connected. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies.
+> **As you add extensions**, each one adds tool definitions to your AI's context window. By Extension 3–4, it's worth thinking about which plugins you keep turned on. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies.
