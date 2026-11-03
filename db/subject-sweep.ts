@@ -109,24 +109,27 @@
  * on its own write, else costing the run its poll, as a claim pass's; its start's lines left out; its start reported
  * (onStart), each refusal by its kind, and its start check (check), the pool's name read and the judge model probed. As
  * a claim pass's follower does (PR 6b-1, the maintainer's choice), it waits out the provider's outage past its pauses,
- * or hung, a call timed out and a probe unanswered, the thought in hand back in the pool, a thought that errs so again
+ * or hung, a call timed out and a probe out too, the thought in hand back in the pool, a thought that errs so again
  * right after a probe answered failed as its own (ProviderOutage, in a window of 15 minutes past its next streak at the
- * run's limit: a suspect when its streak's first error could be its own, a 5xx but 503 or a lost connection, or when
- * its call hung, put back first; a 429 or 503 holds calls back and makes none, nor does a model being pulled, that
- * thought put back behind the rest), and its start, to its first claim, waits out the database, the worker key's lookup
- * but at too many connections, as a claim pass's does. Unlike a claim pass, the database lost past its start ends it
- * (1), for the scheduler to start it again; and the stop and the call's abort are its caller's from its first claim,
- * the gate before the pool hearing the caller's signal (review passes 1 and 2, cold read). No one is there to pass
- * --judge-checked, so a trip holds the pool's following runs of each judge model it names, beside an earlier trip's not
- * lifted: one does not start while a trip's hold on its model stands (judgeHeld), exit 3, until a run of that model
- * with --judge-checked --limit 1, once it is checked, lifts the hold it read as it began (heldSince, namedSince), or
- * with --limit the count of the last trip's hand-back still pending, which the held line offers the models that trip
- * named when its answers naming nothing tripped it alone; a trip naming the model since the run began refuses the lift,
- * exit 3, nothing claimed. A run of another judge model is not held, and lifts nothing; the pool's key changing starts
- * a window of the new pool's at its first answer judged with the alarm on, so a switch back finds no hold. Every answer
- * counts as in a hand run (the maintainer's choice, 2026-10-31): a pooling again — a rules version changed, the
- * reasoning turned off, a pooling broken off or its mark blanked by hand — asks again together each thought the judge
- * named nothing for, and ten of them trip a judge that is right, a trip whose hold waits for that hand run.
+ * run's limit: a suspect when its streak's first error could be its own, a 5xx but 503 or a lost connection, put back
+ * first, or when its call hung, put back behind the rest, its own outage kept for the run, so its next hang within the
+ * window is its own whatever outages came between; a 429 or 503 holds calls back and makes none, nor does a model being
+ * pulled, that thought put back behind the rest; behind the rest is past what is pooled within the window, so a
+ * scheduler's next period asks its new thoughts first), and its start, to its first claim, waits out the database, the
+ * worker key's lookup but at too many connections, as a claim pass's does. Unlike a claim pass, the database lost past
+ * its start ends it (1), for the scheduler to start it again; and the stop and the call's abort are its caller's from
+ * its first claim, the gate before the pool hearing the caller's signal (review passes 1 and 2, cold read). No one is
+ * there to pass --judge-checked, so a trip holds the pool's following runs of each judge model it names, beside an
+ * earlier trip's not lifted: one does not start while a trip's hold on its model stands (judgeHeld), exit 3, until a
+ * run of that model with --judge-checked --limit 1, once it is checked, lifts the hold it read as it began (heldSince,
+ * namedSince), or with --limit the count of the last trip's hand-back still pending, which the held line offers the
+ * models that trip named when its answers naming nothing tripped it alone; a trip naming the model since the run began
+ * refuses the lift, exit 3, nothing claimed. A run of another judge model is not held, and lifts nothing; the pool's
+ * key changing starts a window of the new pool's at its first answer judged with the alarm on, so a switch back finds
+ * no hold. Every answer counts as in a hand run (the maintainer's choice, 2026-10-31): a pooling again — a rules
+ * version changed, the reasoning turned off, a pooling broken off or its mark blanked by hand — asks again together
+ * each thought the judge named nothing for, and ten of them trip a judge that is right, a trip whose hold waits for
+ * that hand run.
  *
  * The question is asked with the judge model's reasoning on unless OB1_SUBJECT_REASONING says off (PR 4: Verify item 1
  * was met that way and missed without, though the difference alone was not significant), at about 8x the time a call,
@@ -325,7 +328,8 @@ export const PROBE_CAP = { ms: 60_000 };
 
 /**
  * A following run's call timed out and a one-token call, given the call's own limit, found the provider out — hung, the
- * thought its suspect — or its judge model missing, pulled again, which makes none (ask; one() waits it out).
+ * thought its suspect — or holding calls back, a 429 or 503, or its judge model missing, pulled again, neither making
+ * one (ask; one() waits it out).
  */
 class TimedOutDown extends ProviderDown {
   constructor(message: string, readonly hung: boolean) {
@@ -374,8 +378,8 @@ const sqlState = (e: unknown): string | undefined => {
   return typeof errno === "string" ? errno : typeof code === "string" ? code : undefined;
 };
 
-/** The line a database that stopped answering ends the sweep with. */
-const databaseDown = (e: unknown) => `\n  The database stopped answering (${String((e as Error)?.message ?? e).slice(0, 300)}): the sweep stops here; run it again.`;
+/** The line a database that stopped answering ends the sweep with, `left` what a --judge-checked run left of its limit (leftOfLimit). */
+const databaseDown = (e: unknown, left = "") => `\n  The database stopped answering (${String((e as Error)?.message ?? e).slice(0, 300)}): the sweep stops here; run it again${left}.`;
 
 /**
  * What one sweep is asked: `model` false for the rules alone; `limit` left out for no limit; `timeout` in seconds, per
@@ -423,9 +427,10 @@ export interface SubjectSweepOptions {
    * as a follower is, exit 0 (130 at once on the second stop; the thought in hand a first stop lets finish can end it
    * as 1, 2 or 3 do), and it does not start while a trip's hold on its judge model stands (judgeHeld): exit 3. Neither
    * a dry run's nor beside --judge-checked or --retry-failed, which no scheduler passes. It waits out the provider's
-   * outage past its pauses, or hung, as a claim pass's follower does, a thought that errs so again right after a probe
-   * answered failed as its own (PR 6b-1), and its start, to its first claim, waits out the database; the database lost
-   * past its start ends it, exit 1, for its caller to start it again.
+   * outage past its pauses, or hung, as a claim pass's follower does, a suspect that errs so again right after a probe
+   * answered failed as its own, a hung one at its next hang within the window of its own outage (PR 6b-1), and its
+   * start, to its first claim, waits out the database; the database lost past its start ends it, exit 1, for its caller
+   * to start it again.
    */
   follow?: number;
   /**
@@ -441,13 +446,13 @@ export interface SubjectSweepOptions {
   /**
    * A following run's word through its caller's row (db/pass-stamp.ts; sleep.ts's `through`): `ok` at each poll that
    * finds the pool empty, and as the run ends, `failed` for an end of its own — a refusal, its own options' among them,
-   * its naming or pooling broken off, the provider's refusal, the database lost past its start, the judge's alarm, a
-   * throw — else `stopped`. It beats no row while it works through a pool: a scheduler's row is the scheduler's to keep
-   * stamped. It hears the run's waits for the provider too, as a claim pass's caller does (PR 6b-1): `startWait` while
-   * the run waits at its start for a judge model its probe found not answering, `providerWait` while it waits out the
-   * provider's outage past its pauses, or hung, not through the pauses themselves (review pass 1, the consumer's
-   * prototype). Its outage stamps no `failed` as it begins, where extraction's follower does: how a scheduler reads
-   * that wait is the scheduler's (PR 6b-2). Unused without `follow`.
+   * its naming or pooling broken off, the pool named away, the provider's refusal, the database lost past its start,
+   * the judge's alarm, a throw — else `stopped`. It beats no row while it works through a pool: a scheduler's row is
+   * the scheduler's to keep stamped. It hears the run's waits for the provider too, as a claim pass's caller does
+   * (PR 6b-1): `startWait` while the run waits at its start for a judge model its probe found not answering,
+   * `providerWait` while it waits out the provider's outage past its pauses, or hung, not through the pauses themselves
+   * (review pass 1, the consumer's prototype). Its outage stamps no `failed` as it begins, where extraction's follower
+   * does: how a scheduler reads that wait is the scheduler's (PR 6b-2). Unused without `follow`.
    */
   stamper?: PassStamper | null;
   /**
@@ -537,9 +542,9 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
     return code;
   } finally {
     if (waits.provider) await stamper?.providerWait?.(false).catch(() => {});
-    // As it ends: failed for an end of its own — a refusal, its naming or pooling broken off, the provider's refusal,
-    // the database lost, the judge's alarm, a throw — and stopped otherwise, claims it failed among them, its last poll
-    // having said ok: a pass fails on its provider, not on a thought (extract-entities.ts's word).
+    // As it ends: failed for an end of its own — a refusal, its naming or pooling broken off, the pool named away, the
+    // provider's refusal, the database lost, the judge's alarm, a throw — and stopped otherwise, claims it failed among
+    // them, its last poll having said ok: a pass fails on its provider, not on a thought (extract-entities.ts's word).
     await stamper?.end(code === 2 || code === 3 || (code === 1 && !claimsEnd.v) ? "failed" : "stopped").catch(() => {});
   }
 }
@@ -611,8 +616,12 @@ async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null,
   const through = { v: false, pinned: false };
   /** Whether the start's wait for the database has said it is not answering, across the start's beginnings. */
   const startSaid = { down: false };
-  /** The worker key as the start's first beginning resolved it, kept by each beginning after it (sweep). */
-  const keyFound = { v: null as { agentId: string | null; actor: string | undefined } | null };
+  /**
+   * The worker key as the start's first beginning resolved it, kept by each beginning after it (sweep); `unresolved` once
+   * a beginning's lookup could not, so the one that does says its agent line whatever the banner (PR 6b-1's review pass
+   * 5, cold read: resolved unsaid, under the first beginning's warning that rows would carry no agent id).
+   */
+  const keyFound = { v: null as { agentId: string | null; actor: string | undefined } | null, unresolved: false };
   try {
     for (let step = 0, first = true; ; first = false) {
       try {
@@ -664,7 +673,7 @@ async function sweep(
     MODEL: boolean; DRY_RUN: boolean; LIMIT: number; RETRY_FAILED: boolean; SWITCH_KEY: boolean; JUDGE_CHECKED: boolean; FOLLOW_S: number;
     env: Record<string, string | undefined>; url: string; session?: SessionSettings; signal?: AbortSignal; onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
     admit?: Admit; stamper: PassStamper | null; banner: boolean; claimsEnd: { v: boolean }; waits: { provider: boolean }; onStart?: (r: StartResult) => void; check: boolean;
-    through: { v: boolean; pinned: boolean }; startSaid: { down: boolean }; keyFound: { v: { agentId: string | null; actor: string | undefined } | null };
+    through: { v: boolean; pinned: boolean }; startSaid: { down: boolean }; keyFound: { v: { agentId: string | null; actor: string | undefined } | null; unresolved: boolean };
     refused: (kind: StartRefusal, line: string) => number; out: Writer["out"]; err: Writer["err"];
   },
 ): Promise<number> {
@@ -748,11 +757,11 @@ async function sweep(
     ({ agentId, actor } = o.keyFound.v);
   } else if (!DRY_RUN) {
     // The agent line and the no-key warning are the start's, left out with it; a key that could not resolve is warned
-    // of whatever the banner (extract-entities.ts's rule).
+    // of whatever the banner (extract-entities.ts's rule), and so is its agent line once a later beginning resolves it.
     // The lookup's own outage thrown for a following run to wait out, as a claim pass's start does (lookupOutage).
     const id = await atStart(() => workerIdentity(o.url, env, {
       noKeyWarning: o.banner ? "  ⚠  OB1_WORKER_KEY is not set: the subjects' lineage rows will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS." : "",
-      write: say,
+      write: o.keyFound.unresolved ? out : say,
       warn: (l) => { if (l) err(l); },
       outage: FOLLOW_S > 0 ? lookupOutage : undefined,
     }));
@@ -767,6 +776,7 @@ async function sweep(
     // Kept once resolved, or with no key to resolve: a lookup the database refused, at too many connections, is tried
     // again at the next beginning (review pass 4, cold read: kept unresolved, the whole run went unattributed).
     if (!env.OB1_WORKER_KEY || actor !== undefined) o.keyFound.v = { agentId, actor };
+    else o.keyFound.unresolved = true;
   }
 
   /**
@@ -1424,7 +1434,7 @@ async function sweep(
    * the provider, which answers 503 as it comes back, is one (PR 6b-1's review pass 2, cold read: its last error a 503,
    * it made no suspect, and crashed the provider again at each outage's end, failed never), and a 500 among a storm's
    * 429s and 503s is not (review pass 3, run-it: read anywhere in the streak, it failed 21 good thoughts in 20 of 72
-   * storm runs, a 429 their recorded words).
+   * storm runs, 12 of them in a 429's or 503's words).
    */
   let streakPoison: string | null = null, streakPoisonWhy = "";
   /**
@@ -1436,20 +1446,38 @@ async function sweep(
   let suspectFirst: string | null = null;
   /**
    * A following run's outage of the provider (worker-bootstrap.ts's ProviderOutage, PR 6b-1, the maintainer's choice:
-   * the claim passes' rule): past the pauses, or its model gone missing as it is pulled again, or a call timed out and a
-   * probe unanswered too, the thought goes back to the pool and the run waits for the provider (waitForProvider); the
+   * the claim passes' rule): past the pauses, or its model gone missing as it is pulled again, or a call timed out and
+   * a probe out too, the thought goes back to the pool and the run waits for the provider (waitForProvider); the
    * thought in hand at the outage, a suspect when its streak's first error could be its own — a 5xx but 503, a lost
    * connection, not a 429 or 503, the provider holding calls back, nor a model being pulled (followClassify) — or when
-   * its call hung, that errs so again right after a probe answered, within suspectWindowMs, is its own. A suspect goes
-   * back first, so, while the run is alone on its pool, it is the thought claimed after each pause and after the wait,
-   * a streak one thought's, as a claim pass's retries in place are (review pass 2, cold read and run-it: put back where
-   * it stood, after a pooling it went behind its ties, and the suspect was whichever thought took the streak's last
-   * error, a good one failed, poisoned ones never); one that made none goes behind the rest, its next errors no
-   * verdict's (review pass 3, cold read).
+   * its call hung, the probe after it out, not holding calls back, that errs so again right after a probe answered,
+   * within suspectWindowMs, is its own. A streak's suspect goes back first, so, while the run is alone on its pool, it
+   * is the thought claimed after each pause and after the wait, a streak one thought's, as a claim pass's retries in
+   * place are (review pass 2, cold read and run-it: put back where it stood, after a pooling it went behind its ties,
+   * and the suspect was whichever thought took the streak's last error, a good one failed, poisoned ones never); one
+   * that made none goes behind the rest, its next errors no verdict's (review pass 3, cold read), and so does a hung
+   * one, its own outage kept for the run (hungEnded); behind the rest is past what is pooled within the window
+   * (backTo).
    */
-  const outage = new ProviderOutage(Date.now, suspectWindowMs(cfg.timeoutMs));
+  const suspectWindow = suspectWindowMs(cfg.timeoutMs);
+  const outage = new ProviderOutage(Date.now, suspectWindow);
   /** Why the provider is down, when a following run is to wait for it before its next claim; null else. */
   let outageWhy: string | null = null;
+  /**
+   * Each hung thought's own outage, for the run: when the probe that ended it answered (PR 6b-1's review pass 5, the
+   * maintainer's choice). One that hangs again within the window of it is its own, whatever outages came between, which
+   * ProviderOutage's suspects do not outlast: behind the rest, a hung thought met another thought's outage before it was
+   * asked again (review pass 5, cold read and run-it: two thoughts that hang the provider, or one beside a thought whose
+   * own error makes no suspect, were failed never). Forgotten once the thought is answered or finished (settle);
+   * hungInWait is the hung thought whose outage the run waits out, for that wait's end to stamp.
+   */
+  const hungEnded = new Map<string, number>();
+  let hungInWait: string | null = null;
+  /** A thought answered or finished: a suspect no longer, its hang forgotten (ProviderOutage's settled). */
+  const settle = (id: string) => {
+    outage.settled(id);
+    hungEnded.delete(id);
+  };
   /**
    * The run's wait for the provider, said through the caller's row as a claim pass's is (providerWait, PR 6b-1): while a
    * following run waits out an outage, not through the pauses before one (review pass 1, the consumer's prototype: said
@@ -1510,6 +1538,14 @@ async function sweep(
     const failed = failedHere();
     return failed > 0 ? `${lead} run again with --retry-failed, which puts back the pool's failed claims, the ${failed} this run failed among them.` : `${lead} run it again.`;
   };
+  /**
+   * What a --judge-checked run ending before its limit left of it, for the run again, so the backlog is not asked with
+   * the alarm off (PR 6b-1's review pass 4, cold read: its --limit stale once part was done): named on each end that
+   * says to run it again, the database's and a hand run's lost poll's beside the provider's, unless a scheduler's run,
+   * which the lift lets run, has asked those thoughts since (review pass 5, cold read: those two ends said "run it
+   * again", and a scheduler's run since took the hand-back, the line offering the backlog with the alarm off).
+   */
+  const leftOfLimit = () => JUDGE_CHECKED && LIMIT ? `, with --judge-checked --limit ${LIMIT - n.seen}, what it left of its limit, unless a scheduler's run has asked those thoughts since, so the backlog is not asked with the alarm off` : "";
 
   /**
    * The claims of `ids` a trip hands back: each still finished with no subject standing — one asked again since and
@@ -1645,7 +1681,7 @@ async function sweep(
       });
     } catch (e) {
       if (!databaseUnavailable(e)) throw e;
-      return tripping === null ? { code: 1, line: databaseDown(e) } : { code: 3, line: lostTrip(e, false) };
+      return tripping === null ? { code: 1, line: databaseDown(e, leftOfLimit()) } : { code: 3, line: lostTrip(e, false) };
     }
   };
 
@@ -1662,12 +1698,15 @@ async function sweep(
   /**
    * The thought in hand back in the pool, its attempt and its place under --limit given back: first (putBack) for a
    * pause or a following run's outage whose streak made it the suspect, last (lease.ts's setBack) for an outage it made
-   * no suspect of, or hung; counted by its claim when it is no longer this worker's (the one transient path's, review
-   * passes 3 and 4).
+   * no suspect of, or hung, `aheadMs` past now, behind what is pooled within the window too, so a scheduler's next
+   * period asks the thoughts pooled since before it (review pass 5, the consumer's prototype and the maintainer's
+   * choice: placed at its set-back, which a budget's stop keeps, a thought that hangs the provider led each later
+   * period, ahead of its live captures); counted by its claim when it is no longer this worker's (the one transient
+   * path's, review passes 3 and 4).
    */
-  const backTo = async (row: Candidate, first: boolean): Promise<Done | false> => {
+  const backTo = async (row: Candidate, first: boolean, aheadMs = 0): Promise<Done | false> => {
     try {
-      if (first ? await putBack(row.id) : await setBack(sql, POOL, workerId, row.id)) {
+      if (first ? await putBack(row.id) : await setBack(sql, POOL, workerId, row.id, aheadMs)) {
         taken--;
         return { release: "none", again: true };
       }
@@ -1684,7 +1723,7 @@ async function sweep(
       }
     } catch (x) {
       if (!databaseUnavailable(x)) throw x;
-      endedBy = { code: 1, line: databaseDown(x) };
+      endedBy = { code: 1, line: databaseDown(x, leftOfLimit()) };
       return false;
     }
     return { release: "none" };
@@ -1701,6 +1740,8 @@ async function sweep(
     try {
       if ((await probeUntil(() => probe(stop.signal), stop.signal, (p) => !isOut(p))) === null) return false;
       outage.end();
+      if (hungInWait !== null) hungEnded.set(hungInWait, Date.now());
+      hungInWait = null;
       transients = 0;
       streakPoison = null;
       streakPoisonWhy = "";
@@ -1756,8 +1797,8 @@ async function sweep(
   /**
    * The judge model's subject for a row, one call: the answer, an egress refusal, the thought left unanswered, or the
    * provider's transient error with a pause left, for one() to put the thought back; throws to end the sweep, or past
-   * the pauses, or a call timed out with the probe after it out, the provider hung or its model being pulled
-   * (TimedOutDown), for a following run to wait the provider out.
+   * the pauses, or a call timed out with the probe after it out, the provider hung, holding calls back or its model
+   * being pulled (TimedOutDown), for a following run to wait the provider out.
    */
   async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string } | { transient: true }> {
     const side = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? {}, writer: actorKindOf(row.metadata) };
@@ -1777,9 +1818,9 @@ async function sweep(
       transients = 0;
       streakPoison = null;
       streakPoisonWhy = "";
-      // Answered, a suspect no longer, whatever becomes of its write (PR 6b-1's review pass 3, cold read: one whose write
-      // found its text moved stayed a suspect, and was failed as its own at an outage it began).
-      outage.settled(row.id);
+      // Answered, a suspect no longer and its hang forgotten, whatever becomes of its write (PR 6b-1's review pass 3, cold
+      // read: one whose write found its text moved stayed a suspect, and was failed as its own at an outage it began).
+      settle(row.id);
       return { key: a.key, answer: a.answer };
     } catch (e) {
       came = Date.now();
@@ -1891,14 +1932,14 @@ async function sweep(
       back = await releaseHeld();
     } catch (x) {
       if (databaseUnavailable(x)) {
-        endedBy = { code: 1, line: databaseDown(x) };
+        endedBy = { code: 1, line: databaseDown(x, leftOfLimit()) };
         return false;
       }
     }
     if (inHand && back) taken--;
     if (stop.signal.aborted) return endAtStop();
     if (!FOLLOW_S) {
-      endedBy = { code: 1, line: `\n  The sweep stops here: ${why}. Run it again.` };
+      endedBy = { code: 1, line: `\n  The sweep stops here: ${why}. Run it again${leftOfLimit()}.` };
       return false;
     }
     pauseMs = Math.max(pauseMs, FOLLOW_S * 1000);
@@ -1969,7 +2010,7 @@ async function sweep(
             } else n.gone++;
           } catch (x) {
             if (!databaseUnavailable(x)) throw x;
-            endedBy = { code: 1, line: databaseDown(x) };
+            endedBy = { code: 1, line: databaseDown(x, leftOfLimit()) };
             return false;
           }
           return { release: "none" };
@@ -1984,19 +2025,28 @@ async function sweep(
         // its streak's first error could be its own — a 5xx but 503, a lost connection — or its call hung; a 429 or 503
         // holds calls back, and a model being pulled, neither making one — and its claim fails, seen, where each run
         // had asked the rest and ended on it, every period an outage to a scheduler; the words recorded are the error
-        // that made it the suspect. A suspect goes back first, its next streak its own, for the verdict; one that made
-        // none goes behind the rest, so a thought whose own error makes no suspect — a 429 for a request too large for
-        // the account's limit — holds no wait's head (review pass 3, cold read: put back first, it was claimed after
-        // every wait, 89 times in 3 s, the rest of the pool never asked). A hung suspect goes behind the rest too, so a
-        // thought that keeps the provider hung holds up no other: its second hang, a call and a probe each at the run's
-        // limit, may land past the window, and under a scheduler's periods past its run, never failed there (review
-        // pass 4, the consumer's prototype and the maintainer's choice: put back first, it led every period, the rest
-        // of the pool never asked).
+        // that made it the suspect. A streak's suspect goes back first, its next streak its own, for the verdict; one
+        // that made none goes behind the rest, so a thought whose own error makes no suspect — a 429 for a request too
+        // large for the account's limit — holds no wait's head (review pass 3, cold read: put back first, it was
+        // claimed after every wait, 89 times in 3 s, the rest of the pool never asked). Behind the rest is past what is
+        // pooled within the window, each thought set back so ordered among them as it went back, so a scheduler's next
+        // period asks the thoughts pooled since first (review pass 5, the consumer's prototype and the maintainer's
+        // choice: placed at its set-back, which a budget's stop keeps, a hung thought led each later period; and one
+        // whose own error makes no suspect is placed so too, or it came before a hung one again and again, whose next
+        // hang then landed past its window). A hung suspect goes behind the rest too, so a thought that keeps the
+        // provider hung holds up no other, its own outage kept for the run (hungEnded), so its next hang within the
+        // window is its own, whatever outages came between (review pass 5, the maintainer's choice: another's outage
+        // first, ProviderOutage's suspects cleared, two hung thoughts were failed never); its second hang, a call and a
+        // probe each at the run's limit, may land past the window, and at the stack's defaults, a 900 s limit and a
+        // 60-minute budget, past a scheduler's run, never failed as its own there (review pass 4, the consumer's
+        // prototype and the maintainer's choice: put back first, it led every period, the rest of the pool never
+        // asked).
         if (FOLLOW_S > 0 && (e instanceof ProviderDown || kind === "transient" || (kind === "fatal" && modelMissing(e)))) {
           const msg = String((e as Error)?.message ?? e).slice(0, 300);
           const hung = e instanceof TimedOutDown && e.hung;
           const suspect = hung || streakPoison === row.id;
-          if (outage.begin(msg, suspect ? row.id : undefined) === "thought") {
+          const hungAt = hung ? hungEnded.get(row.id) : undefined;
+          if ((hungAt !== undefined && Date.now() - hungAt <= suspectWindow) || outage.begin(msg, suspect ? row.id : undefined) === "thought") {
             const why = hung || streakPoison !== row.id ? msg : streakPoisonWhy;
             transients = 0;
             streakPoison = null;
@@ -2007,8 +2057,9 @@ async function sweep(
             return { release: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${why}` };
           }
           outageWhy = msg;
+          if (hung) hungInWait = row.id;
           if (suspect && !hung) suspectFirst = row.id;
-          return backTo(row, suspect && !hung);
+          return backTo(row, suspect && !hung, suspectWindow);
         }
         // Not answering: the thought goes back to the end of the pool, so a thought the provider fails on whenever it
         // is asked does not come first again and end every run (review pass 1). Its claim is handed back as the run ends.
@@ -2019,7 +2070,7 @@ async function sweep(
         if (kind !== "fatal" && !JUDGE_CHECKED) await sql`UPDATE thought_work_claims SET enqueued_at = now() WHERE thought_id = ${row.id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed'`.catch(() => {});
         endedBy = kind === "fatal"
           ? { code: 2, line: `\n  The provider refused the request itself: ${(e as Error).message.slice(0, 300)}\n  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_JUDGE_MODEL against the provider${sentEffort === undefined ? "" : `, and OB1_SUBJECT_REASONING, which sent reasoning_effort ${JSON.stringify(sentEffort)}`}. Nothing was recorded for this thought.` }
-          : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again${JUDGE_CHECKED && LIMIT ? `, with --judge-checked --limit ${LIMIT - n.seen}, what it left of its limit, so the backlog is not asked with the alarm off` : ""}.` };
+          : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again${leftOfLimit()}.` };
         return false;
       }
       // The provider's transient error (ask): the thought goes back to the pool, first, its attempt not counted
@@ -2128,7 +2179,7 @@ async function sweep(
             return false;
           }
           if (databaseUnavailable(e)) {
-            endedBy = tripping === null ? { code: 1, line: databaseDown(e) } : { code: 3, line: lostTrip(e, true) };
+            endedBy = tripping === null ? { code: 1, line: databaseDown(e, leftOfLimit()) } : { code: 3, line: lostTrip(e, true) };
             return false;
           }
           // Rolled back, the claim neither finished nor its subject closed, as the window is told (overBudget).
@@ -2182,7 +2233,7 @@ async function sweep(
         return false;
       }
       if (databaseUnavailable(e)) {
-        endedBy = { code: 1, line: databaseDown(e) };
+        endedBy = { code: 1, line: databaseDown(e, leftOfLimit()) };
         return false;
       }
       if (budgetTimedOut(e)) return overBudget(row, e);
@@ -2266,7 +2317,7 @@ async function sweep(
                  ORDER BY c.thought_id LIMIT ${PAGE}`) as Candidate[];
         } catch (e) {
           if (!databaseUnavailable(e)) throw e;
-          endedBy = { code: 1, line: databaseDown(e) };
+          endedBy = { code: 1, line: databaseDown(e, leftOfLimit()) };
           break;
         }
         if (rows.length === 0) break;
@@ -2320,7 +2371,7 @@ async function sweep(
             break;
           }
           if (!databaseUnavailable(e)) throw e;
-          endedBy = { code: 1, line: databaseDown(e) };
+          endedBy = { code: 1, line: databaseDown(e, leftOfLimit()) };
           break;
         }
         if (moved !== null) {
@@ -2353,7 +2404,7 @@ async function sweep(
             break;
           }
           if (!databaseUnavailable(e)) throw e;
-          endedBy = { code: 1, line: databaseDown(e) };
+          endedBy = { code: 1, line: databaseDown(e, leftOfLimit()) };
           break;
         }
         if (row === undefined) {
@@ -2397,9 +2448,10 @@ async function sweep(
             // False: no longer this worker's — an edit put it back in the pool (the trigger), at its new text, or its
             // lease ran out and another run took it — counted and said (review pass 1: nothing said so).
             const [{ ok }] = (await sql`SELECT release_thought(${id}::uuid, ${POOL}, ${workerId}, ${done.release}, ${done.release === "failed" ? done.error : null}) AS ok`) as { ok: boolean }[];
-            // Finished, a suspect no longer, as the claim passes say it (ProviderOutage's settled; PR 6b-1's review pass 2,
-            // cold read, run-it and mutant): a failure the provider never answered too, its answer's settling aside.
-            outage.settled(id);
+            // Finished, a suspect no longer and its hang forgotten (settle), as the claim passes say it (ProviderOutage's
+            // settled; PR 6b-1's review pass 2, cold read, run-it and mutant): a failure the provider never answered too,
+            // its answer's settling aside.
+            settle(id);
             if (!ok) {
               n.lost++;
               if (done.release === "failed") n.lostFailed++;
@@ -2413,7 +2465,7 @@ async function sweep(
               break;
             }
             if (!databaseUnavailable(e)) throw e;
-            endedBy = { code: 1, line: databaseDown(e) };
+            endedBy = { code: 1, line: databaseDown(e, leftOfLimit()) };
             break;
           }
         }
@@ -2508,7 +2560,7 @@ async function sweep(
     } catch (e) {
       // The database lost here leaves the count unknown: said as the run's end, not read as none (review pass 5: exit 0).
       if (!databaseUnavailable(e)) throw e;
-      err(databaseDown(e));
+      err(databaseDown(e, leftOfLimit()));
       return 1;
     }
   }
