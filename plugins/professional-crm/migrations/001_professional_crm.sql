@@ -68,11 +68,13 @@ CREATE TABLE IF NOT EXISTS opportunities (
 );
 
 -- A thought of the brain's linked to a contact: once each, its text appended
--- to the contact's notes when it was linked.
+-- to the contact's notes when it was linked. ingested: it was captured from
+-- an outside source (the core's trust `ingested`), and its line says so.
 CREATE TABLE IF NOT EXISTS contact_thoughts (
   contact_id  uuid NOT NULL REFERENCES professional_contacts (id),
   thought_id  uuid NOT NULL,
   linked_at   timestamptz NOT NULL DEFAULT now(),
+  ingested    boolean NOT NULL DEFAULT false,
   PRIMARY KEY (contact_id, thought_id)
 );
 
@@ -128,5 +130,5 @@ CREATE OR REPLACE VIEW opportunity_rows AS
 
 CREATE OR REPLACE VIEW linked_thought_rows AS
   SELECT t.contact_id, t.thought_id, t.linked_at,
-         jsonb_build_object('thought_id', t.thought_id, 'linked_at', to_char(t.linked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) AS answer
+         jsonb_build_object('thought_id', t.thought_id, 'linked_at', to_char(t.linked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'ingested', t.ingested) AS answer
     FROM contact_thoughts t;
