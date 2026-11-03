@@ -4432,7 +4432,7 @@ if (configFailed) {
                 continue;
               }
               // The sleep scheduler, fresh, on its row's own key: it runs
-              // re-embed first in each sleep with work, and between its
+              // re-embed first in each period with work, and between its
               // sleeps holds no lease (SMD-2679 PR 4b). Set aside, the key falls
               // to the record's own words below, as its sleep row says. A dead
               // worker's expired leases are its work too — it reclaims them when
@@ -4443,8 +4443,8 @@ if (configFailed) {
               if (runner.by === "scheduler") {
                 const sleeping = runner.beat;
                 // Resting after a sleep its budget stopped, quiet alone wakes nothing: the next begins after a live call, as the sleep row says (review pass 2).
-                const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "idle, no work";
-                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each sleep with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake, runner.down !== null || runner.clears !== null)})`;
+                const awake = sleeping.resting ? "awake, resting — the next sleep begins after a live call and the quiet" : "idle, no period running";
+                const words = `${key}: ${formatPassCounts(c)} — the sleep scheduler runs this key, re-embed first in each period with work (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "reembed", awake, runner.down !== null || runner.clears !== null)})`;
                 // Its failed rows: retried once their cause is fixed, or one the
                 // provider refuses permanently accepted — a retry of that fails
                 // again, every sleep (review pass 1: main's way out was lost).
@@ -4462,10 +4462,10 @@ if (configFailed) {
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${until}` : "";
                 const diedFix = l.expired ? reclaim(key).trim() : "";
                 if (runner.down) {
-                  add("re-embed pass", "warn", `${words}; re-embed set down for ${sleeping.running ? "this" : "its last"} sleep (${runner.down})${failedWords}${conflict}${died}`,
-                      fixOf(`${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. The next sleep with work tries it again, with no second worker.`, c.failed ? failedFix("its next sleep") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
+                  add("re-embed pass", "warn", `${words}; re-embed set down for ${sleeping.running ? "this" : "its last"} period (${runner.down})${failedWords}${conflict}${died}`,
+                      fixOf(`${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. ${runner.down === "statement" ? "It is held until the scheduler restarts" : "The next period with work tries it again"}, with no second worker.`, c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
                 } else if (c.failed || conflict || died) {
-                  add("re-embed pass", "warn", `${words}${made}${failedWords}${conflict}${died}`, fixOf(c.failed ? failedFix("its next sleep") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
+                  add("re-embed pass", "warn", `${words}${made}${failedWords}${conflict}${died}`, fixOf(c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
                 } else {
                   add("re-embed pass", "ok", `${words}${made}`);
                 }
@@ -4661,7 +4661,7 @@ if (configFailed) {
                 const beside = followersBeside(facts.workers?.heartbeats ?? [], sleeping);
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${besideWords(beside)}` : "";
                 const diedFix = l.expired ? fixOf(besideFix(beside), reclaim(key)) : "";
-                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "idle, no work")})`;
+                const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeping.ageS)} ago; ${passWords(sleeping, "consolidate", "idle, no period running")})`;
                 if (sleeping.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
                   // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
@@ -5074,6 +5074,11 @@ if (configFailed) {
             const stmt = s?.to && s.budget === "statement" ? s : null;
             const stmtFixed = !!(stmt && b && stmt.limit !== undefined && (stmt.limit > 0 ? b.statementTimeoutS > stmt.limit : b.statementTimeoutS > 0));
             const stmtWhat = stmt?.limit ? `its statement_timeout (${stmt.limit} s)` : stmt?.limit === 0 ? "the role's or the database's own statement_timeout" : "its statement_timeout";
+            // A scheduler from 2.0.0 holds a claim pass a statement passed its timeout until a restart, on its `holds`
+            // (N9, SMD-3379 PR 1c-4b; re-embed's is its set-down, below): the setting to raise, then the restart.
+            const stmtHeld = (h.holds ?? []).filter((x) => x.why === "statement" && x.pass !== "reembed").map((x) => x.pass);
+            const heldTimeout = b ? (b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own") : null;
+            const heldHow = b?.statementTimeoutS === 0 ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs" : "raise OB1_SLEEP_STATEMENT_TIMEOUT";
             const stmtHow = stmt?.limit === 0 ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs" : "raise OB1_SLEEP_STATEMENT_TIMEOUT";
             const onBudget = s?.to && s.budget
               ? `, stopped on its budget — ${s.budget === "clock" ? `its clock spent${s.limit ? ` (${s.limit} min)` : ""}` : `a pass's statement past statement_timeout${s.limit ? ` (${s.limit} s)` : s.limit === 0 ? " (the role's or the database's own)" : ""}`}`
@@ -5097,8 +5102,8 @@ if (configFailed) {
                 : s && s.to
                   ? h.resting
                     ? `awake — the last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget || ", at its clock with nothing left to do"}; the next begins after a live call and the quiet`
-                    : `idle, no work — the last period ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}`
-                  : "idle, no work — no period yet";
+                    : `idle, no period running — the last ended ${since(s.to)} ago, after ${span(s.from, s.to)}${onBudget}`
+                  : "idle, no period running — none yet";
             const down = h.stale || h.ended;
             // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
             // A held row's own words say it, the supervisor's (SMD-3214).
@@ -5139,7 +5144,7 @@ if (configFailed) {
             const holds = sw?.holds ?? "";
             const madeWords = set?.kind === "model-switch" ? (!recorded.embedding_model ? "the record removed since" : `the switch to ${set.unprintable ? "this stack's model" : cfgModel} made since`) : "";
             const setDetail = !set ? ""
-              : `; ${down ? "at its last word, " : ""}re-embed ${set.kind === "model-switch" && sw?.made ? `set aside${down ? "" : " at its word"}, ${madeWords}` : set.kind === "model-switch" && set.unprintable ? "set aside for a model switch — its model names hold characters preflight does not print; its log names them" : set.kind === "model-switch" ? `set aside — the brain records ${holds}, this stack is configured for ${cfgModel}` : `set down for ${h.running && !down ? "this" : "its last"} sleep (${set.kind})`}`;
+              : `; ${down ? "at its last word, " : ""}re-embed ${set.kind === "model-switch" && sw?.made ? `set aside${down ? "" : " at its word"}, ${madeWords}` : set.kind === "model-switch" && set.unprintable ? "set aside for a model switch — its model names hold characters preflight does not print; its log names them" : set.kind === "model-switch" ? `set aside — the brain records ${holds}, this stack is configured for ${cfgModel}` : `set down for ${h.running && !down ? "this" : "its last"} period (${set.kind})`}`;
             const otherPass = h.outcome === "failed" ? " Another pass's failure, if any, its log says." : "";
             const setFix = !set ? null
               : set.kind === "model-switch" && set.unprintable && !sw?.made
@@ -5149,7 +5154,7 @@ if (configFailed) {
               : set.kind === "model-switch"
                 ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
                 : down ? (set.kind === "outage" ? null : `Its last sleep set re-embed down (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first sleep sets re-embed down again.`)
-                : `Re-embed was set down for ${h.running ? "this" : "its last"} sleep — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next sleep with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
+                : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and ${set.kind === "statement" ? "it is held until that restart" : "the next period with work tries it again"}.${set.kind === "outage" ? "" : otherPass}`;
             // Under a model name that forms no key its row carries, the
             // scheduler keeps re-embed out, as its start said, and the row
             // says so: a row with no key, or a stopped one, whose restart takes
@@ -5190,7 +5195,8 @@ if (configFailed) {
               fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}${refusedBy === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
             } else if (down) {
               // Its last sleep stopped on a statement past its timeout: started as it was, it stops there again (review pass 1).
-              const again = stmt && !stmtFixed ? ` Its last sleep stopped when a pass's statement passed ${stmtWhat}: ${stmtHow} first, or it stops there again.` : "";
+              const again = stmt && !stmtFixed ? ` Its last sleep stopped when a pass's statement passed ${stmtWhat}: ${stmtHow} first, or it stops there again.`
+                : stmtHeld.length ? ` It held ${stmtHeld.join(" and ")} when a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}: ${heldHow} first, or the same statement holds ${stmtHeld.length > 1 ? "them" : "it"} again.` : "";
               fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.${again}`);
             } else if (waitingFor || waitingMid) {
               const cap = (t: string) => `${t.charAt(0).toUpperCase()}${t.slice(1)}`;
@@ -5199,7 +5205,7 @@ if (configFailed) {
               const waitTail = (passes: readonly string[], one: string, many: string, after: string) => {
                 const others = passes.filter((p) => p !== "reembed").length;
                 return [others ? (others > 1 ? many : one) : null,
-                  passes.includes("reembed") ? "re-embed is set down for the sleep at the scheduler's next poll, extraction going on, and the next sleep with work tries it again" : null]
+                  passes.includes("reembed") ? "re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again" : null]
                   .filter((t) => t !== null).join("; ") + after;
               };
               if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer ${waitingFor.every((p) => p === "reembed") ? "an embedding call" : "a one-token call"} — check it, and ${providerRows(waitingFor)}; ${waitTail(waitingFor, "the pass begins on its own once it answers", "the passes begin on their own once it answers", ".")}`);
@@ -5210,6 +5216,8 @@ if (configFailed) {
               // (SMD-2679); and once the setting passes the bound it stopped
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
+            } else if (stmtHeld.length) {
+              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}; the other passes run on meanwhile.`);
             } else if (h.outcome === "failed" && (setFix === null || set?.kind === "outage")) {
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
             }
@@ -5222,13 +5230,13 @@ if (configFailed) {
               const one = stuck.length === 1;
               // Every window kept, the stops land past the last: the decider's call or the write (review pass 1).
               // Each its own reason: every window kept puts the stops past the last (review pass 2).
-              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand");
+              const why = (t: (typeof stuck)[number]) => (t.windows !== null && t.kept === t.windows ? "its windows all kept, the stops landing past the last — in the decider's call or the write" : "a window of it outlasting the runs between pauses, or the minute a paused period gives a call in hand");
               // The remedy as an operator runs it (review pass 4): stopped
               // asleep, the scheduler finishes the window in hand first, up
               // to its 120 s grace, and may leave the lease; and a checkout
               // reaches the stack's Postgres only through host-ports.
               const it = one ? "it" : "them";
-              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first sleep long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler, which returns its passes' leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped asleep, paused or not, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no live call pauses and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
+              fixes.push(`${one ? `${stuck[0].id}: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken it` : `${stuck.length} thoughts: ${SLEEP_STALLED_JOIN} or more long hard stops in a row have taken each`} with no window gained — ${one ? why(stuck[0]) : stuck.map((t) => `${t.id}, ${why(t)}`).join("; ")}. Consolidation joins past ${it} once extraction holds nothing else, a newer thought judged meanwhile missing its pair with ${one ? "it" : "one"}, and the first run between pauses long enough finishes ${it}${b && b.minutes ? ` — a sleep stops at its clock (${b.minutes} min), so raise OB1_SLEEP_BUDGET, or 0 for none, for a window longer than that` : ""}. Sooner, finish ${it} by hand: stop the scheduler, which returns its passes' leases (podman compose -f deploy/compose.yaml stop coordinator, with the -f files and -p the stack was started with, which stops its other passes too — stopped in a period, paused or not, it finishes the window in hand first, up to its 120 s grace); run extraction from a checkout that reaches the database — deploy/compose.host-ports.yaml publishes it — as (cd db && bun extract-entities.ts --url <the database's URL>), which no live call pauses and whose --status lists ${it} (db/README.md, "Long thoughts resume"), a lease still held returning within its --ttl or at once with SELECT release_claims_for_worker(job, worker_id); then start it again: ${restartCommand("sleep", null)}.`);
             }
             add("sleep", fixes.length ? "warn" : "ok", detail, fixes.length ? fixes.join(" ") : undefined);
           }

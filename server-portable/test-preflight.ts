@@ -1669,11 +1669,11 @@ else {
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   await hb("heartbeat:sleep", { running: true });
   const sched = await run(SQL_ENV);
-  assert(new RegExp(`re-embed pass\\s+${rx(KEY)}: 6 thoughts — .* — the sleep scheduler runs this key, re-embed first in each sleep with work \\(stamped 1\\d s ago; working, its passes running\\)`).test(row(sched.out, "re-embed pass")) && !/Finish it/.test(fix(sched.out, "re-embed pass")),
+  assert(new RegExp(`re-embed pass\\s+${rx(KEY)}: 6 thoughts — .* — the sleep scheduler runs this key, re-embed first in each period with work \\(stamped 1\\d s ago; working, its passes running\\)`).test(row(sched.out, "re-embed pass")) && !/Finish it/.test(fix(sched.out, "re-embed pass")),
          `the configured key's pass under a running scheduler is the scheduler's, with no "finish it" (${row(sched.out, "re-embed pass")} | ${fix(sched.out, "re-embed pass")})`);
   // …its failed row retried once mended, or one refused permanently accepted: a retry of that fails every sleep (review pass 1).
   assert(/; 1 failed row\(s\) it will not retry$/.test(row(sched.out, "re-embed pass"))
-      && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
+      && /the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next period takes; for one the provider refuses permanently, cd db && bun reembed\.ts --url \$DATABASE_URL --accept-failed <thought-id…>\.$/.test(fix(sched.out, "re-embed pass")),
          `the scheduler's failed row keeps --accept-failed for one the provider refuses permanently (${fix(sched.out, "re-embed pass")})`);
   // Re-embed held out, or the scheduler paused by a live call (SMD-3379 PR 1c-2): the row says which, not "its passes running".
   await hb("heartbeat:sleep", { running: true, holds: [{ pass: "reembed", why: "outage", until: null }] });
@@ -1684,10 +1684,10 @@ else {
   await hb("heartbeat:sleep", { running: true, aside: { reembed: { kind: "provider" } }, holds: [{ pass: "reembed", why: "provider", until: null }] });
   const schedHeldDown = row((await run(SQL_ENV)).out, "re-embed pass");
   await hb("heartbeat:sleep", { running: true });
-  assert(/\(stamped 1\d s ago; working, its passes running\); re-embed set down for this sleep \(provider\)/.test(schedHeldDown) && !/held out/.test(schedHeldDown),
+  assert(/\(stamped 1\d s ago; working, its passes running\); re-embed set down for this period \(provider\)/.test(schedHeldDown) && !/held out/.test(schedHeldDown),
          `re-embed set down and held is said once, by the set-down (${schedHeldDown})`);
-  assert(/the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; held out: reembed \(outage\)\)/.test(schedHeld)
-         && /the sleep scheduler runs this key, re-embed first in each sleep with work \(stamped 1\d s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(schedPaused),
+  assert(/the sleep scheduler runs this key, re-embed first in each period with work \(stamped 1\d s ago; held out: reembed \(outage\)\)/.test(schedHeld)
+         && /the sleep scheduler runs this key, re-embed first in each period with work \(stamped 1\d s ago; paused by a live call, its passes going on once the brain is quiet\)/.test(schedPaused),
          `the re-embed pass row says re-embed held out, or the scheduler paused (${schedHeld} | ${schedPaused})`);
   // A dead worker's expired lease on the scheduler's key is its work, which it reclaims when it next works the key: named,
   // with the reclaim, no "finish it" beside it (SMD-3485). A record unlike this configuration keeps the record's words.
@@ -1757,12 +1757,12 @@ else {
   const schedAwake = row((await run(SQL_ENV)).out, "re-embed pass");
   await hb("heartbeat:sleep", { running: false, resting: true });
   const schedResting = row((await run(SQL_ENV)).out, "re-embed pass");
-  assert(/\(stamped 1\d s ago; idle, no work\)/.test(schedAwake) && /\(stamped 1\d s ago; awake, resting — the next sleep begins after a live call and the quiet\)/.test(schedResting),
+  assert(/\(stamped 1\d s ago; idle, no period running\)/.test(schedAwake) && /\(stamped 1\d s ago; awake, resting — the next sleep begins after a live call and the quiet\)/.test(schedResting),
          `awake, the scheduler's key waits for the quiet; resting, for a live call and the quiet (${schedAwake} | ${schedResting})`);
   await hb("heartbeat:sleep", { running: true, outcome: "failed", aside: { reembed: { kind: "provider" } } });
   const schedDown = await run(SQL_ENV);
-  assert(/!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*; re-embed set down for this sleep \(provider\); 1 failed row\(s\) it will not retry$/m.test(schedDown.out)
-      && /^\s*→ The provider refused the embedding probe: check the embedding endpoint's key and base URL .*\. The next sleep with work tries it again, with no second worker\. Once their cause is fixed, the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next sleep takes; for one the provider refuses permanently, .* --accept-failed <thought-id…>\.$/m.test(fix(schedDown.out, "re-embed pass")),
+  assert(/!\s+re-embed pass\s+.* — the sleep scheduler runs this key, .*; re-embed set down for this period \(provider\); 1 failed row\(s\) it will not retry$/m.test(schedDown.out)
+      && /^\s*→ The provider refused the embedding probe: check the embedding endpoint's key and base URL .*\. The next period with work tries it again, with no second worker\. Once their cause is fixed, the retry_failed tool \(work_type \S+\) puts the failed rows back to pending, which its next period takes; for one the provider refuses permanently, .* --accept-failed <thought-id…>\.$/m.test(fix(schedDown.out, "re-embed pass")),
          `a scheduler whose re-embed was set down for the sleep warns with the cause's remedy, the embedding endpoint's (${row(schedDown.out, "re-embed pass")} | ${fix(schedDown.out, "re-embed pass")})`);
   // A hand follower on another key beside it: the scheduler refuses at its next poll and ends, so the row warns (review pass 4).
   await hb("heartbeat:sleep", { running: true });
@@ -2232,7 +2232,7 @@ else {
   assert(/a pass under this key is running: 1 in flight/.test(row(consSleptLive.out, "consolidate pass")) && !/Start it again/.test(fix(consSleptLive.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consSleptStale.out, "consolidate pass")) && !/the sleep scheduler runs this key/.test(row(consSleptStale.out, "consolidate pass")),
          `asleep, the scheduler's live claim beside an old workers-profile row reads running, no restart; a stale heartbeat:sleep claims nothing (${row(consSleptLive.out, "consolidate pass")} | ${row(consSleptStale.out, "consolidate pass")})`);
-  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 2\d s ago; idle, no work\)\s*$/m.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
+  assert(/✓\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped 2\d s ago; idle, no period running\)\s*$/m.test(consSlept.out) && !/Start it again|Finish it/.test(fix(consSlept.out, "consolidate pass"))
       && /stopped before it finished/.test(row(consOtherJudge.out, "consolidate pass")),
          `a fresh heartbeat:sleep makes the current judge's key the scheduler's, no remedy; another judge's key reads stopped (${row(consSlept.out, "consolidate pass")} | ${row(consOtherJudge.out, "consolidate pass")})`);
   assert(/!\s+consolidate pass\s+\S+: .* — the sleep scheduler runs this key \(stamped .*\); 1 left by a worker that died, which the scheduler reclaims when it next works this key$/.test(row(consSleptDied.out, "consolidate pass"))
@@ -4413,10 +4413,10 @@ else {
 
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60) } }), 20);
       const awakeOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); idle, no work — the last period ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(row(awakeOut.out, "sleep")),
+      assert(/✓\s+sleep\s+alive \(last stamped 2\d s ago, every 60 s\); idle, no period running — the last ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(row(awakeOut.out, "sleep")),
         `awake: when the last sleep ended and how long it lasted (${row(awakeOut.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60 }), 20);
-      assert(/idle, no work — no period yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no period recorded says no period yet");
+      assert(/idle, no period running — none yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no period recorded says no period yet");
 
       // Its budget (SMD-2679): a sleep its clock stopped is no warning — the
       // row says so, and that the next begins after a live call; one a
@@ -4437,7 +4437,7 @@ else {
       // alone — and the fix is not asked for again.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: null, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, statementTimeoutS: 600, stops: 0 } }), 20);
       const raisedOut = await run(LOG_ON);
-      assert(/✓\s+sleep\s+alive .*; idle, no work — the last period ended 6\d s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a live write pauses its passes; a search does not; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
+      assert(/✓\s+sleep\s+alive .*; idle, no period running — the last ended 6\d s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a live write pauses its passes; a search does not; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
         `a restarted scheduler, its timeout raised past the bound its last sleep stopped at: the mark's own bound, no "after a live call", no fix (${row(raisedOut.out, "sleep")} | ${fix(raisedOut.out, "sleep")})`);
       // Ended, the row says its last sleep stopped on its budget, the count since it last started.
       await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
@@ -4458,6 +4458,20 @@ else {
       assert(/stopped on its budget — a pass's statement past statement_timeout \(the role's or the database's own\);/.test(row(roleOut.out, "sleep")) && /budget: a 60 min clock, statement_timeout the role's or the database's own,/.test(row(roleOut.out, "sleep"))
           && /→ Its last sleep stopped when a pass's statement passed the role's or the database's own statement_timeout: .*needs longer — set OB1_SLEEP_STATEMENT_TIMEOUT above theirs \(a startup setting beats it\), or raise theirs in deploy\/\.env/.test(fix(roleOut.out, "sleep")) && !/Its last pass failed/.test(fix(roleOut.out, "sleep")),
         `a stop on the role's or the database's own timeout says so, its remedy to set ours above theirs (${row(roleOut.out, "sleep")} | ${fix(roleOut.out, "sleep")})`);
+      // A scheduler from 2.0.0 holds the pass a statement passed its timeout until a restart, on its `holds` (N9,
+      // SMD-3379 PR 1c-4b): the row counts it and warns, its fix the setting and the restart, not the generic failed pass.
+      const noClock = { ...BUDGET, minutes: 0, stops: 1 };
+      const stmtHolds = [{ pass: "extract", why: "statement", until: null }];
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", slept: { from: await at(400), to: null }, budget: noClock, holds: stmtHolds }), 20);
+      const heldOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*budget: statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 1 pass\(es\) held by a statement past its timeout/.test(row(heldOut.out, "sleep"))
+          && /→ extract held until a restart: a statement passed its statement_timeout \(300 s\), which its log names .* raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env .*then recreate the coordinator/.test(fix(heldOut.out, "sleep")) && !/Its last pass failed/.test(fix(heldOut.out, "sleep")),
+        `a pass a statement holds until a restart: the row counts it and warns, its fix the setting and the restart (${row(heldOut.out, "sleep")} | ${fix(heldOut.out, "sleep")})`);
+      // Ended so, it is told to raise the setting before it starts again.
+      await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(400), to: await at(60) }, budget: noClock, holds: stmtHolds }), 20);
+      const heldDown = fix((await run(LOG_ON)).out, "sleep");
+      assert(/start it again — .* It held extract when a statement passed its statement_timeout \(300 s\): raise OB1_SLEEP_STATEMENT_TIMEOUT first, or the same statement holds it again\./.test(heldDown),
+        `…and ended so, it is told to raise the setting before it starts again (${heldDown})`);
       // An idle clock-out (review pass 2): resting with no stop on the mark — the clock with nothing left to do, no warning.
       await beat("heartbeat:sleep", v({ every_s: 60, resting: true, slept: { from: await at(3660), to: await at(60) }, budget: { ...BUDGET, stops: 0 } }), 20);
       const idleOut = await run(LOG_ON);
@@ -4468,7 +4482,7 @@ else {
       const oddOut = row((await run(LOG_ON)).out, "sleep");
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null, budget: "clock" } }), 10);
       const runningOut = row((await run(LOG_ON)).out, "sleep");
-      assert(/✓\s+sleep\s+alive .*idle, no work — the last period ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(oddOut) && /working, its passes running — for 2 min; a live write pauses its passes; a search does not$/.test(runningOut),
+      assert(/✓\s+sleep\s+alive .*idle, no period running — the last ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(oddOut) && /working, its passes running — for 2 min; a live write pauses its passes; a search does not$/.test(runningOut),
         `a budget word of no kind, on a sleep not over, or a budget not of the shape is left off (${oddOut} | ${runningOut})`);
 
       // A search wakes it under no setting (SMD-3315): the log off here, or an
@@ -4477,7 +4491,7 @@ else {
       for (const [label, env, reads] of [["the log off", SQL_ENV, undefined], ["an older row's reads: denied", LOG_ON, "denied"], ["an older row's reads: missing", LOG_ON, "missing"]] as const) {
         await beat("heartbeat:sleep", v({ every_s: 60, ...(reads ? { reads } : {}), slept: { from: await at(400), to: await at(60) } }), 20);
         const out = await run(env);
-        assert(/✓\s+sleep\s+alive .*; idle, no work — the last period ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
+        assert(/✓\s+sleep\s+alive .*; idle, no period running — the last ended 6\d s ago, after 6 min; a live write pauses its passes; a search does not$/.test(row(out.out, "sleep")) && fix(out.out, "sleep") === "",
           `${label}: the row is ok, a live write pausing it, and names no query log (${row(out.out, "sleep")} | ${fix(out.out, "sleep")})`);
       }
 
@@ -4523,13 +4537,13 @@ else {
       const reembedWaitFix = fix((await run(LOG_ON)).out, "sleep");
       assert(/Re-embed waiting for the provider mid-pass: the provider stopped answering — check it, and the embedding provider row here \(--deep calls it\)/.test(reembedWaitFix) && !/--deep probes chat/.test(reembedWaitFix),
         `re-embed's wait names the embedding provider's row (${reembedWaitFix})`);
-      assert(/re-embed is set down for the sleep at the scheduler's next poll, extraction going on, and the next sleep with work tries it again\.$/.test(reembedWaitFix) && !/goes on by itself|back in the pool meanwhile/.test(reembedWaitFix),
+      assert(/re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again\.$/.test(reembedWaitFix) && !/goes on by itself|back in the pool meanwhile/.test(reembedWaitFix),
         `…and says the sleep sets re-embed down, not that the pass goes on by itself (review pass 1: ${reembedWaitFix})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed", "extract"], slept: { from: await at(130), to: null } }), 10);
       const bothWaitFix = fix((await run(LOG_ON)).out, "sleep");
       assert(/check it, and the model provider rows here \(--deep probes chat\) and the embedding provider row here \(--deep calls it\)/.test(bothWaitFix),
         `re-embed and extraction waiting name both providers' rows (${bothWaitFix})`);
-      assert(/the pass goes on by itself once it answers; re-embed is set down for the sleep at the scheduler's next poll, .*, the thoughts in hand back in the pool meanwhile\./.test(bothWaitFix),
+      assert(/the pass goes on by itself once it answers; re-embed is set down for the period at the scheduler's next poll, .*, the thoughts in hand back in the pool meanwhile\./.test(bothWaitFix),
         `…each wait's own ending, extraction's going on and re-embed's set down (${bothWaitFix})`);
       // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
@@ -4588,17 +4602,17 @@ else {
         `a model switch set aside is said, with both ways out and not the generic failure (${row(switched.out, "sleep")} | ${fix(switched.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model" } }, slept: { from: await at(130), to: null } }), 10);
       const modelDownFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/Re-embed was set down for this sleep — pull the embedding model its log names .* — a setting changed in deploy\/\.env is read once, so recreate sleep after it \(and api, for the embedding's\): /.test(modelDownFix),
+      assert(/Re-embed was set down for this period — pull the embedding model its log names .* — a setting changed in deploy\/\.env is read once, so recreate sleep after it \(and api, for the embedding's\): /.test(modelDownFix),
         `a set-down mended in deploy/.env names the recreate the scheduler needs (review pass 3: ${modelDownFix})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "provider" } }, slept: { from: await at(130), to: null } }), 10);
       const setDown = await run(LOG_ON);
-      assert(/; re-embed set down for this sleep \(provider\)$/.test(row(setDown.out, "sleep"))
-          && /Re-embed was set down for this sleep — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; extraction and consolidation run on, and the next sleep with work tries it again\./.test(fix(setDown.out, "sleep")),
-        `re-embed set down for the sleep is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
+      assert(/; re-embed set down for this period \(provider\)$/.test(row(setDown.out, "sleep"))
+          && /Re-embed was set down for this period — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; extraction and consolidation run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
+        `re-embed set down for the period is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
       // An outage's set-down adds no failed word: a failed outcome beside it is another pass's, said too (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "outage" } }, slept: { from: await at(130), to: null } }), 10);
       const outageFailedFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/Its last pass failed/.test(outageFailedFix) && /Re-embed was set down for this sleep — its provider did not answer/.test(outageFailedFix),
+      assert(/Its last pass failed/.test(outageFailedFix) && /Re-embed was set down for this period — its provider did not answer/.test(outageFailedFix),
         `beside an outage's set-down, a failed outcome is another pass's and still said (${outageFailedFix})`);
       // A switch put right since the row's word — the record now this stack's — clears at the next sleep: no ways out offered (review pass 1).
       const [{ value: recordNow }] = (await claims`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
@@ -4614,12 +4628,12 @@ else {
       assert(/the set-aside clears at the scheduler's next poll\./.test(madeAsleepFix), `asleep, a switch made since clears at the next poll, which reads the record (review pass 2: ${madeAsleepFix})`);
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "ok", aside: { reembed: { kind: "outage" } }, slept: { from: await at(300), to: await at(130) } }), 10);
       const lastDown = await run(LOG_ON);
-      assert(/; re-embed set down for its last sleep \(outage\)$/.test(row(lastDown.out, "sleep"))
-          && /Re-embed was set down for its last sleep — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep")),
+      assert(/; re-embed set down for its last period \(outage\)$/.test(row(lastDown.out, "sleep"))
+          && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep")),
         `awake, a set-down speaks of the last sleep, an outage naming the embedding provider (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
       const endedDown = await run(LOG_ON);
-      assert(/at its last word, re-embed set down for its last sleep \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))
+      assert(/at its last word, re-embed set down for its last period \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))
           && /Its last sleep set re-embed down \(provider\) — the provider refused the embedding probe: .*; mend that before it starts again, or its first sleep sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
           && !/for the embedding's\): /.test(fix(endedDown.out, "sleep")),
         `an ended row's set-down is its last word, its cause to mend before the restart, in that order (${row(endedDown.out, "sleep")} | ${fix(endedDown.out, "sleep")})`);
@@ -4758,7 +4772,7 @@ else {
           && /reembed:backfill1 stopped, .*— and re-embed with a one-shot run when there is work, its own pass finished under its key — cd db && bun reembed\.ts --url \$DATABASE_URL --job reembed:backfill1\./.test(unfitAlone)
           && !/start it again|--follow\b(?! run by hand)/.test(unfitAlone),
         `with no scheduler, under a model name no row carries, stopped hand followers are retired for a one-shot run, a backfill by its own key — never "start it again" (${unfitAlone})`);
-      // A stopped row set down for its last sleep, under such a name: started again it runs no re-embed, so no set-down to mend (review pass 3).
+      // A stopped row set down for its last period, under such a name: started again it runs no re-embed, so no set-down to mend (review pass 3).
       await beat("heartbeat:sleep", v({ every_s: 60, reembedJob: "reembed:stub-embed@1024", outcome: "stopped", ended: true, reads: "yes", aside: { reembed: { kind: "provider" } } }), 20);
       const unfitDownFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "my embed model", OB1_EMBEDDING_DIM: "1024" })).out, "sleep");
       const fitDownFix = fix((await run({ ...LOG_ON, OB1_EMBEDDING_MODEL: "stub-embed", OB1_EMBEDDING_DIM: "1024" })).out, "sleep");
@@ -4794,7 +4808,7 @@ else {
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
       assert(/!\s+sleep\s+.*2 thought\(s\) held back across its stops — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
-        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler, which returns its passes' leases .*stop coordinator.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the runs between pauses, or the minute a paused period gives a call in hand\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first run between pauses long enough finishes it\. Sooner, finish it by hand: stop the scheduler, which returns its passes' leases .*stop coordinator.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
         `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
       // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });
@@ -4802,7 +4816,7 @@ else {
         "a stalled thought whose windows are all kept is told apart: the stops land past its last window");
       // Two stalled, each with its own reason (review pass 2).
       await sleeping({ total: 2, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }, { id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] });
-      assert(/→ 2 thoughts: 3 or more long hard stops in a row have taken each with no window gained — 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the sleeps, or the minute a paused sleep gives a call in hand\./.test(fix((await run(LOG_ON)).out, "sleep")),
+      assert(/→ 2 thoughts: 3 or more long hard stops in a row have taken each with no window gained — 11111111-1111-4111-8111-111111111111, its windows all kept, the stops landing past the last — in the decider's call or the write; 22222222-2222-4222-8222-222222222222, a window of it outlasting the runs between pauses, or the minute a paused period gives a call in hand\./.test(fix((await run(LOG_ON)).out, "sleep")),
         "two stalled thoughts are each given their own reason");
       // More held than named: the rest counted.
       await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });

@@ -2345,30 +2345,33 @@ coordinator before the change reaches it, run the switch, then bring back
 `api coordinator`. The switch extracts the backlog
 itself, in the foreground and beside any live traffic, as it does under
 `workers`; only consolidation's new pool — the thoughts re-pooled under the
-new key — waits for the brain to go quiet. An embedding model change
+new key — is the scheduler's first period once the coordinator is back,
+its start reading the work whole. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
-so, and once it has, a sleep re-embeds whatever the switch left unfinished
+so, and once it has, a period re-embeds whatever the switch left unfinished
 (SMD-2679) — unless the new name is one its heartbeat row cannot carry (ASCII
 letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
 which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
 (SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
-once, before its first quiet — not re-embed's, which each sleep with work
-starts and whatever refuses it sets down for that sleep (SMD-2679): a bad
+once, before its first period — not re-embed's, which each period with work
+starts and whatever refuses it sets down for that period (SMD-2679): a bad
 `OB1_WORKER_KEY`, a model not served (the judge's too) or an extraction key
 recorded under another model ends each
 start at once (exit 2, `heartbeat:sleep` ended failed), and its supervisor
 tries again after 1, 2, 4, 8, then every 15 minutes, each try refused the same
 way until the cause is mended (SMD-3214), so the coordinator's log names
-the cause within seconds of the first start, not at the first quiet, and
+the cause within seconds of the first start, not at the first period, and
 preflight's `sleep` row gives it and the next try. As with the `workers`
 pass, a model `ollama-pull` is still pulling at a first boot is refused the
 same way, and met at a later try once the pull is done. A worker key revoked
 later, or the key moved by a `--switch-key` run elsewhere, ends it at the next
-sleep, held the same way. Each pass's banner is said once there, not at every sleep;
-progress lines (`pool:`, `before:`) still come with each sleep's work.
+period, held the same way — the moved key's captures queue under it, which the
+scheduler's claim reads do not see, so that period begins at the next rescan.
+Each pass's banner is said once there, not at every period; progress lines
+(`pool:`, `before:`) still come with each period's work.
 
 ## Refreshing a tier
 
