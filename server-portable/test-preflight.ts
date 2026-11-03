@@ -4544,6 +4544,10 @@ else {
       const subjectsHeld = await run(LOG_ON);
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "stopped", ended: true, holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: await at(60) } }), 10);
       const subjectsHeldDown = await run(LOG_ON);
+      // …and a row the sweep's alarm ended failed: the hold says why, not the generic cause of a failed pass (SMD-3306
+      // PR 6b-1's review pass 4, the consumer's prototype).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "subjects", why: "judge", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const subjectsHeldFailed = await run(LOG_ON);
       // A hold of the sweep's for another reason is not the alarm's: no judge remedy beside it.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", holds: [{ pass: "subjects", why: "provider", until: null }], slept: { from: await at(130), to: null } }), 10);
       const subjectsOtherHold = await run(LOG_ON);
@@ -4553,12 +4557,14 @@ else {
       const extractJudgeHold = await run(LOG_ON);
       assert(/asleep, subjects waiting for the provider mid-pass/.test(row(subjectsWait.out, "sleep")) && /check it, and the model provider rows here \(--deep probes chat\)/.test(fix(subjectsWait.out, "sleep"))
              && /held out: subjects \(judge\)/.test(row(subjectsHeld.out, "sleep"))
-             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, .* reaches the scheduler once the coordinator is recreated \(up -d coordinator\), so recreate it first .* a hand run lifts the hold, run in the stack as the recreated coordinator runs, .* podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with \(docker compose alike\) .* The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
+             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked\. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy\/\.env reaches the scheduler once the coordinator is recreated \(up -d coordinator\), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's\. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy\/compose\.yaml run --rm --no-deps coordinator db\/coordinator\.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with \(docker compose alike\) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone\. The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
              && /at its last word, held out: subjects \(judge\)/.test(row(subjectsHeldDown.out, "sleep")) && /The subject sweep is held: .*--judge-checked --limit 1/.test(fix(subjectsHeldDown.out, "sleep"))
              && !/The other passes run on meanwhile/.test(fix(subjectsHeldDown.out, "sleep"))
              && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep"))
              && /held out: extract \(judge\)/.test(row(extractJudgeHold.out, "sleep")) && !/The subject sweep is held/.test(fix(extractJudgeHold.out, "sleep")),
         `the subject sweep's wait and judge hold are said by its name, the hold's fix the hand run that lifts it, a stopped row's too (${row(subjectsWait.out, "sleep")} | ${fix(subjectsHeld.out, "sleep")} | ${fix(subjectsHeldDown.out, "sleep")})`);
+      assert(/The subject sweep is held:/.test(fix(subjectsHeldFailed.out, "sleep")) && !/Its last pass failed/.test(fix(subjectsHeldFailed.out, "sleep")),
+        `a row the sweep's alarm ended failed says the hold, not a failed pass's generic cause (${fix(subjectsHeldFailed.out, "sleep")})`);
       // Re-embed set aside or down, by the row's `aside` (SMD-2679 PR 4b): said, with its fix; extraction and consolidation run on.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } }, slept: { from: await at(130), to: null } }), 10);
       // The brain recording the switch's model, as the scheduler read it.

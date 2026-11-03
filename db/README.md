@@ -3452,22 +3452,22 @@ another saying so. The first naming is
 refused while a login role that can capture — it reads `ob1_config`, without
 which 016's trigger refuses it already — cannot write the claims the trigger
 writes as it, which would fail its every capture. Each claim is one thought,
-leased for the limit a call and five minutes more, a provider's transient error
-putting it back first in the pool for the claim after the pause to take again; a
-run that stops hands back what it holds, a second signal the claim in hand
-before the CLI exits, and a thought the provider stopped answering on, a run by
-hand's, goes to the end of the pool, but a `--judge-checked` run's, which stays
-where it stood, the trip's hand-back first. A lease a gone worker ran out at its
-last
-attempt is failed by
-the next claim, which the pool line counts and a run says, exit 1. Within one key the claims are disjoint while their leases
-hold — a naming leaves a live lease to its run, though an edit pools its thought
-again — and whatever the claims, the door's lock, its fingerprint check and its
-check of the ticket a thought is filed under make a sweep beside the pass, or
-beside another sweep, safe; a run whose pool another run names away from it
-records and closes no subject more, since each write and close first locks the
-pool's name and reads it, and stops, exit 2, at the first of those or of its
-claims, which read the name too, that finds it moved. A claim
+leased for the limit a call and five minutes more, renewed as a following run's
+probe after a timeout begins, a provider's transient error putting it back first
+in the pool for the claim after the pause to take again; a run that stops hands
+back what it holds, a second signal the claim in hand before the CLI exits, and
+a thought the provider stopped answering on, a run by hand's, goes to the end of
+the pool, but a `--judge-checked` run's, which stays where it stood, the trip's
+hand-back first, its end line naming what it left of its limit. A lease a gone
+worker ran out at its last attempt is failed by the next claim, which the pool
+line counts and a run says, exit 1. Within one key the claims are disjoint while
+their leases hold — a naming leaves a live lease to its run, though an edit
+pools its thought again — and whatever the claims, the door's lock, its
+fingerprint check and its check of the ticket a thought is filed under make a
+sweep beside the pass, or beside another sweep, safe; a run whose pool another
+run names away from it records and closes no subject more, since each write and
+close first locks the pool's name and reads it, and stops, exit 2, at the first
+of those or of its claims, which read the name too, that finds it moved. A claim
 finished is the record that the thought was asked at its text: one the model
 named nothing for is not asked again until its text, the ticket it is filed
 under, or the pool's key changes
@@ -3600,79 +3600,84 @@ came first; a dry run's refusals are said, not heard, and a trip's hold is no
 start refusal, its 3 unheard. A following run's start waits out a database not
 answering up to its first claim, its reads and the worker key's lookup waited
 out (the lookup but at too many connections, as a claim pass's) and the rest
-begun again once it answers, the key it resolved kept, as a claim pass's start
-does; past the trip's hold it probes its judge model with one token before any
-claim, as a follower does, and waits at its start for one not answering,
-claiming nothing until it does, a stop ending the wait. `check` is a following
-run's start alone, sleep's start check: its
-refusals heard, the pool's name read and refused as the run would refuse it
-(`key`, `tables`), its probe, ended before the trip's hold and its first write
-but the worker key's lookup's, 0, or 130 at a stop. `follow` (whole seconds): at
-an empty pool the
-run waits that long and claims again, reading the pool's name and another run's
-trip at each claim, until its stop, which ends it as a follower's does wherever
-it lands, exit 0 (130 at once on the second), unless the thought in hand it lets
-finish ends the run otherwise (the alarm's 3, the pool named away's 2, the
-database's 1), or its `--limit`; a dry run, or one with `--judge-checked` or
-`--retry-failed`, refuses it. Past its pauses (below), or hung — a call timed
-out and a probe, given the call's own limit, unanswered too — a following run
-waits out the provider's outage as a claim pass's follower does (PR 6b-1, the
-maintainer's choice), the thought in hand back in the pool and the run probing
-until the provider answers; a thought that errs so again right after a probe
-answered, within 15 minutes past its next streak at the run's limit, is its own,
-its claim failed, said once with the error that made it the suspect, for
-`--retry-failed` (worker-bootstrap.ts's ProviderOutage), a suspect when its
+begun again once it answers, the key it resolved kept and one unresolved looked
+up again, as a claim pass's start does; past the trip's hold it probes its judge
+model with one token before any claim, as a follower does, and waits at its
+start for one not answering, claiming nothing until it does, a stop ending the
+wait. `check` is a following run's start alone, sleep's start check: its
+refusals heard up to the pool's name, read and refused as the run would refuse
+it (`key`, `tables`), not a write's, its probe, ended before the trip's hold and
+its first write but the worker key's lookup's, 0, or 130 at a stop. `follow`
+(whole seconds): at an empty pool the run waits that long and claims again,
+reading the pool's name and another run's trip at each claim, until its stop,
+which ends it as a follower's does wherever it lands, exit 0 (130 at once on the
+second), unless the thought in hand it lets finish ends the run otherwise (the
+alarm's 3, the pool named away's 2, the database's 1), or its `--limit`; a dry
+run, or one with `--judge-checked` or `--retry-failed`, refuses it. Past its
+pauses (below), or hung — a call timed out and a probe, given the call's own
+limit, the claim's lease renewed for it, out too, unanswered or answered 5xx but
+503, a 429 or 503 answering it the provider holding calls back, no suspect — a
+following run waits out the provider's outage as a claim pass's follower does
+(PR 6b-1, the maintainer's choice), the thought in hand back in the pool and the
+run probing until the provider answers; a thought that errs so again right after
+a probe answered, within 15 minutes past its next streak at the run's limit, is
+its own, its claim failed, said once with the error that made it the suspect,
+for `--retry-failed` (worker-bootstrap.ts's ProviderOutage), a suspect when its
 streak's first error could be its own — a 5xx but 503, a lost connection — or
 its call hung; a 429 or 503, the provider holding calls back, waited out past
-the pauses, and a model being pulled, waited out at once, make none. A suspect
-goes back first, so, while the run is alone on its pool, it is the thought
-claimed after each pause and after the wait, a streak one thought's, as a claim
-pass's retries in place are; a thought that made none goes behind the rest; a
-thought answered is a suspect no longer; and a stopping run's timeout is the
-thought's, unprobed. The database lost past its start ends a following run as it
-ends any, exit 1, for its caller to start it again. `admit`, SMD-3379 PR 1b's
-gate, is
-awaited before the pool's lock and naming, with the caller's `signal`, which it
-needs, and before each claim, so a run waiting there holds no claim. A
-provider's transient error puts its thought back in the pool, first, its
-attempt not counted and its place under `--limit` given back, and the run pauses
-before its next claim, holding no claim, which takes it again through that gate,
-the pauses counting the provider's errors since its last answer, across thoughts
-(a timeout or an egress refusal is no answer), the pool's name, another run's
-trip and its own edits read as at any claim; past the last pause a run by hand
-ends, exit 1, and a following run waits the provider out. A stop at the gate, or a gate
-answering after the stop, ends the run, nothing more named, pooled or claimed; a
-run the trip's hold keeps from starting is refused before any gate. Beside the
-stop, `onPass` hands its caller the call's own abort (`abortInHand`, PR 1b-2's):
-the judge's call in hand, once it has run that long, each call's age from its
-own start, goes back behind the pool, unanswered and so unjudged, its attempt
-not counted and, when it went back, its place under `--limit` given back, and
-the run goes on; a thought the rules key, a provider pause and the writes after
-an answer hold no call to abort. A caller's `stamper` hears a following run's
-word, `ok` at each poll that finds the pool empty and, as it ends, `failed` for
-an end of its own (a refusal, its own options' among them, its naming or pooling
-broken off, the provider's refusal, the database lost past its start, the alarm,
-a throw) or `stopped`; it beats no row while it works through a pool, a
-scheduler's row being the scheduler's to keep. It hears the run's waits for the
-provider too, as a claim pass's caller does (PR 6b-1): `startWait` while a
-following run waits at its start, `providerWait` while it waits out an outage
-past its pauses, or hung, not through the pauses, its outage stamping no
-`failed` as it begins, where extraction's follower does: how a scheduler reads
-that wait is the scheduler's (PR 6b-2).
-`session` opens the run's own
-client and its watching connection with the scheduler's per-pass settings
-(refused beside a caller's client; the worker key's lookup opens its one
-connection without them, as the claim passes' does). A statement past its
-statement_timeout at the run's start is thrown, as a claim pass's start-of-pass
-scan's is, for the scheduler to read as its budget's, the naming's write among
-them, whose wait has no other end; the pooling, a scan of every thought with no
-current subject, runs exempt while watched (PR 6b-1, the maintainer's choice: on
-a large brain it can outlast the budget, the pool then never filled and every
-period ending on it), its waits said and a stop cancelling it, the budget set
-back as it ends, for the mark after it and the claims; unwatched (its watching
-connection refused, as at a role's connection limit) it keeps the budget, and a
-session with no statement_timeout leaves a role's or the database's own to bound
-it. One over a thought is the
+the pauses, and a model being pulled, waited out at once, make none. A thought
+goes back first at each pause, and after the wait if its streak made it the
+suspect, so, while the run is alone on its pool and no gone run's lease runs out
+first, a streak is one thought's, as a claim pass's retries in place are, and
+one another thought takes the claim after its wait from — edited in the wait,
+taken by another run — a suspect no longer; after the wait a thought that made
+none, or hung, goes behind the rest, so a thought that keeps the provider hung
+holds up no other (the maintainer's choice), though under a scheduler's periods
+its second hang lands past its run, never failed there; a thought answered is a
+suspect no longer; a stopping run's timeout is the thought's, unprobed; and a
+probe that answers ends the provider's streak. The database lost past its start
+ends a following run as it ends any, exit 1, for its caller to start it again.
+`admit`, SMD-3379 PR 1b's gate, is awaited before the pool's lock and naming,
+with the caller's `signal`, which it needs, and before each claim, so a run
+waiting there holds no claim. A provider's transient error puts its thought back
+in the pool, first, its attempt not counted and its place under `--limit` given
+back, and the run pauses before its next claim, holding no claim, which takes it
+again through that gate, the pauses counting the provider's errors since its
+last answer, across thoughts (a timeout or an egress refusal is no answer, a
+following run's probe answering after a timeout an answer), the pool's name,
+another run's trip and its own edits read as at any claim; past the last pause a
+run by hand ends, exit 1, and a following run waits the provider out. A stop at
+the gate, or a gate answering after the stop, ends the run, nothing more named,
+pooled or claimed; a run the trip's hold keeps from starting is refused before
+any gate. Beside the stop, `onPass` hands its caller the call's own abort
+(`abortInHand`, PR 1b-2's): the judge's call in hand, once it has run that long,
+each call's age from its own start, goes back behind the pool, unanswered and so
+unjudged, its attempt not counted and, when it went back, its place under
+`--limit` given back, and the run goes on; a thought the rules key, a provider
+pause and the writes after an answer hold no call to abort. A caller's `stamper`
+hears a following run's word, `ok` at each poll that finds the pool empty and,
+as it ends, `failed` for an end of its own (a refusal, its own options' among
+them, its naming or pooling broken off, the pool named away, the provider's
+refusal, the database lost past its start, the alarm, a throw) or `stopped`; it
+beats no row while it works through a pool, a scheduler's row being the
+scheduler's to keep. It hears the run's waits for the provider too, as a claim
+pass's caller does (PR 6b-1): `startWait` while a following run waits at its
+start, `providerWait` while it waits out an outage past its pauses, or hung, not
+through the pauses, its outage stamping no `failed` as it begins, where
+extraction's follower does: how a scheduler reads that wait is the scheduler's
+(PR 6b-2). `session` opens the run's own client and its watching connection with
+the scheduler's per-pass settings (refused beside a caller's client; the worker
+key's lookup opens its one connection without them, as the claim passes' does).
+A statement past its statement_timeout at the run's start is thrown, as a claim
+pass's start-of-pass scan's is, for the scheduler to read as its budget's, the
+naming's write among them, whose wait has no other end; the pooling, a scan of
+every thought with no current subject, runs exempt while watched (PR 6b-1, the
+maintainer's choice: on a large brain it can outlast the budget, the pool then
+never filled and every period ending on it), its waits said and a stop
+cancelling it, the budget set back as it ends, for the mark after it and the
+claims; unwatched (its watching connection refused, as at a role's connection
+limit) it keeps the budget, and a session with no statement_timeout leaves a
+role's or the database's own to bound it. One over a thought is the
 thought's or the poll's, as a claim pass's is (review pass 6): its own write
 past it fails the thought, for `--retry-failed`; its claim, its read, a put-back
 or set-back, its release or its answer's window costs the run its poll, counted
