@@ -1111,8 +1111,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const asideWord = (): SleepAside | null =>
     reembedAside ? { reembed: { kind: "model-switch", recorded: reembedAside.recorded, configured: EMBED.model } } : reembedDown ? { reembed: { kind: reembedDown } } : null;
   /**
-   * A claim pass whose start refusal --follow retries, held until the retry
-   * (SMD-3379 PR 1c-4a): `until` the database's clock at the wait's end.
+   * A claim pass whose start refusal --follow retries, held until its retry
+   * wait ends (SMD-3379 PR 1c-4a): `until` the database's clock then; the next
+   * sleep retries it. A stop during the wait leaves it on the ended row.
    */
   let retryHold: SleepHold | null = null;
   /**
@@ -2585,9 +2586,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
         words[r.pass] = "failed";
         const waitMs = outageWait(refusals++);
-        // Held until the retry, on the row (SMD-3379 PR 1c-4a): when, by the database's clock, read as its
-        // epoch so no session's TimeZone enters it — or by its last read's, the query refused, so the hold
-        // still reads timed rather than an event (review pass 1).
+        // Held until its retry wait ends, on the row (SMD-3379 PR 1c-4a): when, by the database's clock — or
+        // by its last read's, the query refused, so the hold still reads timed rather than an event (review pass 1).
         const nowMs = await sql`SELECT (extract(epoch FROM now()) * 1000)::bigint::text AS ms`
           .then((rows) => Number((rows as { ms: string }[])[0].ms), () => sleptUntil.getTime());
         const until = new Date(nowMs + waitMs).toISOString();
@@ -2605,9 +2605,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
             await stamper.alive("failed", malformed ?? undefined);
           }
         }
-        // The retry is the re-arm: no longer held.
-        retryHold = null;
-        sayAside();
+        // The wait's end is the re-arm: no longer held — but a stop keeps it on the ended row, its last word (review pass 2).
+        if (!stopping) {
+          retryHold = null;
+          sayAside();
+        }
         continue;
       }
       refusals = 0;

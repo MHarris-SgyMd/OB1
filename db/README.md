@@ -4694,7 +4694,7 @@ names what it held at its last word, and warns of none.
 Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
 and 1c-4a `holds`: re-embed set aside on a model switch, or set down until
 the next sleep, neither with a time, and a claim pass whose start's refusal
-`--follow` retries, until the retry. `paused { since }` is the scheduler paused by a live
+`--follow` retries, until its retry wait ends (the next sleep retries it). `paused { since }` is the scheduler paused by a live
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out

@@ -218,7 +218,7 @@ export interface PassStamper {
    * value, `until` on the database's clock in toISOString()'s form or null
    * for an event, left out while none is (null or empty). Carried by the
    * row's next write and kept on its end, the last word on what was held, as
-   * brain-info and db/supervise.ts read it. Only the scheduler sets it.
+   * brain-info reads it and db/supervise.ts leaves it. Only the scheduler sets it.
    */
   holds?(holds: readonly SleepHold[] | null): void;
 }

@@ -20383,14 +20383,16 @@ if (want("38")) {
     // the wait — not two of its 1 s intervals old (review pass 2).
     await Bun.sleep(3000);
     const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
+    // The hold carried by the wait's re-stamps, not the first write alone (review pass 2).
+    const carriedHold = (await beat())?.holds?.find((h) => h.pass === "extract");
     const stillRunning = !retryDone;
     sw.missing = false;
     const at = lines.length;
     const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
     const holdsRecovered = (await beat())?.holds;
     assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600
-        && secondHold?.why === "model" && secondLeft > 3500 && secondLeft <= 5100 && holdsRecovered === undefined,
-      `a refusal retried under --follow holds the pass on the row until each retry, by the database's clock, and holds none once a sleep runs (${JSON.stringify(laterBeat?.holds)} at ${nowIso}; the 5 s wait's ${JSON.stringify(secondHold)} ${secondLeft} ms on; after ${JSON.stringify(holdsRecovered)})`);
+        && secondHold?.why === "model" && secondLeft > 2600 && secondLeft <= 5100 && carriedHold?.until === secondHold.until && holdsRecovered === undefined,
+      `a refusal retried under --follow holds the pass on the row until each retry, by the database's clock, and holds none once a sleep runs (${JSON.stringify(laterBeat?.holds)} at ${nowIso}; the 5 s wait's ${JSON.stringify(secondHold)} ${secondLeft} ms on, 3 s in ${JSON.stringify(carriedHold)}; after ${JSON.stringify(holdsRecovered)})`);
     assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 2,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
     // A sleep that ran resets the schedule: the next refusal waits 2.5 s again.
@@ -20444,6 +20446,33 @@ if (want("38")) {
     sw.badRequest = false;
     assert(midPassCode === 2 && !lines.slice(atBad).some((l) => /tries it again/.test(l)),
       `a refusal mid-pass by a pass that has run ends --follow with 2, not a retry (exit ${midPassCode})`);
+
+    // Stopped during a refusal's retry wait, the row ends with the hold on
+    // it, its last word (SMD-3379 PR 1c-4a, review pass 2): cleared only by
+    // the wait's own end. The schedule at 2.5 s, so the stop lands inside it.
+    restoreOutage();
+    restoreOutage = shortenOutage(2500);
+    lines.length = 0;
+    await capture("A synced note before the model goes again.", "sync-sleep", 0, 11);
+    const acRetryHeld = new AbortController();
+    const retryHeldRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acRetryHeld.signal });
+    let heldWaited = false;
+    try {
+      await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+      sw.missing = true;
+      if (await endSleep("a live write that ends the sleep before the refusal")) {
+        heldWaited = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
+      }
+    } finally {
+      acRetryHeld.abort();
+      await retryHeldRun;
+      sw.missing = false;
+      restoreOutage();
+      restoreOutage = shortenOutage();
+    }
+    const heldEnded = await beat();
+    assert(heldWaited && heldEnded?.ended === true && heldEnded.holds?.some((h) => h.pass === "extract" && h.why === "model") === true,
+      `stopped during a refusal's retry wait, the row ends holding the pass, its last word (${JSON.stringify(heldEnded?.holds)}; ended ${heldEnded?.ended}; waited ${heldWaited})`);
 
     // The CLI, signalled twice while asleep with a call in hand: it exits 130
     // at once, and the row reads ended, not running until it goes stale — the
