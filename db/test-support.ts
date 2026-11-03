@@ -753,8 +753,9 @@ export type CountLine = { suite: string; variant: string | null; job: string | n
 
 /**
  * Append this run's counts to the file TEST_COUNTS_ENV names, one JSON line,
- * when it is set: Fork Checks sets it in every job, uploads the file, and on a
- * push to main publishes the lines to the wiki's Test-counts page (SMD-3614).
+ * when it is set: each Fork Checks job that runs suites sets it and uploads the
+ * file (check-fork-consistency.ts 50 holds which), and on a push to main the
+ * lines are published to the wiki's Test-counts page (SMD-3614, SMD-3709).
  * Unset, as a run on a laptop leaves it, nothing is written. One
  * appendFileSync of one short line, so legs that run side by side in one job
  * do not interleave. A failed write is said and leaves the exit code alone:
