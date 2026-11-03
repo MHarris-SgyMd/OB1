@@ -47,9 +47,8 @@ row() {
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
 # pair legs, about twice the slowest honest row here under the lanes' load
-# (test-live's extract shard, ~300 s);
-# OB1_PARITY_ROW_LIMIT sets another. Scratch files go in PARITY_TMP, macOS's
-# TMPDIR without its closing slash.
+# (test-live's extract shard, ~300 s); OB1_PARITY_ROW_LIMIT sets another.
+# Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in
   *[!0-9]* | 0*) echo "OB1_PARITY_ROW_LIMIT must be a whole number of seconds over 0 with no leading zero, not '$ROW_LIMIT'" >&2; exit 2 ;;
@@ -335,11 +334,13 @@ live_rows() {
   at_row ''
   return "$FAILED"
 }
-# The live lanes' shards, in the order they are printed: read from live_rows'
-# own rows, so the shards started are the ones check 35 holds to the workflow
-# (review pass 1: a shard left off a list typed here passed check 35 and never
-# ran).
-LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
+# The live lanes' shards, in the order they are printed: read from the file's
+# test-live rows, so the shards started are the ones check 35 holds to the
+# workflow (review pass 1: a shard left off a list typed here passed check 35
+# and never ran). Check 35 also holds each such row to this sed's one shape,
+# each shard once (review pass 2: an aligned or commented row passed it and
+# was read here as no row).
+LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z][a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
 [ -n "$LIVE_SHARDS" ] || { echo "ci-parity.sh reads no OB1_LIVE_SHARD row in live_rows, so would start no test-live shard" >&2; exit 2; }
 
 # The lanes beside the database lane: each writes to a file, printed when the
@@ -347,12 +348,12 @@ LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z]*\) run db test-live\.ts$/\1/p'
 # another's. A Ctrl-C stops them whole through stop_lanes, since a
 # non-interactive shell's background job ignores SIGINT and their suites would
 # otherwise run on after the script has gone (each lane's with-postgres.sh
-# removes its container as it exits, and stop_lanes waits for that). A TERM to this script alone does too,
-# once the database lane's row in hand ends: bash runs a trap only between
-# commands. A closed terminal's hangup reaches them itself (main()). Their
-# files are in one directory, printed as the lanes start so `tail -f` can
-# follow a lane: NAME.out its rows so far, NAME.now the row in hand, since
-# when, and the row before (SMD-3647).
+# removes its container as it exits, and stop_lanes waits for that). A TERM to
+# this script alone does too, once the database lane's row in hand ends: bash
+# runs a trap only between commands. A closed terminal's hangup reaches them
+# itself (main()). Their files are in one directory, printed as the lanes start
+# so `tail -f` can follow a lane: NAME.out its rows so far, NAME.now the row in
+# hand, since when, and the row before (SMD-3647).
 start_lanes() {
   local shard
   LANES=$(mktemp -d "$PARITY_TMP/ci-parity-lanes.XXXXXX")
@@ -377,8 +378,24 @@ stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
   # Each with-postgres.sh removes its container as it exits, ignoring signals
-  # meanwhile: waited for, so none outlives the script (review pass 1).
-  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do wait "$pid" 2>/dev/null; done
+  # meanwhile: waited for, so none outlives the script (review pass 1), up to
+  # 30 s a lane, so a stuck removal cannot hold the prompt (review pass 2). A
+  # lane that has exited is a zombie until waited for, so its state is read.
+  local n
+  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do
+    n=0
+    while [ "$n" -lt 30 ]; do
+      case "$(ps -o stat= -p "$pid" 2>/dev/null)" in
+        '' | Z*) break ;;
+      esac
+      sleep 1; n=$((n + 1))
+    done
+    if [ "$n" -lt 30 ]; then
+      wait "$pid" 2>/dev/null
+    else
+      echo "  … lane $pid is still removing its container after 30 s; check podman ps" >&2
+    fi
+  done
   drop_lanes
 }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.

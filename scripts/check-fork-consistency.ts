@@ -10510,6 +10510,12 @@ checkJobTimeouts();
 // line no step runs as written is stale. What ci-parity.sh cannot run is
 // excused by job or by script with why.
 const PARITY_SCRIPT = "db/ci-parity.sh";
+/**
+ * A test-live row as ci-parity.sh's live lanes read it (SMD-3688): its LIVE_SHARDS is this shape's shards, read
+ * by sed, so a row check 35 reads in another shape (aligned columns, a comment after, quotes) would pass here and
+ * never run.
+ */
+const LIVE_SHARD_ROW = /^ *OB1_LIVE_SHARD=([a-z]+) run db test-live\.ts$/;
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
@@ -10670,6 +10676,15 @@ function checkCiParity() {
   // Were these missed, the reading is broken, not the two files in step.
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+  // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
+  const parityText = readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n");
+  const laneShards = new Set<string>();
+  for (const r of parity.runs.filter((p) => p.script === "test-live.ts")) {
+    const m = LIVE_SHARD_ROW.exec(parityText[r.line - 1]);
+    if (!m) fail(PARITY_SCRIPT, `line ${r.line} runs test-live.ts in a shape its live lanes do not read, so the shard would never start — write it \`OB1_LIVE_SHARD=<shard> run db test-live.ts\`, single spaces and nothing after (check 35, SMD-3688)`);
+    else if (laneShards.has(m[1])) fail(PARITY_SCRIPT, `line ${r.line} runs test-live's ${m[1]} shard a second time, which would start two lanes on one lane's files — each shard is one row (check 35, SMD-3688)`);
+    else laneShards.add(m[1]);
+  }
 }
 checkCiParity();
 
