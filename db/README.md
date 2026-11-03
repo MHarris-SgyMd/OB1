@@ -2356,16 +2356,28 @@ its trust (046's ceiling of the kind; an unclassified key has none), its scope,
 and whether the operator declared it a priority source. Those set its **tier**,
 which decides whose statement wins: 1 operator trust, 2 a declared source, 3
 agent trust, 4 inferred (flagged so by its maker, ingested trust from an
-undeclared key, or no trust); the lowest tier wins, then the newest within it,
-then the later written (`seq`). A maker may lower its own tier, never raise it.
-A key's new statement on an item closes its open one as `replaced`, naming the
-new one; `clear_priority` closes the caller's own as `cleared` and no other
-key's. `priority_assertions` is append-only: a trigger refuses any UPDATE but an
-open row closing once, every DELETE and TRUNCATE, for the owner too. A
-**capture-only key** may state a priority only on a thought it wrote (the row's
-own `actor_name`), never on a ticket, an entity or another key's thought, and a
-**read key** never: both are refused as outcomes (`ITEM_NOT_YOURS`,
-`READ_ONLY_KEY`), as an unknown item is (`ITEM_NOT_FOUND`). `priority_of` reads a
+undeclared key, or no trust); the lowest tier wins, then the newest within it —
+the later written (`seq`, the order the writers took the item's lock in; the
+clock's `asserted_at` is for display). A maker may lower its own tier, never
+raise it. The maker is the key: the envelope's agent id, else the registry's for
+its name, so a key seen with its id and without it is one maker. A key's new
+statement on an item closes its open one as `replaced`, naming the new one; the
+same statement again (level, times, reference, reason, flag and tier) answers
+`unchanged` and writes nothing, so a source restating every pass adds no rows;
+`clear_priority` closes the caller's own as `cleared` and no other key's.
+`not_before` after `due_at` is refused. `priority_assertions` is append-only: a trigger refuses any UPDATE but an
+open row closing once, every DELETE and TRUNCATE, for the owner too. The
+scope rule **fails closed**: the envelope must state `write` (any item) or
+`capture`; a read key's scope, or none at all, is refused (`READ_ONLY_KEY`). The
+server's envelopes carry a scope only for a capture key today, so SMD-3664's
+operations state `write`. A **capture-only key** may state a priority only on a
+thought its agent captured and nobody has taken since (082's
+`ob1_capturer_of` and `ob1_thought_taken`, by agent id), and take a due time
+only from another such thought — never a ticket, an entity or another key's
+thought. That is asked before any existence answer and refused alike for an
+item that is not there (`ITEM_NOT_YOURS`), so the refusal tells it nothing about
+what exists. The refusals are outcomes, as an unknown item is
+(`ITEM_NOT_FOUND`). `priority_of` reads a
 JSON array of items (at most 1000) in one query: each item's winning level, the
 winner, and every open assertion, the winner first; `priority_history` reads
 every statement on one item, closed ones included, in the order written.
@@ -2380,8 +2392,8 @@ writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
 lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach
 the rows on a forgotten item, and relaxes the trigger to do so. The **priority**
-grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068
-and 115; a re-apply is a no-op. The REST and MCP operations are SMD-3664's.
+grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
+082 and 115; a re-apply is a no-op. The REST and MCP operations are SMD-3664's.
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 

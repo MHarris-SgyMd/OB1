@@ -411,6 +411,7 @@ const FUNCTIONS = [
   "ob1_priority_item_exists(text, text)",
   "ob1_priority_actor(jsonb, text)",
   "ob1_priority_tier(boolean, boolean, text)",
+  "ob1_priority_owns(text, uuid)",
   "ob1_priority_json(priority_assertions)",
   "ob1_priority_isolation(text)",
   "ob1_priority_lock(text, text)",

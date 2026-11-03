@@ -16467,7 +16467,9 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   type Answer = { outcome: string; code: string | null; message: string | null; assertion: Assertion | null; replaced: Assertion | null; winner: Assertion | null };
   const file = files.find((f) => /^\d{3}_priority_assertions\.sql$/.test(f)) ?? "no NNN_priority_assertions.sql";
   const src = readFileSync(join(MIGRATIONS, file), "utf8");
-  const OP = { name: "prio-op" }, BOT = { name: "prio-bot" }, BOT2 = { name: "prio-bot2" }, SYNC = { name: "prio-sync" }, IMPORT = { name: "prio-import" }, ANON = { name: "prio-anon" };
+  // A writer's envelope states its scope (the rule fails closed on one that does not).
+  const W = { scope: "write" };
+  const OP = { name: "prio-op", ...W }, BOT = { name: "prio-bot", ...W }, BOT2 = { name: "prio-bot2", ...W }, SYNC = { name: "prio-sync", ...W }, IMPORT = { name: "prio-import", ...W }, ANON = { name: "prio-anon", ...W };
   const CAP = { name: "prio-cap", scope: "capture" }, READ = { name: "prio-read", scope: "read" };
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('prio-op', 'operator'), ('prio-bot', 'agent'), ('prio-bot2', 'agent'), ('prio-cap', 'agent'), ('prio-sync', 'ingested'), ('prio-import', 'ingested'), ('prio-read', 'agent')`);
   // A raise is an outcome here, named, so a broken rule fails its own row rather than ending the suite.
@@ -16484,11 +16486,13 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
   const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
   const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
-  // A thought written by a key: a raw insert stamped from the envelope (050).
+  // A thought written by a key: a raw insert stamped from the envelope (050), with the key's agent id as the server sends it (the capture row's, 082).
+  const agentOf = async (label: string) => (await db.query<{ id: string | null }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).rows[0]?.id ?? null;
   const thoughtBy = async (who: string, content: string, metadata: object | null = null) => {
     let id = "";
+    const agent = await agentOf(who);
     await db.transaction(async (tx) => {
-      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: who })]);
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(agent ? { name: who, agent_id: agent } : { name: who })]);
       id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id`, [content, metadata === null ? null : JSON.stringify(metadata)])).rows[0].id;
     });
     return id;
@@ -16536,6 +16540,20 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
          && opReal.replaced?.inferred === true && w1 === "prio-sync" && w2 === "prio-op" && w3 === "prio-sync",
     `decision 4's tiers: an agent 3, an ingested key undeclared and an unclassified key 4, a declared source 2, the operator flagging its own inferred 4; the source wins over newer agent statements, the operator's own (replacing its inferred one) over the source, and the source again once it clears (${JSON.stringify(tiers)}, ${w1}, ${w2}, ${w3})`);
 
+  // One key, one maker: seen once with its agent id and once without, its second statement replaces its first.
+  const both = await thoughtBy("prio-op", "[104] one key, with and without its id");
+  const byName = await put("thought", both, 2, BOT);
+  const byId = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
+  const openBoth = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [both])).rows[0].n;
+  // The same statement again: unchanged, no row written, "newest" not moved.
+  const rows0 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  const again = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
+  const rows1 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  const changed = await put("thought", both, 3, BOT, { reason: "now with a reason" });
+  assert(byId.replaced?.id === byName.assertion?.id && openBoth === 1 && byName.assertion?.maker.agent_id === byId.assertion?.maker.agent_id && byName.assertion?.maker.agent_id !== null
+         && again.outcome === "unchanged" && again.assertion?.id === byId.assertion?.id && rows1 === rows0 && changed.outcome === "asserted" && changed.replaced?.id === byId.assertion?.id,
+    `a key seen without its agent id (the registry's for its name) and with it is one maker — one open statement; the same statement again is unchanged and writes no row, a new reason a new statement (${openBoth}, ${again.outcome}, ${rows1 - rows0}, ${changed.outcome})`);
+
   // Newest within a tier.
   const twin = await thoughtBy("prio-op", "[104] two agents on one item");
   await put("thought", twin, 1, BOT);
@@ -16560,9 +16578,29 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(capOther.outcome === "refused" && capOther.code === "ITEM_NOT_YOURS" && capOwn.outcome === "asserted" && capOwn.assertion?.maker.scope === "capture"
          && capOwn.assertion?.maker.trust === "agent" && capOwn.assertion?.tier_name === "agent" && capTicket.code === "ITEM_NOT_YOURS" && capEntity.code === "ITEM_NOT_YOURS",
     `a capture-only key: refused on the operator's thought, a ticket and an entity (ITEM_NOT_YOURS); on the thought it wrote, stored at its own trust and tier (${capOther.code}, ${capOwn.assertion?.tier_name}, ${capTicket.code}, ${capEntity.code})`);
+  // It learns nothing of what exists: a ticket that is there and one that is not, a thought that is not there — one answer, word for word.
+  const capReal = await put("ticket", "SMD-9301", 5, CAP), capGhost = await put("ticket", "SMD-9397", 5, CAP), capNone = await put("thought", "11111111-2222-4333-8444-555555555555", 5, CAP);
+  // A due time only from another thought of its own.
+  const capOwn2 = await thoughtBy("prio-cap", "[104] a capture key's second note");
+  const capRefOther = await put("thought", capThought, 4, CAP, { ref: ["thought", opThought] });
+  const capRefOwn = await put("thought", capThought, 4, CAP, { ref: ["thought", capOwn2] });
+  // A thought another key takes (082: an update by another agent) is no longer its own.
+  // The id read before the transaction: PGlite has one connection, and a query outside an open transaction waits on it.
+  const opAgent = await agentOf("prio-op");
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify({ name: "prio-op", agent_id: opAgent })]);
+    await tx.query(`UPDATE thoughts SET content = content || ' (the operator rewrote it)' WHERE id = $1::uuid`, [capOwn2]);
+  });
+  const capTaken = await put("thought", capOwn2, 3, CAP);
+  assert(capReal.code === "ITEM_NOT_YOURS" && capGhost.code === "ITEM_NOT_YOURS" && capNone.code === "ITEM_NOT_YOURS" && capReal.message === capGhost.message && capGhost.message === capNone.message
+         && capRefOther.code === "ITEM_NOT_YOURS" && capRefOwn.outcome === "asserted" && capRefOwn.assertion?.due_ref?.key === capOwn2 && capTaken.code === "ITEM_NOT_YOURS",
+    `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code})`);
   const readKey = await put("thought", capThought, 1, READ);
   const readClear = await clear("thought", capThought, READ);
-  assert(readKey.code === "READ_ONLY_KEY" && readClear.code === "READ_ONLY_KEY", `a read key may neither state nor clear a priority (${readKey.code}, ${readClear.code})`);
+  const unstated = await put("thought", opThought, 1, { name: "prio-bot" });
+  const unstatedClear = await clear("thought", opThought, { name: "prio-bot" });
+  assert(readKey.code === "READ_ONLY_KEY" && readClear.code === "READ_ONLY_KEY" && unstated.code === "READ_ONLY_KEY" && unstatedClear.code === "READ_ONLY_KEY",
+    `a read key may neither state nor clear a priority, and neither may an envelope stating no scope — the rule fails closed (${readKey.code}, ${readClear.code}, ${unstated.code}, ${unstatedClear.code})`);
 
   // Items: a ticket's key normalised, an unknown one refused, an entity, an open item refused until SMD-3665.
   const ticket = await put("ticket", " smd-9301 ", 3, SYNC);
@@ -16577,12 +16615,13 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   // Arguments: off the scale, a malformed item, a half or self due reference, a reason too long — raised; a due reference kept; a reason cleaned.
   const bad = await Promise.all([put("thought", opThought, 6, OP), put("thought", opThought, -1, OP), put("thought", opThought, null, OP), put("folder", opThought, 2, OP),
     put("thought", "not-a-uuid", 2, OP), put("thought", opThought, 2, OP, { ref: ["ticket", "SMD-9301"], refHalf: true }), put("thought", opThought, 2, OP, { ref: ["thought", opThought] }),
-    put("thought", opThought, 2, OP, { reason: "x".repeat(1001) })]);
+    put("thought", opThought, 2, OP, { reason: "x".repeat(1001) }),
+    ans(`SELECT assert_priority('thought', $1, 2, '2026-11-01'::timestamptz, '2026-12-01'::timestamptz, p_actor => $2::jsonb) AS r`, [opThought, JSON.stringify(OP)])]);
   const refUnknown = await put("thought", opThought, 2, OP, { ref: ["ticket", "SMD-9398"] });
   const withRef = await put("thought", opThought, 3, OP, { ref: ["ticket", "smd-9301"], due_at: "2026-11-03T00:00:00Z", reason: "before" + String.fromCharCode(7) + "the cut" + String.fromCharCode(160) + " " });
   assert(bad.every((b) => b.outcome.startsWith("raised:") && b.code === "22023") && refUnknown.code === "ITEM_NOT_FOUND"
          && withRef.assertion?.due_ref?.key === "SMD-9301" && withRef.assertion?.reason === "before the cut" && withRef.assertion?.due_at !== null,
-    `a level of 6, -1 or none, an unknown kind, a malformed id, half a due reference, one naming itself and a reason past 1000 characters each raise 22023; an unknown due reference is refused; a kept one normalised, the reason cleaned (${bad.map((b) => b.code).join(",")}; ${JSON.stringify(withRef.assertion?.reason)})`);
+    `a level of 6, -1 or none, an unknown kind, a malformed id, half a due reference, one naming itself, a reason past 1000 characters and not_before after due_at each raise 22023; an unknown due reference is refused; a kept one normalised, the reason cleaned (${bad.map((b) => b.code).join(",")}; ${JSON.stringify(withRef.assertion?.reason)})`);
 
   // clear: the caller's own only.
   const clearOther = await clear("thought", opThought, BOT2);

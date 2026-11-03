@@ -708,8 +708,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 029, 046 or 050 ([20bf]); 115 adds work claims — a table, its index
   // and fourteen functions — refusing by name without 008, 046 or 061
   // ([20bg]); 116 adds priority assertions — three tables, two refusing
-  // triggers and seventeen functions — refusing by name without 008, 046, 061,
-  // 068 or 115 ([20bh]) — all
+  // triggers and eighteen functions — refusing by name without 008, 046, 061,
+  // 068, 082 or 115 ([20bh]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
@@ -5274,8 +5274,8 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
   const before = await rows(), auditBefore = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the116 });
   type Answer = { outcome: string; assertion: { tier_name: string } | null; winner: { maker: { name: string } } | null };
-  const op = ((await sql`SELECT assert_priority('thought', ${target}, 3, p_actor => ${actor}::jsonb) AS r`)[0] as { r: Answer }).r;
-  const bot = ((await sql`SELECT assert_priority('thought', ${target}, 4, p_actor => ${{ name: "upgrade-bot" }}::jsonb) AS r`)[0] as { r: Answer }).r;
+  const op = ((await sql`SELECT assert_priority('thought', ${target}, 3, p_actor => ${{ ...actor, scope: "write" }}::jsonb) AS r`)[0] as { r: Answer }).r;
+  const bot = ((await sql`SELECT assert_priority('thought', ${target}, 4, p_actor => ${{ name: "upgrade-bot", scope: "write" }}::jsonb) AS r`)[0] as { r: Answer }).r;
   assert((await rows()) === before && (await audits()) === auditBefore && op.outcome === "asserted" && op.assertion?.tier_name === "operator"
          && bot.outcome === "asserted" && bot.assertion?.tier_name === "agent" && bot.winner?.maker.name === "upgrade-op",
     `applied, the file moves no thought nor audit row; an operator's High and an agent's Urgent on one thought, the operator's the winner (${op.outcome}, ${bot.assertion?.tier_name}, ${bot.winner?.maker.name})`);

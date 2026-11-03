@@ -53,6 +53,9 @@
 --                        undeclared key, or a key with no trust at all.
 --        A maker may lower its own tier (`inferred`), never raise it: the flag
 --        is checked first, then the declaration, then the trust.
+--      * THE ORDER: seq, the order rows were written under the item's lock —
+--        the history's order and what "newest" means; asserted_at is the
+--        clock's, for display.
 --      * THE WINDOW: asserted_at, and closed_at with close_reason — replaced
 --        (closed_by names the assertion that replaced it) or cleared. A new
 --        assertion by the same maker on the same item closes that maker's
@@ -81,17 +84,29 @@
 --      ob1_agents UPDATE). A withdrawn declaration is kept with when; the
 --      assertions made under it keep their tier.
 --
---   5. WHO MAY ASSERT (decision 10):
---      * a read key may not (an envelope whose scope is `read`);
---      * a capture-only key only on a thought it wrote — the row's own stamp
---        (metadata.actor_name, 050) names it — never on a ticket, an entity
---        or another key's thought (SMD-2617: it may not state a ticket's
---        status either), and its assertion takes its own trust's tier;
---      * a write key on any item;
+--   5. WHO MAY ASSERT (decision 10), failing closed:
+--      * the envelope must state its scope: `write` for any item, `capture`
+--        for a capture-only key; any other scope, a read key's or none at
+--        all, is refused (READ_ONLY_KEY). The server's envelopes carry a
+--        scope only for a capture key today, so its operations (SMD-3664)
+--        state `write` for a write key;
+--      * a capture-only key only on a thought its agent captured and nobody
+--        has taken since (082's ob1_capturer_of and ob1_thought_taken, by
+--        agent id, as the maker is), and a due time only from another such
+--        thought — never a ticket, an entity or another key's thought
+--        (SMD-2617: it may not state a ticket's status either). Asked before
+--        any existence answer and refused alike for an item that is not there
+--        (ITEM_NOT_YOURS), so the refusal tells it nothing about what exists.
+--        Its assertion takes its own trust's tier;
 --      * an ingested key at tier 4 unless declared a source.
---      Both refusals are outcomes (ITEM_NOT_YOURS, READ_ONLY_KEY), as an
---      unknown item is (ITEM_NOT_FOUND); a malformed argument, an envelope
---      naming nobody and a transaction above READ COMMITTED raise.
+--      The refusals are outcomes, as an unknown item is (ITEM_NOT_FOUND); a
+--      malformed argument, an envelope naming nobody and a transaction above
+--      READ COMMITTED raise.
+--   THE MAKER is the key: the envelope's agent id, else the registry's for
+--   its name, else its name — so a key seen with its id and without it is one
+--   maker. THE SAME STATEMENT AGAIN (level, times, reference, reason, flag and
+--   tier as the maker's open one) is answered `unchanged` and writes nothing,
+--   so a source restating every pass adds no rows.
 --
 --   6. THE FUNCTIONS (SECURITY INVOKER, PUBLIC's EXECUTE as every core
 --      function):
@@ -149,15 +164,15 @@
 --
 -- SAFETY
 --   Three new tables, their indexes, two refusing triggers on the first;
---   seventeen functions (five calls, a drift check, a rebuild, the triggers'
---   function and nine helpers);
+--   eighteen functions (five calls, a drift check, a rebuild, the triggers'
+--   function and ten helpers);
 --   nothing existing is changed. MINOR under FORK.md's version rules.
 --   test-schema [104] (the rules), test-upgrade [20bh].
 --
 -- Prerequisites
 --   008 (ob1_current_actor), 046 (ob1_registry_kind, ob1_trust_ceiling), 061
---   (ob1_actor_agent_id), 068 (ob1_ticket_head), 115 (ob1_work_claim_text,
---   ob1_work_claim_issue). Applied by `bun db/migrate.ts`. Re-applied: the
+--   (ob1_actor_agent_id), 068 (ob1_ticket_head), 082 (ob1_capturer_of,
+--   ob1_thought_taken), 115 (ob1_work_claim_text, ob1_work_claim_issue). Applied by `bun db/migrate.ts`. Re-applied: the
 --   tables and their rows are kept, and the functions and trigger are
 --   replaced as they were.
 -- =============================================================================
@@ -172,7 +187,9 @@ DECLARE
     ARRAY['ob1_trust_ceiling(text, text)', '046 (ob1_trust_ceiling)'],
     ARRAY['ob1_actor_agent_id()', '061 (ob1_actor_agent_id)'],
     ARRAY['ob1_work_claim_text(text, integer, text)', '115 (ob1_work_claim_text)'],
-    ARRAY['ob1_work_claim_issue(text)', '115 (ob1_work_claim_issue)']];
+    ARRAY['ob1_work_claim_issue(text)', '115 (ob1_work_claim_issue)'],
+    ARRAY['ob1_capturer_of(uuid)', '082 (ob1_capturer_of)'],
+    ARRAY['ob1_thought_taken(uuid)', '082 (ob1_thought_taken)']];
   i int;
 BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
@@ -227,6 +244,7 @@ CREATE TABLE IF NOT EXISTS priority_assertions (
   CONSTRAINT priority_assertions_due_ref   CHECK ((due_ref_kind IS NULL) = (due_ref_key IS NULL)
                                                   AND (due_ref_kind IS NULL OR due_ref_kind IN ('thought', 'ticket', 'entity', 'item'))
                                                   AND NOT (due_ref_kind IS NOT DISTINCT FROM item_kind AND due_ref_key IS NOT DISTINCT FROM item_key)),
+  CONSTRAINT priority_assertions_window    CHECK (due_at IS NULL OR not_before IS NULL OR not_before <= due_at),
   CONSTRAINT priority_assertions_reason    CHECK (reason IS NULL OR (reason <> '' AND length(reason) <= 1000 AND reason !~ '[[:cntrl:]]')),
   CONSTRAINT priority_assertions_maker     CHECK (maker_name <> '' AND length(maker_name) <= 200),
   CONSTRAINT priority_assertions_kind      CHECK (maker_kind IS NULL OR maker_kind IN ('operator', 'agent', 'ingested')),
@@ -235,8 +253,7 @@ CREATE TABLE IF NOT EXISTS priority_assertions (
   CONSTRAINT priority_assertions_tier      CHECK (tier BETWEEN 1 AND 4),
   CONSTRAINT priority_assertions_closed    CHECK ((closed_at IS NULL) = (close_reason IS NULL)
                                                   AND (close_reason IS NULL OR close_reason IN ('replaced', 'cleared'))
-                                                  AND (closed_by IS NULL OR close_reason = 'replaced')
-                                                  AND (closed_at IS NULL OR closed_at >= asserted_at))
+                                                  AND (closed_by IS NULL OR close_reason = 'replaced'))
 );
 
 COMMENT ON TABLE priority_assertions IS
@@ -246,9 +263,9 @@ COMMENT ON COLUMN priority_assertions.maker_name IS
 COMMENT ON COLUMN priority_assertions.maker_key IS
   'The maker as one value: its agent id, else ''name:'' and its name. One key has at most one open assertion per item. Migration 116 / SMD-3663.';
 COMMENT ON COLUMN priority_assertions.seq IS
-  'The order rows were written: the history''s order, and the tie-break for "newest" when two statements share a time (a clock''s resolution is not an order). Migration 116 / SMD-3663.';
+  'The order rows were written, under each item''s lock: the history''s order, and what "newest" means — a clock''s resolution and its steps are not an order. Migration 116 / SMD-3663.';
 COMMENT ON COLUMN priority_assertions.tier IS
-  'Whose statement wins (decision 4): 1 operator (operator trust), 2 source (a key the operator declared a priority source), 3 agent (agent trust), 4 inferred (flagged inferred, ingested trust from an undeclared key, or no trust). Lower wins, then newest within a tier. Stamped at the write. Migration 116 / SMD-3663.';
+  'Whose statement wins (decision 4): 1 operator (operator trust), 2 source (a key the operator declared a priority source), 3 agent (agent trust), 4 inferred (flagged inferred, ingested trust from an undeclared key, or no trust). Lower wins, then the newest within a tier (seq). Stamped at the write. Migration 116 / SMD-3663.';
 COMMENT ON COLUMN priority_assertions.reason IS
   'Free text the maker gives, control characters made spaces, at most 1000 characters. Shown as data, trusted for nothing; may hold personal data, so forget_thought (SMD-1723) must reach the rows on a forgotten item. Migration 116 / SMD-3663.';
 
@@ -365,7 +382,7 @@ STABLE
 AS $$
   SELECT CASE p_kind
     WHEN 'thought' THEN EXISTS (SELECT 1 FROM thoughts WHERE id = p_key::uuid)
-    WHEN 'ticket'  THEN EXISTS (SELECT 1 FROM ob1_ticket_head WHERE issue = p_key)
+    WHEN 'ticket'  THEN EXISTS (SELECT 1 FROM ob1_ticket_head WHERE issue_key = md5(p_key)::uuid AND issue = p_key)
     WHEN 'entity'  THEN EXISTS (SELECT 1 FROM ob1_entities WHERE id = p_key::uuid)
     ELSE false
   END
@@ -397,7 +414,10 @@ BEGIN
   IF length(name) > 200 THEN
     RAISE EXCEPTION USING MESSAGE = format('%s: a maker''s key name is at most 200 characters; this one has %s', p_what, length(name)), ERRCODE = 'invalid_parameter_value';
   END IF;
-  agent_id := ob1_actor_agent_id();
+  -- The envelope's agent id, else the registry's for the key's name: one key is
+  -- one maker whether or not the server had resolved its id (review pass 1: a
+  -- key seen once with its id and once without held two open statements).
+  agent_id := COALESCE(ob1_actor_agent_id(), (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = name));
   -- The registry's word for the key, never the envelope's: an envelope that
   -- says "kind" or "trust" says nothing here (050's rule).
   kind := ob1_registry_kind(agent_id, name);
@@ -410,7 +430,25 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_actor(jsonb, text) IS
-  'Sets ob1.actor from p_actor when given, then returns the envelope''s maker: name, 061''s agent id, 046''s registry kind and its trust ceiling, the envelope''s scope, and whether the operator declared it a priority source (by the name or the agent''s label). Raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 116 / SMD-3663.';
+  'Sets ob1.actor from p_actor when given, then returns the envelope''s maker: name, its agent id (061''s from the envelope, else the registry''s for the name), 046''s registry kind and its trust ceiling, the envelope''s scope, and whether the operator declared it a priority source (by the name or the agent''s label). Raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 116 / SMD-3663.';
+
+-- Whether a capture-only key's agent captured this thought and nobody has
+-- taken it since (082's reading: the capturer by agent id on the first capture
+-- row, a take by another agent's update). By id, as the maker is: a renamed key
+-- keeps its thoughts, and a key that once held the name gains none. No id, no
+-- thought: refused, never guessed from a name.
+CREATE OR REPLACE FUNCTION ob1_priority_owns(p_key text, p_agent uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  -- Never NULL: a thought that is not there has no capturer, and a NULL here
+  -- read as "not refused" in assert_priority's NOT(...), which then answered
+  -- ITEM_NOT_FOUND — the existence oracle this rule is asked first to close.
+  SELECT COALESCE(p_agent IS NOT NULL AND ob1_capturer_of(p_key::uuid) = p_agent AND NOT ob1_thought_taken(p_key::uuid), false)
+$$;
+COMMENT ON FUNCTION ob1_priority_owns(text, uuid) IS
+  'Whether the agent p_agent captured the thought p_key and no other agent has taken it since (082''s ob1_capturer_of and ob1_thought_taken): a capture-only key''s own thought. False, never NULL, for a NULL agent or a thought that is not there. Migration 116 / SMD-3663.';
 
 -- ob1:priority-tier
 CREATE OR REPLACE FUNCTION ob1_priority_tier(p_inferred boolean, p_source boolean, p_trust text)
@@ -474,8 +512,10 @@ $$;
 COMMENT ON FUNCTION ob1_priority_lock(text, text) IS
   'Takes the transaction advisory lock on one item''s assertions. Migration 116 / SMD-3663.';
 
--- The winner among an item's open assertions: lowest tier, then newest, then
--- the later written (seq). The rule; the drift check has its own copy.
+-- The winner among an item's open assertions: lowest tier, then the newest —
+-- the later written (seq), the order the writers took the item's lock in; a
+-- clock that steps back moves asserted_at and nothing here. The rule; the
+-- drift check has its own copy.
 CREATE OR REPLACE FUNCTION ob1_priority_winner(p_kind text, p_key text)
 RETURNS priority_assertions
 LANGUAGE sql
@@ -483,15 +523,15 @@ STABLE
 AS $$
   SELECT a.* FROM priority_assertions a
    WHERE a.item_kind = p_kind AND a.item_key = p_key AND a.closed_at IS NULL
-   ORDER BY a.tier, a.asserted_at DESC, a.seq DESC
+   ORDER BY a.tier, a.seq DESC
    LIMIT 1
 $$;
 COMMENT ON FUNCTION ob1_priority_winner(text, text) IS
-  'The winning open assertion on one item (decision 4): the lowest tier, then the newest within it, then the later written (seq); NULL when none is open. Migration 116 / SMD-3663.';
+  'The winning open assertion on one item (decision 4): the lowest tier, then the newest within it — the later written (seq), the order the writers took the item''s lock in; NULL when none is open. Migration 116 / SMD-3663.';
 
 -- The item's projection row made current: written, replaced or removed.
 CREATE OR REPLACE FUNCTION ob1_priority_project(p_kind text, p_key text)
-RETURNS void
+RETURNS priority_assertions
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -500,7 +540,7 @@ DECLARE
 BEGIN
   IF w.id IS NULL THEN
     DELETE FROM priority_current WHERE item_kind = p_kind AND item_key = p_key;
-    RETURN;
+    RETURN NULL;
   END IF;
   SELECT count(*)::int INTO n FROM priority_assertions WHERE item_kind = p_kind AND item_key = p_key AND closed_at IS NULL;
   INSERT INTO priority_current (item_kind, item_key, winner_id, level, tier, maker_name, asserted_at, open_count)
@@ -508,10 +548,11 @@ BEGIN
   ON CONFLICT (item_kind, item_key) DO UPDATE
      SET winner_id = EXCLUDED.winner_id, level = EXCLUDED.level, tier = EXCLUDED.tier,
          maker_name = EXCLUDED.maker_name, asserted_at = EXCLUDED.asserted_at, open_count = EXCLUDED.open_count;
+  RETURN w;
 END;
 $$;
 COMMENT ON FUNCTION ob1_priority_project(text, text) IS
-  'Makes one item''s priority_current row current: its winner and open count, or no row when none is open. Called by the writers under the item''s lock. Migration 116 / SMD-3663.';
+  'Makes one item''s priority_current row current — its winner and open count, or no row when none is open — and returns the winner (NULL for none). Called by the writers under the item''s lock. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- assert_priority
@@ -548,6 +589,9 @@ BEGIN
       MESSAGE = format('a priority level is 0 (none) to 5 (critical); %s is not', COALESCE(p_level::text, 'NULL')),
       ERRCODE = 'invalid_parameter_value';
   END IF;
+  IF p_due_at IS NOT NULL AND p_not_before IS NOT NULL AND p_not_before > p_due_at THEN
+    RAISE EXCEPTION USING MESSAGE = 'not_before is after due_at: the item could not start before it is due', ERRCODE = 'invalid_parameter_value';
+  END IF;
   IF (p_due_ref_kind IS NULL) <> (p_due_ref_key IS NULL) THEN
     RAISE EXCEPTION USING MESSAGE = 'a due reference takes both a kind and a key, or neither', ERRCODE = 'invalid_parameter_value';
   END IF;
@@ -560,9 +604,26 @@ BEGIN
   PERFORM ob1_priority_isolation('assert_priority');
   SELECT * INTO v_who FROM ob1_priority_actor(p_actor, 'assert_priority');
 
-  IF v_who.scope = 'read' THEN
+  -- Fail closed: the envelope states a scope that may write, write or capture
+  -- (review pass 1: a scope read from its absence let an envelope without one
+  -- write anything — the server's own envelopes carry none for a write key,
+  -- so its operations, SMD-3664, state it).
+  IF v_who.scope IS DISTINCT FROM 'write' AND v_who.scope IS DISTINCT FROM 'capture' THEN
     RETURN jsonb_build_object('outcome', 'refused', 'code', 'READ_ONLY_KEY',
-      'message', format('%s is a read key, which may not state a priority', v_who.name),
+      'message', format('%s states no write or capture scope, so it may not state a priority', v_who.name),
+      'assertion', NULL, 'replaced', NULL, 'winner', NULL);
+  END IF;
+
+  -- A capture-only key states a priority only on a thought its agent captured
+  -- and nobody has taken (082), and takes its due time only from another such
+  -- thought. Asked before any existence answer, and refused alike for an item
+  -- that is not there, so the refusal tells it nothing about what exists
+  -- (review pass 1).
+  IF v_who.scope = 'capture' AND NOT (
+       v_item.kind = 'thought' AND ob1_priority_owns(v_item.key, v_who.agent_id)
+       AND (v_ref_kind IS NULL OR (v_ref_kind = 'thought' AND ob1_priority_owns(v_ref_key, v_who.agent_id)))) THEN
+    RETURN jsonb_build_object('outcome', 'refused', 'code', 'ITEM_NOT_YOURS',
+      'message', format('%s is a capture-only key: it may state a priority only on a thought it captured, and take a due time only from another', v_who.name),
       'assertion', NULL, 'replaced', NULL, 'winner', NULL);
   END IF;
 
@@ -581,20 +642,23 @@ BEGIN
       'assertion', NULL, 'replaced', NULL, 'winner', NULL);
   END IF;
 
-  -- A capture-only key states a priority only on a thought it wrote: the row's
-  -- own stamp (050) names the writer of its current text.
-  IF v_who.scope = 'capture' AND NOT (
-       v_item.kind = 'thought'
-       AND EXISTS (SELECT 1 FROM thoughts t WHERE t.id = v_item.key::uuid AND t.metadata->>'actor_name' = v_who.name)) THEN
-    RETURN jsonb_build_object('outcome', 'refused', 'code', 'ITEM_NOT_YOURS',
-      'message', format('%s is a capture-only key: it may state a priority only on a thought it wrote, and this %s %s is not one', v_who.name, v_item.kind, v_item.key),
-      'assertion', NULL, 'replaced', NULL, 'winner', NULL);
-  END IF;
-
   SELECT * INTO v_old FROM priority_assertions a
    WHERE a.item_kind = v_item.kind AND a.item_key = v_item.key AND a.closed_at IS NULL
      AND a.maker_key = COALESCE(v_who.agent_id::text, 'name:' || v_who.name)
    FOR UPDATE;
+
+  -- The same statement again — level, times, reference, reason, flag and tier
+  -- as the open one says — is no change: answered unchanged, nothing written,
+  -- so a source restating its priority every pass (board-sync) adds no row
+  -- and moves no "newest" (review pass 1).
+  IF v_old.id IS NOT NULL
+     AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier)
+         IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false),
+                               ob1_priority_tier(p_inferred, v_who.source, v_who.trust)) THEN
+    SELECT * INTO v_win FROM priority_assertions WHERE id = (SELECT c.winner_id FROM priority_current c WHERE c.item_kind = v_item.kind AND c.item_key = v_item.key);
+    RETURN jsonb_build_object('outcome', 'unchanged', 'code', NULL, 'message', NULL,
+      'assertion', ob1_priority_json(v_old), 'replaced', NULL, 'winner', ob1_priority_json(v_win));
+  END IF;
 
   -- The maker's open one closes first, naming the id the new one is about to
   -- take: the unique index allows one open per maker at every moment.
@@ -609,8 +673,7 @@ BEGIN
           ob1_priority_tier(p_inferred, v_who.source, v_who.trust), v_now)
   RETURNING * INTO v_row;
 
-  PERFORM ob1_priority_project(v_item.kind, v_item.key);
-  v_win := ob1_priority_winner(v_item.kind, v_item.key);
+  v_win := ob1_priority_project(v_item.kind, v_item.key);
   RETURN jsonb_build_object('outcome', 'asserted', 'code', NULL, 'message', NULL,
     'assertion', ob1_priority_json(v_row),
     'replaced', CASE WHEN v_old.id IS NOT NULL THEN ob1_priority_json(v_old) END,
@@ -618,7 +681,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION assert_priority(text, text, int, timestamptz, timestamptz, text, text, text, boolean, jsonb) IS
-  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before, or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertion on the item, if any, closes as replaced. Returns jsonb {outcome: asserted | refused, code, message, assertion, replaced, winner}: refused READ_ONLY_KEY, ITEM_NOT_FOUND (the item, or the due reference), or ITEM_NOT_YOURS (a capture-only key on anything but a thought it wrote). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
+  'States that an item (p_kind thought, ticket, entity or item; p_key) matters at p_level (0 none to 5 critical), optionally due at p_due_at, not startable before p_not_before (never after p_due_at), or taking the due time of another item (p_due_ref_kind, p_due_ref_key), with p_reason; p_inferred lowers the maker''s tier to 4. The maker is the key p_actor names, its kind, trust, scope and source declaration the registry''s at the write, never an argument''s; its tier follows decision 4. The maker''s open assertion on the item, if any, closes as replaced; the same statement again is unchanged, nothing written. Returns jsonb {outcome: asserted | unchanged | refused, code, message, assertion, replaced, winner}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key on anything but a thought its agent captured and nobody took, or a due reference to one — asked before existence, and answered alike for an item that is not there), or ITEM_NOT_FOUND (the item, or the due reference). Raises for no maker, a malformed argument, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- clear_priority
@@ -640,9 +703,9 @@ DECLARE
 BEGIN
   PERFORM ob1_priority_isolation('clear_priority');
   SELECT * INTO v_who FROM ob1_priority_actor(p_actor, 'clear_priority');
-  IF v_who.scope = 'read' THEN
+  IF v_who.scope IS DISTINCT FROM 'write' AND v_who.scope IS DISTINCT FROM 'capture' THEN
     RETURN jsonb_build_object('outcome', 'refused', 'code', 'READ_ONLY_KEY',
-      'message', format('%s is a read key, which may not clear a priority', v_who.name), 'assertion', NULL, 'winner', NULL);
+      'message', format('%s states no write or capture scope, so it may not clear a priority', v_who.name), 'assertion', NULL, 'winner', NULL);
   END IF;
   PERFORM ob1_priority_lock(v_item.kind, v_item.key);
   v_now := clock_timestamp();
@@ -656,14 +719,13 @@ BEGIN
     RETURN jsonb_build_object('outcome', 'nothing_to_clear', 'code', NULL, 'message', NULL, 'assertion', NULL,
       'winner', CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END);
   END IF;
-  PERFORM ob1_priority_project(v_item.kind, v_item.key);
-  v_win := ob1_priority_winner(v_item.kind, v_item.key);
+  v_win := ob1_priority_project(v_item.kind, v_item.key);
   RETURN jsonb_build_object('outcome', 'cleared', 'code', NULL, 'message', NULL, 'assertion', ob1_priority_json(v_row),
     'winner', CASE WHEN v_win.id IS NOT NULL THEN ob1_priority_json(v_win) END);
 END;
 $$;
 COMMENT ON FUNCTION clear_priority(text, text, jsonb) IS
-  'Closes the caller''s own open assertion on an item as cleared, with none after; another key''s are untouched. Returns jsonb {outcome: cleared | nothing_to_clear | refused, code, message, assertion, winner}: refused READ_ONLY_KEY. The item need not exist (a statement on a thought since removed can still be cleared). Raises for no maker, a malformed item, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
+  'Closes the caller''s own open assertion on an item as cleared, with none after; another key''s are untouched. Returns jsonb {outcome: cleared | nothing_to_clear | refused, code, message, assertion, winner}: refused READ_ONLY_KEY (an envelope stating no write or capture scope). The item need not exist (a statement on a thought since removed can still be cleared). Raises for no maker, a malformed item, or a transaction above READ COMMITTED. Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- priority_of / priority_history
@@ -688,7 +750,7 @@ BEGIN
      ORDER BY n.kind, n.key, e.ord)
   SELECT q.kind, q.key, c.level,
          (SELECT ob1_priority_json(a) FROM priority_assertions a WHERE a.id = c.winner_id),
-         COALESCE((SELECT jsonb_agg(ob1_priority_json(a) ORDER BY (a.id = c.winner_id) DESC, a.tier, a.asserted_at DESC, a.seq DESC)
+         COALESCE((SELECT jsonb_agg(ob1_priority_json(a) ORDER BY (a.id = c.winner_id) DESC, a.tier, a.seq DESC)
                      FROM priority_assertions a
                     WHERE a.item_kind = q.kind AND a.item_key = q.key AND a.closed_at IS NULL), '[]'::jsonb)
     FROM asked q
@@ -755,7 +817,7 @@ AS $$
   WITH open AS (
          SELECT a.item_kind, a.item_key, a.id, a.level, a.tier, a.maker_name, a.asserted_at,
                 count(*) OVER (PARTITION BY a.item_kind, a.item_key) AS n,
-                row_number() OVER (PARTITION BY a.item_kind, a.item_key ORDER BY a.tier ASC, a.asserted_at DESC, a.seq DESC) AS rn
+                row_number() OVER (PARTITION BY a.item_kind, a.item_key ORDER BY a.tier ASC, a.seq DESC) AS rn
            FROM priority_assertions a WHERE a.closed_at IS NULL),
        fresh AS (SELECT * FROM open WHERE rn = 1)
   SELECT COALESCE(f.item_kind, c.item_kind), COALESCE(f.item_key, c.item_key),
@@ -775,12 +837,7 @@ AS $$
 DECLARE
   r record;
 BEGIN
-  IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
-    RAISE EXCEPTION USING
-      MESSAGE = format('ob1_rebuild_priority_projection() must run under READ COMMITTED; this transaction is %s', upper(current_setting('transaction_isolation'))),
-      HINT = 'BEGIN ISOLATION LEVEL READ COMMITTED; then call it.',
-      ERRCODE = 'feature_not_supported';
-  END IF;
+  PERFORM ob1_priority_isolation('ob1_rebuild_priority_projection()');
   written := 0;
   deleted := 0;
   -- Item by item under each item's own lock, the writers' order: never a lock
