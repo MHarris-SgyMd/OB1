@@ -2475,11 +2475,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — the learning path's six `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810). Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role — and family-calendar's carried neither; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `household_items`, `household_vendors` (extensions/household-knowledge) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `maintenance_tasks`, `maintenance_logs` (extensions/home-maintenance) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
+| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): three of the six, family-calendar's, home-maintenance's and household-knowledge's plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `family_members`, `activities`, `important_dates` (extensions/family-calendar — upstream's file carried no RLS and no grant; listed so the whole path is one grant) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
@@ -4368,7 +4365,7 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
 bun sleep.ts --url …               # wait for quiet, sleep once until its pools drain or its budget stops it, pausing for live calls
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
+#   --quiet SECONDS (300)   --capture SECONDS (20; at most the quiet)   --abort-after SECONDS (60; at least the 60 s stall floor)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N re-embed, N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before its pools drained (a live write during its sweep), or whose re-embed was set down or aside, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one sleep ended, or a second signal
@@ -4377,7 +4374,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_QUIET`, `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its four numbers, and `OB1_SLEEP_BUDGET`,
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its five numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -4450,7 +4447,7 @@ holding no claim, one mid-thought keeping its claim and the windows answered —
 and go on once `--capture` seconds (`OB1_SLEEP_CAPTURE`, 20, held to the
 quiet) have passed with no live write. The log says `paused:` and `resumed:`,
 and the row `paused { since }`. While paused, a model call in hand longer than
-60 s is aborted and its thought set back in the queue, extraction keeping its
+`--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at least the stall floor) is aborted and its thought set back in the queue, extraction keeping its
 answered windows and counting the stop (093); consolidation's at most three a
 sleep. As the passes go on, the thoughts stopped that way are moved behind
 the newer work. A pause is not the clock's: the budget counts the passes'
@@ -4731,7 +4728,9 @@ apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
 
 Since SMD-3379 PR 1c-2 the readers take two fields; 1c-3b writes `paused`,
-and 1c-4 will write `holds`. `paused { since }` is the scheduler paused by a live
+and 1c-4a `holds`: re-embed set aside on a model switch, or set down until
+the next sleep, neither with a time, and a claim pass whose start's refusal
+`--follow` retries, until its retry wait ends (the next sleep retries it). `paused { since }` is the scheduler paused by a live
 call, its gate closed since then (the database's clock), its passes waiting
 between thoughts. It is read on a live row alone, and `db/supervise.ts`
 drops it from a row it ends. `holds` is the passes the scheduler holds out
@@ -4747,7 +4746,7 @@ of its work, one to four, each `{ pass, why, until }`:
   event rather than a time.
 
 Paused is the state, before running: `brain_info` reads "paused by a live
-call for 40 s; held out: consolidate (provider)", `task_status` reads it
+call for 40 s; held out: reembed (provider)", `task_status` reads it
 running, and preflight's `sleep` row adds "its passes waiting between
 thoughts, going on once the brain is quiet … a live write pauses it". The
 re-embed and consolidate pass rows each name their own pass's hold, or the
@@ -6210,7 +6209,7 @@ bun test-schema.ts                          # PGlite, no container
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout run them one at a time for now ([2] edits a copy of the migrations since SMD-3639, but side by side is SMD-3688's to try)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 /**
  * test-auth.ts — every vendored server authenticates through the core server's
- * auth path: the seven extension servers (SMD-1252, FORK.md change 64) and the
+ * auth path: the extension servers (SMD-1252, FORK.md change 64; four of the
+ * seven, family-calendar, home-maintenance and household-knowledge plugins
+ * since SMD-2311) and the
  * recipes and integrations that compared a key the same way — six more MCP
  * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
  * change 67).
@@ -152,16 +154,10 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
 const SERVERS: Server[] = [
-  // The seven extension servers (change 64).
-  ext("family-calendar/index.ts", ["get_week_schedule", "search_activities", "get_upcoming_dates"],
-    ["add_family_member", "add_activity", "add_important_date"], { health: "/" }),
-  ext("home-maintenance/index.ts", ["get_upcoming_maintenance", "search_maintenance_history"],
-    ["add_maintenance_task", "log_maintenance"]),
-  ext("household-knowledge/index.ts", ["search_household_items", "get_item_details", "list_vendors"],
-    ["add_household_item", "add_vendor"]),
+  // The extension servers (change 64): four of the seven, family-calendar, home-maintenance and household-knowledge plugins since SMD-2311.
   ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
     ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
-     "log_interview_notes", "link_contact_to_professional_crm"]),
+     "log_interview_notes", "link_contact_to_professional_crm"], { health: "/" }),
   ext("meal-planning/index.ts", ["search_recipes", "get_meal_plan"],
     ["add_recipe", "update_recipe", "create_meal_plan", "generate_shopping_list"]),
   ext("professional-crm/index.ts", ["crm_search_contacts", "crm_get_contact_history", "crm_get_follow_ups", "crm_prep_context", "crm_stale_contacts"],
@@ -527,7 +523,7 @@ console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive 
 // extension server's real route and transport), the line at the ceiling and
 // mcpReply's wiring of it, and the real transport's answer the slow probe's
 // stand-in copies.
-const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/family-calendar/index.ts")!;
+const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/job-hunt/index.ts")!;
 {
   // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
   const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
@@ -553,7 +549,7 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/family-calendar/in
     const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
     assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
       `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
-    // A client that leaves mid-upload (review passes 3 and 4), at family-calendar's real route and
+    // A client that leaves mid-upload (review passes 3 and 4), at job-hunt's real route and
     // transport: logged once. On Bun 1.4.0 the signal aborts before the body read rejects (20 of 20
     // measured), so the listener registered before the read is what logs it; a read that failed first
     // would reach the transport's 400, which settles the request, and the abort after it would log nothing.

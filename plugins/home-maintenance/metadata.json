@@ -1,0 +1,26 @@
+{
+  "name": "Home Maintenance Plugin",
+  "description": "The house's maintenance tasks, one-time or recurring, and the log of work done on them, in tables of the plugin's own: every task with its id, what is due or overdue, logging work that moves a task on, and a search over the history. The learning path's Extension 2, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": [
+    "plugin",
+    "home",
+    "maintenance",
+    "scheduling",
+    "tracking"
+  ],
+  "difficulty": "beginner",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-02",
+  "updated": "2026-11-02"
+}

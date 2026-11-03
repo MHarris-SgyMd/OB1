@@ -1,0 +1,25 @@
+{
+  "name": "Household Knowledge Plugin",
+  "description": "Facts about the things in the home, with their particulars as a JSON object, and the vendors who work on it, in tables of the plugin's own: a search across names, places, notes and details, one item in full, and the vendors by service. The learning path's Extension 1, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": [
+    "plugin",
+    "household",
+    "home",
+    "knowledge-base"
+  ],
+  "difficulty": "beginner",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-02",
+  "updated": "2026-11-02"
+}

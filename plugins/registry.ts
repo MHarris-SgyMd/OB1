@@ -6,5 +6,8 @@
 
 import type { PluginManifest } from "../server-portable/plugin-sdk.ts";
 import example from "./example/index.ts";
+import familyCalendar from "./family-calendar/index.ts";
+import homeMaintenance from "./home-maintenance/index.ts";
+import householdKnowledge from "./household-knowledge/index.ts";
 
-export const PLUGINS: readonly PluginManifest[] = [example];
+export const PLUGINS: readonly PluginManifest[] = [example, familyCalendar, homeMaintenance, householdKnowledge];
