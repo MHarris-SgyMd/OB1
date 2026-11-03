@@ -1260,7 +1260,7 @@ bun run test:e2e          # the whole server over MCP with no Supabase at all, O
 ../db/with-postgres.sh bun test-rest-sql.ts  # the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ../db/with-postgres.sh bun test-preflight.ts  # the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer assertions with no DATABASE_URL, which skips the database sections)
-OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
+OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest in a job of its own (SMD-3691): the sections SHARDS in test-preflight.ts lists (SMD-3468)
 OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # every section SHARDS does not list; an assertion outside every section would count in both, which [doc] fails on
 ```
 

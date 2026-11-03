@@ -11,11 +11,11 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * OB1_PREFLIGHT_SHARD=first|rest runs one shard of the sections (SHARDS
- * below); unset, every section runs. CI runs the two side by side (SMD-3468):
+ * below); unset, every section runs. CI runs the two at once (SMD-3468):
  * the first beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195), and the rest on a
- * Postgres of its own. What the cluster shares — a role and its settings,
+ * while the data-layer job's other suites run (SMD-3195), and the rest in a
+ * job of its own, on a runner of its own (SMD-3691). What the cluster shares — a role and its settings,
  * pg_locks, pg_stat_activity — is scoped here to the current database, or
  * named for this suite (pf_*, ob1_pf_capture, "pf reader's").
  */

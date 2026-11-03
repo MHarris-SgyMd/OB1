@@ -4919,7 +4919,7 @@ const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
  * skip it: publish-test-counts, on a push to main, where nothing is gated.
  */
 const CHANGES_JOB = "changes";
-const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
+const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "preflight-rest", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
 const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code != 'false') }}`;
 /**
  * The changes job as written (review pass 1): a checkout on pull requests
