@@ -28,7 +28,7 @@ import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.t
 import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
-import { TAKEN_OVER, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
+import { TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
@@ -1769,15 +1769,44 @@ export const renderRunWorker = (o: Outcome<DryRunClaimResult, RunWorkerCode>): R
 
 const workText = (issue: string, piece: string | null) => `${issue}${piece ? ` ${oneLine(snipText(piece, 100))}` : ""}`;
 const holderText = (holder: string, ownKey: boolean) => ownKey ? `your own key (${oneLine(snipText(holder, 80))})` : oneLine(snipText(holder, 80));
-/** What a session of the caller's own key does about a claim its key holds under a token it does not have. */
-const OWN_KEY = "A claim by your own key is another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.";
-const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
-const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>) =>
-  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? OWN_KEY : "Leave it to its holder, or claim other work."}`;
+/**
+ * What a session of the caller's own key does about a claim its key holds: this session's own claim on overlapping
+ * work (its id in the worktree's token files — a whole-ticket claim while it claims a piece), another session of
+ * the key, or this one without its token (SMD-3654: the words gave the lost-token way to a session holding both).
+ */
+const ownKey = (mine: string) => `A claim by your own key is this session's own (its id is in your worktree's .work-claims/: ${mine}), another session of yours, or this one without its token: list_claims shows each claim's label. If this session lost its token, claim the work again once the claim lapses, or ask an operator to release it with force and a reason.`;
+const OWN_KEY = ownKey("work under it, or release it and claim the piece");
+/** On a renewal the caller's claim lapsed and another covers its work: one of this session's own makes the lapsed one spare (review pass 1). */
+const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were renewing and delete its token file");
+/** Another claim's work and holder, its piece quoted (another key's words): the start of heldLine and sinceLine. */
+const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
+const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
+  `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
 const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOver
   ? `Refused: claim ${r.id} lapsed and was taken over${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}: stop work on it; list_claims shows the claim that holds the work now.`
-  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, claim it again.`;
+  : `Refused: claim ${r.id} was released${r.releasedBy ? ` by ${oneLine(snipText(r.releasedBy, 80))}` : ""}${r.releasedAt ? ` at ${r.releasedAt}` : ""}${r.reason ? ` (${JSON.stringify(oneLine(snipText(r.reason, 200)))})` : ""}; if the work is still yours to do, ask the user before claiming it again: a release may be an operator's, made on purpose.`;
+/**
+ * A renewal that revived a lapsed claim (SMD-3654): when it lapsed, and what was claimed or renewed on its work
+ * meanwhile — each claim by its work (a piece quoted, as heldLine does: another key's piece is its words, not ours),
+ * holder, times and state, never its label, the first SINCE_MAX and a count of the rest. None: said so. Unread, or
+ * whether it had lapsed unread: said so, with one check to make and what each answer means (review pass 1). The
+ * check's bound when the lease is unread is the claim's own claimedAt: no overlapping claim is made or renewed while
+ * it is live, so one after it came in a lapse (review pass 2: "your previous lease ran out" was a time nothing kept).
+ */
+const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
+  `${heldWho(c)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
+const lapseCheck = (after: string, id: string) =>
+  `list the ticket's claims with list_claims and include_ended: a claim other than this one (claim ${id}) on its work, claimed or renewed after ${after}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
+const lapseText = (l: ClaimLapse | undefined, claim: WorkClaim) => {
+  if (!l) return "";
+  if (l.at === null) return ` Whether it had lapsed could not be read: ${lapseCheck(`${claim.claimedAt}, when this claim was made`, claim.id)}`;
+  if (l.claimedSince === null) return ` It had lapsed at ${l.at}, and the claims made or renewed on its work since could not be read: ${lapseCheck(l.at, claim.id)}`;
+  if (!l.claimedSince.length) return ` It had lapsed at ${l.at}; no other claim was made or renewed on its work meanwhile.`;
+  const n = l.claimedSince.length + (l.moreSince ?? 0);
+  return ` It had lapsed at ${l.at}, and since then ${n === 1 ? "another claim was" : `${n} claims were`} made or renewed on its work: ${l.claimedSince.map(sinceLine).join("; ")}${l.moreSince ? `; and ${l.moreSince} more, which list_claims with include_ended shows` : ""}. Another agent may have built part of the work: stop, and tell the user before carrying on.`;
+};
 // 115's words can quote the caller's argument (a ticket key it could not read, cut at 80 characters): a token passed
 // in the wrong one is masked, a cut one too.
 const claimInput = (r: Extract<Refusal, { code: "REFUSED_CLAIM_INPUT" }>) => `Refused: ${oneLine(snipText(r.message.replace(/wc_[0-9a-f]{8,}/gi, "[a work-claim token]"), 300))}`;
@@ -1800,17 +1829,19 @@ const notYours = (r: Extract<Refusal, { code: "CLAIM_NOT_YOURS" }>) =>
 export const renderClaimWork = (o: Outcome<ClaimWorkResult, ClaimWorkCode>): Reply => render(o, (v) =>
   v.outcome === "claimed"
     ? `Claimed ${workText(v.claim.issue, v.claim.piece)} for ${oneLine(snipText(v.claim.holder, 80))} until ${v.claim.expiresAt} (claim ${v.claim.id}). Token: ${v.token} — keep it where only you read it, pass it to renew_claim and release_claim, and never write it into a thought, a commit, a PR, a ticket or a log.`
-    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+    : `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
 (r) => r.code === "WORK_CLAIMED" ? inTheWay(r) : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r)
+  // Its own ended claim's token, refused before 115 made a new claim of it (review pass 3), in renew_claim's words.
+  : r.code === "CLAIM_RELEASED" ? endedText(r)
   : r.code === "REFUSED_CLAIM_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is an ingested (importer's) key, which cannot claim work.` : unknownRefusal(r), AS_JSON);
 
 export const renderRenewClaim = (o: Outcome<RenewClaimResult, RenewClaimCode>): Reply => render(o,
-  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).`,
+  (v) => `Renewed your claim on ${workText(v.claim.issue, v.claim.piece)} until ${v.claim.expiresAt} (claim ${v.claim.id}).${lapseText(v.lapsed, v.claim)}`,
   (r) => r.code === "CLAIM_NOT_FOUND" ? noClaim(r)
     : r.code === "CLAIM_NOT_YOURS" ? notYours(r)
     : r.code === "CLAIM_UNATTRIBUTED" ? unattributedText(r)
     : r.code === "CLAIM_RELEASED" ? endedText(r)
-    : r.code === "WORK_CLAIMED" ? `${inTheWay(r)} Your claim lapsed before another covered its work.`
+    : r.code === "WORK_CLAIMED" ? `${inTheWay(r, OWN_KEY_RENEWING)} Your claim lapsed before another covered its work.`
     : r.code === "REFUSED_CLAIM_INPUT" ? claimInput(r) : unknownRefusal(r), AS_JSON);
 
 export const renderReleaseClaim = (o: Outcome<ReleaseClaimResult, ReleaseClaimCode>): Reply => render(o,
