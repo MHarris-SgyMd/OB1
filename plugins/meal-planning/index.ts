@@ -77,12 +77,12 @@ function amount(q: string | null | undefined): number | null {
   const n = written(q);
   return n !== null && n <= MOST ? n : null;
 }
+/** amount()'s reading, before its bound. */
 function written(q: string | null | undefined): number | null {
   let s = (q ?? "").trim();
-  let part = 0;
   const last = s.slice(-1);
   if (last in VULGAR) {
-    part = VULGAR[last];
+    const part = VULGAR[last];
     s = s.slice(0, -1).trim();
     if (s === "") return part;
     return /^\d+$/.test(s) ? Number(s) + part : null;
@@ -106,7 +106,10 @@ const UNITS: Record<string, string> = Object.fromEntries(Object.entries({
 /** The cooks' one-letter units, whose case is the unit: "T" a tablespoon and "t" a teaspoon, so they are read before any lower-casing. */
 const LETTER_UNITS: Record<string, string> = { T: "tbsp", t: "tsp", c: "cup", C: "cup" };
 /** A unit's one spelling where it has one ("Lbs." is "lb", "T" is "tbsp"); undefined for a word that is no unit this knows. */
-const knownUnit = (u: string) => LETTER_UNITS[u.trim().replace(/\.$/, "")] ?? UNITS[u.trim().toLowerCase().replace(/\.$/, "")];
+const knownUnit = (u: string) => {
+  const w = u.trim().replace(/\.$/, "");
+  return LETTER_UNITS[w] ?? UNITS[w.toLowerCase()];
+};
 /** A unit in its one spelling where it has one, else as written. */
 const unitOf = (u: string) => knownUnit(u) ?? u.trim();
 /**
@@ -119,7 +122,8 @@ function measure(quantity: string | null | undefined, unit: string | null | unde
   if (q && !u) {
     const m = /^(\S+(?:\s+\S+)?)\s+([A-Za-z][A-Za-z.]*)$/.exec(q);
     // Only a word that is a unit: "2 large" is two of something large, not two larges.
-    if (m && amount(m[1]) !== null && knownUnit(m[2]) !== undefined) return { quantity: m[1], unit: knownUnit(m[2])! };
+    const known = m ? knownUnit(m[2]) : undefined;
+    if (m && known !== undefined && amount(m[1]) !== null) return { quantity: m[1], unit: known };
   }
   return { quantity: q, unit: u ? unitOf(u) : null };
 }
@@ -178,10 +182,14 @@ export function shoppingItems(meals: { recipe_id: string; ingredients: Ingredien
     }
   }
   return [...byKey.values()].map((h) => {
-    const given = h.quantities.filter((q): q is string => q !== null);
-    const numbers = given.map(amount).filter((n): n is number => n !== null);
+    const numbers: number[] = [];
     const counts = new Map<string, number>();
-    for (const q of given) if (amount(q) === null) counts.set(q, (counts.get(q) ?? 0) + 1);
+    for (const q of h.quantities) {
+      if (q === null) continue;
+      const n = amount(q);
+      if (n !== null) numbers.push(n);
+      else counts.set(q, (counts.get(q) ?? 0) + 1);
+    }
     // Sorted, so the same meals in another order say the same quantity, and a mark made at it holds.
     const words = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([q, k]) => (k > 1 ? `${q} ×${k}` : q));
     const parts = [...(numbers.length > 0 ? [quantityText(numbers.reduce((a, b) => a + b, 0))] : []), ...words];
@@ -441,11 +449,11 @@ export default definePlugin({
             .map((b) => [itemKey(b.name, b.unit), b.bought]));
           await sql`DELETE FROM shopping_list_items WHERE list_id = ${id}`;
           for (const [position, item] of items.entries()) {
-            const key = itemKey(item.name, item.unit);
-            const kept = bought.has(key) && keepsMark(bought.get(key)!, item.quantity);
+            const was = bought.get(itemKey(item.name, item.unit));
+            const kept = was !== undefined && keepsMark(was, item.quantity);
             await sql`
               INSERT INTO shopping_list_items (list_id, name, quantity, unit, purchased, bought_quantity, recipe_ids, position)
-              VALUES (${id}, ${item.name}, ${item.quantity}, ${item.unit}, ${kept}, ${kept ? bought.get(key)! : null},
+              VALUES (${id}, ${item.name}, ${item.quantity}, ${item.unit}, ${kept}, ${kept ? was : null},
                       (SELECT coalesce(array_agg(x::uuid), '{}') FROM jsonb_array_elements_text((${JSON.stringify(item.recipe_ids)}::text)::jsonb) x), ${position})`;
           }
           return listOf(sql, week_start);
@@ -486,11 +494,11 @@ export default definePlugin({
           const list = await sql<{ id: string }>`
             SELECT id FROM shopping_lists WHERE id = (SELECT list_id FROM shopping_list_items WHERE id = ${item_id}) FOR UPDATE`;
           if (list.length === 0) return null;
-          // None, when a list made again while this waited took the item away.
           // Bought at its quantity; marked again, still at what was first bought.
           const marked = await sql<{ id: string }>`
             UPDATE shopping_list_items SET purchased = ${purchased}, bought_quantity = CASE WHEN ${purchased} THEN coalesce(bought_quantity, quantity) END
              WHERE id = ${item_id} RETURNING id`;
+          // None, when a list made again while this waited took the item away: nothing is written.
           if (marked.length === 0) return null;
           await sql`UPDATE shopping_lists SET updated_at = now() WHERE id = ${list[0].id}`;
           const [full] = await sql<Answer<z.input<typeof Item>>>`SELECT answer FROM shopping_item_rows WHERE id = ${item_id}`;
