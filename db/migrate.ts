@@ -71,7 +71,7 @@
 
 import type { SQL } from "bun";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ACCEPTED_CLAIM_SQL,
@@ -156,6 +156,16 @@ export interface MigrateOptions {
   plugins?: string | null;
   /** Where plugins live; the tree's plugins/ unless a suite names another. */
   pluginsDir?: string;
+  /**
+   * Where the core migrations live; the tree's db/migrations unless a suite
+   * names another, a copy it may edit (SMD-3639); blank is unset, a relative
+   * path is resolved against the migrator process's working directory. The
+   * CLI reads it from OB1_TEST_MIGRATIONS_DIR, so a spawned run can be pointed
+   * there too. Test-only: no deploy file or operator sets it, and a brain
+   * always reads db/migrations; a run given one says so on stderr before it
+   * reads a file.
+   */
+  migrationsDir?: string;
   /**
    * OB1_PLUGIN_DB_PASSWORD (SMD-2310, SMD-2756): the secret each plugin's
    * login role's password is derived from (db/config.mjs's
@@ -587,9 +597,22 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return substituteMigration(sql, SUBSTITUTIONS, file);
   }
 
+  /** The core migrations' directory: the tree's, or a suite's copy (SMD-3639). */
+  const coreDir = opts.migrationsDir?.trim() ? resolve(opts.migrationsDir.trim()) : MIGRATIONS_DIR;
+
   /** The migration files, read and hashed now; null (the problem printed) when their names collide. */
   function loadMigrations(): Migration[] | null {
-    const names = readdirSync(MIGRATIONS_DIR)
+    // A suite's directory it cannot list is refused as "No .sql files" is, not thrown: missing, a file, under a
+    // file or not readable (review passes 1 and 2).
+    let listed: string[];
+    try {
+      listed = readdirSync(coreDir);
+    } catch (e) {
+      if (coreDir === MIGRATIONS_DIR) throw e;
+      err(`${coreDir} is not a directory this run can read (${(e as { code?: string }).code ?? "error"}): the migrations directory a suite named (migrationsDir or OB1_TEST_MIGRATIONS_DIR).`);
+      return null;
+    }
+    const names = listed
       .filter((f) => f.endsWith(".sql"))
       .sort(); // 001_, 002_, … lexical order is the intended order
     // The number is the file's identity — the order, and how prose names a file
@@ -604,7 +627,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       return null;
     }
     return names.map((name) => {
-        const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+        const template = readFileSync(join(coreDir, name), "utf8");
         return {
           name,
           requiresPgvector: requiresPgvector(template),
@@ -677,12 +700,13 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     return found.some((p) => p.files.some((m) => !recorded.has(`${p.name}/${m.name}`)));
   }
 
+  if (coreDir !== MIGRATIONS_DIR) err(`Reading migrations from ${coreDir}, not db/migrations: a test suite's setting (OB1_TEST_MIGRATIONS_DIR); unset it to apply the brain's own.`);
   const migrations = loadMigrations();
   if (migrations === null) return 2;
   const plugins = loadPluginMigrations();
   if (plugins === null) return 2;
   if (migrations.length === 0) {
-    err(`No .sql files in ${MIGRATIONS_DIR}`);
+    err(`No .sql files in ${coreDir}`);
     return 2;
   }
 
@@ -1570,7 +1594,9 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // The file applied by hand, into this database, from the repository's root or into the compose stack's Postgres (review pass 3: a psql with no database named created it in another).
     // The database's name in a shell's single quotes, so a name with `$`, a backquote or a double quote pastes as itself (review pass 4: an identifier's double quotes ran a command substitution).
     const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
-    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f db/migrations/${file.name}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < db/migrations/${file.name}`;
+    // A suite's copy named as read (SMD-3639).
+    const path = coreDir === MIGRATIONS_DIR ? `db/migrations/${file.name}` : join(coreDir, file.name);
+    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f ${path}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < ${path}`;
     try {
       const before = await state();
       if (!before.installed) {
@@ -1878,6 +1904,8 @@ if (import.meta.main) {
       // SMD-2756); the URL too, which those roles' connections are built from.
       plugins: process.env.OB1_PLUGINS,
       pluginPassword: process.env.OB1_PLUGIN_DB_PASSWORD,
+      // A suite's copy of the migrations, for a spawned run (SMD-3639); run() takes blank as unset.
+      migrationsDir: process.env.OB1_TEST_MIGRATIONS_DIR,
       url,
     });
   });
