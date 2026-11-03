@@ -19438,7 +19438,7 @@ if (want("38")) {
     const ac = new AbortController();
     const callsBefore = modelCalls.length;
     // A 6 s capture in a 7 s quiet, written in seconds and run at SCALE (3.6 s, 4.2 s): the call in hand, 3.6 s,
-    // ends 1.2-1.7 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s, unscaled).
+    // ends about 1.1-2.0 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s, unscaled).
     // The scheduler's pool reads counted by the lines written before each: a paused poll reads none.
     const poolReadAt: number[] = [];
     const poolCounting = new Proxy(sql, {
@@ -19463,10 +19463,13 @@ if (want("38")) {
     await liveWrite(sql, "a live write");
     const pauseSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  paused: a live write at .* — the passes wait between thoughts, windows and pairs until no live write for ${capS(6000)} s$`).test(l)), 10_000);
     const pauseMs = Date.now() - pausedAt;
-    // The thought in hand still claimed as the pause is said: the pause met a call in hand (SMD-3714 review pass 1).
-    const [atPause] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
-    // Extractions finished as the pause began: by the resume, only the call in hand may have joined them (SMD-3714 review pass 2).
-    const doneAtPause = (await claims(EX)).succeeded ?? 0;
+    // The thought in hand still claimed as the pause is said: the pause met a call in hand (SMD-3714 review
+    // pass 1). And the extractions finished then: by the resume, only the call in hand may have joined them
+    // (review pass 2). One statement, so the call can't end between the two reads (review pass 3).
+    const [pauseRead] = (await sql`SELECT (SELECT thought_id::text FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed' LIMIT 1) AS id,
+                                          (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded') AS done`) as { id: string | null; done: number }[];
+    const atPause = pauseRead?.id ? { id: pauseRead.id } : undefined;
+    const doneAtPause = Number(pauseRead?.done ?? 0);
     let pausedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (pausedBeat = await beat())?.paused !== undefined, 3_000);
     // The call in hand runs on and its thought is done; no claim follows while the gate is closed.
