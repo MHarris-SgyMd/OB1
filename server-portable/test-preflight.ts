@@ -3258,6 +3258,12 @@ else {
       assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups priority/.test(missingBoth.out),
              "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
+      // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
+      await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
+      const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON work_claims TO ob1_pf_capture");
+      assert(/!  ticket claims\s+the server's role holds no [A-Z, ]*SELECT[A-Z, ]* on work_claims: claim_work, renew_claim, release_claim and list_claims fail naming the table, and every read's claimed label says its claims could not be read \(SMD-3599\)/.test(noSelect.out),
+             `…and without SELECT on it, the claim calls and every read's claimed label are named (${noSelect.out.split("\n").find((l) => /ticket claims/.test(l))?.trim().slice(0, 200)})`);
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.
