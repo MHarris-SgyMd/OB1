@@ -46,7 +46,8 @@ row() {
 }
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
-# pair legs, over twice the slowest honest row here under both lanes' load;
+# pair legs, about twice the slowest honest row here under the lanes' load
+# (test-live's extract shard, ~300 s);
 # OB1_PARITY_ROW_LIMIT sets another. Scratch files go in PARITY_TMP, macOS's
 # TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
@@ -200,7 +201,7 @@ typecheck() {
 # typecheck, one after another in a background subshell beside the database
 # suites, its rows printed when the database lane is done. None of these reads
 # the shared Postgres, so the database suites see no other client; what they
-# share is the CPU, and with it the timing rows of both lanes (test-server's
+# share is the CPU, and with it the timing rows of every lane (test-server's
 # probe windows, test-live's polls) run under more load than in series. Its
 # FAILED is its own, so it returns its verdict and main() reads it from wait.
 # free_rows NOWFILE: at_row's file.
@@ -290,10 +291,11 @@ free_rows() {
 # test-upgrade.ts and the first shard on pair-postgres, the rest on
 # preflight-postgres; here one after the other on one, each shard dropping the
 # schema before its first database section, which costs nothing while the
-# lane's length stays inside the longest test-live shard's. The script runs itself again under a second
-# with-postgres.sh with --pair, and that run does only this — so a run needs
-# podman or docker even when DATABASE_URL is given, and without one this lane
-# fails with with-postgres.sh's "No working container runtime found".
+# lane's length stays inside the longest test-live shard's. The script runs
+# itself again under a with-postgres.sh of its own with --pair, and that run
+# does only this — so a run needs podman or docker even when DATABASE_URL is
+# given, and without one this lane fails with with-postgres.sh's "No working
+# container runtime found".
 # pair_rows NOWFILE: at_row's file.
 pair_rows() {
   FAILED=0 NOW_FILE="$1"
@@ -311,7 +313,9 @@ pair_rows() {
 # and that run does only its shard's row. One Postgres per shard, not one with
 # four databases: roles and backends are the cluster's, and the suite makes
 # roles and counts connections. [2] edits a copy of the migrations, never the
-# tracked tree (SMD-3639), so no shard reads another's edit.
+# tracked tree (SMD-3639), so no shard reads another's edit. Like the pair
+# lane, the live lanes need podman or docker even when DATABASE_URL is given:
+# test-live runs on their Postgres, never on that one.
 # live_rows SHARD NOWFILE: one shard's row; at_row's file.
 live_rows() {
   FAILED=0 NOW_FILE="$2"
@@ -331,15 +335,19 @@ live_rows() {
   at_row ''
   return "$FAILED"
 }
-# The live lanes' shards, in the order they are printed.
-LIVE_SHARDS="rest sleep long extract"
+# The live lanes' shards, in the order they are printed: read from live_rows'
+# own rows, so the shards started are the ones check 35 holds to the workflow
+# (review pass 1: a shard left off a list typed here passed check 35 and never
+# ran).
+LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\([a-z]*\) run db test-live\.ts$/\1/p' "$ROOT/db/${0##*/}" | tr '\n' ' ')
+[ -n "$LIVE_SHARDS" ] || { echo "ci-parity.sh reads no OB1_LIVE_SHARD row in live_rows, so would start no test-live shard" >&2; exit 2; }
 
 # The lanes beside the database lane: each writes to a file, printed when the
 # database lane is done, one block each, so no lane's rows interleave with
 # another's. A Ctrl-C stops them whole through stop_lanes, since a
 # non-interactive shell's background job ignores SIGINT and their suites would
-# otherwise run on after the script has gone (the pair lane's with-postgres.sh
-# removes its container as it exits). A TERM to this script alone does too,
+# otherwise run on after the script has gone (each lane's with-postgres.sh
+# removes its container as it exits, and stop_lanes waits for that). A TERM to this script alone does too,
 # once the database lane's row in hand ends: bash runs a trap only between
 # commands. A closed terminal's hangup reaches them itself (main()). Their
 # files are in one directory, printed as the lanes start so `tail -f` can
@@ -368,6 +376,9 @@ drop_lanes() { [ -z "$LANES" ] || rm -rf "$LANES"; }
 stop_lanes() {
   local pid
   for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do stop_tree "$pid"; done
+  # Each with-postgres.sh removes its container as it exits, ignoring signals
+  # meanwhile: waited for, so none outlives the script (review pass 1).
+  for pid in $FREE_PID $PAIR_PID $LIVE_PIDS; do wait "$pid" 2>/dev/null; done
   drop_lanes
 }
 # wait_lane PID NAME TITLE: wait for a lane, read its verdict, print its rows.
@@ -401,7 +412,9 @@ main() {
   # ends each row's own group; so main() only exits, since stopping the lanes
   # too could cut their with-postgres.sh's container removals short. A HUP
   # sent to this script alone exits once the database lane's row in hand ends,
-  # leaving the lanes to run on unreported, each row within its limit.
+  # leaving the lanes to run on unreported, each row within its limit and each
+  # container removed as its lane ends; their rows go with the lanes'
+  # directory, which the exit removes.
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
