@@ -7204,6 +7204,15 @@ if (want("10h")) {
   const sweep = (opts: Omit<SubjectSweepOptions, "writer"> = {}, e = env, url = URL_!) => caught((writer) => sweepSubjects({ url, env: e, ...opts, writer }));
   /** What a run's call answers: its exit code and the lines on each stream. */
   type SweepRun = Awaited<ReturnType<typeof sweep>>;
+  /**
+   * The scheduler's budget the cases past it run under, a session's or a role's statement_timeout: short, since each
+   * such case waits it out once or more, and at 1500 ms, with holds of 2.5–4.5 s, they took ~54 s of [10h]'s ~150
+   * (SMD-3713); a statement nothing holds ends far inside it. A hold that must outlast it is BUDGET_MS and a margin in
+   * milliseconds, the margins kept as they were, since load delays a step by milliseconds, not by a share of the budget;
+   * one that need only outlast the run ends with it.
+   */
+  const BUDGET_MS = 750;
+  const BUDGET_SESSION = { statement_timeout: String(BUDGET_MS) };
   /** The summary line's counts, after "N thought(s) in …:" — what the sweep did with each thought it took. */
   const tally = (r: { stdout: string }) => /^ {2}\d+ thought\(s\) in [^:]*: (.*)$/m.exec(r.stdout)?.[1] ?? "";
   type Subject = { id: string; thought: string; key: string; by: string; judge: string; standing: boolean; fp: string | null; current: string; produced_by: string | null; recipe: Record<string, unknown> | null; agent: string | null };
@@ -7854,7 +7863,7 @@ if (want("10h")) {
         const timedWas = (await sql`SELECT key, value FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`) as { key: string; value: string }[];
         await sql`INSERT INTO ob1_config (key, value) VALUES ('subject_pool_key', 'subjects:r0'), ('subject_pool_filled', 'subjects:r0')
                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
-        await sql.unsafe(`ALTER ROLE ${SROLE} SET statement_timeout = '1500ms'`);
+        await sql.unsafe(`ALTER ROLE ${SROLE} SET statement_timeout = '${BUDGET_MS}ms'`);
         const timedHolder = new SQL({ url: URL_!, max: 1 });
         let timedOut = null as SweepRun | null;
         try {
@@ -7884,7 +7893,7 @@ if (want("10h")) {
           const h = await openTx(budgetHolder);
           await h.q`SELECT value FROM ob1_config WHERE key = 'subject_pool_key' FOR SHARE`;
           const safety = setTimeout(() => void h.q`COMMIT`.catch(() => {}), 10_000);
-          budgetOut = await sweep({ model: false, switchKey: true, session: { statement_timeout: "1500" } }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` })).finally(() => clearTimeout(safety));
+          budgetOut = await sweep({ model: false, switchKey: true, session: BUDGET_SESSION }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` })).finally(() => clearTimeout(safety));
           await h.q`COMMIT`;
           h.q.release();
         } finally {
@@ -9208,10 +9217,11 @@ if (want("10h")) {
         && /The 1 thought\(s\) it named nothing for are back in the pool/.test(mixRun.stderr) && /the 2 this run failed among them\./.test(mixRun.stderr),
         `a timeout, then an unread answer and an empty one: the two answers trip it, the empty one goes back alone, and both failed claims are counted (exit ${mixRun.code}, ${ownCalls - asked} asked, claims ${mixClaims.join(",")}): ${mixRun.stderr.trim().slice(0, 400)}`);
 
-      // …and a judge that times out on every thought gives the alarm nothing to judge: each claim failed, exit 1.
+      // …and a judge that times out on every thought gives the alarm nothing to judge: each claim failed, exit 1. Three,
+      // each a second's limit: two counted as answers would trip the window of five.
       await drop(mixIds);
       await alarmAt(5);
-      const slowIds = await seedAll(notes(21, 5, "slow-judge, a judge too slow for it."));
+      const slowIds = await seedAll(notes(21, 3, "slow-judge, a judge too slow for it."));
       const slowRun = await alarmRun({ timeout: 1, limit: 10 });
       const slowClaims = await statusOf(slowIds);
       assert(slowRun.code === 1 && slowClaims.every((c) => c === "failed") && !/gave no subject/.test(slowRun.stderr),
@@ -10019,14 +10029,20 @@ if (want("10h")) {
       // A second stop ends the call in hand while the case holds the claim's row.
       // The second stop's own hand-back, the promise its call returns, waits for the row too: back, 1, within its bound,
       // null past it (review pass 8, mutant: a plain release under the budget lived, the run's end handing back for it).
+      // Within, the row let go 1.5 s past the budget, the stop's hand-back and the run's end's both wait for it: the call's
+      // abort ends the run's loop at once, so its end's hand-back starts beside the stop's, and either may wait on the row
+      // first; the one behind finds nothing left, 0. Each lands past the budget, not null. Held to the stop's 1, the case
+      // failed 4 of 30 local runs under load, the unchanged test's among them, the row SMD-3712's flake failed. Past, the
+      // row is held to the run's end, where a 4 s hold raced the two hand-backs' bounds (SMD-3713).
       const handBacks: Record<string, { code: number | null; claim: string | undefined; said: boolean; stopLine: string; hard: string }> = {};
-      for (const [what, holdMs, waitMs] of [["within", 3000, 30_000], ["past", 4000, 1600]] as const) {
+      for (const [what, holdMs, waitMs] of [["within", BUDGET_MS + 1500, 30_000], ["past", null, 1600]] as const) {
         const [handT] = await seedAll([`Hand-back note ${what}: sweep-pass-good work, its claim's row held as the run hands it back.`]);
         const holder = new SQL({ url: URL_!, max: 1 });
         const hc = await holder.reserve();
         let stopOf: PassStop | null = null;
         let hardOf: Promise<unknown> | null = null;
         let holding: Promise<void> | null = null;
+        const ran = Promise.withResolvers<void>();
         onOwn = (t) => {
           if (!t.includes(`Hand-back note ${what}`) || holding !== null) return;
           holding = (async () => {
@@ -10034,14 +10050,14 @@ if (want("10h")) {
             await hc`SELECT 1 FROM thought_work_claims WHERE thought_id = ${handT}::uuid AND work_type = ${POOL} FOR UPDATE`;
             (stopOf as PassStop | null)?.();
             hardOf = (stopOf as PassStop | null)?.() ?? null;
-            await Bun.sleep(holdMs);
+            await (holdMs === null ? ran.promise : Bun.sleep(holdMs));
             await hc`COMMIT`;
           })();
           return holding;
         };
         RELEASE_WAIT.ms = waitMs;
         try {
-          const r = await orHung(sweep({ session: { statement_timeout: "1500" }, onPass: (st) => { stopOf = st; }, signal: backstop() }), 20_000);
+          const r = await orHung(sweep({ session: BUDGET_SESSION, onPass: (st) => { stopOf = st; }, signal: backstop() }), 20_000);
           handBacks[what] = {
             code: r?.code ?? null, claim: (await claimOf(handT))?.status,
             said: /the claims this run holds could not go back to the pool \(canceling statement due to statement timeout\): each returns as its lease runs out/.test(r?.stderr ?? ""),
@@ -10049,6 +10065,7 @@ if (want("10h")) {
             hard: hardOf === null ? "none" : String(await (hardOf as Promise<unknown>)),
           };
         } finally {
+          ran.resolve();
           RELEASE_WAIT.ms = 30_000;
           onOwn = null;
           await (holding as Promise<void> | null)?.catch(() => {});
@@ -10057,7 +10074,7 @@ if (want("10h")) {
         }
         await drop([handT]);
       }
-      assert(handBacks.within.code === 130 && handBacks.within.claim === "pending" && !handBacks.within.said && handBacks.within.stopLine === "is back in the pool" && handBacks.within.hard === "1"
+      assert(handBacks.within.code === 130 && handBacks.within.claim === "pending" && !handBacks.within.said && handBacks.within.stopLine === "is back in the pool" && ["1", "0"].includes(handBacks.within.hard)
           && handBacks.past.code === 130 && handBacks.past.claim === "claimed" && handBacks.past.said && handBacks.past.stopLine === "goes back as each lease runs out" && handBacks.past.hard === "null",
         `the run's hand-back waits out a short budget on a claim's held row, the claim back, but no longer than its own bound, said, the claim left to its lease (${JSON.stringify(handBacks)})`);
 
@@ -10080,7 +10097,7 @@ if (want("10h")) {
       let ownRun: SweepRun | null = null;
       try {
         for (const id of ownIds.slice(0, 2)) await dh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${id}::uuid::text, 0))`;
-        ownRun = await orHung(settled(sweep({ session: { statement_timeout: "1500" }, signal: backstop() })));
+        ownRun = await orHung(settled(sweep({ session: BUDGET_SESSION, signal: backstop() })));
       } finally {
         await dh`SELECT pg_advisory_unlock_all()`.catch(() => {});
         dh.release();
@@ -10119,7 +10136,7 @@ if (want("10h")) {
         });
         return locked;
       };
-      const finishRun = await orHung(settled(sweep({ session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
+      const finishRun = await orHung(settled(sweep({ session: BUDGET_SESSION, signal: backstop() }))).finally(async () => {
         onOwn = null;
         await (finishHeld as Promise<void> | null)?.catch(() => {});
         fc.release();
@@ -10143,13 +10160,13 @@ if (want("10h")) {
       const budgetClaimStop = new AbortController();
       let claimRun: SweepRun | null = null;
       try {
-        const running = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
+        const running = settled(sweep({ follow: 1, session: BUDGET_SESSION, admit: async () => {
           claimGates.push(Date.now());
-          // Before the pool, then before each claim: the first claim's takes the table, for 2.5 s.
+          // Before the pool, then before each claim: the first claim's takes the table, 1 s past the budget.
           if (claimGates.length !== 2) return;
           await tc`BEGIN`;
           await tc`LOCK TABLE thought_work_claims IN EXCLUSIVE MODE`;
-          tableHeld = Bun.sleep(2500).then(async () => { await tc`COMMIT`; });
+          tableHeld = Bun.sleep(BUDGET_MS + 1000).then(async () => { await tc`COMMIT`; });
         }, signal: AbortSignal.any([budgetClaimStop.signal, backstop()]) }));
         await pollUntil(async () => (await claimOf(claimT))?.status === "succeeded", 20_000);
         budgetClaimStop.abort();
@@ -10161,14 +10178,17 @@ if (want("10h")) {
         await tableHolder.close({ timeout: 5 });
       }
       const claimGap = claimGates.length >= 3 ? claimGates[2] - claimGates[1] : -1;
-      assert(claimRun?.code === 0 && (await claimOf(claimT))?.status === "succeeded" && claimGap >= 3200
+      assert(claimRun?.code === 0 && (await claimOf(claimT))?.status === "succeeded" && claimGap >= BUDGET_MS + 1700
           && (claimRun.stderr.match(/^ {2}the claim passed the scheduler's statement_timeout \(canceling statement due to statement timeout\): the run loses this poll, not its end; it held no claim, and it claims again in 1 s$/gm) ?? []).length === 1
           && tally(claimRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
-        `a claim past a scheduler's budget costs the run its poll, said once, and a following run claims again a follow later, through the gate, the table's 2.5 s and the follow's 1 s apart (exit ${claimRun?.code ?? "still running at 20 s"}, gates ${claimGates.length}, ${claimGap} ms between the claims' two): ${claimRun?.stdout.trim().slice(-200)} | ${claimRun?.stderr.trim().slice(0, 300)}`);
+        `a claim past a scheduler's budget costs the run its poll, said once, and a following run claims again a follow later, through the gate, the table's hold and the follow's 1 s apart (exit ${claimRun?.code ?? "still running at 20 s"}, gates ${claimGates.length}, ${claimGap} ms between the claims' two): ${claimRun?.stdout.trim().slice(-200)} | ${claimRun?.stderr.trim().slice(0, 300)}`);
       await drop([claimT]);
 
-      /** The claim's row of `id` held from the judge's question on, for `ms`: the answer waits for the lock, not its hold. */
-      const holdClaimRow = (text: string, id: string, ms: number) => {
+      /**
+       * The claim's row of `id` held from the judge's question on, for `ms`, or until it settles: the answer waits for the
+       * lock, not its hold.
+       */
+      const holdClaimRow = (text: string, id: string, ms: number | Promise<unknown>) => {
         const holder = new SQL({ url: URL_!, max: 1 });
         let held: Promise<void> | null = null;
         onOwn = (t) => {
@@ -10180,7 +10200,7 @@ if (want("10h")) {
             return c;
           })();
           held = locked.then(async (c) => {
-            await Bun.sleep(ms);
+            await (typeof ms === "number" ? Bun.sleep(ms) : ms.catch(() => {}));
             await c`COMMIT`;
             c.release();
           });
@@ -10197,8 +10217,8 @@ if (want("10h")) {
       // failure left out of the run's count, and the run ends at its limit, 0.
       garbledAnswers = true;
       const [releaseT] = await seedAll(["Budget note 5: garbled sweep-pass-good work, its release held past the budget."]);
-      const releaseFree = holdClaimRow("Budget note 5", releaseT, 2500);
-      const releaseRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
+      const releaseFree = holdClaimRow("Budget note 5", releaseT, BUDGET_MS + 1000);
+      const releaseRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: BUDGET_SESSION, signal: backstop() }))).finally(async () => {
         await releaseFree();
         garbledAnswers = savedGarbled;
       });
@@ -10221,10 +10241,10 @@ if (want("10h")) {
           await wc`BEGIN`;
           await wc`SELECT value FROM ob1_config WHERE key = ${JUDGE_WINDOW_KEY} FOR UPDATE`;
         })();
-        windowHeld = locked.then(() => Bun.sleep(2500)).then(async () => { await wc`COMMIT`; });
+        windowHeld = locked.then(() => Bun.sleep(BUDGET_MS + 1000)).then(async () => { await wc`COMMIT`; });
         return locked;
       };
-      const windowRun = await orHung(settled(sweep({ session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
+      const windowRun = await orHung(settled(sweep({ session: BUDGET_SESSION, signal: backstop() }))).finally(async () => {
         onOwn = null;
         await (windowHeld as Promise<void> | null)?.catch(() => {});
         wc.release();
@@ -10239,9 +10259,9 @@ if (want("10h")) {
 
       // A put-back after the provider's transient error, a run following with --limit 1: the thought back with its place
       // under the limit, asked again after the provider's pause, the longer than the follow, and answered.
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 3000, 100, 100);
+      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 2000, 100, 100);
       const [putT] = await seedAll(["Budget note 7: flaky-judge sweep-pass-good work, its put-back held past the budget."]);
-      const putFree = holdClaimRow("Budget note 7", putT, 2500);
+      const putFree = holdClaimRow("Budget note 7", putT, BUDGET_MS + 1000);
       /** When each question about the thought came: the second the pause's length after the hand-back. */
       const putCalls: number[] = [];
       const putHold = onOwn;
@@ -10250,13 +10270,13 @@ if (want("10h")) {
         return putHold?.(t);
       };
       const putAsked = ownCalls;
-      const putRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, signal: backstop() }))).finally(async () => {
+      const putRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: BUDGET_SESSION, signal: backstop() }))).finally(async () => {
         await putFree();
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
       const putGap = putCalls.length === 2 ? putCalls[1] - putCalls[0] : -1;
-      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2 && putGap >= 4500
-          && new RegExp(`^ {2}${putT}'s put-back, set-back or claim read passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held is back in the pool, and it claims again in 3 s$`, "m").test(putRun.stderr)
+      assert(putRun?.code === 0 && (await claimOf(putT))?.status === "succeeded" && ownCalls - putAsked === 2 && putGap >= BUDGET_MS + 2000
+          && new RegExp(`^ {2}${putT}'s put-back, set-back or claim read passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, not its end; what it held is back in the pool, and it claims again in 2 s$`, "m").test(putRun.stderr)
           && tally(putRun) === "1 subject(s) recorded (1 by stub-judge); 1 poll(s) lost to the scheduler's statement_timeout",
         `a put-back past a scheduler's budget costs the run its poll, the thought back with its place under --limit and asked again after the provider's pause (exit ${putRun?.code ?? "still running at 30 s"}, ${ownCalls - putAsked} asked, ${putGap} ms apart): ${putRun?.stdout.trim().slice(-200)} | ${putRun?.stderr.trim().slice(0, 300)}`);
       await drop([putT]);
@@ -10269,12 +10289,13 @@ if (want("10h")) {
       let readGates = 0;
       let readHeld: Promise<void> | null = null;
       const readAsked = ownCalls;
-      const readRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: { statement_timeout: "1500" }, admit: async () => {
-        // The first claim's gate takes the thoughts, which the claim does not read and its read does, for 3 s.
+      const readRun = await orHung(settled(sweep({ follow: 1, limit: 1, session: BUDGET_SESSION, admit: async () => {
+        // The first claim's gate takes the thoughts, which the claim does not read and its read does, 1.5 s past the
+        // budget.
         if (++readGates !== 2) return;
         await readConn`BEGIN`;
         await readConn`LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE`;
-        readHeld = Bun.sleep(3000).then(async () => { await readConn`COMMIT`; });
+        readHeld = Bun.sleep(BUDGET_MS + 1500).then(async () => { await readConn`COMMIT`; });
       }, signal: backstop() }))).finally(async () => {
         await (readHeld as Promise<void> | null)?.catch(() => {});
         readConn.release();
@@ -10295,11 +10316,11 @@ if (want("10h")) {
       let stopGates = 0;
       let budgetStopHeld: Promise<void> | null = null;
       const budgetStop = new AbortController();
-      const stoppedRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
+      const stoppedRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, admit: async () => {
         if (++stopGates !== 2) return;
         await sc`BEGIN`;
         await sc`LOCK TABLE thought_work_claims IN EXCLUSIVE MODE`;
-        budgetStopHeld = Bun.sleep(2500).then(async () => { await sc`COMMIT`; });
+        budgetStopHeld = Bun.sleep(BUDGET_MS + 1000).then(async () => { await sc`COMMIT`; });
       }, signal: AbortSignal.any([budgetStop.signal, backstop()]) }));
       const claimWaited = await pollUntil(() => waitingOnLock("claim_thoughts("), 20_000);
       budgetStop.abort();
@@ -10316,14 +10337,18 @@ if (want("10h")) {
 
       // …and one while the lost poll's hand-back waits, the claim's row held past the budget and then the stop: the claim
       // back once the row is let go, the poll said lost to the stop, not as a poll to come (review pass 7, cold read).
+      // The row is let go once the stop is sent, the hand-back seen waiting (the release before it is release_thought's).
       const [handT] = await seedAll(["Budget note 17: sweep-pass-good work, its release and hand-back held as the run stops."]);
-      const handFree = holdClaimRow("Budget note 17", handT, 4500);
+      const handLet = Promise.withResolvers<void>();
+      const handFree = holdClaimRow("Budget note 17", handT, handLet.promise);
       const handStop = new AbortController();
-      const handRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([handStop.signal, backstop()]) }));
+      const handRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([handStop.signal, backstop()]) }));
       const handWaited = await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000);
       handStop.abort();
+      handLet.resolve();
       const handRun = await orHung(handRunning, 20_000).finally(async () => {
         handStop.abort();
+        handLet.resolve();
         await handFree();
       });
       assert(handWaited && handRun?.code === 0 && (await claimOf(handT))?.status === "pending"
@@ -10342,7 +10367,7 @@ if (want("10h")) {
       let doorWaited = false;
       try {
         await hh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${hardT}::uuid::text, 0))`;
-        const hardRunning = settled(sweep({ session: { statement_timeout: "1500" }, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
+        const hardRunning = settled(sweep({ session: BUDGET_SESSION, onPass: (st) => { hardStopOf = st; }, signal: backstop() }));
         // Both stops once the door's write is seen waiting on the case's lock (review pass 7, cold read: on a timer, a
         // slow answer let the stops land before the write, which the case then never met).
         doorWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
@@ -10368,7 +10393,7 @@ if (want("10h")) {
       let onceWaited = false;
       try {
         await oc`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${onceT}::uuid::text, 0))`;
-        const onceRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
+        const onceRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([onceStop.signal, backstop()]) }));
         onceWaited = await pollUntil(() => waitingOnLock("record_thought_subject(", "advisory"), 20_000);
         onceStop.abort();
         onceRun = await orHung(onceRunning, 20_000);
@@ -10397,7 +10422,7 @@ if (want("10h")) {
       try {
         await lc`BEGIN`;
         await lc`SELECT 1 FROM thought_work_claims WHERE thought_id = ${lapseT}::uuid AND work_type = ${POOL} FOR UPDATE`;
-        const twoRunning = settled(sweep({ follow: 1, session: { statement_timeout: "1500" }, admit: async () => {
+        const twoRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, admit: async () => {
           // Before the pool, then before each claim: the third claim's lets the run-out lease go.
           if (++twoGates !== 4) return;
           await lc`COMMIT`;
@@ -10428,15 +10453,18 @@ if (want("10h")) {
       const [mixUnread, mixDoor, mixLease] = await seedAll(["Budget note 14a: garbled sweep-pass-good work, unread.", "Budget note 14b: sweep-pass-good work, its door held past the budget.", "Budget note 14c: sweep-pass-good work, its release and hand-back held past both."]);
       const mixHolder = new SQL({ url: URL_!, max: 1 });
       const mh = await mixHolder.reserve();
-      const mixFree = holdClaimRow("Budget note 14c", mixLease, 4000);
+      // Held to the run's end, past the claim's release and both hand-backs.
+      const mixRan = Promise.withResolvers<void>();
+      const mixFree = holdClaimRow("Budget note 14c", mixLease, mixRan.promise);
       let mixRun: SweepRun | null = null;
       try {
         await mh`SELECT pg_advisory_lock(hashtextextended('ob1:subject:' || ${mixDoor}::uuid::text, 0))`;
         RELEASE_WAIT.ms = 500;
-        mixRun = await orHung(settled(sweep({ follow: 1, limit: 3, session: { statement_timeout: "1500" }, signal: backstop() })));
+        mixRun = await orHung(settled(sweep({ follow: 1, limit: 3, session: BUDGET_SESSION, signal: backstop() })));
       } finally {
         RELEASE_WAIT.ms = 30_000;
         garbledAnswers = savedGarbled;
+        mixRan.resolve();
         await mixFree();
         await mh`SELECT pg_advisory_unlock_all()`.catch(() => {});
         mh.release();
@@ -10596,13 +10624,13 @@ if (want("10h")) {
       let inPause = -1;
       let pauseAbort: InHandAbort = () => -1;
       const [pauseT] = await seedAll(["Abort note 2: flaky-judge sweep-pass-good work."]);
-      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 3000, 100, 100);
+      TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, 2000, 100, 100);
       /** When each call for the thought came: the pause between them is the pause's (review pass 3). */
       const pauseCalls: number[] = [];
       onOwn = (thought) => {
         if (thought.includes("Abort note 2")) pauseCalls.push(Date.now());
         if (!thought.includes("Abort note 2") || inPause !== -1) return;
-        setTimeout(() => { inPause = pauseAbort(0); }, 1500);
+        setTimeout(() => { inPause = pauseAbort(0); }, 1000);
       };
       const pauseAsked = ownCalls;
       const pauseRun = await sweep({ onPass: (_st, a) => { pauseAbort = a; }, signal: backstop() }).finally(() => {
@@ -10610,7 +10638,7 @@ if (want("10h")) {
         TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...savedPauses);
       });
       assert(inPause === 0 && pauseRun.code === 0 && ownCalls - pauseAsked === 2 && (await claimOf(pauseT))?.status === "succeeded" && !/set back/.test(pauseRun.stdout)
-          && pauseCalls.length === 2 && pauseCalls[1] - pauseCalls[0] >= 2500,
+          && pauseCalls.length === 2 && pauseCalls[1] - pauseCalls[0] >= 1700,
         `a provider pause holds no call: an abort in it aborts nothing, and the call after it, the pause's length on, is answered (aborted ${inPause}; exit ${pauseRun.code}, ${ownCalls - pauseAsked} asked, ${pauseCalls.length === 2 ? pauseCalls[1] - pauseCalls[0] : "?"} ms apart): ${pauseRun.stdout.trim().slice(-200)}`);
 
       // …and a stop during that pause ends the run there, nothing more claimed or asked, the thought back in the pool
@@ -11138,7 +11166,7 @@ if (want("10h")) {
       try {
         await rh`BEGIN`;
         await rh`SELECT 1 FROM thought_work_claims WHERE thought_id = ${poolingT}::uuid AND work_type = ${POOL} FOR UPDATE`;
-        poolingOut = await sweep({ session: { statement_timeout: "1500" }, limit: 1, signal: backstop() }).then((r) => `exit ${r.code}: ${r.stderr.trim().slice(0, 160)}`, (e: Error) => `rejected: ${e.message}`);
+        poolingOut = await sweep({ session: BUDGET_SESSION, limit: 1, signal: backstop() }).then((r) => `exit ${r.code}: ${r.stderr.trim().slice(0, 160)}`, (e: Error) => `rejected: ${e.message}`);
         await rh`ROLLBACK`;
       } finally {
         rh.release();
