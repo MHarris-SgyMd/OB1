@@ -740,8 +740,9 @@ COMMENT ON FUNCTION ob1_item_project(uuid) IS
 -- other bad argument). Review pass 1: the bare cast raised 22007, and
 -- 'infinity' was a due time; pass 2: 'now', 'tomorrow' and 'epoch' were taken;
 -- pass 3: so were '17:00 tomorrow' and '09:00 today', since Postgres reads a
--- word anywhere. Text without an offset is read in the session's time zone:
--- the server passes instants. Both writers take their due time through it.
+-- word anywhere. Text without an offset is UTC (review pass 4: it was the
+-- session's time zone, where set_priority reads a bare date as the start of
+-- that day in UTC). Both writers take their due time through it.
 CREATE OR REPLACE FUNCTION ob1_item_due(p_due text)
 RETURNS timestamptz
 LANGUAGE plpgsql
@@ -759,7 +760,14 @@ BEGIN
     RAISE EXCEPTION USING MESSAGE = format('not a due time: %L (a time with its offset)', left(p_due, 80)), ERRCODE = 'invalid_parameter_value';
   END IF;
   BEGIN
-    v := p_due::timestamptz;
+    -- Text without an offset is UTC, as set_priority reads a bare date (the
+    -- start of that day in UTC): never the session's time zone (review pass 4).
+    -- An offset follows a time: a date's own '-01' is none.
+    IF btrim(p_due) ~ '[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?([Zz]|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN
+      v := p_due::timestamptz;
+    ELSE
+      v := p_due::timestamp AT TIME ZONE 'UTC';
+    END IF;
   EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR invalid_time_zone_displacement_value THEN
     RAISE EXCEPTION USING MESSAGE = format('not a due time: %L (a time with its offset)', left(p_due, 80)), ERRCODE = 'invalid_parameter_value';
   END;
@@ -770,7 +778,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_due(text) IS
-  'An open item''s due time from text: NULL for NULL; ISO 8601 alone (a date, or a date and time with an optional offset), so none of Postgres''s words (now, today, tomorrow, epoch, infinity) anywhere in it; raises 22023 for anything else, or a date Postgres can''t read. Text without an offset is read in the session''s time zone. Migration 117 / SMD-3665.';
+  'An open item''s due time from text: NULL for NULL; ISO 8601 alone (a date, or a date and time with an optional offset), so none of Postgres''s words (now, today, tomorrow, epoch, infinity) anywhere in it; raises 22023 for anything else, or a date Postgres can''t read. Text without an offset is UTC, as set_priority reads a bare date. Migration 117 / SMD-3665.';
 
 -- Pending proposals on an item made moot: it settled another way.
 CREATE OR REPLACE FUNCTION ob1_item_moot(p_item uuid, p_at timestamptz, p_except uuid DEFAULT NULL)
@@ -874,12 +882,20 @@ BEGIN
   END IF;
   IF v_have.item_id IS NOT NULL THEN
     -- A capture key is shown it only if it is its own: another key's item
-    -- would tell it that key's owner, due time and status.
+    -- would tell it that key's owner, due time and status. Asked under the
+    -- item's lock, as every ownership check is, so a take in flight is waited
+    -- for (review pass 4).
+    PERFORM ob1_item_lock(v_have.item_id);
+    SELECT * INTO v_have FROM open_items WHERE item_id = v_have.item_id;
     v_show := v_who.scope = 'write' OR ob1_item_owns(v_have.item_id, v_who.env_agent_id, v_who.plugin);
-    -- Nothing is written, so it is unchanged; but a call whose text, owner or
-    -- due time differ from the item's is told how to change it (review pass
-    -- 2: a plugin's re-sync of a renamed task read as done).
-    v_other := (v_have.text, v_have.owner, v_have.due_at) IS DISTINCT FROM (v_text, v_owner, v_due);
+    -- Nothing is written, so it is unchanged; but a call whose owner or due
+    -- time differ from the item's — or, for a plugin row, whose text does — is
+    -- told how to change it (review pass 2: a plugin's re-sync of a renamed
+    -- task read as done). An item found by its thought and text is the
+    -- opening's text, so a text edited since is not a difference to undo
+    -- (review pass 4).
+    v_other := (v_have.owner, v_have.due_at) IS DISTINCT FROM (v_owner, v_due)
+               OR (v_row IS NOT NULL AND v_have.text IS DISTINCT FROM v_text);
     RETURN jsonb_build_object('outcome', 'unchanged', 'code', NULL,
       'message', CASE WHEN NOT v_show THEN 'an item for this is already open'
                       WHEN v_other THEN 'the item stands as it was, not as this call says: update_item changes its text, owner or due time' END,
@@ -1032,7 +1048,10 @@ BEGIN
   -- A proposed item reads as not yet open until a key confirms it: a capture-
   -- only key, which is how the extractor's items are opened, may dismiss its
   -- own but never confirm one (review pass 3).
-  IF v_who.scope = 'capture' AND (v_gate.item).status = 'proposed' AND v_status = 'open' THEN
+  -- Nor by settling it first and reopening it (review pass 4): a capture-only
+  -- key sets open only an item that has stood open before.
+  IF v_who.scope = 'capture' AND v_status = 'open'
+     AND NOT EXISTS (SELECT 1 FROM open_item_events e WHERE e.item_id = v_id AND e.status = 'open') THEN
     RETURN ob1_item_refused('CONFIRM_NOT_YOURS', format('%s is a capture-only key: a proposed item is confirmed by a write key; it may dismiss one (dropped)', v_who.name))
            || jsonb_build_object('item', NULL, 'event', NULL, 'mooted', 0);
   END IF;
@@ -1134,7 +1153,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION propose_item_close(text, text, uuid, text, text, jsonb) IS
-  'Proposes closing an open item to p_status (done, the default, or dropped), shown by the thought p_evidence_thought, labelled p_label (one lower-case word: resolves, implements), with p_reason. Never changes the item: another key decides (decide_item_close). The proposer''s own pending proposal with the same evidence is unchanged when its status, label and reason are the same, and is withdrawn (rejected by its proposer) for the new one when they are not. Returns jsonb {outcome: proposed | unchanged | refused, code, message, proposal, replaced, item}: refused READ_ONLY_KEY, ITEM_NOT_YOURS (a capture-only key on an item it does not own, or with evidence it did not capture), ITEM_NOT_FOUND, EVIDENCE_NOT_FOUND, ITEM_SETTLED (done or dropped already). Raises for a malformed argument, no maker, or a transaction above READ COMMITTED. Migration 117 / SMD-3665.';
+  'Proposes closing an open item to p_status (done, the default, or dropped), shown by the thought p_evidence_thought, labelled p_label (one lower-case word: resolves, implements), with p_reason. Never changes the item: another key decides (decide_item_close). The proposer''s own pending proposal with the same evidence is unchanged when its status, label and reason are the same, and is withdrawn (rejected by its proposer) for the new one when they are not; replaced names the newest withdrawn (two, one made by name before the key had an id and one after, both close). Returns jsonb {outcome: proposed | unchanged | refused, code, message, proposal, replaced, item}: refused READ_ONLY_KEY, ITEM_NOT_YOURS (a capture-only key on an item it does not own, or with evidence it did not capture), ITEM_NOT_FOUND, EVIDENCE_NOT_FOUND, ITEM_SETTLED (done or dropped already). Raises for a malformed argument, no maker, or a transaction above READ COMMITTED. Migration 117 / SMD-3665.';
 
 CREATE OR REPLACE FUNCTION decide_item_close(
   p_proposal uuid,

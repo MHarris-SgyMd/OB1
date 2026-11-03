@@ -17049,8 +17049,13 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const capProposed = await open("[105] the extractor's guess", CAP, { proposed: true });
   const capConfirm = await status(capProposed.item?.id ?? GHOST, "open", CAP);
   const capDismiss = await status(capProposed.item?.id ?? GHOST, "dropped", CAP);
-  assert(capProposed.item?.status === "proposed" && capConfirm.code === "CONFIRM_NOT_YOURS" && capDismiss.outcome === "changed" && capDismiss.item?.status === "dropped",
-    `a capture key's proposed item is not confirmed by it (CONFIRM_NOT_YOURS) but may be dismissed (${capConfirm.code}, ${capDismiss.outcome})`);
+  const capReopen = await status(capProposed.item?.id ?? GHOST, "open", CAP);
+  const capOpened = await open("[105] a capture key's own open item", CAP);
+  await status(capOpened.item?.id ?? GHOST, "done", CAP);
+  const capReopenOwn = await status(capOpened.item?.id ?? GHOST, "open", CAP);
+  assert(capProposed.item?.status === "proposed" && capConfirm.code === "CONFIRM_NOT_YOURS" && capDismiss.outcome === "changed" && capDismiss.item?.status === "dropped"
+         && capReopen.code === "CONFIRM_NOT_YOURS" && capReopenOwn.outcome === "changed",
+    `a capture key's proposed item is not confirmed by it (CONFIRM_NOT_YOURS), nor by dismissing then reopening it (review pass 4), but may be dismissed; an item it opened open it may settle and reopen (${capConfirm.code}, ${capDismiss.outcome}, ${capReopen.code}, ${capReopenOwn.outcome})`);
 
   // Due times are ISO 8601 alone, through both writers: a relative word anywhere in the text raises (review pass 3); a date, and a time with or without an offset, are kept.
   const isoBad = await Promise.all([update(tid, { due_at: "2026-11-05 17:00 tomorrow" }, OP), update(tid, { due_at: "17:00 tomorrow" }, OP), open("[105] due now", OP, { due_at: "now" }),
@@ -17058,6 +17063,21 @@ console.log("\n[105] Migration 117: open items — an item opened from a thought
   const isoGood = await Promise.all([update(tid, { due_at: "2027-03-01" }, OP), update(tid, { due_at: "2027-03-01T17:00:00+01:00" }, OP), open("[105] due a time", OP, { due_at: "2027-03-02 09:30Z" })]);
   assert(isoBad.every((d) => d.code === "22023") && isoGood.every((d) => d.outcome === "updated" || d.outcome === "opened") && isoGood[1].item?.due_at === "2027-03-01T16:00:00+00:00",
     `a due time with a relative word anywhere raises 22023 from both writers; a date, a time with an offset and one with Z are kept, the offset honoured (${isoBad.map((d) => d.code).join(",")}; ${isoGood.map((d) => d.outcome).join(",")}, ${isoGood[1].item?.due_at})`);
+
+  // A due time without an offset is UTC whatever the session's time zone, as set_priority reads a bare date (review pass 4).
+  let nyEpoch = -1;
+  await db.transaction(async (tx) => {
+    await tx.exec(`SET LOCAL TimeZone = 'America/New_York'`);
+    await tx.query(`SELECT update_item($1, '{"due_at": "2027-04-01"}'::jsonb, $2::jsonb)`, [tid, j(OP)]);
+    nyEpoch = Number((await tx.query<{ e: string }>(`SELECT extract(epoch FROM due_at)::text AS e FROM open_items WHERE item_id = $1::uuid`, [tid])).rows[0].e);
+  });
+  assert(nyEpoch === Date.UTC(2027, 3, 1) / 1000, `a bare date under a New York session is the start of that day in UTC (${nyEpoch})`);
+
+  // An item found by its thought and text is the opening's text: the source re-sending it after an edit is not told to undo the edit (review pass 4).
+  await update(fromThought.item?.id ?? GHOST, { text: "renew the passport by May" }, OP);
+  const resent = await open("renew the passport", OP, { thought: passport });
+  assert(resent.outcome === "unchanged" && resent.item?.id === fromThought.item?.id && resent.message === null && resent.item?.text === "renew the passport by May",
+    `the opening's text re-sent after the item's text was edited is the same item, unchanged, with no word of a difference (${resent.outcome}, ${JSON.stringify(resent.message)})`);
 
   // Append-only events; proposals decided once — for the owner too.
   const anyEvent = h.events[0].id;

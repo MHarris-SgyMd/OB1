@@ -2460,10 +2460,12 @@ call came through (a plugin hook, `hook:<plugin>`, has no agent id) — asked
 before any existence answer, and refused alike for an item that is not there
 (`ITEM_NOT_YOURS`); one whose envelope carries no agent id of its own opens no
 item but a plugin row's (`ITEM_UNATTRIBUTED`), since it could never prove one its
-own. A missing origin thought is `ORIGIN_NOT_FOUND`. A due time that does not
-start with a digit (Postgres's `now`, `tomorrow`, `epoch`), is no time, or is
-infinite is refused (22023); text without an offset is read in the session's time zone, so the
-server passes instants. 117 replaces 116's
+own. A missing origin thought is `ORIGIN_NOT_FOUND`. A due time is ISO 8601
+alone (a date, or a date and time with an optional offset), so none of
+Postgres's words (`now`, `tomorrow`, `epoch`) anywhere in it; anything else is
+refused (22023), and text without an offset is UTC, as `set_priority` reads a
+bare date. A capture-only key may dismiss a proposed item but not confirm it,
+directly or by reopening it (`CONFIRM_NOT_YOURS`). 117 replaces 116's
 `ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
 whose capture rule now admits an open item the key owns, and redefines
 `ob1_priority_actor` on `ob1_actor_maker`, the maker reader the item writers

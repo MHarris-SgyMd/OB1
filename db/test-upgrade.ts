@@ -5286,7 +5286,8 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
   assert(grants.length === 6 && grants[0] === `GRANT SELECT, INSERT, UPDATE ON priority_assertions TO "ob1_upgrade_probe";`
          && grants[1] === `GRANT SELECT, INSERT, UPDATE, DELETE ON priority_current TO "ob1_upgrade_probe";`
          && grants[2] === `GRANT SELECT ON priority_sources TO "ob1_upgrade_probe";`
-         && grants[3] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`,
+         && grants[3] === `GRANT SELECT ON ob1_entities TO "ob1_upgrade_probe";`
+         && grants[4] === `GRANT SELECT ON open_items TO "ob1_upgrade_probe";` && grants[5] === `GRANT SELECT ON open_item_events TO "ob1_upgrade_probe";`,
     `--grant's priority group: SELECT, INSERT and UPDATE on the assertions, all four on the projection, SELECT alone on the sources and on the entities an assertion may name (${grants.join("; ")})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the116 });
   const kept = Number((await sql`SELECT count(*)::int AS n FROM priority_assertions`)[0].n);
