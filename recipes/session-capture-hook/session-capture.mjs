@@ -3093,8 +3093,8 @@ function ownPieceNote(text, root, claimId) {
  * or lapsed with no claim on overlapping work made or renewed since: renew. A
  * claim made before the lapse and revived during it counts (review pass 2 of
  * SMD-3654: it was missed). Lapsed with one: `blocked`, the marker written as
- * for WORK_CLAIMED, naming each claim's id so the agent can tell one the user
- * already decided on. Can't tell: `keep`.
+ * for WORK_CLAIMED, naming each claim's id and its state so the agent can
+ * match it against the claim named after the user's decision. Can't tell: `keep`.
  */
 async function lapseCheck(cfg, claim, knownExpiry) {
   if (!claim.ticket) return { note: ` (its token file names no ticket, so claims made while it lapsed at ${knownExpiry} were not checked)` };
