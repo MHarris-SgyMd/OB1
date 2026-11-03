@@ -454,14 +454,16 @@ For reference, here's what the official Open Brain extensions expose:
 | Extension | Tools | Cross-Extension |
 |-----------|-------|----------------|
 | 1. Household Knowledge | 5 | — |
-| 2. Home Maintenance | 4 | — |
-| 3. Family Calendar | 6 | — |
-| 4. Meal Planning | 6 + 4 shared | — |
-| 5. Professional CRM | 7 | 1 bridge to core |
-| 6. Job Hunt Pipeline | 8 | 1 bridge to CRM |
-| **All extensions** | **40** | **2 bridges** |
+| 2. Home Maintenance | 5 | — |
+| 3. Family Calendar | 7 | — |
+| 4. Meal Planning | 8 | — |
+| 5. Professional CRM | 10 | 1 bridge to core |
+| 6. Job Hunt Pipeline | 10 | 1 bridge to CRM |
+| **All extensions** | **45** | **2 bridges** |
 
-With all 6 extensions connected simultaneously, that's ~40 tool definitions. Based on community testing ([Issue #36](https://github.com/NateBJones-Projects/OB1/issues/36)), Claude Opus handles this fine in scripted use but routing accuracy degrades for ambiguous, multi-domain prompts — and weaker models struggle significantly.
+On this fork the first four are plugins, their tools on the brain's own connector; meal planning's shared server is retired, and its plugin reads and ticks off the list behind the brain's own keys (SMD-2311). The counts above are this tree's.
+
+With all 6 extensions connected simultaneously, that's ~45 tool definitions. Based on community testing ([Issue #36](https://github.com/NateBJones-Projects/OB1/issues/36)), Claude Opus handles this fine in scripted use but routing accuracy degrades for ambiguous, multi-domain prompts — and weaker models struggle significantly.
 
 The official extensions are designed to be connected selectively (you don't need Meal Planning loaded during a job search), but many users connect everything and leave it. This guide helps you be intentional about it.
 

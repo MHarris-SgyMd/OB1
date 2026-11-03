@@ -54,7 +54,7 @@ Lead with the human pain point. What real-life scenario makes this extension wor
 | 1. [Household Knowledge Base](../household-knowledge/) | Home facts your agent can recall | |
 | 2. [Home Maintenance Tracker](../home-maintenance/) | Scheduling and history for home upkeep | |
 | 3. [Family Calendar](../family-calendar/) | Multi-person schedule coordination | |
-| 4. [Meal Planning](../meal-planning/) | Recipes, meal plans, shared grocery lists | |
+| 4. [Meal Planning](../meal-planning/) | Recipes, meal plans, grocery lists | |
 | 5. [Professional CRM](../professional-crm/) | Contact tracking with interaction history | |
 | 6. [Job Hunt Pipeline](../job-hunt/) | Application tracking and interview pipeline | |
 

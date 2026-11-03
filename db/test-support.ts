@@ -74,6 +74,13 @@ const TABLES = [
   // ticket by its key, not a thought — so its place is free. Its CASCADE takes
   // the helpers whose arguments are its row type.
   "work_claims",
+  // 116's priority assertions (SMD-3663): no foreign key either way — an
+  // assertion names its item by a kind and a key, not a reference — so their
+  // place is free. The first's CASCADE takes the helpers whose arguments or
+  // result are its row type, and its triggers.
+  "priority_assertions",
+  "priority_current",
+  "priority_sources",
   // 060's vector snapshot (SMD-2116): keyed by (content_fingerprint,
   // embedding_model), no foreign key either way — a row outlives the
   // thought it came from on purpose — so its place in the order is free.
@@ -389,6 +396,28 @@ const FUNCTIONS = [
   "ob1_work_claim_lock(text)",
   "ob1_work_claim_is_holder(work_claims, text, uuid, bytea)",
   "ob1_work_claims_in_the_way(text, text, uuid, timestamp with time zone)",
+  // 116 (SMD-3663): priority assertions — the five calls, the drift check, the
+  // rebuild and the helpers (those taking or returning priority_assertions'
+  // row type go with its CASCADE, and are named anyway).
+  "assert_priority(text, text, integer, timestamp with time zone, timestamp with time zone, text, text, text, boolean, jsonb)",
+  "clear_priority(text, text, jsonb)",
+  "priority_of(jsonb)",
+  "priority_history(text, text)",
+  "declare_priority_source(text, boolean)",
+  "ob1_priority_projection_drift()",
+  "ob1_rebuild_priority_projection()",
+  "ob1_priority_assertions_guard()",
+  "ob1_priority_item(text, text)",
+  "ob1_priority_item_exists(text, text)",
+  "ob1_priority_actor(jsonb, text)",
+  "ob1_priority_tier(boolean, boolean, text)",
+  "ob1_priority_owns(text, uuid)",
+  "ob1_priority_is_maker(priority_assertions, text, uuid)",
+  "ob1_priority_json(priority_assertions)",
+  "ob1_priority_isolation(text)",
+  "ob1_priority_lock(text, text)",
+  "ob1_priority_winner(text, text)",
+  "ob1_priority_project(text, text)",
 ];
 
 /**
@@ -1370,10 +1399,7 @@ export const CONTRIB_DIR = join(HERE, "..");
  * entity-extraction's tables, so the community files must come first.
  */
 export const CONTRIB_SCHEMA_FILES: readonly string[] = [
-  "extensions/home-maintenance/schema.sql",
-  "extensions/household-knowledge/schema.sql",
   "extensions/job-hunt/schema.sql",
-  "extensions/meal-planning/schema.sql",
   "extensions/professional-crm/schema.sql",
   "recipes/adaptive-capture-classification/schema.sql",
   "recipes/brain-health-monitoring/ops-views.sql",

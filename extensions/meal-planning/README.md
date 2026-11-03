@@ -2,7 +2,7 @@
 
 ## Why This Matters
 
-Your agent can reason across five datasets — what you've cooked before, what's in the pantry, who's home this week (from your family calendar), what people actually liked, and what you need to buy. That's meal planning that actually works. And your spouse needs access too — not to your whole brain, just to the meal plan and the shopping list. This is where you learn to share specific parts of your system with someone else.
+Your agent can reason across five datasets — what you've cooked before, what's in the pantry, who's home this week (from your family calendar), what people actually liked, and what you need to buy. That's meal planning that actually works.
 
 ## Learning Path: Extension 4 of 6
 
@@ -17,183 +17,83 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 ## What You'll Learn
 
-- Scoping rows without Row Level Security — what upstream's policies did and why this fork's schema leaves them out (the [RLS primitive](../../primitives/rls/), as background)
-- Shared MCP server (separate server with limited, scoped access)
 - JSONB for complex data (ingredients, instructions)
-- Auto-generating derivative data (shopping lists from meal plans)
+- Auto-generating derivative data (shopping lists from meal plans), and keeping what a person changed (a bought item) when it is made again
+- Idempotent planning: a slot set, not appended to
 - Cross-extension queries (checking who's home this week from the family calendar)
 
 ## What It Does
 
-A complete meal planning system with recipes, weekly meal plans, and auto-generated shopping lists. Includes a separate shared MCP server so your partner can view plans — and, with a write-scoped key, check off grocery items — without accessing your full Open Brain.
+A meal planning system with recipes, weekly meal plans, and shopping lists made from them.
+
+On this fork the meal planner is a **plugin**: [`plugins/meal-planning`](../../plugins/meal-planning/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_meal_planning`, which the brain's migrator makes when you turn the plugin on.
+
+Upstream's extension also had a second, "shared" server, so a household member could view the plan and tick off the list on a key of their own. A plugin's operations take the brain's own scopes, which cannot express "read, and mark bought", so that server is retired (SMD-2920). The plugin's own `get_shopping_list` and `mark_item_purchased` do the reading and ticking, behind the brain's read and write keys.
 
 **Tables:**
-- `recipes` — Your recipe collection with JSONB ingredients and instructions
-- `meal_plans` — Weekly meal planning linked to recipes
-- `shopping_lists` — Auto-generated grocery lists from meal plans
+- `recipes` — Your recipe collection with ingredients, instructions and tags
+- `meal_plans` — The week's meals: a recipe or a custom meal, by day and meal
+- `shopping_lists`, `shopping_list_items` — One list a week, made from the planned recipes, each item with whether it is bought
 
-**Primary MCP Tools (full access):**
-- `add_recipe` — Add a recipe with ingredients and instructions
-- `search_recipes` — Search by name, cuisine, tags, or ingredient
-- `update_recipe` — Update an existing recipe
-- `create_meal_plan` — Plan meals for a week
-- `get_meal_plan` — View the meal plan for a given week
-- `generate_shopping_list` — Auto-generate shopping list from meal plan
+**Tools** (each also a REST route under `/v1/plugins/meal-planning/`):
+- `meal_planning_add_recipe` — Add a recipe with ingredients and instructions
+- `meal_planning_search_recipes` — Find recipes by words, cuisine, tag or ingredient
+- `meal_planning_update_recipe` — Change a recipe's fields
+- `meal_planning_create_meal_plan` — Plan meals for days and meal types of a week
+- `meal_planning_get_meal_plan` — See the week's meals, day by day
+- `meal_planning_generate_shopping_list` — Make the week's shopping list from its recipes
+- `meal_planning_get_shopping_list` — See the week's list
+- `meal_planning_mark_item_purchased` — Tick an item off
 
-**Shared MCP Tools (household access):**
-- `view_meal_plan` — View meal plans (read-only)
-- `view_recipes` — Browse recipes (read-only)
-- `view_shopping_list` — View shopping list
-- `mark_item_purchased` — Toggle item purchased status
+The plugin's [README](../../plugins/meal-planning/README.md) gives each one's input, output and refusals.
 
 ## Prerequisites
 
-- Working Open Brain setup
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-3 recommended (Extension 3's family calendar, a plugin, is read for cross-extension integration)
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
-- **Required reading:** [Shared MCP Server](../../primitives/shared-mcp/) primitive
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
-
-```text
-MEAL PLANNING -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-GENERATED DURING SETUP
-  Default User ID:             ____________
-  MCP Access Key:              ____________  (same key for all extensions)
-  MCP Server URL:              ____________
-  MCP Connection URL:          ____________
-
-FOR SHARED SERVER
-  Household Access Key:        ____________
-  Household access key:        ____________  (minted for the shared server alone)
-  Shared Server URL:           ____________
-  Shared Connection URL:       ____________
-
-NOTE: This extension runs TWO servers, each on its own port with its own keys:
-  1. Primary (index.ts) — your full access
-  2. Shared (shared-server.ts) — household read + shopping list
-
---------------------------------------
-```
 
 ## Steps
 
-> **No JSON config files. No local Node.js server. Same pattern as your core Open Brain setup.**
+### 1. Turn on the Plugin
 
-### 1. Create the Database Schema
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with — `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql`, or paste it into the SQL client you use. This creates three tables (`recipes`, `meal_plans`, `shopping_lists`), each with a `user_id` column both servers fill from `DEFAULT_USER_ID`.
+```
+OB1_PLUGINS=meal-planning
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
+```
 
-Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
-
-**What changed for the shared server:** upstream's policies also let a `household_member` role, read from Supabase's JWT, see recipes and meal plans and edit shopping lists. Here the shared server's scope is the tool set it registers and its own key list ("Decide the Household Member's Scope", below) — the same rows, a narrower set of verbs — not a row policy.
-
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
+The migrator makes the plugin's tables, and the servers start with its eight tools.
 
-> If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
+### 2. Check Your AI Sees It
 
-### 3. Run the Primary MCP Server
+Your MCP client lists the `meal_planning_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the three that read. A write key sees all eight.
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
+### 3. Test It
 
-```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/meal-planning/index.ts
-```
-
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
-
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` beside `ingredients` into `JSONB` in one insert, the tag and ingredient filters, the recipe embedded on each meal (`recipes:recipe_id (…)`), the shopping list aggregated from it, and `update_recipe`'s error path carrying the database's message (FORK.md change 77, SMD-1588; change 74's review had found two of the six failing on the shim).
-
-### 4. Connect to Your AI
-
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Meal Planning` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test the Primary Server
-
-Try these prompts in Claude Desktop:
+Try these prompts:
 
 ```
-Add a recipe: Chicken Stir-Fry. Ingredients: 1 lb chicken breast, 2 cups broccoli, 1 cup bell peppers, 3 tbsp soy sauce, 2 tbsp oil. Instructions: 1) Cut chicken into cubes. 2) Heat oil in wok. 3) Cook chicken 5 min. 4) Add vegetables, cook 3 min. 5) Add soy sauce, toss well. Tags: quick, healthy, asian. Prep 10 min, cook 15 min, serves 4.
-
-Plan meals for the week of March 17: Monday dinner is the chicken stir-fry, Tuesday dinner is pasta night (custom meal, no recipe), Wednesday dinner is tacos.
-
-Generate a shopping list for the week of March 17.
+Add a recipe: pasta al limone, Italian, serves 4 — 400 g spaghetti, 2 tbsp olive oil, 1 lemon; boil the pasta, toss with oil and lemon.
 ```
 
-## Setting Up the Shared Server
-
-The shared server gives household members limited access — they can view meal plans, browse recipes, and manage the shopping list without accessing your full Open Brain.
-
-### 1. Decide the Household Member's Scope
-
-The boundary is the shared server's own key list. Mint the household member a key of their own (Step 3 of [Run a Remote MCP Server](../../primitives/deploy-remote-mcp/)) — `read` unless they should check items off the shopping list — and put its hash in `MCP_HOUSEHOLD_ACCESS_KEYS`, never in the primary server's `MCP_ACCESS_KEYS`. The shared server registers only its four tools, so even a write key there cannot reach your recipes' edits or your meal plans' changes. Upstream's schema carried `auth.jwt() ->> 'role' = 'household_member'` policies as a Supabase-side line; this fork's carries none (SMD-1810) — the servers connect as one Postgres role — so the key list is the line that holds (to have the database hold one too, give the shared server a `SUPABASE_URL` whose role has only the household member's privileges).
-
-### 2. Run the Shared Server
-
-The shared server runs under Bun exactly as the primary one does (Step 3 above), from `shared-server.ts` instead of `index.ts`, with its own keys — `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works) rather than `MCP_ACCESS_KEYS`, so a household member's key never opens the primary server — and on a port of its own:
-
-```bash
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_HOUSEHOLD_ACCESS_KEYS='spouse:write:paste-the-hash-here' \
-PORT=8788 bun extensions/meal-planning/shared-server.ts
+```
+Plan dinners for next week: pasta on Monday and Wednesday, salad on Tuesday, leftovers on Thursday.
 ```
 
-`SUPABASE_HOUSEHOLD_KEY`, the restricted key upstream's Edge Function read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
-
-> **Every tool of the shared server runs on the fork.** `extensions/test-tools.ts` drives all four in CI on the rows the primary server's tools planted — the embedded recipe on `view_meal_plan`, the tag filter on `view_recipes`, `view_shopping_list`'s error path carrying the database's message (FORK.md change 77, SMD-1588).
-
-Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
-
-### 3. Connect Your Household Member
-
-Your spouse/partner follows the [Remote MCP Connection](../../primitives/remote-mcp/) guide on their device:
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Meal Planning (Shared)` |
-| URL | The shared server's MCP Connection URL |
-
-They can view meal plans and recipes; with a write-scoped key they can also check off grocery items. They cannot create recipes, modify meal plans, or access other parts of your Open Brain.
-
-### 4. Test the Shared Server
-
-Your spouse can now use prompts like:
+```
+What's for dinner on Wednesday?
+```
 
 ```
-What's for dinner this week?
-Show me the shopping list for this week.
-Mark "chicken breast" as purchased.        (needs a write-scoped key — mark_item_purchased is the one tool that writes)
-Search recipes tagged "quick".
+Make the shopping list for next week. I already have the olive oil — tick it off.
 ```
 
 ## Cross-Extension Integration
@@ -206,10 +106,7 @@ Who's home for dinner this week? Adjust the meal plan servings accordingly.
 ```
 
 **With Household Knowledge Base (Extension 1):**
-Cross-reference pantry inventory: "Do we have the ingredients for chicken stir-fry?" queries both the recipe's ingredients and your knowledge base entries about pantry stock.
-
-**Pattern reuse:**
-The table shape you build here — a `user_id` the server fills — is the one Extensions 5 (Professional CRM) and 6 (Job Hunt Pipeline) reuse. The shared MCP server pattern is reusable for any future extension where you want to give someone else partial access.
+Cross-reference pantry inventory: "Do we have the ingredients for chicken stir-fry?" reads both the recipe's ingredients and your knowledge base entries about pantry stock.
 
 ## Expected Outcome
 
@@ -217,39 +114,31 @@ Your agent can now:
 
 - Store and search your recipe collection
 - Plan weekly meals with a mix of recipes and custom entries
-- Auto-generate shopping lists by aggregating recipe ingredients
-- Let your spouse view plans (and, with a write-scoped key, check off grocery items) without full system access
-
-The shared server demonstrates a key Open Brain principle: your data, your rules. You control exactly what someone else can see and do.
+- Make shopping lists by adding up recipe ingredients
+- Tick off what's bought, and keep those ticks when the list is made again
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/meal-planning/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-**JSONB ingredient search not working**
-- The `search_recipes` tool uses `.cs.` (contains) operator for JSONB — ingredient names must match exactly (case-insensitive)
-- For more flexible search, consider adding a GIN index on the ingredients JSONB column
+**No `meal_planning_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `meal-planning`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
 
-**Shopping list aggregation is wrong**
-- The current implementation does simple string concatenation for quantities (e.g., "1 cup + 2 cups")
-- For production use, you'd want smarter quantity aggregation
-
-**Shared server can see or change more than it should**
-- Its scope is the tool set it registers and its own key list ("Decide the Household Member's Scope"); there is no row policy behind it on this fork (SMD-1810). Check which server the connector points at and which key it carries — a household member's key must be on the shared server's list only
-- Test by trying to add or delete a recipe through the shared server: it registers no tool for that
+**Shopping list quantities don't add up**
+- Only quantities written as numbers ("2", "1/2", "1 1/2") are summed; others ("a pinch") are listed after the sum
 
 ## Next Steps
 
-**Extension 5: Professional CRM** — You'll reuse the table shape you just built — a `user_id` the server fills — for professional contact data. The shared server pattern isn't needed here (your work contacts are private), but the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
+**Extension 5: Professional CRM** — Contact management with interaction history: the multi-entity relationship (contacts → interactions) is the same pattern you used in Extension 3 (family members → activities).
 
 **Key concepts in Extension 5:**
 - Contact management with interaction history
 - Relationship tracking and follow-up reminders
-- A `user_id` the server fills, for sensitive professional data
 - Integration with calendar (Extension 3) for scheduling follow-ups
 
 Continue to [Extension 5: Professional CRM](../professional-crm/)
 
-> **Tool surface area:** This extension introduced the concept of scoped servers — a primary server with full access and a shared server with limited tools. That same principle applies to how you organize all your MCP tools. With ~25 tools across 4 extensions now, consider running the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify which servers to connect per workflow and whether any tools can be consolidated.
+> **Tool surface area:** With ~25 tools across 4 plugins now, consider running the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) to identify which plugins to turn on per workflow and whether any tools can be consolidated.
