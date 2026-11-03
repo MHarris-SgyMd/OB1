@@ -2330,7 +2330,8 @@ the lock. Claims are not in
 `thought_audit`: they change no thought, and the table keeps its own history. The
 **claims** grant group (SELECT, INSERT, UPDATE on `work_claims`; no DELETE) is
 soft: a role without it gets a permission error (42501) naming `work_claims` on
-the calls, and nothing else; the rules hold for
+the calls, and every read's `claimed` label (SMD-3599) says the claims could not
+be read; nothing else fails. The rules hold for
 callers of the functions, while a role with the group can write the table
 directly, as with the pages group. Needs 008, 046 and 061; a re-apply is a no-op.
 The REST and MCP operations are `claim_work`, `renew_claim`, `release_claim` and

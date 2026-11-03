@@ -2591,7 +2591,8 @@ export const ROLE_GRANTS = Object.freeze({
   // release_work_claim (SECURITY INVOKER, PUBLIC's EXECUTE), read through
   // list_work_claims. No DELETE: an ended claim stays as history. The holder's
   // kind is read from ob1_agents, the capture group's SELECT. Soft: a role
-  // without it is refused the claim calls, naming the table, and nothing else.
+  // without it is refused the claim calls, naming the table, and every read's
+  // claimed label (SMD-3599) says its claims could not be read; nothing else.
   claims: Object.freeze([
     Object.freeze({ table: "work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "115" }),
   ]),
