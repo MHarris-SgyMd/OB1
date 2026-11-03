@@ -15,106 +15,83 @@ You ran into someone at a conference six months ago. They mentioned they were lo
 | **5** | **Professional CRM** | **<-- You are here** |
 | 6 | Job Hunt Pipeline | Not started |
 
-## What It Does
-
-A professional contact management system with interaction logging, opportunity tracking, and follow-up reminders. Scoped to your `DEFAULT_USER_ID` so your professional network stays private. This extension introduces multi-level relationships (contacts → interactions → opportunities) and cross-extension integration with your core Open Brain thoughts table.
-
 ## What You'll Learn
 
-- Reusing Extension 4's table shape (a `user_id` the server fills)
-- Multi-level relationships across three tables
-- Pipeline/opportunity tracking with stage management
-- Auto-updating timestamps (last_contacted)
-- Cross-extension integration with the core Open Brain
+- Multi-level relationships across tables (contacts → interactions → opportunities)
+- Pipeline tracking with stage management
+- A value that only moves forward (`last_contacted` follows the latest interaction, never an older one logged late)
+- Reading the brain's own thoughts through its core, as the caller, from a plugin that holds nothing of the core's
 - Bridge tools that connect different data domains
+
+## What It Does
+
+A professional contact management system with interaction logging, opportunity tracking, follow-up reminders, meeting prep and stale-contact detection.
+
+On this fork the CRM is a **plugin**: [`plugins/professional-crm`](../../plugins/professional-crm/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list, connector or `DEFAULT_USER_ID` to set up. Its tables live in a schema of its own, `plugin_professional_crm`, which the brain's migrator makes when you turn the plugin on.
+
+**Tables:**
+- `professional_contacts` — The people in your network
+- `contact_interactions` — Each touchpoint with them
+- `opportunities` — Deals, projects and collaborations, each at a stage
+- `contact_thoughts` — The brain's thoughts linked to a contact
+
+**Tools** (each also a REST route under `/v1/plugins/professional-crm/`):
+- `professional_crm_add_contact` — Add a contact
+- `professional_crm_search_contacts` — Find contacts by words or a tag
+- `professional_crm_update_contact` — Change a contact's fields, including the follow-up date
+- `professional_crm_log_interaction` — Log a meeting, email, call, coffee or other touchpoint
+- `professional_crm_get_contact_history` — A contact's profile, interactions, opportunities and linked thoughts
+- `professional_crm_create_opportunity` — Add an opportunity, with a contact or none
+- `professional_crm_list_opportunities` — Find opportunities by stage, open or closed, or contact
+- `professional_crm_update_opportunity` — Move an opportunity on, through to won or lost
+- `professional_crm_get_follow_ups` — Who is overdue or due for a follow-up
+- `professional_crm_link_thought` — **The bridge:** link a thought from your brain to a contact
+- `professional_crm_prep_context` — **Meeting prep:** everything about a contact in one briefing
+- `professional_crm_stale_contacts` — Relationships going cold
+
+The old server's tools carried a `crm_` prefix of their own; the plugin's name prefixes them now. The plugin's [README](../../plugins/professional-crm/README.md) gives each one's input, output and refusals.
+
+`schema.sql` here is the old server's tables. It stays only because job-hunt's standalone server still writes its CRM link into them, until job-hunt is a plugin too (SMD-2311 PR 4b). The plugin does not read them. The plugin's README has the copy for a brain that held them.
 
 ## Prerequisites
 
-- Working Open Brain setup
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extensions 1-4 recommended
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
-- **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like, plus an access key — reuse one from your core setup or mint one for this server.
-
-```text
-PROFESSIONAL CRM -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-MCP SERVER (you'll create these)
-  Default User ID:       ____________
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
-```
 
 ## Steps
 
-### 1. Set Up the Database Schema
+### 1. Turn on the Plugin
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql`, or paste it into the SQL client you use. This creates three tables with foreign keys (`professional_contacts`, `contact_interactions`, `opportunities`), each with a `user_id` column the server fills from `DEFAULT_USER_ID`.
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
-
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
-
-```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+```
+OB1_PLUGINS=professional-crm
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
 ```
 
-Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
-
-> If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
-
-### 3. Run the MCP Server
-
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/professional-crm/index.ts
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+The migrator makes the plugin's tables, and the servers start with its twelve tools.
 
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all ten against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` (as `[]` too), full-text search with a tag filter through the `text[]` argument, the follow-up window with `.not()`, the stale-contact query, a thought linked through the fork's own `upsert_thought` (FORK.md change 77, SMD-1588; change 74's review had found two of the ten failing on the shim, and the tag filters were a third path nobody had driven).
+### 2. Check Your AI Sees It
 
-### 4. Connect to Your AI
+Your MCP client lists the `professional_crm_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the six that read. A write key sees all twelve.
 
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
+### 3. Test It
 
-| Setting | Value |
-|---------|-------|
-| Connector name | `Professional CRM` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test the Extension
-
-Try these commands with Claude:
+Try these prompts:
 
 ```
 Add a professional contact: Sarah Chen, works at DataCorp as VP of Engineering, met at AI Summit 2026
 ```
 
 ```
-Log an interaction: had coffee with Sarah Chen yesterday, discussed their RAG pipeline needs, follow up needed
+Log an interaction: had coffee with Sarah Chen yesterday, discussed their RAG pipeline needs, follow up needed. Remind me to follow up next Tuesday.
 ```
 
 ```
@@ -125,80 +102,55 @@ Show me everyone I need to follow up with this week
 Create an opportunity: DataCorp consulting project, linked to Sarah Chen, in conversation stage, estimated $50k
 ```
 
+```
+Prep me for my meeting with Sarah
+```
+
 ## Cross-Extension Integration
 
 **This is where extensions start to compound in power.**
 
-### `link_thought_to_contact` — The Bridge Tool
+### `professional_crm_link_thought` — The Bridge Tool
 
 Your core Open Brain captures thoughts all day long. Some of those thoughts mention people. This tool bridges the gap — your agent sees a thought about someone and can surface it before your next meeting with them.
 
 **Example workflow:**
 
 1. You capture a thought: "Ran into Sarah Chen at the AI meetup — she's looking for someone to help with their RAG pipeline."
-2. Your agent uses `link_thought_to_contact` to add this to Sarah's contact record (stored in the contact's notes or tags)
-3. Next time you look up Sarah or have a follow-up due, that thought appears in context
+2. Your agent finds it with `search_thoughts` and uses `professional_crm_link_thought` to add it to Sarah's contact record
+3. Next time you look up Sarah or prep for a meeting, that thought appears in context
 4. Before your next meeting with Sarah, your agent surfaces: "Last interaction: coffee 2 weeks ago. Note from recent thought: looking for RAG pipeline help."
 
 **How it works technically:**
 
-The tool takes a `thought_id` (from the core Open Brain `thoughts` table) and a `contact_id` (from `professional_contacts`). It retrieves the thought content and appends it to the contact's notes with a timestamp and reference. This creates a bidirectional link — the contact record gains context, and the thought gains a professional relationship tag.
+The tool takes a `thought_id` (from `search_thoughts`) and a `contact_id` (from `professional_crm_search_contacts`). It reads the thought through the brain's own `fetch`, as the key that called it, so a key that may not read thoughts cannot link one. It appends the thought's text to the contact's notes on a dated line, and records the link, so linking the same thought again adds nothing.
 
 ### Integration with Extension 6 (Job Hunt Pipeline)
 
-If you build Extension 6, the `link_contact_to_professional_crm` tool works in reverse — recruiters and hiring managers from your job search automatically become professional contacts. Your networking doesn't stop when the job search ends. Those relationships persist in your CRM, ready for the long-term connection.
-
-## Available Tools
-
-All tools use the `crm_` prefix for clear namespace separation from other extensions.
-
-1. **`crm_add_contact`** — Add a contact (name, company, title, email, phone, linkedin_url, how_we_met, tags, notes)
-2. **`crm_search_contacts`** — Full-text search across name, company, title, notes, and how_we_met using PostgreSQL FTS with GIN indexes. Falls back to ILIKE if the FTS function hasn't been created yet. Supports tag filtering and result limits
-3. **`crm_log_interaction`** — Log a touchpoint (contact_id, interaction_type, summary, follow_up_needed, follow_up_notes). Auto-updates contact's last_contacted timestamp via trigger
-4. **`crm_get_contact_history`** — Get a contact's full profile + all interactions + linked opportunities ordered by date
-5. **`crm_create_opportunity`** — Create an opportunity/deal linked to a contact (title, description, stage, value, expected_close_date)
-6. **`crm_get_follow_ups`** — List contacts with follow_up_date in the past or next N days, split into overdue vs upcoming
-7. **`crm_update_contact`** — Update only the fields you provide on an existing contact, including setting or clearing `follow_up_date`
-8. **`crm_link_thought`** — **CROSS-EXTENSION BRIDGE** — Takes a thought_id and contact_id, retrieves the thought from your core Open Brain, and links it to the contact record
-9. **`crm_prep_context`** — **MEETING PREP** — Aggregates a contact's full profile, recent interactions, open opportunities, pending follow-ups, and relationship health metrics into a single briefing. The power tool — ask "prep me for my meeting with Sarah" and get everything in one call
-10. **`crm_stale_contacts`** — Find relationships going cold — contacts with no interaction logged in the past N days, ordered by staleness. Helps you maintain your network proactively
+If you build Extension 6, its link works in reverse — recruiters and hiring managers from your job search become professional contacts. Your networking doesn't stop when the job search ends.
 
 ## Expected Outcome
-
-After completing this extension, you should be able to:
-
-1. Maintain a professional contact database with rich context
-2. Search contacts instantly with full-text search (ranked results, not just substring matching)
-3. Log every interaction with timestamps and follow-up tracking
-4. Track opportunities through a pipeline (identified → in_conversation → proposal → negotiation → won/lost)
-5. Connect thoughts from your Open Brain to specific contacts
-6. Get proactive follow-up reminders before relationships go cold
-7. Prep for any meeting with a single command that pulls full context
-8. Detect stale relationships before they go cold
 
 Your agent will be able to answer questions like:
 - "Who do I need to follow up with this week?"
 - "Show me my full history with Sarah Chen"
-- "What opportunities are in the proposal stage?"
+- "What opportunities are in the proposal stage?" — and "Mark the DataCorp project won."
 - "Find contacts I met at conferences who work in AI"
-- "Which thoughts have I captured about John's project?"
 - "Prep me for my meeting with Sarah" (aggregated briefing)
 - "Which relationships are going cold?" (stale contact detection)
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/professional-crm/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-**"Foreign key violation" when logging interactions**
-- Ensure the contact exists before logging an interaction
-- Verify the `contact_id` UUID is correct
-- Check that the contact belongs to the same user_id
+**No `professional_crm_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `professional-crm`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
 
-**"Thought not found" when linking**
-- Verify the thought_id exists in your core Open Brain `thoughts` table
-- Check that the user has permission to access that thought
+**`NO_SUCH_THOUGHT` when linking**
+- The thought is read as the key that called the tool: check the id with `search_thoughts`, using the same key
 
 ## Next Steps
 
@@ -206,4 +158,4 @@ For common issues (connection errors, 401s, deployment problems), see [Common Tr
 
 [Continue to Extension 6 →](../job-hunt/README.md)
 
-> **32 tools and counting.** With 5 extensions connected, your AI is holding ~32 tool definitions in context. If you're noticing the AI picking the wrong tool or ignoring some entirely, the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) has prompt kits that audit your tools, suggest merges, and help you scope servers by workflow (capture vs. query vs. admin).
+> **37 tools and counting.** With 5 plugins on, your AI is holding ~37 tool definitions from them in context. If you're noticing the AI picking the wrong tool or ignoring some entirely, the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) has prompt kits that audit your tools, suggest merges, and help you turn on only the plugins a workflow needs.

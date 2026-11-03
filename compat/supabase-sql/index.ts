@@ -534,8 +534,9 @@ class Catalog {
    * declared types and type categories, in order — and its OUT columns (a
    * `RETURNS TABLE` function's, an OUT parameter's) as a column map, so the
    * rows a function answers are shaped as a table's are (a `date` column the
-   * bare date): `crm_search_contacts` answers through a function on one path
-   * and through the table on another, and PostgREST gives one shape.
+   * bare date): professional-crm's search answered through a function on one
+   * path and through the table on another until it became a plugin
+   * (SMD-2311), and PostgREST gives one shape.
    */
   argTypesOf(fn: string): Promise<Overload[]> {
     return this.memo(this.store.fns, fn, async () => {

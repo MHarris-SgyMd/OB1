@@ -101,5 +101,5 @@ All extensions reference this guide for common issues:
 - [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2, a plugin since SMD-2311)
 - [Family Calendar](../../extensions/family-calendar/) (Extension 3, a plugin since SMD-2311)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4, a plugin since SMD-2311)
-- [Professional CRM](../../extensions/professional-crm/) (Extension 5)
+- [Professional CRM](../../extensions/professional-crm/) (Extension 5, a plugin since SMD-2311)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
