@@ -143,20 +143,20 @@ keep_output() {
 # last; else the last three lines that are not blank or Bun's version
 # trailer. no-tally, for a failing suite that printed no assertion tally
 # (a crash, or a script with a tally of its own), adds its last crash line
-# under its failure lines (review pass 2: a failed row then a throw showed the
-# row alone). stopped, for a row limit cut off, reads no crash line: an error a
-# suite logged and lived through, as test-jev's "error: connection reset",
-# would pass for the cause; its failure lines show, else its tail, where it
-# stopped.
+# under its failure lines (SMD-3607 review pass 2: a failed row then a throw
+# showed the row alone). stopped, for a row its limit cut off, reads no crash
+# line: an error a suite logged and lived through, as test-jev's "error:
+# connection reset", would pass for the cause; its failure lines show, else
+# its tail, where it stopped.
 excerpt() {
-  local lines crash= n
-  [ "${2:-}" = stopped ] || crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
+  local mode="${2:-}" lines crash= n
+  [ "$mode" = stopped ] || crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
   lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$' | awk '!seen[$0]++')
   if [ -n "$lines" ]; then
     printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
     n=$(printf '%s\n' "$lines" | grep -c .)
     [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
-    [ "${2:-}" != no-tally ] || [ -z "$crash" ] || printf '%s\n' "$crash" | tail -1 | sed 's/^/        /'
+    [ "$mode" != no-tally ] || [ -z "$crash" ] || printf '%s\n' "$crash" | tail -1 | sed 's/^/        /'
   elif [ -n "$crash" ]; then
     printf '%s\n' "$crash" | tail -3 | sed 's/^/        /'
   else
