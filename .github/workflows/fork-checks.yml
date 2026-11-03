@@ -1510,24 +1510,27 @@ jobs:
       # named no CPU; this says which a run had. "busy" is user, nice, system
       # and interrupt time over all time; "runnable" is /proc/loadavg's
       # count, less the sampler. Runnable over the CPU count most seconds,
-      # with busy near 100%, is a runner bound by its CPUs, where another leg
-      # adds contention, not time off (preflight-rest's comment has what this
-      # found). It reads, so it never fails the job.
+      # with busy 80% or more on average, is a runner bound by its CPUs, where
+      # another leg adds contention, not time off (preflight-rest's comment
+      # has what this found). It reads, so it never fails the job.
       - name: The runner's CPU while the legs ran
         if: ${{ !cancelled() }}
         run: |
           model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo)
           echo "CPU: ${model:-no model name in /proc/cpuinfo}, $(nproc) of them"
           [ -s "$RUNNER_TEMP/cpu.log" ] || { echo "no samples: the sampler did not run"; exit 0; }
-          from=0; to=$EPOCHSECONDS; span="from the start of the legs to their end"
-          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || { from=0; span="over the whole job, the legs never having started"; }
+          # The window says what it could read: the legs' start, else the
+          # job's; the last leg's end, else this step's start.
+          from=""; to=$EPOCHSECONDS; ended="this step"
+          read -r from _ 2> /dev/null < "$RUNNER_TEMP/data-layer.started" || true
           if [ -s "$RUNNER_TEMP/data-layer.legs" ]; then
-            to=0
+            to=0; ended="the last leg's end"
             while IFS= read -r leg; do
-              end=$(stat -c %Y "$RUNNER_TEMP/$leg.rc" 2> /dev/null) || end=$EPOCHSECONDS
+              if ! end=$(stat -c %Y "$RUNNER_TEMP/$leg.rc" 2> /dev/null); then end=$EPOCHSECONDS; ended="this step, a leg having written no code"; fi
               if [ "$end" -gt "$to" ]; then to=$end; fi
             done < "$RUNNER_TEMP/data-layer.legs"
           fi
+          if [ -n "$from" ]; then span="from the legs' start to $ended"; else from=0; span="from the job's start to $ended, data-layer.started unread"; fi
           awk -v from="$from" -v to="$to" -v cpus="$(nproc)" -v span="$span" '
             NF == 10 {
               busy = $2 + $3 + $4 + $7 + $8; total = busy + $5 + $6 + $9
@@ -1580,9 +1583,10 @@ jobs:
   # fourth would have added contention, not time off. The rest shard is 56
   # CPU-seconds timed alone on a laptop (39.7 of bun, 16 of its Postgres),
   # the first shard 71.5 and test-upgrade 33 (most of its span waits); the
-  # data layer keeps those two. With two legs, on an EPYC, the first shard
-  # ended at 169 s, the CPUs 67% busy and never at 95%. One Postgres, with
-  # a /dev/shm of 1 GB: the data layer's Postgres step has why.
+  # data layer keeps those two. With two legs, on an EPYC (one run,
+  # 41566315515), the first shard ended at 169 s, the CPUs 67% busy and
+  # never at 95%. One Postgres, with a /dev/shm of 1 GB: the data layer's
+  # Postgres step has why.
   preflight-rest:
     name: The deploy gate's rest shard against real Postgres
     runs-on: ubuntu-24.04
