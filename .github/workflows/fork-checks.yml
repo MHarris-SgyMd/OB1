@@ -5170,10 +5170,10 @@ jobs:
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
   # job left out is published only if its upload ends first (SMD-3709).
-  # A pull request, the merge queue and a
-  # push to another branch publish nothing. contents: write, on this job
-  # alone, is what pushes to the wiki's repository; the token stays out of the
-  # clone's config (an extraheader on each git call) and out of the checkout.
+  # A pull request, the merge queue and a push to another branch publish
+  # nothing. contents: write, on this job alone, is what pushes to the wiki's
+  # repository; the token stays out of the clone's config (an extraheader on
+  # each git call) and out of the checkout.
   publish-test-counts:
     name: Publish the suites' counts to the wiki
     runs-on: ubuntu-24.04

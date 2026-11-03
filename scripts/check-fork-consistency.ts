@@ -10758,7 +10758,7 @@ checkCheckNumbers();
  * - its needs are exactly the jobs with an actions/upload-artifact step whose `name` starts `test-counts-`;
  * - such a job has one such step, named `test-counts-<its key>`, or with a matrix `test-counts-<its key>-` and
  *   expressions naming the job's index or each axis that varies (an include-only matrix's keys that differ between
- *   its entries), so that a second upload of one name, which fails, and only on a push to main, is not written;
+ *   its entries), so no two of its jobs upload one name, the second of which fails, and only on a push to main;
  * - it sets OB1_TEST_COUNTS in its own env and uploads that file or its directory, the paths compared as written;
  * - a job that sets OB1_TEST_COUNTS uploads counts, and nothing sets or clears it in the workflow's env or a step's,
  *   nor names it in a run but to read it (`$OB1_TEST_COUNTS`, `${…}`, `env.…`, so a read in another language is
@@ -10801,8 +10801,8 @@ function matrixCountsName(key: string, matrix: unknown): string {
 }
 /** Whether a matrix job's counts name is its own in each job of the matrix: its key, then expressions naming the job's index or each axis that varies (an expression reads a name in any case). */
 function matrixNameHolds(key: string, matrix: unknown, name: string): boolean {
-  const expressions = [...name.matchAll(/\$\{\{(.*?)\}\}/g)].map((m) => m[1].toLowerCase()).join(" ");
   if (!name.startsWith(`${COUNTS_ARTIFACT}${key}-`)) return false;
+  const expressions = [...name.matchAll(/\$\{\{(.*?)\}\}/g)].map((m) => m[1].toLowerCase()).join(" ");
   if (/(?<![\w.])strategy\.job-index\b/.test(expressions)) return true;
   const named = new Set([...expressions.matchAll(/(?<![\w.])matrix\.([\w-]+)/g)].map((m) => m[1]));
   return named.size > 0 && (matrixAxes(matrix) ?? []).every((a) => named.has(a.toLowerCase()));
@@ -10834,13 +10834,15 @@ function testCountsProblems(text: string): string[] {
     const counts = mapping(job.env)?.[COUNTS_ENV];
     const matrix = mapping(job.strategy)?.matrix;
     const want = matrix ? matrixCountsName(key, matrix) : `${COUNTS_ARTIFACT}${key}`;
-    const instead = uploads.length || counts !== undefined ? "set it in the job's own env: alone" : "a job that uploads no counts sets it nowhere";
+    // A counts job: one that uploads counts or sets OB1_TEST_COUNTS, so it keeps the variable in its own env.
+    const countsJob = uploads.length > 0 || counts !== undefined;
+    const instead = countsJob ? "set it in the job's own env: alone" : "a job that uploads no counts sets it nowhere";
     for (const s of Array.isArray(job.steps) ? job.steps : []) {
       const step = mapping(s);
       if (mapping(step?.env)?.[COUNTS_ENV] !== undefined) problems.push(`job ${key} sets or clears ${COUNTS_ENV} in a step's env, which this check does not read (a suite a test spawns adds a row of its own, or none when its line repeats one, so no step need clear it) — ${instead} (check 50, SMD-3709)`);
       if (typeof step?.run === "string" && namesCountsInRun(step.run)) problems.push(`job ${key} names ${COUNTS_ENV} in a step's run other than as $${COUNTS_ENV}, \${${COUNTS_ENV}…} or env.${COUNTS_ENV}: a set, an unset, a $GITHUB_ENV line, a read in another language or a word for it, which this check does not read — ${instead}, and write the word otherwise (check 50, SMD-3709)`);
     }
-    if (uploads.length || counts !== undefined) counted.add(key);
+    if (countsJob) counted.add(key);
     if (!uploads.length) {
       if (counts !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} but uploads no ${COUNTS_ARTIFACT}… artifact, so its suites' counts never reach the page — upload that file or its directory with actions/upload-artifact, named ${want} (a name built wholly by an expression is not read)${needs.includes(key) ? "" : `, and add the job to ${COUNTS_PUBLISHER}' needs`}, or drop the variable from a job that runs no suites (check 50, SMD-3709)`);
       continue;
@@ -10852,7 +10854,7 @@ function testCountsProblems(text: string): string[] {
       ? `job ${key} uploads ${name}, which is not its own in each job of its matrix — name it ${want}, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`
       : `job ${key} uploads ${name}, not ${want} — name each job's counts after its key, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`);
     if (typeof counts !== "string" || !counts) { problems.push(`job ${key} uploads ${name} but sets no ${COUNTS_ENV} in its own env:, the file report() in db/test-support.ts appends its suites' counts to, which this check reads there alone — set it there, to the file the job uploads or a file directly in the directory it uploads (check 50, SMD-3709)`); continue; }
-    const paths = typeof uploads[0].path === "string" ? uploads[0].path.split("\n").map((p) => p.trim().replace(/\/+$/, "")).filter(Boolean) : [];
+    const paths = typeof uploads[0].path === "string" ? uploads[0].path.split("\n").map((p) => p.trim().replace(/\/+$/, "")) : [];
     if (!paths.includes(counts) && !paths.includes(posix.dirname(counts))) problems.push(`job ${key} uploads ${name} from ${JSON.stringify(uploads[0].path ?? null)}, which, compared as written, is neither its ${COUNTS_ENV}, ${counts}, nor that file's directory, so this check cannot tell the artifact holds its counts — upload ${posix.dirname(counts)}/ (check 50, SMD-3709)`);
   }
   // A need that sets OB1_TEST_COUNTS but uploads nothing has its message above, which says to upload.
