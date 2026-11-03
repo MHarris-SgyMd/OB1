@@ -4937,7 +4937,7 @@ const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
  * skip it: publish-test-counts, on a push to main, where nothing is gated.
  */
 const CHANGES_JOB = "changes";
-const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
+const AGGREGATE_GATED = ["portable-server", "db-schema", "replay-gate", "db-live", "data-layer", "preflight-rest", "deploy-stack", "deploy-stack-brains", "deploy-stack-auth", "deploy-stack-observability", "auth-poc", "compat-shim"];
 const GATED_IF = `\${{ !cancelled() && (needs.${CHANGES_JOB}.result != 'success' || needs.${CHANGES_JOB}.outputs.code != 'false') }}`;
 /**
  * The changes job as written (review pass 1): a checkout on pull requests
@@ -9162,9 +9162,10 @@ checkHostIpTemplates();
 // ── Check 31: a plugin's code stays in its schema, its role and the SDK (SMD-2310) ──
 //
 // A plugin runs in the brain's servers. Its SQL runs on a connection logged
-// in as ob1_plugins, then under SET LOCAL ROLE to its own role with its schema
-// first on the path (db/migrate.ts, store-sql.ts's pluginTx), and Postgres
-// refuses both roles the core's tables: that is the boundary. This check is
+// in as its own login role, ob1_plugins_<name> (SMD-2756), then under SET
+// LOCAL ROLE to its own role with its schema first on the path
+// (db/migrate.ts, store-sql.ts's pluginTx), and Postgres refuses both roles
+// the core's tables and every other plugin's: that is the boundary. This check is
 // the accident guard in front of it — code that would read like an attempt
 // to leave it fails a push, so it is seen in review — not a sandbox: a
 // plugin's TypeScript runs in the server's process, and curation is what
@@ -10745,6 +10746,14 @@ checkCheckNumbers();
 // line no step runs as written is stale. What ci-parity.sh cannot run is
 // excused by job or by script with why.
 const PARITY_SCRIPT = "db/ci-parity.sh";
+/**
+ * A test-live row as ci-parity.sh's live lanes read it (SMD-3688): its LIVE_SHARDS is this shape's shards, read
+ * by sed, so a row check 35 reads in another shape (aligned columns, a comment after, quotes) would pass here and
+ * never run.
+ */
+const LIVE_SHARD_ROW = /^ *OB1_LIVE_SHARD=([a-z]+) run db test-live\.ts$/;
+/** ci-parity.sh's line that reads LIVE_SHARD_ROW's shards, held to this text so the two cannot drift apart (SMD-3688 review pass 3). */
+const LIVE_SHARDS_LINE = `LIVE_SHARDS=$(sed -n 's/^ *OB1_LIVE_SHARD=\\([a-z][a-z]*\\) run db test-live\\.ts$/\\1/p' "$ROOT/db/\${0##*/}" | tr '\\n' ' ')`;
 const PARITY_NOT_RUN: { jobs: Record<string, string>; scripts: Record<string, string> } = {
   jobs: {
     "deploy-stack": "the compose stack built from the images, with its networks and proxy; run it with docker compose (deploy/README.md)",
@@ -10905,6 +10914,19 @@ function checkCiParity() {
   // Were these missed, the reading is broken, not the two files in step.
   if (!parity.runs.some((p) => p.script === "test-live.ts") || !parity.typechecks.length || !ci.some((r) => r.script === "test-live.ts") || !ciTsc.length) fail(SELF, `check 35 reads no test-live.ts or no typecheck in ${SUITE_WORKFLOW} or ${PARITY_SCRIPT} — the reading is broken, not the two in step`);
   for (const [where, detail] of parityProblems(ci, ciTsc, ciJobs, parity, PARITY_NOT_RUN)) fail(where, `${detail} (check 35, SMD-2903)`);
+  // Each test-live row is a live lane's, in the one shape the lanes read, and each shard one lane (SMD-3688 review pass 2).
+  if (!LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db   test-live.ts") || LIVE_SHARD_ROW.test("    OB1_LIVE_SHARD=long run db test-live.ts # c"))
+    fail(SELF, "check 35's LIVE_SHARD_ROW no longer takes a live lane's row and refuses an aligned or commented one, so it holds nothing");
+  const parityText = readFileSync(join(ROOT, PARITY_SCRIPT), "utf8").split("\n");
+  if (parityText.filter((l) => l === LIVE_SHARDS_LINE).length !== 1 || parityText.filter((l) => /\bLIVE_SHARDS=/.test(l.replace(/#.*$/, ""))).length !== 1)
+    fail(PARITY_SCRIPT, `has not exactly one assignment of LIVE_SHARDS, the line \`${LIVE_SHARDS_LINE}\`: another reads, or sets, other shards than the rows check 35 holds (check 35, SMD-3688)`);
+  const laneShards = new Set<string>();
+  for (const r of parity.runs.filter((p) => p.script === "test-live.ts")) {
+    const m = LIVE_SHARD_ROW.exec(parityText[r.line - 1]);
+    if (!m) fail(PARITY_SCRIPT, `line ${r.line} runs test-live.ts in a shape its live lanes do not read, so the shard would never start — write it \`OB1_LIVE_SHARD=<shard> run db test-live.ts\`, single spaces and nothing after (check 35, SMD-3688)`);
+    else if (laneShards.has(m[1])) fail(PARITY_SCRIPT, `line ${r.line} runs test-live's ${m[1]} shard a second time, which would start two lanes on one lane's files — each shard is one row (check 35, SMD-3688)`);
+    else laneShards.add(m[1]);
+  }
 }
 checkCiParity();
 

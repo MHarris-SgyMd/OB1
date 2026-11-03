@@ -1970,8 +1970,8 @@ polls for new work.
 
 **Two passes, pick one.** `workers` runs both followers always, at low
 concurrency, beside live traffic. `sleep` runs the same two
-passes, and re-embed when the brain has vectors to re-embed, only while the brain is quiet, at most an hour a sleep by default, and
-stops them within seconds of the next live call ("The `sleep` pass
+passes, and re-embed when the brain has vectors to re-embed, only while the brain is quiet, at most an hour a sleep by default (its pauses aside), and
+pauses them within seconds of the next live call ("The `sleep` pass
 instead", below) — so a backlog, and a sync write's capture made after a
 sleep's clock, waits for the next live call and the quiet. They are alternatives,
 not companions: `OB1_PASSES` naming both runs `sleep` alone, and the log says
@@ -2235,11 +2235,15 @@ embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run `bun db/reembed.ts --switch-model` (db/README.md's
 re-embed section), or put `OB1_EMBEDDING_MODEL` (and `OB1_EMBEDDING_DIM`)
-back and recreate `api` and the coordinator, which read them once. On the next live call it stops them within `OB1_SLEEP_POLL` seconds
-(unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
-model call in hand is aborted and every lease returned, and the brain is
-quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
-`OB1_SLEEP_BUDGET` minutes (unset, 60), and the next begins after a live call
+back and recreate `api` and the coordinator, which read them once. On the next live call it pauses them within `OB1_SLEEP_POLL` seconds
+(unset, 5): they wait between thoughts and go on once `OB1_SLEEP_CAPTURE`
+seconds (unset, 20; held to the quiet) pass with no live call, a model call in
+hand longer than `OB1_SLEEP_ABORT_AFTER` seconds (unset, 60) aborted meanwhile,
+its thought set back (SMD-3379 PR 1c-3b). One that finds nothing left to do ends the sleep, as during the sweep
+(its call in hand given 2 s, then cancelled), and the brain is quiet again
+`OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
+`OB1_SLEEP_BUDGET` minutes (unset, 60) besides its pauses, so a busy day's
+sleep lasts longer by them, and the next begins after a live call
 (**Settings**, below). Each pass's cost is the same as under `workers`, spent
 only while nobody is using the brain.
 `db/README.md`, "Sleep", has the full rules.
@@ -2261,7 +2265,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `asleep:` when a sleep begins, `extraction drained — consolidating
-beside it`, and `awake:` with the live call that woke it; `budget:` at its start
+beside it`, `paused:` with the live call that paused it and `resumed:` once
+the capture has passed, and `awake:` with the live call that ended it (its
+pools drained, or the clock spent); `budget:` at its start
 names the budget in force, and a sleep it stops says why — `the sleep's budget
 is spent (60 min)`, `… still in hand 300 s past the budget — stopped now`, or
 `<pass>: a statement passed the pass's statement_timeout (300 s)` with `the
@@ -2299,10 +2305,17 @@ podman compose -f deploy/compose.yaml up -d coordinator
 podman compose -f deploy/compose.yaml exec postgres psql -U postgres openbrain -c "DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%'"
 ```
 
-**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_POLL` (1–60, the most a
-pass runs beside a live call) and `OB1_SLEEP_WORKERS` (each pass's workers,
-unset 1), digits only (`deploy/.env.example`). The budget (SMD-2679):
-`OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes (0–10080, unset 60; 0
+**Settings.** `OB1_SLEEP_QUIET` (1–86400), `OB1_SLEEP_CAPTURE` (1–86400, held
+to the quiet: the quiet after the newest live call before paused passes go
+on, unset 20), `OB1_SLEEP_ABORT_AFTER` (60–86400, unset 60: how long a model
+call in hand may have run, counted from its start, when a pause aborts it, its thought set back;
+at least extraction's stall floor, so each abort counts as a long stop),
+`OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
+before it pauses; a call in hand runs on, to that bound once paused) and
+`OB1_SLEEP_WORKERS` (each pass's workers, unset 1),
+digits only (`deploy/.env.example`). The budget (SMD-2679):
+`OB1_SLEEP_BUDGET`, the longest a sleep runs in minutes, its pauses aside
+(0–10080, unset 60; 0
 for no clock) — at it the passes stop after the thought in hand and the next
 sleep waits for a live call — and each pass's session settings:
 `OB1_SLEEP_STATEMENT_TIMEOUT` in seconds (0–86400, unset 300; 0 leaves the
@@ -2312,7 +2325,9 @@ scheduler), `OB1_SLEEP_WORK_MEM` and `OB1_SLEEP_MAINTENANCE_WORK_MEM` in MB
 last sleep stopped, and how many sleeps stopped on it. **The clock is on by
 default:** upgraded, a quiet night holds the model for an hour, and the rest
 of a backlog waits for the next live call — `OB1_SLEEP_BUDGET=0` and a
-recreate restore the old behaviour, a larger value drains a backlog sooner. The scheduler reads its
+recreate run a sleep until its pools drain, a live write then ending it (one
+that finds work pauses it, so a stalled thought keeps the sleep going since
+SMD-3379 PR 1c-3b); a larger value drains a backlog sooner. The scheduler reads its
 environment once, so recreate the coordinator after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml up -d coordinator`.
 A `restart` keeps the values it was created with.
@@ -2536,7 +2551,7 @@ by name, and the source half gets its URL alone:
 - the knobs `migrate.ts` and `db/config.mjs` read on a refresh:
   `OB1_EMBEDDING_MODEL`, `OB1_EMBEDDING_DIM`, `OB1_EMBEDDING_DIMENSIONS`,
   `OB1_TRGM_INDEX`, `OB1_BACKFILL_LIMIT`, `OB1_CHUNK_CONTEXT`, `OB1_PLUGINS`
-  and the plugin role's `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
+  and the plugin logins' secret `OB1_PLUGIN_DB_PASSWORD`, and `OB1_TIER`;
 - `POSTGRES_PASSWORD`.
 
 Every other `OB1_*` setting stays behind: the provider and worker keys,
@@ -2722,11 +2737,11 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
-  their role's database password `OB1_PLUGIN_DB_PASSWORD`. In their place the
+  their login roles' secret `OB1_PLUGIN_DB_PASSWORD`. In their place the
   canary gets keys of its own (below) and, where stable sets one, a plugin
-  role password of its own, which every `up` sets the plugins' login role
-  to, where the canary's Postgres has one (migrate.ts makes that role once
-  and never changes its password);
+  secret of its own, from which every `up` derives each plugin login role's
+  password and sets it, where the canary's Postgres has one (migrate.ts
+  makes each role once and never changes its password, SMD-2756);
 - **stable's `COMPOSE_PROJECT_NAME`**: the file names the canary's own
   project instead, `COMPOSE_PROJECT_NAME="<canary>"`, so compose given that file
   alone acts on the canary, never on stable (SMD-2873);

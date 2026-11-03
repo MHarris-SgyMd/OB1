@@ -84,7 +84,7 @@
 # tier.ts and migrate.ts read is handed to the target half, by name: the
 # knobs a migration reads (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM,
 # OB1_EMBEDDING_DIMENSIONS, OB1_TRGM_INDEX, OB1_BACKFILL_LIMIT,
-# OB1_CHUNK_CONTEXT, OB1_PLUGINS and the plugin role's OB1_PLUGIN_DB_PASSWORD),
+# OB1_CHUNK_CONTEXT, OB1_PLUGINS and the plugin logins' OB1_PLUGIN_DB_PASSWORD),
 # OB1_TIER, and POSTGRES_PASSWORD, which builds the URL. Every other OB1_*
 # stays behind: the provider keys, the worker keys, OB1_COMPARE_KEY (which `tier.ts --diff`
 # reads from the shell, and compose's reading carries) and the authorization

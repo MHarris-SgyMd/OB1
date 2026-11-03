@@ -2120,7 +2120,7 @@ export type StoreEnv = {
   DATABASE_URL?: string;
   /** "sql", the only store, or unset. `postgrest` is refused by name (SMD-3152). */
   OB1_STORE?: string;
-  /** The password of the login role plugins' SQL runs on (db/config.mjs's PLUGIN_LOGIN_ROLE, SMD-2310); unset, a plugin's tables are refused. */
+  /** The secret each plugin's login role's password is derived from (db/config.mjs's pluginLoginPassword, SMD-2310, SMD-2756); unset, a plugin's tables are refused. */
   OB1_PLUGIN_DB_PASSWORD?: string;
 };
 

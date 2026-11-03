@@ -261,7 +261,7 @@
     {
       "path": "recipes/weekly-digest",
       "capabilities": [
-        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "importance-ranked synthesis → one sendMessage; optional when no chat id is set" }
+        { "vendor": "telegram", "family": "message-stream/chat", "transport": "push", "direction": "sink", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a synthesis of each day and writer's share → one sendMessage; optional when no chat id is set" }
       ]
     },
     {

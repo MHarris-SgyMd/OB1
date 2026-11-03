@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "generated": "2026-11-02",
+  "origin": "SMD-3662's dogfood set: one row per \"what next\" session against the maintainer's brains, recorded at the time and never rewritten once the board moves (evals/eval-priority.ts prints them beside the seeded table).",
+  "note": "Fields are ids and numbers only (check 9, SMD-1295), the session's prompt under query, prose under note. date is YYYYMMDD. pick is the SMD ticket's number the live board gave and the operator took up; picked_instead is the one the brains put first. thought is the stable thought that records the session. A read's rank is where it put the pick: a number from 1, 0 when it was not in the read's results, null when the session did not record it. evals/priority.ts's dogfoodProblems holds the shape.",
+  "rows": [
+    {
+      "date": 20261014,
+      "query": "highest value unstarted open brain issue? compare answers from stable, canary, and you",
+      "pick": 2888,
+      "picked_instead": 2540,
+      "thought": "1bb25732-3689-435f-9e0d-0346a897d392",
+      "note": "Stable (board synced 19:47Z) and canary (board copy from 10-12) both picked SMD-2540 (Medium, Backlog). No Open Brain ticket was in Todo, so unstarted meant Backlog; SMD-2888 (High, Backlog) loses a capture when the embedder is unreachable, measured on a scratch brain on 10-11.",
+      "reads": {
+        "plain": { "rank": 0, "note": "returned summaries of earlier sessions that ran the same comparison, and tickets already In Progress (SMD-2681, SMD-2682)" },
+        "ticket_rows": { "rank": 0, "note": "filtered to ticket rows: real Backlog tickets ranked by how closely the text matched; no High Open Brain ticket surfaced" }
+      }
+    },
+    {
+      "date": 20261102,
+      "query": "what is the highest-value unstarted issue?",
+      "pick": 2908,
+      "picked_instead": 1853,
+      "thought": "47df1786-b060-4c95-9ea7-6b1017ed04ff",
+      "note": "Stable and canary both picked SMD-1853, a tracking parent with no code of its own, because its title matched the question's words. SMD-2908 (High, Backlog) was a v2.0.0 rider, decided 10-26, to build before the cut (no earlier than 11-03); one of four High Backlog Open Brain tickets. Recorded in SMD-3660's Problem, filed from that session (the thought is its board-sync row).",
+      "reads": {
+        "plain": { "rank": 0, "note": "neither brain surfaced SMD-2908" },
+        "filter": { "rank": 4, "note": "the filter {\"status_type\":\"backlog\",\"priority\":\"High\"} returned exactly the four High Backlog tickets; SMD-2908 fourth of four by similarity (28%)" }
+      }
+    }
+  ]
+}

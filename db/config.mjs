@@ -11,6 +11,8 @@
  * a full re-embed.
  */
 
+import { createHmac } from "node:crypto";
+
 /** Width of the `thoughts.embedding` column. */
 /**
  * Environment access that survives a runtime with no `process` — written for
@@ -505,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -1404,45 +1406,67 @@ export function migrationNameProblem(names) {
 export const PLUGIN_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 /**
- * A plugin's own Postgres schema and the role that owns it (SMD-2310): its
- * name, hyphens read as underscores. The migrator makes both and runs the
- * plugin's migrations as the role, in the schema; the server's handle
- * (store-sql.ts's pluginTx) sets the same two, so the plugin's tables are the
+ * A plugin's own Postgres schema, the role that owns it, and the login role
+ * its SQL runs on (SMD-2310, SMD-2756): its name, hyphens read as
+ * underscores. The migrator makes all three and runs the plugin's migrations
+ * on the login, as the role, in the schema; the server's handle
+ * (store-sql.ts's pluginTx) does the same, so the plugin's tables are the
  * role's and the core's are not.
+ *
+ * The login (`ob1_plugins_<name>`: LOGIN, NOINHERIT, no superuser) holds SET
+ * on its own plugin's role and nothing else, so SQL that undoes the role
+ * lands where Postgres refuses it the core's tables and every other plugin's
+ * (SMD-2756). Its password is pluginLoginPassword's.
  * @param {string} name
- * @returns {{ schema: string, role: string }}
+ * @returns {{ schema: string, role: string, login: string }}
  */
 export function pluginIdents(name) {
   const snake = name.replace(/-/g, "_");
-  return { schema: `plugin_${snake}`, role: `ob1_plugin_${snake}` };
+  return { schema: `plugin_${snake}`, role: `ob1_plugin_${snake}`, login: `ob1_plugins_${snake}` };
 }
 
 /**
- * The login role every plugin's SQL runs on (SMD-2310): NOINHERIT, no
- * superuser, holding SET on each plugin's role and nothing on the core. The
- * servers' plugin pools and the migrator's plugin phase connect as it, then
- * SET LOCAL ROLE to the plugin's own; SQL that undoes that role lands here,
- * where Postgres still refuses it the core's tables. Its password is the
- * operator's secret, OB1_PLUGIN_DB_PASSWORD.
+ * The one login role every plugin's SQL ran on before SMD-2756, holding SET
+ * on every plugin's role: from it, SQL that undid one plugin's role could SET
+ * ROLE to another's. A plain migrator run retires it (its plugin roles
+ * revoked, then dropped), and preflight fails a brain where it still holds
+ * one.
  */
-export const PLUGIN_LOGIN_ROLE = "ob1_plugins";
+export const SHARED_PLUGIN_LOGIN = "ob1_plugins";
 
 /**
- * The connection string for PLUGIN_LOGIN_ROLE: `url` with its user and
+ * A plugin's login password (SMD-2756): the HMAC-SHA256 of its login role's
+ * name under the operator's one secret, OB1_PLUGIN_DB_PASSWORD, in hex. One
+ * secret in deploy/.env gives every plugin a password of its own, and none of
+ * them gives another, or the secret. The secret is trimmed here, as the
+ * server trims every value it reads (trimmedEnv, SMD-1843): the migrator,
+ * deploy/canary.sh and CI read it untrimmed, and a quoted `"…secret "` would
+ * otherwise make every login under a password the servers never derive.
+ * @param {string} secret
+ * @param {string} name
+ * @returns {string}
+ */
+export function pluginLoginPassword(secret, name) {
+  return createHmac("sha256", secret.trim()).update(pluginIdents(name).login).digest("hex");
+}
+
+/**
+ * The connection string for a plugin's login role: `url` with its user and
  * password replaced, every other part kept. Throws on a URL that names no
  * host — a socket URL (`postgres:///db?host=/run/postgresql`) — where the URL
  * parser ignores a user set on it, and the connection would fall back to the
- * server's own role (PR 3 review pass 2): plugin SQL never runs as that. The
- * password is percent-encoded, so a `%` in it reaches the server as itself.
+ * server's own role (PR 3 review pass 2): plugin SQL never runs as that.
  * @param {string} url
- * @param {string} password
+ * @param {string} name the plugin's
+ * @param {string} secret OB1_PLUGIN_DB_PASSWORD, its password derived from it
  * @returns {string}
  */
-export function pluginLoginUrl(url, password) {
+export function pluginLoginUrl(url, name, secret) {
+  const { login } = pluginIdents(name);
   const u = new URL(url);
-  u.username = PLUGIN_LOGIN_ROLE;
-  u.password = encodeURIComponent(password);
-  if (u.username !== PLUGIN_LOGIN_ROLE) throw new Error(`the database URL names no host, so a plugin's connection cannot log in as ${PLUGIN_LOGIN_ROLE}: give DATABASE_URL a host (a socket directory as ?host= keeps a host in the URL's own part)`);
+  u.username = login;
+  u.password = pluginLoginPassword(secret, name);
+  if (u.username !== login) throw new Error(`the database URL names no host, so a plugin's connection cannot log in as ${login}: give DATABASE_URL a host (a socket directory as ?host= keeps a host in the URL's own part)`);
   return u.toString();
 }
 
@@ -2645,14 +2669,15 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
-  // The learning path's six extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810). Upstream's five with policies ENABLEd RLS
-  // on `auth.uid() = user_id` and granted nothing — Supabase's default
-  // privileges carried its service role — and family-calendar's carried
-  // neither; the policies are gone, and this group is what a role other than
-  // the tables' owner needs. Every id is a uuid, so no sequence rows; no
-  // function is REVOKEd FROM PUBLIC, so no function rows (test-schema [50]
-  // measures both).
+  // The learning path's extensions/*/schema.sql, applied by hand as each
+  // README's Step 1 says (SMD-1810): five of the six, family-calendar's a
+  // plugin since SMD-2311, its tables in its own schema under its own role.
+  // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
+  // granted nothing — Supabase's default privileges carried its service role;
+  // the policies are gone, and this group is what a role other than the
+  // tables' owner needs. Every id is a uuid, so no sequence rows; no function
+  // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
+  // both).
   extensions: Object.freeze([
     Object.freeze({ table: "household_items",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
     Object.freeze({ table: "household_vendors",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
@@ -2664,9 +2689,6 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "family_members",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
-    Object.freeze({ table: "activities",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
-    Object.freeze({ table: "important_dates",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
     Object.freeze({ table: "companies",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
     Object.freeze({ table: "job_postings",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
     Object.freeze({ table: "applications",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),

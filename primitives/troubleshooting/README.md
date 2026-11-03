@@ -99,7 +99,6 @@ All extensions reference this guide for common issues:
 
 - [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
 - [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
-- [Family Calendar](../../extensions/family-calendar/) (Extension 3)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4)
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

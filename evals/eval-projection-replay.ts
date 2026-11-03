@@ -61,7 +61,7 @@
 import { SQL } from "bun";
 import { writeFileSync } from "node:fs";
 import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, refuseHeldDatabase, resetSchema } from "../db/test-support.ts";
 import { chunkContent } from "../server-portable/chunk.ts";
 import { createEmbedder, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { loadEnv } from "./env.ts";
@@ -330,15 +330,7 @@ const fid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0"
 async function fixtureCheck(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) { console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun eval-projection-replay.ts --fixture-check"); process.exit(2); }
-  const probe = new SQL({ url, max: 1 });
-  // Two statements: a subquery over a table that does not exist fails at parse time, CASE or no CASE.
-  const exists = ((await probe`SELECT (to_regclass('thoughts') IS NOT NULL) AS present`)[0] as { present: boolean }).present;
-  const held = exists ? Number(((await probe`SELECT count(*)::int AS n FROM thoughts`)[0] as { n: number }).n) : 0;
-  await probe.end();
-  if (held > 0 && process.env.OB1_FIXTURE_RESET !== "1") {
-    console.error(`the database at DATABASE_URL holds ${held} thought(s) and --fixture-check DROPS the schema. Point it at a throwaway (../db/with-postgres.sh), or set OB1_FIXTURE_RESET=1 if you mean it.`);
-    process.exit(2);
-  }
+  await refuseHeldDatabase(url, "--fixture-check");
   // resetSchema refuses a non-loopback database unless OB1_ALLOW_REMOTE_DB=1 (test-support's guard).
   await resetSchema(url, { dim: FIXTURE_DIM, model: FIXTURE_MODEL });
   const sql = new SQL({ url, max: 1 });
