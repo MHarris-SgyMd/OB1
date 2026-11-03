@@ -106,7 +106,7 @@ cd server-portable && bun keygen.ts --name session-hook --scope capture
 
 Add the printed `session-hook:capture:<sha256>` line to `MCP_ACCESS_KEYS` in `deploy/.env` and restart the server (`podman compose -f compose.yaml up -d` from `deploy/`). Copy the raw key — it is shown once.
 
-A capture-scoped key sees `capture_thought` and nothing else: no search, no update, no delete. If this file leaks, the leak can add a thought to your brain; it cannot read one, alter one or remove one. Preflight lists the key as `session-hook(capture)`.
+A capture-scoped key sees `capture_thought`, and since SMD-3664 `set_priority` and `clear_priority`, which the brain lets it use on a thought it captured alone: no search, no update, no delete. If this file leaks, the leak can add a thought to your brain and state how much its own thoughts matter, at its own tier; it cannot read one, alter one, remove one, or state a priority on another key's. Preflight lists the key as `session-hook(capture)`.
 
 Since migration 046 (SMD-1730) every audit row records who holds the key that wrote it — `operator`, `agent` or `ingested` — from the key's classification in the registry. The hook's summaries are agent-written, so classify the key right after minting, before the hook's first request (046 upserts the label; `resolve_agent` attaches the digest when the key is first seen) — else its first summaries land with no kind and preflight's `audit events` row names the key until they are backfilled. (`resolve_agent` gives each key a stable agent id when it first sees it, kept across a rename — the same key under a new name — and a rotation — a new key under the same name.)
 

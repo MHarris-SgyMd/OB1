@@ -792,7 +792,7 @@ else {
     const line = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+priority\s{2,}\S/.test(l)) ?? "";
     try {
       const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-      assert(/✓  priority\s+assert_priority, clear_priority, priority_of and priority_history present; the server's role holds the priority group/.test(whole.out),
+      assert(/✓  priority\s+assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group/.test(whole.out),
              `on a brain at 116 the priority functions and the priority grant: ok (${line(whole.out).trim()})`);
       await prio.unsafe("ALTER FUNCTION priority_history(text, text) RENAME TO priority_history_away");
       let missing: Awaited<ReturnType<typeof run>>;

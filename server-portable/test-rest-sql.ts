@@ -1411,6 +1411,43 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
         && noOpen.isError && /^Refused: open items \(kind item\) arrive with SMD-3665/.test(noOpen.text) && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
         && noHistoryMcp.isError && noHistoryMcp.text === `Refused: the brain holds no thought ${nowhere}.`,
       `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item until SMD-3665 — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
+
+    // Review pass 1: the item a refusal names is 116's own keying, read from the brain — a zero-width space 116 strips
+    // is stripped in the answer too; which argument is missing, or malformed, is told from the brain, not 116's words.
+    const zeroWidth = await rest("POST", path(`smd-9401${String.fromCharCode(0x200b)}`, "ticket"), { level: 2 });
+    const bothMissing = await rest("POST", path(nowhere), { level: 2, due_ref: { kind: "thought", key: item } });
+    const badRef = await rest("POST", path(item), { level: 2, due_ref: { kind: "thought", key: "bogus" } });
+    const badItem = await rest("POST", path("bogus"), { level: 2, due_ref: { kind: "thought", key: item } });
+    assert(zeroWidth.status === 404 && same(zeroWidth.body.item, { kind: "ticket", key: "SMD-9401" }) && bothMissing.status === 404 && bothMissing.body.which === "item"
+        && badRef.status === 400 && badRef.body.problem === "due_ref" && badItem.status === 400 && badItem.body.problem === "key",
+      `a refusal names the item as 116 keys it (a zero-width space stripped); a missing item beside a due reference is the item's; a malformed due reference's key is due_ref's, the item's own key's key (${JSON.stringify(zeroWidth.body.item)} ${bothMissing.body.which} | ${badRef.body.problem} ${badItem.body.problem})`);
+    // A capture-only key whose agent id the registry cannot give: its own thought refused as unattributed, never as
+    // another's — set up wrong, final and without Retry-After; unreachable, retryable with it.
+    await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_smd3664_away`;
+    try {
+      const setAway = await rest("POST", path(hookThought), { level: 3 }, KEYS.hook);
+      const clearAway = await rest("DELETE", path(hookThought), undefined, KEYS.hook);
+      const setAwayMcp = await mcp("set_priority", { kind: "thought", key: hookThought, level: 3 }, KEYS.hook).catch(asReply);
+      assert(setAway.status === 503 && setAway.body.code === "PRIORITY_UNATTRIBUTED" && setAway.body.cause === "registry_misconfigured" && setAway.body.retryable === false && setAway.headers.get("retry-after") === null
+          && clearAway.status === 503 && clearAway.body.code === "PRIORITY_UNATTRIBUTED"
+          && setAwayMcp.isError && /^Refused: a capture-only key's own thoughts are known by its agent id, which the agent registry cannot give this server until an operator acts/.test(setAwayMcp.text),
+        `the registry set up wrong: a capture-only key's set and clear on its own thought answer 503 PRIORITY_UNATTRIBUTED, final, no Retry-After, never ITEM_NOT_YOURS (${setAway.status} ${setAway.body.code} ${setAway.body.cause} | ${clearAway.status} | ${setAwayMcp.text.slice(0, 80)})`);
+    } finally {
+      await sql`ALTER FUNCTION resolve_agent_smd3664_away(text, text, text) RENAME TO resolve_agent`;
+    }
+    await sql`ALTER FUNCTION resolve_agent(text, text, text) RENAME TO resolve_agent_smd3664_real`;
+    await sql.unsafe(`CREATE FUNCTION resolve_agent(p_key_hash text, p_label text, p_scope text DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql AS $f$
+      BEGIN RAISE EXCEPTION 'the registry is away (SMD-3664 test)' USING ERRCODE = '08006'; END $f$`);
+    try {
+      const away = await rest("POST", path(hookThought), { level: 3 }, KEYS.hook);
+      assert(away.status === 503 && away.body.code === "PRIORITY_UNATTRIBUTED" && away.body.cause === "registry_away" && away.body.retryable === true && away.headers.get("retry-after") !== null,
+        `the registry unreachable: retryable, with Retry-After (${away.status} ${away.body.cause} ${away.body.retryable} ${away.headers.get("retry-after")})`);
+    } finally {
+      await sql`DROP FUNCTION resolve_agent(text, text, text)`;
+      await sql`ALTER FUNCTION resolve_agent_smd3664_real(text, text, text) RENAME TO resolve_agent`;
+    }
+    const back = await rest("POST", path(hookThought), { level: 3 }, KEYS.hook);
+    assert(back.status === 200 && back.body.outcome === "asserted", `…and with the registry back, the capture-only key states it (${back.status} ${back.body.outcome ?? back.body.code})`);
   } finally {
     await sql`UPDATE ob1_agents SET kind = NULL WHERE label IN ('writer', 'rival')`;
   }

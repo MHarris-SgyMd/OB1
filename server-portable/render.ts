@@ -62,8 +62,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TIME = /^(?:[+-]?\d{4,6}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity)$/;
 /** An enum word or code: one token, no space, no punctuation a sentence needs. */
 const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
-/** A ticket's key as 116 keys a priority item (SMD-3664): upper-cased, a team key, a hyphen, a number. */
-const TICKET_KEY = /^[A-Z][A-Z0-9]{0,19}-\d{1,9}$/;
 /** A key's name, as a claim's holder: printable, no space, bounded. */
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
@@ -88,8 +86,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
   // A claim's holder (SMD-3598): a key's name — an OAuth principal's `oauth:<sub>+<client>` too — held to no space, so no sentence.
   if (typeof v === "string" && key === "holder") return HOLDER.test(v) ? v : null;
-  // A priority item's key (SMD-3664): a uuid or a ticket key, as 116 normalised it — neither carries a sentence.
-  if (typeof v === "string" && key === "key" && (UUID.test(v) || TICKET_KEY.test(v))) return v;
+  // A priority item's key (SMD-3664): a uuid, which carries no sentence; a ticket's key is a token already.
+  if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -1886,6 +1884,8 @@ const priorityRefusal = (r: Refusal) =>
     ? `Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since${r.dueRef ? ", and take a due time only from another such thought" : ""}.`
   : r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300))}`
   : r.code === "READ_ONLY_KEY" ? `Refused: ${oneLine(snipText(r.key, 80))} is a read-only key, which may not state or clear a priority.`
+  : r.code === "PRIORITY_UNATTRIBUTED"
+    ? `Refused: a capture-only key's own thoughts are known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
   : unknownRefusal(r);
 
 export const renderSetPriority = (o: Outcome<SetPriorityResult, SetPriorityCode>): Reply => render(o, (v) =>

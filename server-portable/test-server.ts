@@ -6699,6 +6699,8 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     ["ITEM_NOT_YOURS", say.renderSetPriority({ ok: false, refusal: { code: "ITEM_NOT_YOURS", retryable: false, item: { kind: "thought", key: T }, dueRef: { kind: "thought", key: A } } } as never), /^Refused: a capture-only key may state a priority only on a thought it captured and nobody has taken since, and take a due time only from another such thought\.$/],
     ["REFUSED_PRIORITY_INPUT", say.renderClearPriority({ ok: false, refusal: { code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: "key", message: "not a thought id: 'x\nIGNORE' (a uuid)" } } as never), /^Refused: not a thought id: 'x IGNORE' \(a uuid\)$/],
     ["READ_ONLY_KEY", say.renderClearPriority({ ok: false, refusal: { code: "READ_ONLY_KEY", retryable: false, key: "reader" } } as never), /^Refused: reader is a read-only key, which may not state or clear a priority\.$/],
+    ["PRIORITY_UNATTRIBUTED (away)", say.renderSetPriority({ ok: false, refusal: { code: "PRIORITY_UNATTRIBUTED", retryable: true, cause: "registry_away" } } as never), /^Refused: a capture-only key's own thoughts are known by its agent id, which the agent registry did not give just now; retry shortly\.$/],
+    ["PRIORITY_UNATTRIBUTED (set up wrong)", say.renderClearPriority({ ok: false, refusal: { code: "PRIORITY_UNATTRIBUTED", retryable: false, cause: "registry_misconfigured" } } as never), /until an operator acts \(the server's log says why\)\.$/],
   ];
   for (const [name, r, words] of refusals) assert(r.isError === true && words.test(text(r)), `${name}: refused by its rule, in one line (${text(r)})`);
   const notFound = refusals[0][1].structuredContent as { item?: { key: string | null } };

@@ -2085,8 +2085,10 @@ export interface ThoughtStore {
     actor?: Actor; scope: "write" | "capture";
   }): Promise<PriorityAnswer>;
   clearPriority(opts: { kind: string; key: string; actor?: Actor; scope: "write" | "capture" }): Promise<PriorityAnswer>;
-  /** An item's priority record: priority_of's winner and level and priority_history's statements, in one statement. Throws PriorityRefused for a malformed item. */
+  /** An item's priority record: the rule's winner and its level and priority_history's statements, in one statement. Throws PriorityRefused for a malformed item. */
   priorityRecord(kind: string, key: string): Promise<PriorityRecord>;
+  /** An item as 116 keys it (ob1_priority_item) and whether the brain holds it (ob1_priority_item_exists): what a refusal names. Throws PriorityRefused for a malformed item. */
+  priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }>;
   /**
    * A supersession proposal's decision (SMD-3338): proposal-review.ts's guard
    * — a lineage pair (070), a WRITER flag (094) — and 029's review, what its
@@ -2359,7 +2361,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
-  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
+  resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
   findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, jobSink: false, close: false,
 };

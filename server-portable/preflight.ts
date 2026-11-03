@@ -44,7 +44,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
-import { MIGRATION_EXIT, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
+import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -3042,20 +3042,19 @@ if (configFailed) {
          */
         {
           const PRIORITY_FNS = ["assert_priority(text,text,integer,timestamptz,timestamptz,text,text,text,boolean,jsonb)", "clear_priority(text,text,jsonb)",
-            "priority_of(jsonb)", "priority_history(text,text)", "ob1_priority_item_exists(text,text)"];
-          // The group's grants (db/config.mjs ROLE_GRANTS priority), each table and privilege a pair.
-          const PRIORITY_GRANTS: [string, string][] = [
-            ["priority_assertions", "SELECT"], ["priority_assertions", "INSERT"], ["priority_assertions", "UPDATE"],
-            ["priority_current", "SELECT"], ["priority_current", "INSERT"], ["priority_current", "UPDATE"], ["priority_current", "DELETE"],
-            ["priority_sources", "SELECT"], ["ob1_entities", "SELECT"],
-          ];
+            "priority_history(text,text)", "ob1_priority_item(text,text)", "ob1_priority_item_exists(text,text)", "ob1_priority_winner(text,text)", "ob1_priority_json(priority_assertions)"];
+          // The group's grants, each table and privilege a pair, read from db/config.mjs's ROLE_GRANTS — the list
+          // `migrate.ts --grant` grants — not copied here (review pass 1: a copy drifts from a group that grows).
+          const PRIORITY_GRANTS = ROLE_GRANTS.priority.flatMap((g) => (g.table ? g.privileges.map((p) => [g.table as string, p] as const) : []));
           // Its own read, caught here, as the ticket claims' is: a refusal warns this row alone.
           const prRows = await sql.unsafe(`
             SELECT to_regclass('public.priority_assertions') IS NOT NULL AS has_table,
                    ARRAY(SELECT f FROM unnest(ARRAY[${PRIORITY_FNS.map((f) => `'${f}'`).join(", ")}]) f WHERE to_regprocedure('public.' || f) IS NULL) AS missing,
                    CASE WHEN to_regclass('public.priority_assertions') IS NULL THEN NULL
                         ELSE ARRAY(SELECT g.t || ' ' || g.p FROM (VALUES ${PRIORITY_GRANTS.map(([t, p]) => `('${t}', '${p}')`).join(", ")}) g(t, p)
-                                    WHERE to_regclass('public.' || g.t) IS NULL OR NOT has_table_privilege('public.' || g.t, g.p)) END AS ungranted`)
+                                    -- CASE, not OR: Postgres keeps no order among OR's arms, and the text form raises for a
+                                    -- table that is not there (review pass 1; the write-privileges row's guard).
+                                    WHERE CASE WHEN to_regclass('public.' || g.t) IS NULL THEN true ELSE NOT has_table_privilege('public.' || g.t, g.p) END) END AS ungranted`)
             .then((r) => r as { has_table: boolean; missing: string[]; ungranted: string[] | null }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const pr = Array.isArray(prRows) ? prRows[0] : null;
           if (!pr) {
@@ -3069,7 +3068,7 @@ if (configFailed) {
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: set_priority, clear_priority and priority_history fail naming the table, and nothing else does`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {
-            add("priority", "ok", "assert_priority, clear_priority, priority_of and priority_history present; the server's role holds the priority group");
+            add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
           }
         }
 

@@ -1044,27 +1044,44 @@ export class SqlStore implements ThoughtStore {
 
   async priorityRecord(kind: string, key: string): Promise<PriorityRecord> {
     // One statement, so the winner and the history are one snapshot's: a write between two reads could leave a
-    // winner the history does not hold. The history is asked by priority_of's normalised item.
+    // winner the history does not hold. The item keyed once by 116's ob1_priority_item, the winner by its rule
+    // (ob1_priority_winner), the statements aggregated once, by priority_history (review pass 1: priority_of's list
+    // was a second aggregation, thrown away).
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
-        SELECT p.item_kind, p.item_key, p.level, p.winner, priority_history(p.item_kind, p.item_key) AS history,
-               ob1_priority_item_exists(p.item_kind, p.item_key) AS exists
-          FROM priority_of(jsonb_build_array(jsonb_build_object('kind', ${kind}::text, 'key', ${key}::text))) p` as Record<string, unknown>[];
+        SELECT i.kind AS item_kind, i.key AS item_key, ob1_priority_item_exists(i.kind, i.key) AS exists,
+               (SELECT ob1_priority_json(w) FROM ob1_priority_winner(i.kind, i.key) w WHERE w.id IS NOT NULL) AS winner,
+               priority_history(i.kind, i.key) AS history
+          FROM ob1_priority_item(${kind}::text, ${key}::text) i` as Record<string, unknown>[];
     } catch (e) {
       throw priorityRefusedOr(e);
     }
     const r = rows[0];
     if (!r || !(PRIORITY_KINDS as readonly unknown[]).includes(r.item_kind) || typeof r.item_key !== "string" || !Array.isArray(r.history)) {
-      throw new Error("priority_of answered no item this server reads");
+      throw new Error("ob1_priority_item answered no item this server reads");
     }
+    const winner = r.winner === null || r.winner === undefined ? null : normalisePriorityAssertion(r.winner, "ob1_priority_winner");
     return {
       item: { kind: r.item_kind as PriorityItem["kind"], key: r.item_key },
       exists: r.exists === true,
-      level: r.level === null || r.level === undefined ? null : Number(r.level),
-      winner: r.winner === null || r.winner === undefined ? null : normalisePriorityAssertion(r.winner, "priority_of"),
+      level: winner?.level ?? null,
+      winner,
       history: (r.history as unknown[]).map((a) => normalisePriorityAssertion(a, "priority_history")),
     };
+  }
+
+  async priorityItem(kind: string, key: string): Promise<{ item: PriorityItem; exists: boolean }> {
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT i.kind, i.key, ob1_priority_item_exists(i.kind, i.key) AS exists FROM ob1_priority_item(${kind}::text, ${key}::text) i` as Record<string, unknown>[];
+    } catch (e) {
+      throw priorityRefusedOr(e);
+    }
+    const r = rows[0];
+    if (!r || !(PRIORITY_KINDS as readonly unknown[]).includes(r.kind) || typeof r.key !== "string") throw new Error("ob1_priority_item answered no item this server reads");
+    return { item: { kind: r.kind as PriorityItem["kind"], key: r.key }, exists: r.exists === true };
   }
 
   async reviewProposal(opts: { id: string; decision: "accept" | "reject"; note?: string; direction?: "newer" | "older"; force?: boolean; actor?: Actor }): Promise<ReviewResult> {

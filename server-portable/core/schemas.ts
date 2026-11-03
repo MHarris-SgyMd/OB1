@@ -576,7 +576,9 @@ export const SPECS = {
       not_before: PRIORITY_TIME.optional().describe("When the item can start at the earliest, in due_at's forms; never after due_at"),
       due_ref: z.object({ kind: z.enum(PRIORITY_KINDS), key: z.string().min(1).max(200) }).strict().optional()
         .describe("Another item whose due time this one takes, where this statement has no due_at of its own — never the item itself"),
-      reason: z.string().max(1000).optional().describe("Why it matters, at most 1000 characters: free text, shown to every key that reads the item's priority"),
+      // 116 counts a reason's characters once cleaned; the schema's cap only bounds the request, four UTF-16 units a
+      // character, so an astral character (two units) is never refused here (review pass 1).
+      reason: z.string().max(4000).optional().describe("Why it matters, at most 1000 characters: free text, shown to every key that reads the item's priority"),
       inferred: z.boolean().optional().describe("True when this is your inference, not a statement you were given: lowers your statement to the inferred tier"),
     },
   },
