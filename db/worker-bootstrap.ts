@@ -589,6 +589,13 @@ export async function probeUntil(probe: () => Promise<Probe>, wake: AbortSignal,
 export const SUSPECT_WINDOW_MS = 15 * 60_000;
 
 /**
+ * SUSPECT_WINDOW_MS as ProviderOutage reads it when one is made, its window's default and the base a caller's own
+ * window adds to (the subject sweep's): read as it runs, so a live suite shortens it in its own process (SMD-3306 PR
+ * 6b-1).
+ */
+export const SUSPECT_WINDOW = { ms: SUSPECT_WINDOW_MS };
+
+/**
  * A --follow worker's provider outage (SMD-2599): why it began, and the
  * thoughts in hand when it did. While `reason` is set the pass stops after
  * the thought in hand and the follower probes; `end()` clears it when a probe
@@ -597,9 +604,10 @@ export const SUSPECT_WINDOW_MS = 15 * 60_000;
  * answered a probe is the thought's own (a document that crashes the server
  * every time), and `begin` says so, so it is recorded failed and visible
  * rather than cycling through the pool for ever. "Right after" is within
- * SUSPECT_WINDOW_MS of the probe that answered: a thought another process
- * finished meanwhile, and an edit re-queued hours later, meets a later
- * outage as any other thought does (review pass 1).
+ * SUSPECT_WINDOW_MS of the probe that answered, or the window a caller whose
+ * calls run longer gives: a thought another process finished meanwhile, and
+ * an edit re-queued hours later, meets a later outage as any other thought
+ * does (review pass 1).
  */
 export class ProviderOutage {
   reason: string | null = null;
@@ -608,11 +616,15 @@ export class ProviderOutage {
   private suspects = new Set<string>();
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    /** How long after a probe answered a suspect's error is "right after" it: a caller's own, when its calls outrun 15 minutes (the subject sweep's, SMD-3306 PR 6b-1). */
+    private readonly windowMs: number = SUSPECT_WINDOW.ms,
+  ) {}
 
   /** Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". */
   begin(reason: string, thoughtId?: string): "outage" | "thought" {
-    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= SUSPECT_WINDOW_MS) {
+    if (thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.windowMs) {
       this.suspects.delete(thoughtId);
       return "thought";
     }

@@ -5218,9 +5218,12 @@ if (configFailed) {
             // judgeHeld). The hold is the window's, not the process's: an ended row's last word stands for it until
             // that run, which runs in the stack, the coordinator's one-off, with the stack's settings, network and
             // version (review pass 2, walkthrough: from a checkout it met the egress gate's default deny before it
-            // lifted anything, its chat endpoint not the stack's, its pool key the checkout's version's).
+            // lifted anything, its chat endpoint not the stack's, its pool key the checkout's version's), once the
+            // coordinator is recreated after a change to deploy/.env, which `compose run` reads afresh where the running
+            // coordinator keeps what it was made with (review pass 3, walkthrough: run before the recreate, the lift
+            // took another model, or another pool, or the scheduler went on calling the endpoint that tripped it).
             if (h.holds?.some((x) => x.pass === "subjects" && x.why === "judge")) {
-              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run lifts the hold, run in the stack, with its settings, its network and its version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; a change to them in deploy/.env reaches the scheduler once the coordinator is recreated (up -d coordinator), so recreate it first — a new OB1_JUDGE_MODEL needs no lift, a trip holding the models it named alone, and a new OB1_SUBJECT_REASONING names another pool, whose switch is the key's. Once the model is right, a hand run lifts the hold, run in the stack as the recreated coordinator runs, its settings, network and version — podman compose -f deploy/compose.yaml run --rm --no-deps coordinator db/coordinator.ts run extract --subjects --judge-checked --limit 1, with the -f files and -p the stack was started with (docker compose alike) — or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

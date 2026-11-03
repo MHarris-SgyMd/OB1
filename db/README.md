@@ -3372,7 +3372,9 @@ leased for the limit a call and five minutes more, a provider's transient error
 putting it back first in the pool for the claim after the pause to take again; a
 run that stops hands back what it holds, a second signal the claim in hand
 before the CLI exits, and a thought the provider stopped answering on, a run by
-hand's, goes to the end of the pool. A lease a gone worker ran out at its last
+hand's, goes to the end of the pool, but a `--judge-checked` run's, which stays
+where it stood, the trip's hand-back first. A lease a gone worker ran out at its
+last
 attempt is failed by
 the next claim, which the pool line counts and a run says, exit 1. Within one key the claims are disjoint while their leases
 hold — a naming leaves a live lease to its run, though an edit pools its thought
@@ -3512,12 +3514,13 @@ grants' (`tables`), the worker key's (`identity`, `lookup`), another pool named
 probe (`model`, `provider`) — or through as its thoughts begin, unless a stop
 came first; a dry run's refusals are said, not heard, and a trip's hold is no
 start refusal, its 3 unheard. A following run's start waits out a database not
-answering up to its first claim, its reads waited out and the rest begun again
-once it answers, as a claim pass's start does; past the trip's hold it probes
-its judge model with one token before any claim, as a follower does, and waits
-at
-its start for one not answering, claiming nothing until it does, a stop ending
-the wait. `check` is a following run's start alone, sleep's start check: its
+answering up to its first claim, its reads and the worker key's lookup waited
+out (the lookup but at too many connections, as a claim pass's) and the rest
+begun again once it answers, the key it resolved kept, as a claim pass's start
+does; past the trip's hold it probes its judge model with one token before any
+claim, as a follower does, and waits at its start for one not answering,
+claiming nothing until it does, a stop ending the wait. `check` is a following
+run's start alone, sleep's start check: its
 refusals heard, the pool's name read and refused as the run would refuse it
 (`key`, `tables`), its probe, ended before the trip's hold and its first write
 but the worker key's lookup's, 0, or 130 at a stop. `follow` (whole seconds): at
@@ -3526,20 +3529,25 @@ run waits that long and claims again, reading the pool's name and another run's
 trip at each claim, until its stop, which ends it as a follower's does wherever
 it lands, exit 0 (130 at once on the second), unless the thought in hand it lets
 finish ends the run otherwise (the alarm's 3, the pool named away's 2, the
-database's 1), or its `--limit`; a dry run, or
-one with `--judge-checked`, refuses it. Past its pauses (below), or hung — a
-call timed out and a probe unanswered too — a following run waits out the
-provider's outage as a claim pass's follower does (PR 6b-1, the maintainer's
-choice), the thought in hand back in the pool, first, and the run probing until
-the provider answers; a thought that errs so again right after a probe answered
-is its own, its claim failed, said once, for `--retry-failed`
-(worker-bootstrap.ts's ProviderOutage), a suspect when an error of its streak
-could be its own — a 5xx but 503, a lost connection, a timeout; a 429 or 503,
-the provider holding calls back, and a model being pulled, waited out at once,
-make none. Put back first, the thought is the one claimed after each pause and
-after the wait, so a streak is one thought's, as a claim pass's retries in place
-are. The database lost past its start ends a following run as it ends any, exit
-1, for its caller to start it again. `admit`, SMD-3379 PR 1b's gate, is
+database's 1), or its `--limit`; a dry run, or one with `--judge-checked` or
+`--retry-failed`, refuses it. Past its pauses (below), or hung — a call timed
+out and a probe, given the call's own limit, unanswered too — a following run
+waits out the provider's outage as a claim pass's follower does (PR 6b-1, the
+maintainer's choice), the thought in hand back in the pool and the run probing
+until the provider answers; a thought that errs so again right after a probe
+answered, within 15 minutes past its next streak at the run's limit, is its own,
+its claim failed, said once with the error that made it the suspect, for
+`--retry-failed` (worker-bootstrap.ts's ProviderOutage), a suspect when its
+streak's first error could be its own — a 5xx but 503, a lost connection — or
+its call hung; a 429 or 503, the provider holding calls back, waited out past
+the pauses, and a model being pulled, waited out at once, make none. A suspect
+goes back first, so, while the run is alone on its pool, it is the thought
+claimed after each pause and after the wait, a streak one thought's, as a claim
+pass's retries in place are; a thought that made none goes behind the rest; a
+thought answered is a suspect no longer; and a stopping run's timeout is the
+thought's, unprobed. The database lost past its start ends a following run as it
+ends any, exit 1, for its caller to start it again. `admit`, SMD-3379 PR 1b's
+gate, is
 awaited before the pool's lock and naming, with the caller's `signal`, which it
 needs, and before each claim, so a run waiting there holds no claim. A
 provider's transient error puts its thought back in the pool, first, its
@@ -3558,14 +3566,15 @@ not counted and, when it went back, its place under `--limit` given back, and
 the run goes on; a thought the rules key, a provider pause and the writes after
 an answer hold no call to abort. A caller's `stamper` hears a following run's
 word, `ok` at each poll that finds the pool empty and, as it ends, `failed` for
-an end of its own (a refusal, its own options' among them, the provider's
-refusal, the database lost past its start, the alarm, a throw) or `stopped`; it
-beats no row while it works through a pool, a scheduler's row being the
-scheduler's to keep. It hears the run's waits for the provider too, as a claim
-pass's caller does (PR 6b-1): `startWait` while a following run waits at its
-start, `providerWait` while it waits out an outage past its pauses, not through
-the pauses, its outage stamping no `failed` as it begins, where extraction's
-follower does: how a scheduler reads that wait is the scheduler's (PR 6b-2).
+an end of its own (a refusal, its own options' among them, its naming or pooling
+broken off, the provider's refusal, the database lost past its start, the alarm,
+a throw) or `stopped`; it beats no row while it works through a pool, a
+scheduler's row being the scheduler's to keep. It hears the run's waits for the
+provider too, as a claim pass's caller does (PR 6b-1): `startWait` while a
+following run waits at its start, `providerWait` while it waits out an outage
+past its pauses, or hung, not through the pauses, its outage stamping no
+`failed` as it begins, where extraction's follower does: how a scheduler reads
+that wait is the scheduler's (PR 6b-2).
 `session` opens the run's own
 client and its watching connection with the scheduler's per-pass settings
 (refused beside a caller's client; the worker key's lookup opens its one

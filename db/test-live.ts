@@ -45,7 +45,7 @@ import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH } from "./lease.ts";
-import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
+import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
@@ -54,7 +54,7 @@ import { reviewProposal } from "../server-portable/proposal-review.ts";
 import { reviewHint } from "../server-portable/render.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, namedSince, readJudgeWindow, recordSubject, RELEASE_WAIT, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
+import { currentSubjectSql, DOOR_GRANTS, filedTicketSql, heldSince, JUDGE_ALARM, JUDGE_WINDOW_KEY, judgeHeld, judgeTrips, LEASE_MARGIN_S, NAMING_WAIT, namedSince, PROBE_CAP, readJudgeWindow, recordSubject, RELEASE_WAIT, sweepSubjects, type JudgeWindow, type SubjectSweepOptions, type SubjectWrite } from "./subject-sweep.ts";
 import { metadataTicket, subjectCurrent, subjectPrompt, subjectRuleKey } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
@@ -7119,7 +7119,7 @@ if (want("10h")) {
   let garbledAnswers = true;
   /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
   let onOwn: ((thought: string) => void | Promise<unknown>) | null = null;
-  /** Each own question's word in turn, ahead of judgeMode: "503", "500", "404" (the model gone missing), "slow" (past a one-second limit) or "answer". */
+  /** Each own question's word in turn, ahead of judgeMode: "503", "500", "429", "404" (the model gone missing), "slow" (past a one-second limit) or "answer". */
   const judgeScript: string[] = [];
   /**
    * The "flaky-judge" thoughts whose first question the stub has failed with a 503: each is answered when asked again
@@ -7133,7 +7133,8 @@ if (want("10h")) {
   let afterCrash = 0;
   /**
    * Each probe's word in turn (PR 6b-1: a following run's start probe, its check's and its outage's): "503" out, "404" the
-   * model unserved, "401" the key refused, "slow" an answer past a one-second limit (review pass 2); else it answers.
+   * model unserved, "401" the key refused, "slow" an answer past a one-second limit (review pass 2), "late" one past a
+   * cap shortened to 200 ms but within that limit (review pass 3); else it answers.
    */
   const probeScript: string[] = [];
   let probes = 0;
@@ -7147,6 +7148,7 @@ if (want("10h")) {
         probes++;
         const word = probeScript.shift();
         if (word === "slow") await Bun.sleep(1500);
+        if (word === "late") await Bun.sleep(400);
         if (word === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
         if (word === "404") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
         if (word === "401") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
@@ -7176,6 +7178,8 @@ if (want("10h")) {
       // A thought the provider errs on whenever it is asked, a suspect (500), and one it holds back, none (503): PR 6b-1.
       if (thought.includes("poison-judge")) return new Response(JSON.stringify({ error: { message: "internal error" } }), { status: 500 });
       if (thought.includes("busy-judge")) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      // One whose request is too large for the account's limit, 429 every time: the thought's own, making no suspect (review pass 3).
+      if (thought.includes("rate-judge")) return new Response(JSON.stringify({ error: { message: "Request too large for the rate limit" } }), { status: 429 });
       if (thought.includes("flaky-judge") && !flaked.has(thought)) {
         flaked.add(thought);
         return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -7183,6 +7187,7 @@ if (want("10h")) {
       const step = judgeScript.shift();
       if (step === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (step === "500") return new Response(JSON.stringify({ error: { message: "internal error" } }), { status: 500 });
+      if (step === "429") return new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 });
       if (step === "slow") await Bun.sleep(1500);
       if (step === "404") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
       if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
@@ -9400,12 +9405,36 @@ if (want("10h")) {
       }
       const windowLostClaims = await statusOf(windowLostIds);
       assert(windowLostRun?.code === 1 && windowLostClaims.join(",") === "pending,pending"
-        && /\n {2}The database stopped answering \(the alarm case loses the database at the window\): the sweep stops here; run it again\./.test(windowLostRun?.stderr ?? ""),
+        && /\n {2}The database stopped answering \(the alarm case loses the database at the window\): the sweep stops here; run it again\./.test(windowLostRun?.stderr ?? "")
+        && !/What it holds goes back/.test(windowLostRun?.stderr ?? ""),
         `the database lost at the window's write takes the finish of a claim named nothing back with it: the claim back in the pool, exit 1 (exit ${windowLostRun?.code}, claims ${windowLostClaims.join(",")}): ${(windowLostRun?.stderr ?? "").trim().slice(0, 300)}`);
+
+      // …and lost there and again at the run's hand-back, the claim in hand left to its lease: the end line says so
+      // (PR 6b-1's review pass 3, mutant: the line's amendment dropped lived, named out of the suite's reach). The losses
+      // are the case's own triggers on the two writes.
+      await drop(windowLostIds);
+      await alarmAt(5);
+      const undoLoseWindowAgain = await caseTrigger("alarm_case_lose_window_again", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}'`, `RAISE EXCEPTION 'the alarm case loses the database at the window' USING ERRCODE = '57P01';`);
+      const undoLoseHandBack = await caseTrigger("alarm_case_lose_hand_back", "BEFORE UPDATE", "thought_work_claims", `OLD.status = 'claimed' AND NEW.status = 'pending'`, `RAISE EXCEPTION 'the alarm case loses the database at the hand-back' USING ERRCODE = '57P01';`);
+      let heldLostIds: string[] = [];
+      let heldLostRun = null as SweepRun | null;
+      try {
+        heldLostIds = await seedAll(notes(911, 2, "named nothing."));
+        heldLostRun = await alarmRun();
+      } finally {
+        await undoLoseHandBack();
+        await undoLoseWindowAgain();
+      }
+      const heldLostClaims = await statusOf(heldLostIds);
+      assert(heldLostRun?.code === 1 && heldLostClaims.slice().sort().join(",") === "claimed,pending"
+        && /\n {2}The database stopped answering \(the alarm case loses the database at the window\): the sweep stops here; run it again\.\n {2}What it holds goes back to the pool as each lease runs out\./.test(heldLostRun?.stderr ?? ""),
+        `the database lost at the window's write and again at the run's hand-back: the claim in hand left to its lease, said (exit ${heldLostRun?.code}, claims ${heldLostClaims.join(",")}): ${(heldLostRun?.stderr ?? "").trim().slice(-300)}`);
+      // Its claim, left to its lease, handed back for the cases after it.
+      await sql`UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL WHERE thought_id = ANY(${sql.array(heldLostIds, "TEXT")}::uuid[]) AND work_type = ${POOL} AND status = 'claimed'`;
 
       // …and lost as a trip on an unread answer is written, which no finish carried: said, its claims failed as they
       // were, the window holding the answer before it. The loss is the case's own trigger on the trip's write alone.
-      await drop(windowLostIds);
+      await drop(heldLostIds);
       await alarmAt(5);
       const undoLoseTrip = await caseTrigger("alarm_case_lose_trip", "BEFORE UPDATE", "ob1_config", `NEW.key = '${JUDGE_WINDOW_KEY}' AND NEW.value LIKE '%"tripped":"%'`, `RAISE EXCEPTION 'the alarm case loses the database at the trip' USING ERRCODE = '57P01';`);
       let tripLostIds: string[] = [];
@@ -9718,6 +9747,10 @@ if (want("10h")) {
       const followChecked = await sweep({ follow: 1, judgeChecked: true, stamper: throughRow, signal: backstop() });
       const followHalf = await sweep({ follow: 0.5, stamper: throughRow, signal: backstop() });
       const refusedWords = stamped.join(",");
+      // …nor --retry-failed, whose count a start begun again would read as 0 (PR 6b-1's review pass 3, cold read).
+      const followRetry = await sweep({ follow: 1, retryFailed: true, signal: backstop() });
+      assert(followRetry.code === 2 && /^follow is a scheduler's run of the sweep, and --retry-failed is an operator's word that the failures' cause is mended, which no scheduler can give: drop one of them\.$/m.test(followRetry.stderr),
+        `a following run refuses --retry-failed, usage (exit ${followRetry.code}): ${followRetry.stderr.trim().slice(-160)}`);
       const lent = new SQL({ url: URL_!, max: 1 });
       const sessionLent = await caught((writer) => sweepSubjects({ sql: lent, env, session: { application_name: "ob1-sweep-lent" }, writer })).finally(() => lent.close({ timeout: 5 }));
       const gateDeaf = await orHung(sweep({ admit: heldGate(0).admit }), 10_000);
@@ -11243,6 +11276,15 @@ if (want("10h")) {
       const checkIdentity = await sweep({ follow: 1, check: true, onStart: hearInto(checkIdentityHeard), signal: backstop() }, { ...env, OB1_WORKER_KEY: "d".repeat(64) });
       assert(checkIdentity.code === 2 && JSON.stringify(checkIdentityHeard) === JSON.stringify([{ ok: false, refused: "identity" }]),
         `a check refuses an unknown worker key as the run does, identity (exit ${checkIdentity.code}; heard ${JSON.stringify(checkIdentityHeard)})`);
+      // …and the worker key's lookup refused its connection, the key unresolved, under a policy admitting that actor alone:
+      // refused as the lookup's, which sleep retries, not identity's, which it ends on (PR 6b-1's review pass 3, mutant:
+      // heard as identity, it lived).
+      const lookupHeard: StartResult[] = [];
+      const lookupLent = new SQL({ url: URL_!, max: 2 });
+      const lookupRun = await sweep({ sql: lookupLent, onStart: hearInto(lookupHeard) }, { ...env, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "actor:subject-worker" }, "postgres://postgres:ob1test@127.0.0.1:1/ob1test")
+        .finally(() => lookupLent.close({ timeout: 5 }));
+      assert(lookupRun.code === 2 && JSON.stringify(lookupHeard) === JSON.stringify([{ ok: false, refused: "lookup" }]),
+        `a worker key its lookup could not resolve, under a policy admitting that actor alone, is refused as the lookup's (exit ${lookupRun.code}; heard ${JSON.stringify(lookupHeard)}): ${lookupRun.stderr.trim().slice(-200)}`);
       const checkAlone = await sweep({ check: true, onStart: hearInto(checkUsageHeard) });
       const handProbes = probes;
       const handStart = await sweep({ limit: 1, onStart: hearInto(handHeard), signal: backstop() });
@@ -11526,12 +11568,36 @@ if (want("10h")) {
       const restoreTiePauses = shortenPauses();
       const restoreTieWaits = shortenOutage(100, 200);
       const tieAsks: string[] = [];
+      /** Stale note's asks, the fifth answered as the case edits its text (review pass 3). */
+      let staleAsked = 0, staleT = "";
+      /** Aborted as Stop note is asked, its call in hand (review pass 3). */
+      const stopNow = new AbortController();
       onOwn = (t) => {
-        for (const [k, w] of [["A", "Tie note A"], ["B", "Tie note B"], ["C", "Tie note C"], ["G", "Tie note G"], ["K", "Crash note"], ["S", "Settle note"], ["H", "Hung note 1"], ["T", "Hung note 2"], ["R", "Streak note"], ["Q", "Close note"], ["U", "Hung note 3"]] as const) if (t.includes(w)) tieAsks.push(k);
+        for (const [k, w] of [["A", "Tie note A"], ["B", "Tie note B"], ["C", "Tie note C"], ["G", "Tie note G"], ["K", "Crash note"], ["S", "Settle note"], ["H", "Hung note 1"], ["T", "Hung note 2"], ["R", "Streak note"], ["Q", "Close note"], ["U", "Hung note 3"], ["Z", "Rate note:"], ["Y", "Rate note G"], ["W", "Storm note"], ["V", "Words note"], ["X", "Stale note"], ["P", "Stop note"], ["L", "Lift note"], ["N", "Pulled note"], ["J", "Late note"], ["E", "Verdict note"], ["F", "Unanswered note"], ["D", "Denied note"]] as const) if (t.includes(w)) tieAsks.push(k);
+        if (t.includes("Stop note")) stopNow.abort();
+        if (t.includes("Stale note") && ++staleAsked === 5) return sql`SELECT update_thought(${staleT}::uuid, ${"Stale note: sweep-pass-good work, edited as it was answered."})`;
       };
       let tieRun: SweepRun | null = null, crashRun: SweepRun | null = null, settleAgainRun: SweepRun | null = null, hungRun: SweepRun | null = null, streakRun: SweepRun | null = null, closeRun: SweepRun | null = null, hungAgainRun: SweepRun | null = null;
       let tieWords = "", tieInstants = 0, crashWords = "", settleWords = "", hungWords = "", crashAsks = "", settleAsks = "", hungAsks = "", streakWords = "", streakAsks = "", closeWords = "", closeAsks = "", hungAgainAsks = "";
       let tied: string[] = [], crashT = "", settleT2 = "", hungT = "", timedT = "", streakT = "", closeT = "", hungAgainT = "";
+      let rateT = "", rateGood: string[] = [], rateRun: SweepRun | null = null, rateAsks = "", rateStatus = "", rateGoodStatus: string[] = [];
+      let stormT = "", stormRun: SweepRun | null = null, stormAsks = "", stormWords = "", wordsT = "", wordsRun: SweepRun | null = null;
+      let staleRun: SweepRun | null = null, staleWords = "", staleAsks = "", stoppingT = "", stoppingRun: SweepRun | null = null, stoppingProbed = 0;
+      let liftT = "", liftRun: SweepRun | null = null, plainRun: SweepRun | null = null, liftBefore = "", liftAfter = "", plainAfter = "";
+      let pulledT = "", pulledRun: SweepRun | null = null, pulledAsks = "", pulledWords = "";
+      let probeCapT = "", probeCapRun: SweepRun | null = null, probeCapAsks = "";
+      let verdictT = "", verdictRun: SweepRun | null = null, verdictAsks = "", unansweredT = "", unansweredRun: SweepRun | null = null, unansweredAsks = "";
+      let deniedT = "", deniedRun: SweepRun | null = null, deniedWords = "";
+      /**
+       * Each case's claims as its own run left them, read as that run ends (PR 6b-1's review pass 3, mutant: read once every
+       * run had gone, a later run's work passed a case whose own left its thought unfinished).
+       */
+      type TieClaim = Awaited<ReturnType<typeof claimOf>>;
+      let tieStatus: string[] = [];
+      let crashClaim: TieClaim = undefined, settleClaim2: TieClaim = undefined, closeClaim: TieClaim = undefined, streakClaim: TieClaim = undefined;
+      let hungClaim: TieClaim = undefined, timedClaim: TieClaim = undefined, probeCapClaim: TieClaim = undefined, hungAgainClaim: TieClaim = undefined;
+      let pulledClaim: TieClaim = undefined, stormClaim: TieClaim = undefined, wordsClaim: TieClaim = undefined, staleClaim: TieClaim = undefined;
+      let stoppingClaim: TieClaim = undefined, verdictClaim: TieClaim = undefined, unansweredClaim: TieClaim = undefined, deniedClaim: TieClaim = undefined;
       try {
         const followUntil = async (opts: Omit<SubjectSweepOptions, "writer">, stopWhen: () => Promise<boolean>, ms = 20_000) => {
           waited.length = 0;
@@ -11551,11 +11617,13 @@ if (want("10h")) {
         await sql`SELECT requeue_thought_work(${POOL}, id) FROM unnest(${sql.array(tied, "TEXT")}::uuid[]) AS id`;
         [{ n: tieInstants }] = (await sql`SELECT count(DISTINCT enqueued_at)::int AS n FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array(tied, "TEXT")}::uuid[])`) as { n: number }[];
         tieRun = await followUntil({}, finished(tied));
+        tieStatus = await statusOf(tied);
         tieWords = waited.join(",");
         const tieFrom = tieAsks.length;
         // Its call crashes the provider, which answers the next three 503: the streak 500, 503, 503, 503 its own.
         [crashT] = await seedAll(["Crash note: crash-judge work, the provider crashing on it and coming back."]);
         crashRun = await followUntil({}, finished([crashT]), 10_000);
+        crashClaim = await claimOf(crashT);
         crashWords = waited.join(",");
         crashAsks = tieAsks.slice(tieFrom).join(",");
         // A suspect answered, then edited and asked again within the window: its errors begin an outage of their own.
@@ -11574,6 +11642,7 @@ if (want("10h")) {
           }
           return (c?.status === "succeeded" || c?.status === "failed") && c.at !== null && c.at > editedAt;
         });
+        settleClaim2 = await claimOf(settleT2);
         settleWords = waited.join(",");
         settleAsks = tieAsks.slice(settleFrom).join(",");
         judgeScript.length = 0;
@@ -11596,6 +11665,7 @@ if (want("10h")) {
           }
           return (c?.status === "succeeded" || c?.status === "failed") && c.at !== null && c.at > closeEditedAt;
         });
+        closeClaim = await claimOf(closeT);
         closeWords = waited.join(",");
         closeAsks = tieAsks.slice(closeFrom).join(",");
         judgeScript.length = 0;
@@ -11617,6 +11687,7 @@ if (want("10h")) {
           }
           return (c?.status === "succeeded" || c?.status === "failed") && c.at !== null && c.at > streakEditedAt;
         });
+        streakClaim = await claimOf(streakT);
         streakWords = waited.join(",");
         streakAsks = tieAsks.slice(streakFrom).join(",");
         judgeScript.length = 0;
@@ -11627,16 +11698,165 @@ if (want("10h")) {
         judgeScript.splice(0, judgeScript.length, "slow", "answer", "slow");
         probeScript.splice(0, probeScript.length, "up", "slow");
         hungRun = await followUntil({ timeout: 1 }, finished([hungT, timedT]));
+        [hungClaim, timedClaim] = [await claimOf(hungT), await claimOf(timedT)];
         hungWords = waited.join(",");
         hungAsks = tieAsks.slice(hungFrom).join(",");
+        // …and the probe after a timeout is given the call's own limit, not the start's and the wait's cap, so a model busy
+        // with another pass's call, answering it late, leaves the timeout the thought's (review pass 3, cold read: capped at
+        // 60 s, a model busy with consolidation's 71 s call read as hung). The cap shortened under the limit tells them apart.
+        const probeCapFrom = tieAsks.length;
+        [probeCapT] = await seedAll(["Late note: sweep-pass-good work, its call past the limit, the probe after it answered late."]);
+        judgeScript.splice(0, judgeScript.length, "slow");
+        probeScript.splice(0, probeScript.length, "up", "late");
+        const probeCapWas = PROBE_CAP.ms;
+        PROBE_CAP.ms = 200;
+        probeCapRun = await followUntil({ timeout: 1 }, finished([probeCapT])).finally(() => { PROBE_CAP.ms = probeCapWas; });
+        probeCapClaim = await claimOf(probeCapT);
+        probeCapAsks = tieAsks.slice(probeCapFrom).join(",");
+        judgeScript.length = 0;
+        probeScript.length = 0;
         // Hung again right after a probe answered: the timeout's outage made it the suspect, so it is its own (PR 6b-1's
         // review pass 2, mutant: a timeout's outage making no suspect lived).
         const hungAgainFrom = tieAsks.length;
         [hungAgainT] = await seedAll(["Hung note 3: sweep-pass-good work, the provider hanging on it each time."]);
         judgeScript.splice(0, judgeScript.length, "slow", "slow");
         probeScript.splice(0, probeScript.length, "up", "slow", "up", "slow");
-        hungAgainRun = await followUntil({ timeout: 1 }, finished([hungAgainT]));
+        // The claim passes' 15 minutes taken out of the window, so only the sweep's own part holds it — five of its limits
+        // and the pauses — as at the default 900 s a timeout's outage, its probe past it, came after 15 minutes, too late
+        // ever to be the thought's (review pass 3, cold read and the consumer's prototype).
+        const windowWas = SUSPECT_WINDOW.ms;
+        SUSPECT_WINDOW.ms = 0;
+        hungAgainRun = await followUntil({ timeout: 1 }, finished([hungAgainT])).finally(() => { SUSPECT_WINDOW.ms = windowWas; });
+        hungAgainClaim = await claimOf(hungAgainT);
         hungAgainAsks = tieAsks.slice(hungAgainFrom).join(",");
+        // A timed-out call whose probe finds the judge model missing, pulled again, is an outage that makes no suspect,
+        // twice over, the thought answered once the model is back (review pass 3, cold read: as a hang, it made one).
+        const pulledFrom = tieAsks.length;
+        [pulledT] = await seedAll(["Pulled note: sweep-pass-good work, its model pulled again as it is asked."]);
+        judgeScript.splice(0, judgeScript.length, "slow", "slow", "answer");
+        probeScript.splice(0, probeScript.length, "up", "404", "up", "404");
+        pulledRun = await followUntil({ timeout: 1 }, finished([pulledT]));
+        pulledClaim = await claimOf(pulledT);
+        pulledAsks = tieAsks.slice(pulledFrom).join(",");
+        pulledWords = waited.join(",");
+        judgeScript.length = 0;
+        probeScript.length = 0;
+        // A thought whose own error makes no suspect — a 429 for a request too large for the account's limit — goes behind
+        // the rest after each outage, never failed, a 429 counting for nothing, and the rest are asked (review pass 3, cold
+        // read: put back first, it was claimed after every wait, 89 times in 3 s, the rest never asked).
+        const rateFrom = tieAsks.length;
+        [rateT] = await seedAll(["Rate note: rate-judge work, its request too large for the provider's limit."]);
+        rateGood = await seedAll(["Rate note G1: sweep-pass-good work, queued behind it.", "Rate note G2: sweep-pass-good work, queued behind it.", "Rate note G3: sweep-pass-good work, queued behind it."]);
+        await sql`SELECT requeue_thought_work(${POOL}, id) FROM unnest(${sql.array(rateGood, "TEXT")}::uuid[]) AS id`;
+        await sql`UPDATE thought_work_claims SET enqueued_at = (SELECT min(enqueued_at) FROM thought_work_claims WHERE work_type = ${POOL} AND thought_id = ANY(${sql.array(rateGood, "TEXT")}::uuid[])) - interval '1 second'
+                   WHERE work_type = ${POOL} AND thought_id = ${rateT}::uuid`;
+        rateRun = await followUntil({}, finished(rateGood));
+        rateAsks = tieAsks.slice(rateFrom).join(",");
+        rateStatus = (await claimOf(rateT))?.status ?? "none";
+        rateGoodStatus = await statusOf(rateGood);
+        await drop([rateT, ...rateGood]);
+        // A 500 late in a storm's streak makes no suspect, only the error right after the provider last answered can (review
+        // pass 3, run-it: read anywhere in the streak, it failed good thoughts in storms, 21 of 72 runs, a 429 their words).
+        const stormFrom = tieAsks.length;
+        judgeScript.splice(0, judgeScript.length, "429", "500", "429", "429", "429", "429", "500", "503", "answer");
+        [stormT] = await seedAll(["Storm note: sweep-pass-good work, asked through a storm."]);
+        stormRun = await followUntil({}, finished([stormT]));
+        stormClaim = await claimOf(stormT);
+        stormWords = waited.join(",");
+        stormAsks = tieAsks.slice(stormFrom).join(",");
+        judgeScript.length = 0;
+        // …and a thought failed as its own records the error that made it the suspect, its streak's first, not its last.
+        judgeScript.splice(0, judgeScript.length, "500", "429", "429", "429", "500", "429", "429", "429");
+        [wordsT] = await seedAll(["Words note: sweep-pass-good work, a 500 first each time."]);
+        wordsRun = await followUntil({}, finished([wordsT]));
+        wordsClaim = await claimOf(wordsT);
+        judgeScript.length = 0;
+        // A suspect answered is one no longer, even when its write finds its text moved: edited as it is answered, asked
+        // again, its errors begin an outage of their own (review pass 3, cold read: settled only at its release, a stale
+        // write left it a suspect, failed as its own at its next outage).
+        const staleFrom = tieAsks.length;
+        judgeScript.splice(0, judgeScript.length, "500", "500", "500", "500", "answer", "500", "500", "500", "500");
+        [staleT] = await seedAll(["Stale note: sweep-pass-good work, edited as it is answered."]);
+        staleRun = await followUntil({}, async () => staleAsked >= 10 && (await claimOf(staleT))?.status === "succeeded");
+        staleClaim = await claimOf(staleT);
+        staleWords = waited.join(",");
+        staleAsks = tieAsks.slice(staleFrom).join(",");
+        judgeScript.length = 0;
+        // A stopping run's timeout is the thought's, unprobed, failed unanswered, as a claim pass's (review pass 3, cold read:
+        // probed on a stop, the thought was handed back each time, never failed).
+        [stoppingT] = await seedAll(["Stop note: sweep-pass-good work, its call timing out as the run stops."]);
+        judgeScript.splice(0, judgeScript.length, "slow");
+        const stoppingProbes = probes;
+        stoppingRun = await orHung(sweep({ follow: 1, timeout: 1, stamper: waitRow, signal: AbortSignal.any([stopNow.signal, backstop()]) }), 20_000);
+        stoppingProbed = probes - stoppingProbes;
+        stoppingClaim = await claimOf(stoppingT);
+        judgeScript.length = 0;
+        // A thought failed as its own is a suspect no longer: edited and asked again in the same run, a streak of 503s
+        // alone makes no suspect, and a 500 after that outage begins another, waited out, the thought answered (review
+        // pass 3, mutant: the verdict's reset of the streak's mark dropped lived, the 503s then failing it again).
+        const verdictFrom = tieAsks.length;
+        judgeScript.splice(0, judgeScript.length, "500", "500", "500", "500", "500", "500", "500", "500");
+        [verdictT] = await seedAll(["Verdict note: sweep-pass-good work, failed as its own, then edited."]);
+        let verdictEditedAt = "";
+        verdictRun = await followUntil({}, async () => {
+          const c = (await sql`SELECT status, finished_at::text AS at FROM thought_work_claims WHERE thought_id = ${verdictT}::uuid AND work_type = ${POOL}`)[0] as { status: string; at: string | null } | undefined;
+          if (verdictEditedAt === "") {
+            if (c?.status !== "failed") return false;
+            judgeScript.splice(0, judgeScript.length, "503", "503", "503", "503", "500", "500", "500", "500", "answer");
+            verdictEditedAt = ((await sql`SELECT clock_timestamp()::text AS at`)[0] as { at: string }).at;
+            await sql`SELECT update_thought(${verdictT}::uuid, ${"Verdict note: sweep-pass-good work, failed as its own, and edited since."})`;
+            return false;
+          }
+          return (c?.status === "succeeded" || c?.status === "failed") && c.at !== null && c.at > verdictEditedAt;
+        });
+        verdictClaim = await claimOf(verdictT);
+        verdictAsks = tieAsks.slice(verdictFrom).join(",");
+        judgeScript.length = 0;
+        // A suspect failed unanswered is one no longer: hung and waited out, then timed out with the probe answering,
+        // edited and asked again, its errors begin an outage of their own (review pass 3, mutant: settled only when it
+        // succeeded, it lived).
+        const unansweredFrom = tieAsks.length;
+        judgeScript.splice(0, judgeScript.length, "slow", "slow");
+        probeScript.splice(0, probeScript.length, "up", "slow");
+        [unansweredT] = await seedAll(["Unanswered note: sweep-pass-good work, hung, then failed unanswered, then edited."]);
+        let unansweredEditedAt = "";
+        unansweredRun = await followUntil({ timeout: 1 }, async () => {
+          const c = (await sql`SELECT status, finished_at::text AS at FROM thought_work_claims WHERE thought_id = ${unansweredT}::uuid AND work_type = ${POOL}`)[0] as { status: string; at: string | null } | undefined;
+          if (unansweredEditedAt === "") {
+            if (c?.status !== "failed") return false;
+            judgeScript.splice(0, judgeScript.length, "500", "500", "500", "500", "answer");
+            unansweredEditedAt = ((await sql`SELECT clock_timestamp()::text AS at`)[0] as { at: string }).at;
+            await sql`SELECT update_thought(${unansweredT}::uuid, ${"Unanswered note: sweep-pass-good work, hung, then failed unanswered, and edited since."})`;
+            return false;
+          }
+          return (c?.status === "succeeded" || c?.status === "failed") && c.at !== null && c.at > unansweredEditedAt;
+        });
+        unansweredClaim = await claimOf(unansweredT);
+        unansweredAsks = tieAsks.slice(unansweredFrom).join(",");
+        judgeScript.length = 0;
+        probeScript.length = 0;
+        // A timeout whose probe the provider refuses is the thought's, failed unanswered, no outage begun (review pass 3,
+        // mutant: a refused probe read as down lived).
+        judgeScript.splice(0, judgeScript.length, "slow");
+        probeScript.splice(0, probeScript.length, "up", "401");
+        [deniedT] = await seedAll(["Denied note: sweep-pass-good work, its call past the limit, the probe after it refused."]);
+        deniedRun = await followUntil({ timeout: 1 }, finished([deniedT]));
+        deniedClaim = await claimOf(deniedT);
+        deniedWords = waited.join(",");
+        judgeScript.length = 0;
+        probeScript.length = 0;
+        // A --judge-checked run's thought not answering stays where it stood, the trip's hand-back first, so the lift run
+        // again asks it, not the backlog (review pass 3, run-it); without the flag it goes to the end, as before.
+        const enqueuedOfLift = async () => ((await sql`SELECT enqueued_at::text AS at FROM thought_work_claims WHERE thought_id = ${liftT}::uuid AND work_type = ${POOL}`) as { at: string }[])[0]?.at ?? "";
+        [liftT] = await seedAll(["Lift note: sweep-pass-good work, not answered in a lift run."]);
+        liftBefore = await enqueuedOfLift();
+        judgeScript.splice(0, judgeScript.length, "503", "503", "503", "503");
+        liftRun = await orHung(sweep({ judgeChecked: true, limit: 1, signal: backstop() }), 20_000);
+        liftAfter = await enqueuedOfLift();
+        judgeScript.splice(0, judgeScript.length, "503", "503", "503", "503");
+        plainRun = await orHung(sweep({ limit: 1, signal: backstop() }), 20_000);
+        plainAfter = await enqueuedOfLift();
+        judgeScript.length = 0;
       } finally {
         judgeScript.length = 0;
         probeScript.length = 0;
@@ -11647,8 +11867,6 @@ if (want("10h")) {
       // Each poisoned thought's asks in one run of eight, the good one's once, in some order.
       const runsOf = (asks: string[]) => asks.reduce<[string, number][]>((rs, a) => (rs.length && rs[rs.length - 1][0] === a ? (rs[rs.length - 1][1]++, rs) : [...rs, [a, 1]]), []);
       const tieRuns = runsOf(tieAsks.slice(0, tieAsks.length).filter((a) => "ABCG".includes(a)));
-      const tieStatus = await statusOf(tied);
-      const crashClaim = await claimOf(crashT), hungClaim = await claimOf(hungT), timedClaim = await claimOf(timedT), settleClaim2 = await claimOf(settleT2), streakClaim = await claimOf(streakT), closeClaim = await claimOf(closeT), hungAgainClaim = await claimOf(hungAgainT);
       assert(tieInstants === 1 && tieRun?.code === 0 && JSON.stringify(tieStatus) === JSON.stringify(["failed", "failed", "failed", "succeeded"])
           && JSON.stringify(tieRuns.map(([a, k]) => `${a}${k}`).sort()) === JSON.stringify(["A8", "B8", "C8", "G1"])
           && tieWords.split("providerWait:true").length === 4
@@ -11671,10 +11889,38 @@ if (want("10h")) {
           && hungAsks === "H,H,T" && hungWords.split("providerWait:true").length === 2
           && /^ {2}the provider is not answering \(the call timed out after 1 s, and a one-token call got no answer either/m.test(hungRun.stderr),
         `a following run's call timed out with a probe unanswered too is the provider hung, waited out, the thought asked again; one a probe answers past is the thought's, failed unanswered (exit ${hungRun?.code ?? "still running at 20 s"}; asks ${hungAsks}; words ${hungWords}; claims ${hungClaim?.status}, ${timedClaim?.status} ${timedClaim?.last_error})`);
+      assert(probeCapRun?.code === 0 && probeCapClaim?.status === "failed" && probeCapClaim.last_error === "timed out after 1 s, the sweep's limit a call, which --timeout sets"
+          && probeCapAsks === "J" && !/the provider is not answering/.test(probeCapRun.stderr),
+        `the probe after a timeout is given the call's own limit: answered past the start's cap, within the limit, the timeout is the thought's, failed unanswered (exit ${probeCapRun?.code ?? "still running at 20 s"}; asks ${probeCapAsks}; claim ${probeCapClaim?.status} ${probeCapClaim?.last_error})`);
       assert(hungAgainRun?.code === 0 && hungAgainAsks === "U,U" && hungAgainClaim?.status === "failed"
           && /^provider error again right after the provider answered a probe, so this thought's: the call timed out after 1 s, and a one-token call got no answer either/.test(hungAgainClaim.last_error ?? ""),
         `a thought that hangs the provider again right after a probe answered is its own, the timeout's outage making it the suspect (exit ${hungAgainRun?.code ?? "still running at 20 s"}; asks ${hungAgainAsks}; claim ${hungAgainClaim?.status} ${hungAgainClaim?.last_error?.slice(0, 80)})`);
-      await drop([...tied, crashT, settleT2, hungT, timedT, streakT, closeT, hungAgainT]);
+      assert(pulledRun?.code === 0 && pulledClaim?.status === "succeeded" && pulledAsks === "N,N,N" && pulledWords.split("providerWait:true").length === 3
+          && /^ {2}the provider is not answering \(the call timed out after 1 s, and a one-token call found the judge model missing/m.test(pulledRun.stderr),
+        `a timed-out call whose probe finds the model missing makes no suspect, twice over, the thought answered once it is back (exit ${pulledRun?.code ?? "still running at 20 s"}; asks ${pulledAsks}; words ${pulledWords}; claim ${pulledClaim?.status})`);
+      assert(rateRun?.code === 0 && JSON.stringify(rateGoodStatus) === JSON.stringify(["succeeded", "succeeded", "succeeded"]) && rateStatus !== "failed"
+          && rateAsks.startsWith("Z,Z,Z,Z,Y") && !/erred on it again/.test(rateRun.stderr),
+        `a thought whose own 429 makes no suspect goes behind the rest after its outage, never failed, the rest answered (exit ${rateRun?.code ?? "still running at 20 s"}; asks ${rateAsks}; its claim ${rateStatus}; the rest ${JSON.stringify(rateGoodStatus)})`);
+      assert(stormRun?.code === 0 && stormClaim?.status === "succeeded" && stormAsks === "W,W,W,W,W,W,W,W,W"
+          && stormWords.split("providerWait:true").length === 3 && !/erred on it again/.test(stormRun.stderr)
+          && wordsRun?.code === 0 && wordsClaim?.status === "failed" && /so this thought's: .*internal error/.test(wordsClaim.last_error ?? "") && !/rate limited/.test(wordsClaim.last_error ?? ""),
+        `a 500 late in a storm's streak makes no suspect, the thought answered; one failed as its own records its streak's first error, not its last (exits ${stormRun?.code ?? "hung"}, ${wordsRun?.code ?? "hung"}; storm asks ${stormAsks}, words ${stormWords}, claim ${stormClaim?.status}; recorded ${wordsClaim?.last_error?.slice(0, 160)})`);
+      assert(staleRun?.code === 0 && staleClaim?.status === "succeeded" && staleAsks === "X,X,X,X,X,X,X,X,X,X"
+          && staleWords.split("providerWait:true").length === 3 && !/erred on it again/.test(staleRun.stderr),
+        `a suspect answered is one no longer even when its write finds its text moved: asked again, its errors begin an outage of their own (exit ${staleRun?.code ?? "still running at 20 s"}; asks ${staleAsks}; words ${staleWords}; claim ${staleClaim?.status})`);
+      assert(stoppingRun?.code === 0 && stoppingClaim?.status === "failed" && stoppingClaim.last_error === "timed out after 1 s, the sweep's limit a call, which --timeout sets" && stoppingProbed === 1,
+        `a stopping run's timeout is the thought's, unprobed, failed unanswered (exit ${stoppingRun?.code ?? "hung"}; claim ${stoppingClaim?.status} ${stoppingClaim?.last_error}; ${stoppingProbed} probe(s), the start's)`);
+      assert(verdictRun?.code === 0 && verdictClaim?.status === "succeeded" && verdictAsks.split(",").length === 17 && verdictAsks.split(",").every((a) => a === "E"),
+        `a thought failed as its own is a suspect no longer: edited, a streak of 503s makes no suspect and a 500 after its outage begins another, the thought answered (exit ${verdictRun?.code ?? "still running at 20 s"}; asks ${verdictAsks}; claim ${verdictClaim?.status} ${verdictClaim?.last_error?.slice(0, 80)})`);
+      assert(unansweredRun?.code === 0 && unansweredClaim?.status === "succeeded" && unansweredAsks === "F,F,F,F,F,F,F",
+        `a suspect failed unanswered is one no longer: edited, its errors begin an outage of their own, the thought answered (exit ${unansweredRun?.code ?? "still running at 20 s"}; asks ${unansweredAsks}; claim ${unansweredClaim?.status} ${unansweredClaim?.last_error?.slice(0, 80)})`);
+      assert(deniedRun?.code === 0 && deniedClaim?.status === "failed" && deniedClaim.last_error === "timed out after 1 s, the sweep's limit a call, which --timeout sets"
+          && !deniedWords.includes("providerWait:true") && !/the provider is not answering/.test(deniedRun.stderr),
+        `a timeout whose probe the provider refuses is the thought's, failed unanswered, no outage begun (exit ${deniedRun?.code ?? "still running at 20 s"}; words ${deniedWords}; claim ${deniedClaim?.status} ${deniedClaim?.last_error})`);
+      assert(liftRun?.code === 1 && /The provider is not answering after 3 pauses/.test(liftRun.stderr) && liftAfter !== "" && liftAfter <= liftBefore
+          && plainRun?.code === 1 && plainAfter > liftAfter,
+        `a --judge-checked run's thought not answering stays where it stood; without the flag it goes to the end (exits ${liftRun?.code ?? "hung"}, ${plainRun?.code ?? "hung"}; queued ${liftBefore} → ${liftAfter} → ${plainAfter})`);
+      await drop([...tied, crashT, settleT2, hungT, timedT, streakT, closeT, hungAgainT, pulledT, probeCapT, stormT, wordsT, staleT, stoppingT, verdictT, unansweredT, deniedT, liftT]);
 
       // …and the row's wait unsaid as the run ends when its write of the wait throws (PR 6b-1's review pass 2, mutant: the
       // end's unsaying dropped lived); a stop landing as the wait ends is heard before another claim (mutant: the check
@@ -11803,14 +12049,25 @@ if (want("10h")) {
       const restartRow = await restartHolder.reserve();
       const restartHeard: StartResult[] = [];
       let restartRun: SweepRun | null = null, restartWaited = false, restartEnded = 0;
+      // Its own environment, its worker key spoiled once the first beginning resolved it: the re-begun start keeps the key
+      // it resolved, not looking it up again (PR 6b-1's review pass 3, run-it: looked up again at a database just back,
+      // too many connections dropped the key, or under a policy admitting that actor alone refused the run). Its pooling's
+      // condition built on the run's client, the connection lost leaves no rejection unhandled (review pass 3, claims
+      // audit: built on the pin, four, which no assertion read). Its start's lines said once, at its first beginning (review
+      // pass 3, mutant: said at each, it lived).
+      const restartEnv = { ...env };
+      let restartUnhandled = 0;
+      const onRestartUnhandled = () => { restartUnhandled++; };
+      process.on("unhandledRejection", onRestartUnhandled);
       try {
         await restartRow`BEGIN`;
         await restartRow`SET LOCAL lock_timeout = '20s'`;
         await restartRow`SELECT 1 FROM thought_work_claims WHERE thought_id = ${restartT}::uuid AND work_type = ${POOL} FOR UPDATE`;
         waited.length = 0;
         const stopping = new AbortController();
-        const restarting = orHung(sweep({ follow: 1, stamper: waitRow, onStart: (r) => { restartHeard.push(r); }, signal: AbortSignal.any([stopping.signal, backstop()]) }));
+        const restarting = orHung(sweep({ follow: 1, stamper: waitRow, onStart: (r) => { restartHeard.push(r); }, signal: AbortSignal.any([stopping.signal, backstop()]) }, restartEnv));
         restartWaited = await pollUntil(() => waitingOnLock("requeue_thought_work("), 20_000);
+        restartEnv.OB1_WORKER_KEY = "d".repeat(64);
         [{ n: restartEnded }] = (await sql`
           SELECT count(pg_terminate_backend(pid))::int AS n FROM pg_stat_activity
            WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%requeue_thought_work(%'`) as { n: number }[];
@@ -11818,20 +12075,78 @@ if (want("10h")) {
         await pollUntil(async () => (await claimOf(restartT))?.status === "succeeded", 20_000);
         stopping.abort();
         restartRun = await restarting;
+        await Bun.sleep(300);
       } finally {
+        process.off("unhandledRejection", onRestartUnhandled);
         restoreRestart();
         await restartRow`ROLLBACK`.catch(() => {});
         restartRow.release();
         await restartHolder.close({ timeout: 5 });
       }
       const restartClaim = await claimOf(restartT);
+      const [{ id: workerAgent }] = (await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'subject-worker'`) as { id: string }[];
+      const restartSubject = (await subjects()).find((x) => x.thought === restartT && x.standing);
       const [{ restartFilled }] = (await sql`SELECT value AS "restartFilled" FROM ob1_config WHERE key = 'subject_pool_filled'`) as { restartFilled: string }[];
       assert(restartWaited && restartEnded === 1 && restartRun?.code === 0 && restartClaim?.status === "succeeded" && restartFilled === POOL
           && /^ {2}the database is not answering \(.*\) — waiting for it, then the run's start begins again$/m.test(restartRun.stderr)
           && /^ {2}the database answers again$/m.test(restartRun.stdout) && !/The database stopped answering/.test(restartRun.stderr)
-          && JSON.stringify(restartHeard) === JSON.stringify([{ ok: true, provider: "up" }]),
-        `a following run's start begins again once the database answers, its pooling's connection lost as it waited, the thought pooled and asked, its start heard once (waited ${restartWaited}, ended ${restartEnded}; exit ${restartRun?.code ?? "still running at 30 s"}; claim ${restartClaim?.status}; filled ${JSON.stringify(restartFilled)}; heard ${JSON.stringify(restartHeard)}): ${restartRun?.stderr.trim().slice(0, 300)}`);
+          && JSON.stringify(restartHeard) === JSON.stringify([{ ok: true, provider: "up" }])
+          && restartSubject?.agent === workerAgent && restartUnhandled === 0
+          && (restartRun.stdout.match(/^ {2}subjects: the rules \(/gm) ?? []).length === 1,
+        `a following run's start begins again once the database answers, its pooling's connection lost as it waited, the thought pooled and asked, its start heard once, its worker key the one it first resolved, no rejection unhandled, its start's lines said once (waited ${restartWaited}, ended ${restartEnded}; exit ${restartRun?.code ?? "still running at 30 s"}; claim ${restartClaim?.status}; filled ${JSON.stringify(restartFilled)}; heard ${JSON.stringify(restartHeard)}; agent ${restartSubject?.agent ?? "none"}; ${restartUnhandled} unhandled): ${restartRun?.stderr.trim().slice(0, 300)}`);
       await drop([restartT]);
+
+      // …and begun again past the database lost once at the naming's write, and once at the pool-filled mark, each by the
+      // case's own trigger raising the shutdown's state at its first firing alone (PR 6b-1's review pass 3, mutant: the
+      // start's through mark set before the naming, or before the mark, lived, the case above losing the pooling alone).
+      for (const [what, key, cond] of [["naming", "subject_pool_key", "true"], ["mark", "subject_pool_filled", "NEW.value <> ''"]] as const) {
+        const restoreRebegun = shortenOutage(100, 200);
+        const [rebegunT] = await seedAll([`Restart note ${what}: sweep-pass-good work, pooled after its start lost the database at the ${what}.`]);
+        await sql`UPDATE ob1_config SET value = '' WHERE key = 'subject_pool_filled'`;
+        await sql.unsafe(`CREATE SEQUENCE restart_case_${what}`);
+        const undoRebegun = await caseTrigger(`restart_case_lose_${what}`, "BEFORE UPDATE", "ob1_config", `NEW.key = '${key}' AND ${cond}`,
+          `IF nextval('restart_case_${what}') = 1 THEN RAISE EXCEPTION 'the restart case loses the database at the ${what}' USING ERRCODE = '57P01'; END IF; RETURN NEW;`);
+        let rebegunRun: SweepRun | null = null;
+        try {
+          waited.length = 0;
+          const stopping = new AbortController();
+          const running = orHung(sweep({ follow: 1, stamper: waitRow, signal: AbortSignal.any([stopping.signal, backstop()]) }));
+          await pollUntil(async () => (await claimOf(rebegunT))?.status === "succeeded", 20_000);
+          stopping.abort();
+          rebegunRun = await running;
+        } finally {
+          await undoRebegun();
+          await sql.unsafe(`DROP SEQUENCE restart_case_${what}`);
+          restoreRebegun();
+        }
+        const rebegunClaim = await claimOf(rebegunT);
+        const [{ rebegunFilled }] = (await sql`SELECT value AS "rebegunFilled" FROM ob1_config WHERE key = 'subject_pool_filled'`) as { rebegunFilled: string }[];
+        assert(rebegunRun?.code === 0 && rebegunClaim?.status === "succeeded" && rebegunFilled === POOL
+            && rebegunRun.stderr.split(`  the database is not answering (the restart case loses the database at the ${what}) — waiting for it, then the run's start begins again`).length === 2
+            && !/The database stopped answering/.test(rebegunRun.stderr),
+          `a following run's start begins again past the database lost at the ${what}, said once (exit ${rebegunRun?.code ?? "still running at 20 s"}; claim ${rebegunClaim?.status}; filled ${JSON.stringify(rebegunFilled)}): ${rebegunRun?.stderr.trim().slice(0, 300)}`);
+        await drop([rebegunT]);
+      }
+
+      // …and a role whose grants pass the start's check but not the naming's write of the name — INSERT and UPDATE of
+      // ob1_config's key alone — is refused there as the tables', 2, not a naming broken off, 1 (PR 6b-1's review pass 3,
+      // mutant: that refusal dropped lived).
+      const KROLE = "ob1_live_subjects_keyonly";
+      const kUrl = URL_!.replace(/\/\/[^@]*@/, `//${KROLE}:ob1keyonly@`);
+      const dropK = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${KROLE}') THEN EXECUTE 'DROP OWNED BY ${KROLE}'; EXECUTE 'DROP ROLE ${KROLE}'; END IF; END $$`);
+      await dropK();
+      const keyOnlyHeard: StartResult[] = [];
+      let keyOnlyRun: SweepRun | null = null;
+      try {
+        await sql.unsafe(`CREATE ROLE ${KROLE} LOGIN PASSWORD 'ob1keyonly'`);
+        await sql.unsafe(`GRANT ALL ON ALL TABLES IN SCHEMA public TO ${KROLE}; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${KROLE}; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO ${KROLE}`);
+        await sql.unsafe(`REVOKE INSERT, UPDATE ON ob1_config FROM ${KROLE}; GRANT INSERT (key), UPDATE (key) ON ob1_config TO ${KROLE}`);
+        keyOnlyRun = await orHung(sweep({ model: false, switchKey: true, onStart: (r) => { keyOnlyHeard.push(r); }, signal: backstop() }, { ...env, OB1_WORKER_KEY: "", DATABASE_URL: kUrl }, kUrl), 20_000);
+      } finally {
+        await dropK();
+      }
+      assert(keyOnlyRun?.code === 2 && JSON.stringify(keyOnlyHeard) === JSON.stringify([{ ok: false, refused: "tables" }]) && /Naming pool \S+ broke off \(permission denied for table ob1_config\)/.test(keyOnlyRun.stderr),
+        `a role whose grants pass the start's check but not the naming's write is refused there, the tables', 2 (exit ${keyOnlyRun?.code ?? "still running at 20 s"}; heard ${JSON.stringify(keyOnlyHeard)}): ${keyOnlyRun?.stderr.trim().slice(-200)}`);
 
       // …and a stop that lands before the thoughts begin — here as the pool-filled mark waits on its row — is heard by
       // no start, the run ending there (review pass 1, run-it: heard through).

@@ -314,6 +314,17 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   w.end();
   clock += SUSPECT_WINDOW_MS + 1;
   ok(w.begin("503", "E") === "outage", "a suspect meeting an outage past the window is in an outage like any other thought");
+  // A caller's own window, longer than 15 minutes, its calls outrunning the claim passes' (SMD-3306 PR 6b-1's review pass 3).
+  let longClock = 0;
+  const long = new ProviderOutage(() => longClock, SUSPECT_WINDOW_MS * 4);
+  long.begin("500", "L");
+  long.end();
+  longClock = SUSPECT_WINDOW_MS * 4;
+  ok(long.begin("500", "L") === "thought", "a caller's own window holds a suspect past the claim passes' 15 minutes");
+  long.begin("500", "M");
+  long.end();
+  longClock += SUSPECT_WINDOW_MS * 4 + 1;
+  ok(long.begin("500", "M") === "outage", "…and only to its own edge");
 
   // The schedule carried across outages that come back at once (SMD-2679 PR 4a-2b): from where the last ended, inside the window and nothing settled since.
   let resumeClock = 0;
