@@ -2375,7 +2375,8 @@ the whole row, so a column added later is held too), every DELETE and TRUNCATE,
 for the owner too. The scope rule **fails closed**: the envelope must state
 `write` (any item) or `capture`; a read key's scope, or none at all, is refused
 (`READ_ONLY_KEY`). The server's envelopes carry a scope only for a capture key
-today, so SMD-3664's operations state `write`. A **capture-only key** may state
+today, so the operations (SMD-3664) state `write` for a write key and `capture`
+for a capture-only key. A **capture-only key** may state
 a priority only on a thought its agent captured and nobody has taken since
 (082's `ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope
 itself carries, never one read by name, and asked once, under a share lock on
@@ -2384,8 +2385,8 @@ ticket, an entity or another key's thought. That is asked before any existence
 answer and refused alike for an item that is not there (`ITEM_NOT_YOURS`), so
 the refusal tells it nothing about what exists; neither writer shows it the
 item's winner. `priority_of` and `priority_history` take no actor: who may read
-them is the operations layer's (SMD-3664's read tools, which a capture-only key
-is never given). With both `due_at` and a due reference, the item's own `due_at`
+them is the operations layer's (`priority_history`, a read tool, which a
+capture-only key is never given; SMD-3664). With both `due_at` and a due reference, the item's own `due_at`
 is its due time. A deleted item's assertions stay as they were (SMD-3711, beside
 SMD-1723). The refusals are outcomes, as an unknown item is (`ITEM_NOT_FOUND`).
 `priority_of` reads a JSON array of items (at most 1000): each item's winning
@@ -2414,7 +2415,9 @@ lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach
 the rows on a forgotten item, and relaxes the trigger to do so. The **priority**
 grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
-082 and 115; a re-apply is a no-op. The REST and MCP operations are SMD-3664's.
+082 and 115; a re-apply is a no-op. The REST and MCP operations are
+`set_priority`, `clear_priority` and `priority_history` (SMD-3664;
+server-portable/README.md, Priority assertions).
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
@@ -2558,8 +2561,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `crm_persons`, `crm_person_mentions` (schemas/crm-person-tiers) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `readwise_books` (schemas/readwise-books — upstream granted the table nothing; its integration wrote it through Supabase's default privileges) | `SELECT, INSERT, UPDATE, DELETE` |
 | | functions `merge_thought_provenance_metadata(uuid, jsonb)`, `merge_thought_eval_metadata(uuid, jsonb)` (schemas/provenance-chains; SECURITY DEFINER, `REVOKE`d `FROM PUBLIC`) | `EXECUTE` |
-| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): three of the six, family-calendar's, home-maintenance's and household-knowledge's plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `recipes`, `meal_plans`, `shopping_lists` (extensions/meal-planning) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
+| **extensions** — the learning path's `extensions/*/schema.sql`, applied by hand as each README's Step 1 says (SMD-1810): two of the six, professional-crm's and job-hunt's; the other four are plugins since SMD-2311, their tables in their own schemas under their own roles. Upstream's five with policies enabled RLS on `auth.uid() = user_id` and granted nothing — Supabase's default privileges carried its service role; the policies are gone, and this group is what a role other than the tables' owner needs. Every id is a `uuid` (no sequences) and no function is `REVOKE`d `FROM PUBLIC` | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
 | **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |

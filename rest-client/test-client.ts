@@ -121,6 +121,10 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     claim_work: { ticket: "smd-3379", piece: "PR 1b-2", label: "a session & a branch", lease_seconds: 600, token: "wc_" + "0".repeat(64) },
     renew_claim: { id: ID, token: "wc_" + "1".repeat(64), lease_seconds: 3600 },
     release_claim: { id: ID, token: "wc_" + "2".repeat(64), reason: "merged", force: false },
+    // Priority assertions (SMD-3664): the item in the path — a ticket key and a uuid — the rest in the body or none.
+    set_priority: { kind: "ticket", key: "smd-3664", level: 4, due_at: "2027-03-01", not_before: "2027-02-01T09:00:00+01:00", due_ref: { kind: "thought", key: ID }, reason: "a reason & more?", inferred: false },
+    clear_priority: { kind: "thought", key: ID },
+    priority_history: { kind: "entity", key: ID },
   } satisfies { [K in ToolName]: InputOf<K> };
   const client = createRestClient({ baseUrl: "http://api", fetch: viaApp });
   for (const name of TOOL_NAMES) {

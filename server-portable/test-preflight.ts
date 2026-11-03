@@ -786,6 +786,28 @@ else {
   assert(/worker claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
          "…and dropped, the claim functions are the shipped four, said as such");
 
+  // 116's priority assertions (SMD-3664): the functions the priority operations call, under 116's signatures.
+  {
+    const prio = new SQL({ url: LIVE, max: 1 });
+    const line = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+priority\s{2,}\S/.test(l)) ?? "";
+    try {
+      const whole = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      assert(/✓  priority\s+assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group/.test(whole.out),
+             `on a brain at 116 the priority functions and the priority grant: ok (${line(whole.out).trim()})`);
+      await prio.unsafe("ALTER FUNCTION priority_history(text, text) RENAME TO priority_history_away");
+      let missing: Awaited<ReturnType<typeof run>>;
+      try {
+        missing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      } finally {
+        await prio.unsafe("ALTER FUNCTION priority_history_away(text, text) RENAME TO priority_history");
+      }
+      assert(missing.code === 1 && /priority\s+migration 116's priority_history\(text,text\) missing under 116's signature/.test(missing.out) && /116_priority_assertions\.sql/.test(missing.out),
+             `a priority function missing: does not start, naming it and 116 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 140)})`);
+    } finally {
+      await prio.close();
+    }
+  }
+
   // 115's work claims (SMD-3598), "ticket claims" beside 015's "worker claims": the four functions the claim
   // operations call, and a statement log that would print a renewal's or a release's token (a bind value) whole.
   {
@@ -3232,6 +3254,10 @@ else {
       assert(/!  ticket claims\s+the server's role holds no INSERT, UPDATE on work_claims: claim_work, renew_claim and release_claim fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups claims/.test(missingBoth.out),
              "…and the claims group it lacks is a warning naming the group, the claim calls alone failing for it");
+      // 116's priority group (SMD-3664): soft too — the writes it lacks named, the priority calls alone failing.
+      assert(/!  priority\s+the server's role holds no priority_assertions INSERT, priority_assertions UPDATE, priority_current INSERT, priority_current UPDATE, priority_current DELETE: set_priority and clear_priority fail naming the table, and nothing else does/.test(missingBoth.out)
+             && /--grant <role> --groups priority/.test(missingBoth.out),
+             "…and the priority group it lacks is a warning naming each write, the priority calls alone failing for it");
       // 060's snapshot writes are named too, with the trigger that makes them
       // (SMD-2116); they are granted with the chunk writes below so the arms
       // after read as before, and revoked again at the end.

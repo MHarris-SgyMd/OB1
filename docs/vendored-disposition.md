@@ -280,7 +280,7 @@ retired: their directories and their rows in those suites went with SMD-1931's P
 | `slack-capture`, `telegram-capture` | **plugin at `/hooks/<name>`** (SMD-2101) | Inbound webhooks; SMD-2101 already carries them. |
 | `recipes/ob-graph` | **retired** (SMD-2920) | A second, hand-curated graph outside the event log; its reads are SMD-2922's core entity-graph reads. |
 | `recipes/work-operating-model-activation` | **retired** (SMD-2920) | With `skills/work-operating-model` and `recipes/bring-your-own-context`, which depend on it; a plugin port is the path back. |
-| `extensions/meal-planning/shared-server.ts` | **not ported** (SMD-2920; SMD-2311 leaves it out) | Plugin operations declare `read`, `capture` or `write`; a household key limited to "read plus mark purchased" can't be expressed, and `write` would open every write in the brain. |
+| `extensions/meal-planning/shared-server.ts` | **retired** (SMD-2920; removed in SMD-2311 PR 3, the meal-planning plugin's `get_shopping_list` and `mark_item_purchased` reading and ticking the list behind the brain's own keys) | Plugin operations declare `read`, `capture` or `write`; a household key limited to "read plus mark purchased" can't be expressed, and `write` would open every write in the brain. |
 | `chrome-capture-extension` | **client of `/api`** (SMD-1931, done in its PR 3) | A browser client, not a server: `POST /v1/thoughts` with a capture key, `GET /v1/whoami` as its key check. |
 
 `entity-extraction-worker` and `consolidation-workers` are workers, not surface; they
