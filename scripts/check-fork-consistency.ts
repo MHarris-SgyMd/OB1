@@ -10530,10 +10530,10 @@ checkJobTimeouts();
  * scanner `blanked` uses, regex literals kept (on each of the repo's .ts files it reads the names the TypeScript
  * parser does; a regex after `)` it reads as a division, with the other limits its docblock gives), is its section's
  * — the section's own number, its base, or a sub-check of it — so a renumber that moved the headers and missed a code
- * line fails, even where the old number is still listed because another check took it: 316 names on 312 lines today,
- * all in their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails),
- * and none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for
- * each run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
+ * line fails, even where the old number is still listed because another check took it: some 320 names today, all in
+ * their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and
+ * none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for each
+ * run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
  * message (so a stale mention in a comment is not read, as comments name other checks freely), and a name in other
  * words (`check-50`, `check #50`, a number built at runtime) is not read. It reads this file's own text, and not any
  * other file that cites a check by number; prose that reads as a citation or a header fails loudly and is reworded,
