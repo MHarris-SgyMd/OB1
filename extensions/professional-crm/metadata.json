@@ -1,6 +1,6 @@
 {
   "name": "Professional CRM",
-  "description": "Track professional contacts, log interactions, manage opportunities, and connect your network to your thoughts.",
+  "description": "Track professional contacts, log interactions, manage opportunities, and connect your network to your thoughts. On this fork it is the professional-crm plugin, turned on in the brain itself (SMD-2311).",
   "category": "extensions",
   "author": {
     "name": "Nate B. Jones",
@@ -13,17 +13,16 @@
       "contribution": "Original proposal (#93), crm_ prefix convention, FTS search, meeting prep tool, stale contact detection"
     }
   ],
-  "version": "1.1.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Bun 1.4+"]
+    "tools": []
   },
-  "requires_primitives": ["deploy-remote-mcp", "remote-mcp", "rls"],
   "learning_order": 5,
-  "tags": ["crm", "contacts", "networking", "professional", "rls", "fts"],
+  "tags": ["crm", "contacts", "networking", "professional"],
   "difficulty": "intermediate",
-  "estimated_time": "45 minutes",
+  "estimated_time": "15 minutes",
   "created": "2026-03-12",
-  "updated": "2026-04-17"
+  "updated": "2026-11-03"
 }

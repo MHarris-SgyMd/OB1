@@ -28,7 +28,7 @@ The decision table marks which rows are that direction, which the maintainer dec
 - **Scheduling.** board-sync's interval, sleep's work period and n8n's schedules are three separate clocks.
 
 **The extensions** sit where SMD-2308 left them, with three gaps:
-- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example, the family calendar, home maintenance, household knowledge and meal planning use it. SMD-2311 ports the other two extensions; they and three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
+- **Plugins were decided as the destination** (`operator-surface-tiers.md` decisions 9–12): a plugin's operations join the brain's contract, and the brain's servers serve them behind the brain's keys. The mechanism is built (SMD-2310), and the example, the family calendar, home maintenance, household knowledge, meal planning and the professional CRM use it. SMD-2311 ports the last extension, job hunt; it and three integrations still run as standalone servers on `compat/supabase-sql` (SMD-3216).
 - **A plugin runs inside the brain's servers**, so it must be curated, and its SQL needs a role boundary that one plugin cannot step out of (SMD-2756).
 - **A plugin has no way out of the brain.** Check 31 refuses `fetch` in plugin code, so anything that reaches an outside service has no home. n8n was chosen as the fork's integration point for exactly that (SMD-1863), but `orchestration-tool.md`'s decision 7 kept it away from the brain's own tools.
 
@@ -57,7 +57,7 @@ The direction joins the two. One runtime runs every task a brain has, whether a 
 
 ### An interactive tool call
 
-Take `crm_add_contact`, professional-crm's tool once it is a plugin with a workflow (SMD-2311):
+Take `add_contact`, professional-crm's operation (a plugin since SMD-2311), once it is a workflow:
 
 1. The client calls the tool on the brain's MCP server. The MCP server forwards it to the REST core as it forwards any plugin operation (`POST /v1/plugins/professional-crm/contacts`), with the client's key or exchanged token (`operator-surface-tiers.md`, "Identity").
 2. The REST core checks the caller, the scope and the input against the manifest, as it does today. The operation's implementation is a workflow, so it opens a run: a row with the caller's principal, the operation, its bounded scope, the class `live` and a deadline.
