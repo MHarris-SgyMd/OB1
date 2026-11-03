@@ -7560,6 +7560,10 @@ if (want("10h")) {
     // close took (SMD-3713 review pass 2, walkthrough: unchecked, and the timeout halved to 1.5 s).
     let lockWait = "", facetFree = false, probedWaiting = false;
     try {
+      // Connected before the door's lock is taken, so the close waits at once and the probe sees it well inside the
+      // lock_timeout, not after a slow connect (SMD-3713 review pass 3, cold read).
+      await closer`SELECT 1`;
+      await prober`SELECT 1`;
       await holder.begin(async (h: SQL) => {
         await h`SELECT pg_advisory_xact_lock(hashtextextended(${`ob1:subject:${filed}`}, 0))`;
         const closing = closer.begin(async (tx: SQL) => {
@@ -10373,14 +10377,19 @@ if (want("10h")) {
       const handFree = holdClaimRow("Budget note 17", handT, handLet.promise);
       const handStop = new AbortController();
       const handRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([handStop.signal, backstop()]) }));
-      const handWaited = await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000);
-      handStop.abort();
-      handLet.resolve();
-      const handRun = await orHung(handRunning, 20_000).finally(async () => {
+      // In a try, so a poll that throws still stops the run and lets the row go (SMD-3713 review pass 3, cold read).
+      let handWaited = false;
+      let handRun: SweepRun | null = null;
+      try {
+        handWaited = await pollUntil(() => waitingOnLock("release_claims_for_worker("), 20_000);
+        handStop.abort();
+        handLet.resolve();
+        handRun = await orHung(handRunning, 20_000);
+      } finally {
         handStop.abort();
         handLet.resolve();
         await handFree();
-      });
+      }
       assert(handWaited && handRun?.code === 0 && (await claimOf(handT))?.status === "pending"
           && new RegExp(`^ {2}${handT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`, "m").test(handRun.stderr)
           && !/claims again/.test(handRun.stderr) && /stopped after 1 thought\(s\): what it held is back in the pool/.test(handRun.stderr),
