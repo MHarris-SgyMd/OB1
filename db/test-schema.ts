@@ -16682,9 +16682,10 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const edits = await Promise.all([
     raised(`UPDATE priority_assertions SET level = 0 WHERE id = $1::uuid`, [hist[1].id]),
     raised(`UPDATE priority_assertions SET closed_at = NULL, close_reason = NULL, closed_by = NULL WHERE id = $1::uuid`, [anyId]),
+    raised(`UPDATE priority_assertions SET closed_at = now(), close_reason = 'cleared', level = 0 WHERE id = (SELECT id FROM priority_assertions WHERE closed_at IS NULL ORDER BY seq LIMIT 1)`),
     raised(`DELETE FROM priority_assertions WHERE id = $1::uuid`, [anyId]),
     raised(`TRUNCATE priority_assertions`)]);
-  assert(edits.every((e) => e.code === "23001" && /append-only/.test(e.message)), `priority_assertions refuses an edit, a reopening, a DELETE and a TRUNCATE, naming itself append-only (${edits.map((e) => e.code).join(",")})`);
+  assert(edits.every((e) => e.code === "23001" && /append-only/.test(e.message)), `priority_assertions refuses an edit, a reopening, a close that edits as it closes, a DELETE and a TRUNCATE, naming itself append-only (${edits.map((e) => e.code).join(",")})`);
 
   // The projection: exact after every call; a raw write seen by the drift check and repaired by the rebuild.
   const exact = await drift();

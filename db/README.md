@@ -2370,7 +2370,9 @@ scope, kind or declaration, states it afresh), so a source restating every pass
 adds no rows;
 `clear_priority` closes the caller's own as `cleared` and no other key's.
 `not_before` after `due_at` is refused. `priority_assertions` is append-only: a trigger refuses any UPDATE but an
-open row closing once, every DELETE and TRUNCATE, for the owner too. The
+open row closing once (every other column as it was, compared as the whole
+row, so a column added later is held too), every DELETE and TRUNCATE, for the
+owner too. The
 scope rule **fails closed**: the envelope must state `write` (any item) or
 `capture`; a read key's scope, or none at all, is refused (`READ_ONLY_KEY`). The
 server's envelopes carry a scope only for a capture key today, so SMD-3664's
@@ -2397,7 +2399,12 @@ kept current in the write's transaction; `ob1_priority_projection_drift()`
 checks it with its own copy of the winner's rule (068's) and
 `ob1_rebuild_priority_projection()` repairs it after a raw write.
 `declare_priority_source(label, declared)` is the operator's, beside
-`set_agent_kind`: server roles hold only `SELECT` on `priority_sources`. Each
+`set_agent_kind`: the priority group grants only `SELECT` on
+`priority_sources`, so the server's operations cannot declare a source. That is
+the server's surface, not a wall — a role holding the server group can classify
+a key (`set_agent_kind`), and a role holding the priority group can write the
+tables directly; the rules hold for callers of the functions, as 115's do. Two
+declarations of one key at once wait on an advisory lock on it. Each
 declaration is a row of its own, closed by its withdrawal and never rewritten,
 and always names the key's agent id — a declaration makes the registry row for a
 label the registry does not know yet, as `set_agent_kind` does. Makers,

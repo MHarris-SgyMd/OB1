@@ -95,10 +95,16 @@
 --      declared). One row per declaration, never rewritten, always by the
 --      key's agent id: a declaration makes the registry row for a label the
 --      registry does not know yet, as set_agent_kind does, and a maker is
---      matched by that id alone. Server roles read the table and cannot write it, so
---      only a role the operator holds can declare one (decision 10, as 046's
---      ob1_agents UPDATE). A withdrawn declaration is kept with when; the
---      assertions made under it keep their tier.
+--      matched by that id alone. The priority group grants SELECT alone on
+--      it, so the server's operations offer no way to declare one: it is the
+--      operator's, by psql, beside set_agent_kind (decision 10). That is the
+--      server's surface, not a wall: a role holding the server group can
+--      classify a key (set_agent_kind, its ob1_agents UPDATE) and so raise a
+--      key's trust, and a role holding the priority group can write the
+--      tables directly, as with every core table its group writes (115's
+--      note). The rules hold for callers of the functions. A withdrawn
+--      declaration is kept with when; the assertions made under it keep
+--      their tier.
 --
 --   5. WHO MAY ASSERT (decision 10), failing closed:
 --      * the envelope must state its scope: `write` for any item, `capture`
@@ -123,26 +129,29 @@
 --   THE MAKER is the key: the envelope's agent id, else the registry's for
 --   its name, else its name — so a key seen with its id and without it is one
 --   maker, and a statement it made by name before it had an id is still its
---   own to replace or clear (115's is_holder rule). clear_priority never shows
---   a capture key the item's winner. THE SAME STATEMENT AGAIN (level, times, reference, reason, flag and
---   tier as the maker's open one) is answered `unchanged` and writes nothing,
---   so a source restating every pass adds no rows.
+--   own to replace or clear (115's is_holder rule). Neither writer shows a
+--   capture key the item's winner. THE SAME STATEMENT AGAIN (level, times,
+--   reference, reason, flag and tier, and the maker's stamp — name, agent
+--   id, kind, trust, scope, source — as the maker's open one) is answered
+--   `unchanged` and writes nothing, so a source restating every pass adds no
+--   rows, and a key that has since gained an id states it afresh.
 --
 --   6. THE FUNCTIONS (SECURITY INVOKER, PUBLIC's EXECUTE as every core
 --      function):
 --      * assert_priority(p_kind, p_key, p_level, p_due_at, p_not_before,
 --        p_due_ref_kind, p_due_ref_key, p_reason, p_inferred, p_actor):
---        jsonb {outcome: asserted | refused, code, message, assertion,
---        replaced, winner}.
+--        jsonb {outcome: asserted | unchanged | refused, code, message,
+--        assertion, replaced, winner}.
 --      * clear_priority(p_kind, p_key, p_actor): {outcome: cleared |
 --        nothing_to_clear | refused, code, message, assertion, winner}.
 --      * priority_of(p_items jsonb): for a JSON array of {kind, key}, one row
---        per item — the winner, every open assertion (the winner first, then
---        tier and newest), and the projection's level — in one query. An item
---        with none returns a row with a NULL winner: unknown, not low
+--        per item — every open assertion by the rule's order (tier, then the
+--        later written), the winner its first and the level the winner's —
+--        read once, in one statement, so a reply never contradicts itself.
+--        An item with none returns a row with a NULL winner: unknown, not low
 --        (decision 3). STABLE.
 --      * priority_history(p_kind, p_key): every assertion on the item, closed
---        ones included, oldest first. STABLE.
+--        ones included, in the order written. STABLE.
 --      * declare_priority_source(p_label, p_declared): the operator's.
 --      The assertion jsonb never carries anything that proves a key: its
 --      maker's name, agent id, kind, trust, scope and source flag, as data.
@@ -348,14 +357,13 @@ AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     -- Only an open row closing, once: every other column as it was.
+    -- The whole row but the three closing columns, as jsonb: a column a later
+    -- migration adds is held without editing a list here (review pass 5).
+    -- maker_key is left out: a stored generated column is not yet computed in
+    -- a BEFORE trigger's NEW, and the columns it is made from are compared.
     IF OLD.closed_at IS NULL AND NEW.closed_at IS NOT NULL
-       AND (NEW.id, NEW.seq, NEW.item_kind, NEW.item_key, NEW.level, NEW.due_at, NEW.not_before, NEW.due_ref_kind, NEW.due_ref_key,
-            NEW.reason, NEW.inferred, NEW.maker_name, NEW.maker_agent_id, NEW.maker_kind, NEW.maker_trust, NEW.maker_scope,
-            NEW.maker_source, NEW.tier, NEW.asserted_at)
-           IS NOT DISTINCT FROM
-           (OLD.id, OLD.seq, OLD.item_kind, OLD.item_key, OLD.level, OLD.due_at, OLD.not_before, OLD.due_ref_kind, OLD.due_ref_key,
-            OLD.reason, OLD.inferred, OLD.maker_name, OLD.maker_agent_id, OLD.maker_kind, OLD.maker_trust, OLD.maker_scope,
-            OLD.maker_source, OLD.tier, OLD.asserted_at) THEN
+       AND to_jsonb(NEW) - ARRAY['closed_at', 'close_reason', 'closed_by', 'maker_key']
+           = to_jsonb(OLD) - ARRAY['closed_at', 'close_reason', 'closed_by', 'maker_key'] THEN
       RETURN NEW;
     END IF;
     RAISE EXCEPTION USING
@@ -642,6 +650,7 @@ DECLARE
   v_who      record;
   v_now      timestamptz;
   v_id       uuid   := gen_random_uuid();
+  v_mine     boolean;
   v_own      int;
   v_old      priority_assertions;
   v_row      priority_assertions;
@@ -677,27 +686,24 @@ BEGIN
       'assertion', NULL, 'replaced', NULL, 'winner', NULL);
   END IF;
 
+  PERFORM ob1_priority_lock(v_item.kind, v_item.key);
   -- A capture-only key states a priority only on a thought its agent captured
   -- and nobody has taken (082), and takes its due time only from another such
-  -- thought. Asked before any existence answer, and refused alike for an item
-  -- that is not there, so the refusal tells it nothing about what exists
-  -- (review pass 1).
-  IF v_who.scope = 'capture' AND NOT (
-       v_item.kind = 'thought' AND ob1_priority_owns(v_item.key, v_who.env_agent_id)
-       AND (v_ref_kind IS NULL OR (v_ref_kind = 'thought' AND ob1_priority_owns(v_ref_key, v_who.env_agent_id)))) THEN
-    RETURN jsonb_build_object('outcome', 'refused', 'code', 'ITEM_NOT_YOURS',
-      'message', format('%s is a capture-only key: it may state a priority only on a thought it captured, and take a due time only from another', v_who.name),
-      'assertion', NULL, 'replaced', NULL, 'winner', NULL);
-  END IF;
-
-  PERFORM ob1_priority_lock(v_item.kind, v_item.key);
-  -- Asked again under a share lock on the thoughts, so a take committing
-  -- between the first reading and the write is seen, or waits (082's rule
-  -- re-reads "taken" under a lock; review pass 2).
+  -- thought. Asked once, under the item's lock and a share lock on the
+  -- thoughts (082's rule re-reads "taken" under a lock), so a take committing
+  -- meanwhile is seen or waited for; and before any existence answer, refused
+  -- alike for an item that is not there, so the refusal tells it nothing
+  -- about what exists (review passes 1, 2 and 5). Any other kind is refused
+  -- first: its key is no thought's id.
   IF v_who.scope = 'capture' THEN
-    PERFORM 1 FROM thoughts t WHERE t.id IN (v_item.key::uuid, v_ref_key::uuid) FOR SHARE;
-    IF NOT (ob1_priority_owns(v_item.key, v_who.env_agent_id)
-            AND (v_ref_kind IS NULL OR ob1_priority_owns(v_ref_key, v_who.env_agent_id))) THEN
+    IF v_item.kind <> 'thought' OR (v_ref_kind IS NOT NULL AND v_ref_kind <> 'thought') THEN
+      v_mine := false;
+    ELSE
+      PERFORM 1 FROM thoughts t WHERE t.id IN (v_item.key::uuid, v_ref_key::uuid) FOR SHARE;
+      v_mine := ob1_priority_owns(v_item.key, v_who.env_agent_id)
+                AND (v_ref_kind IS NULL OR ob1_priority_owns(v_ref_key, v_who.env_agent_id));
+    END IF;
+    IF NOT v_mine THEN
       RETURN jsonb_build_object('outcome', 'refused', 'code', 'ITEM_NOT_YOURS',
         'message', format('%s is a capture-only key: it may state a priority only on a thought it captured, and take a due time only from another', v_who.name),
         'assertion', NULL, 'replaced', NULL, 'winner', NULL);
@@ -850,18 +856,19 @@ BEGIN
   -- The winner and its level from the rule, read with the open assertions in
   -- one statement, so one reply never contradicts itself (review pass 4: the
   -- projection's level beside a live list disagreed until a rebuild).
-  SELECT q.kind, q.key, w.level,
-         CASE WHEN w.id IS NOT NULL THEN ob1_priority_json(w) END,
-         COALESCE((SELECT jsonb_agg(ob1_priority_json(a) ORDER BY a.tier, a.seq DESC)
-                     FROM priority_assertions a
-                    WHERE a.item_kind = q.kind AND a.item_key = q.key AND a.closed_at IS NULL), '[]'::jsonb)
+  -- One read: the open assertions in the rule's order (ob1_priority_winner's:
+  -- tier, then the later written), the winner their first (review pass 5).
+  SELECT q.kind, q.key, (l.list->0->>'level')::smallint, l.list->0, l.list
     FROM asked q
-    CROSS JOIN LATERAL ob1_priority_winner(q.kind, q.key) AS w
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(jsonb_agg(ob1_priority_json(a) ORDER BY a.tier, a.seq DESC), '[]'::jsonb) AS list
+        FROM priority_assertions a
+       WHERE a.item_kind = q.kind AND a.item_key = q.key AND a.closed_at IS NULL) AS l
    ORDER BY q.ord;
 END;
 $$;
 COMMENT ON FUNCTION priority_of(jsonb) IS
-  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner, and every open assertion by tier and newest, the winner first. An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). The winner is the rule''s, read with the list in one statement; priority_current is the projection SMD-3667''s reads join. Raises on a malformed item. Migration 116 / SMD-3663.';
+  'For a JSON array of {kind, key} (at most 1000; an item asked twice answered once, at its first place), one row per item in the order asked: its kind and key normalised, the winning level, the winner, and every open assertion in the rule''s order (tier, then the later written), the winner its first. An item nobody stated a priority on has a NULL level and winner: unknown, not low (decision 3). One read of the assertions, so a reply never contradicts itself; priority_current is the projection SMD-3667''s reads join. Raises on a malformed item. Migration 116 / SMD-3663.';
 
 CREATE OR REPLACE FUNCTION priority_history(p_kind text, p_key text)
 RETURNS jsonb
@@ -901,6 +908,9 @@ BEGIN
     INSERT INTO ob1_agents (label) VALUES (v_label) ON CONFLICT (label) DO NOTHING;
   END IF;
   v_agent := (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = v_label);
+  -- One declaration of a key at a time: FOR UPDATE locks no row that is not
+  -- there yet, so two at once would both insert (review pass 5).
+  PERFORM pg_advisory_xact_lock(hashtextextended('ob1:priority-source:' || COALESCE(v_agent::text, v_label), 0));
   SELECT * INTO v_standing FROM priority_sources s
    WHERE s.withdrawn_at IS NULL AND s.source_agent_id = v_agent
    FOR UPDATE;
@@ -917,7 +927,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION declare_priority_source(text, boolean) IS
-  'The operator declares the key named label a priority source (p_declared true, the default) — a new row naming the key''s agent id, the registry''s row for the label, which the declaration makes when there is none (as set_agent_kind does) — or withdraws the standing declaration of the key the label names now (false), which keeps its row with when. Returns {ok, label, agent_id, declared, was_declared}, or {ok: false, error: BAD_LABEL}. A declared key''s assertions take tier 2, between the operator''s and an agent''s. Server roles hold SELECT alone on priority_sources (and no INSERT on ob1_agents), so only a role the operator holds can call it — as set_agent_kind. Migration 116 / SMD-3663.';
+  'The operator declares the key named label a priority source (p_declared true, the default) — a new row naming the key''s agent id, the registry''s row for the label, which the declaration makes when there is none (as set_agent_kind does) — or withdraws the standing declaration of the key the label names now (false), which keeps its row with when. Returns {ok, label, agent_id, declared, was_declared}, or {ok: false, error: BAD_LABEL}. A declared key''s assertions take tier 2, between the operator''s and an agent''s. The priority group grants SELECT alone on priority_sources, so the server''s operations cannot call it: it is the operator''s, by psql, as set_agent_kind. (The rules hold for callers of the functions; a role holding the server group can still classify a key, and so raise its trust.) Migration 116 / SMD-3663.';
 
 -- ---------------------------------------------------------------------------
 -- The drift check and the rebuild (068's pattern)
