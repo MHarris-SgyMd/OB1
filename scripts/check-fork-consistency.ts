@@ -587,9 +587,17 @@
  *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
  *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
  *      two took 47, within a day). Its probe pins what it refuses and passes
+ *  50. fork-checks.yml's publish-test-counts downloads the `test-counts-*`
+ *      artifacts and needs exactly the jobs that upload one, each of which
+ *      sets OB1_TEST_COUNTS in its own env and uploads that file or its
+ *      directory, and a job that sets OB1_TEST_COUNTS uploads one: a counts
+ *      job left out reaches the wiki's Test-counts page only if it ends
+ *      first, unnamed when it does not, and a need with no counts is named
+ *      on every page as having none (SMD-3709). Its probe pins what it
+ *      refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44 and 48 parse YAML with Bun.YAML,
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
  * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
  */
@@ -10731,6 +10739,98 @@ function checkCheckNumbers() {
   for (const [line, msg] of checkNumberProblems(readFileSync(join(ROOT, SELF), "utf8"), CROSS_SECTION_MESSAGES)) fail(`${SELF}:${line}`, `${msg.replace(/ \(SMD-3658\)$/, "")} (check 49, SMD-3658)`);
 }
 checkCheckNumbers();
+
+// ── 50: publish-test-counts needs exactly the jobs that upload suite counts (SMD-3709) ──
+/**
+ * 50: publish-test-counts (SMD-3614) downloads every `test-counts-*` artifact and writes the wiki's Test-counts page
+ * once the jobs it needs have ended. A job that uploads counts but is not among its needs races it: its rows reach the
+ * page only if it ends first, and the page, which names the needed jobs that reported nothing, does not name it. A need
+ * that uploads no counts is named on every page as a job that reported none. And a job uploads no counts unless it
+ * sets OB1_TEST_COUNTS, where report() in db/test-support.ts appends each suite run's line, and uploads that file or
+ * its directory. So in fork-checks.yml publish-test-counts downloads `test-counts-*`, and its needs are exactly the
+ * jobs with an actions/upload-artifact step whose `name` starts `test-counts-` (a matrix expression after it
+ * included); each such job sets OB1_TEST_COUNTS in its own env and uploads it, and a job that sets OB1_TEST_COUNTS
+ * uploads counts. Paths are compared as written. Its probe pins what it refuses and passes.
+ */
+const COUNTS_PUBLISHER = "publish-test-counts";
+const COUNTS_ENV = "OB1_TEST_COUNTS";
+const COUNTS_ARTIFACT = "test-counts-";
+type CountsJob = { needs?: unknown; env?: unknown; steps?: unknown };
+/** A job's steps that use the action `action` (`actions/upload-artifact`, say), each with its `with:` map. */
+function stepsUsing(job: CountsJob, action: string): Record<string, unknown>[] {
+  return (Array.isArray(job.steps) ? job.steps : []).flatMap((s) => {
+    const step = s as { uses?: unknown; with?: unknown } | null;
+    const args = step?.with && typeof step.with === "object" && !Array.isArray(step.with) ? step.with as Record<string, unknown> : {};
+    return typeof step?.uses === "string" && step.uses.startsWith(`${action}@`) ? [args] : [];
+  });
+}
+function testCountsProblems(text: string): string[] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [`does not parse: ${(e as Error).message} — check 50 cannot read which jobs upload suite counts (SMD-3709)`]; }
+  const jobs = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as { jobs?: unknown }).jobs : null;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return ["has no `jobs:` map check 50 can read (SMD-3709)"];
+  const all = Object.entries(jobs as Record<string, unknown>).filter((e): e is [string, CountsJob] => !!e[1] && typeof e[1] === "object" && !Array.isArray(e[1]));
+  const publisher = all.find(([key]) => key === COUNTS_PUBLISHER)?.[1];
+  if (!publisher) return [`has no job ${COUNTS_PUBLISHER}, which gathers the ${COUNTS_ARTIFACT}* artifacts into the wiki's Test-counts page — check 50 holds its needs to the jobs that upload them (SMD-3709)`];
+  const problems: string[] = [];
+  if (!stepsUsing(publisher, "actions/download-artifact").some((w) => w.pattern === `${COUNTS_ARTIFACT}*`)) problems.push(`job ${COUNTS_PUBLISHER} has no actions/download-artifact step with pattern ${COUNTS_ARTIFACT}*, so the counts the jobs upload never reach the page (check 50, SMD-3709)`);
+  const needs = typeof publisher.needs === "string" ? [publisher.needs] : Array.isArray(publisher.needs) ? publisher.needs.filter((n): n is string => typeof n === "string") : [];
+  const uploaders = new Set<string>();
+  for (const [key, job] of all) {
+    const uploads = stepsUsing(job, "actions/upload-artifact").filter((w) => typeof w.name === "string" && w.name.startsWith(COUNTS_ARTIFACT));
+    const counts = job.env && typeof job.env === "object" && !Array.isArray(job.env) ? (job.env as Record<string, unknown>)[COUNTS_ENV] : undefined;
+    if (!uploads.length) {
+      if (counts !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} but uploads no ${COUNTS_ARTIFACT}… artifact, so its suites' counts never reach the page — upload the file's directory, and add the job to ${COUNTS_PUBLISHER}'s needs (check 50, SMD-3709)`);
+      continue;
+    }
+    uploaders.add(key);
+    if (!needs.includes(key)) problems.push(`job ${key} uploads ${uploads[0].name} but ${COUNTS_PUBLISHER} does not need it, so its rows reach the page only if it happens to end first, and the page does not say they are missing — add it to ${COUNTS_PUBLISHER}'s needs (check 50, SMD-3709)`);
+    if (typeof counts !== "string" || !counts) { problems.push(`job ${key} uploads ${uploads[0].name} but sets no ${COUNTS_ENV} in its own env, so report() in db/test-support.ts writes no counts for it to upload (check 50, SMD-3709)`); continue; }
+    for (const w of uploads) {
+      const paths = typeof w.path === "string" ? w.path.split("\n").map((p) => p.trim().replace(/\/+$/, "")).filter(Boolean) : [];
+      if (!paths.includes(counts) && !paths.includes(posix.dirname(counts))) problems.push(`job ${key} uploads ${w.name} from ${JSON.stringify(w.path ?? null)}, which is neither its ${COUNTS_ENV}, ${counts}, nor that file's directory, so the artifact holds no counts (check 50, SMD-3709)`);
+    }
+  }
+  for (const n of needs) if (!uploaders.has(n)) problems.push(`job ${COUNTS_PUBLISHER} needs ${n}, which uploads no ${COUNTS_ARTIFACT}… artifact, so every page names it as a job that reported no counts — its needs are the jobs that upload them (check 50, SMD-3709)`);
+  return problems;
+}
+function checkTestCountsPublished() {
+  const ENV = "    env:\n      OB1_TEST_COUNTS: /tmp/c/counts.jsonl\n";
+  const counts = (key: string, env = ENV, name = `test-counts-${key}`, path = "/tmp/c/") =>
+    `  ${key}:\n    runs-on: ubuntu-24.04\n${env}    steps:\n      - run: bun test.ts\n      - uses: actions/upload-artifact@v7\n        with:\n          name: ${name}\n          path: ${path}\n`;
+  const publish = (needs: string, pattern = "test-counts-*") =>
+    `  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: ${needs}\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n          pattern: ${pattern}\n`;
+  const lint = "  lint:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n";
+  const wf = (...jobs: string[]) => `name: probe\non: push\njobs:\n${jobs.join("")}`;
+  const matrix = "test-counts-a-" + "${{ matrix.shard }}";
+  // [why, text, what each problem it reports says]: none for a pass, one phrase per problem, in order.
+  const NOT_NEEDED = "does not need it", NO_ENV = "sets no OB1_TEST_COUNTS", NO_UPLOAD = "but uploads no", EXTRA = "which uploads no", PATH = "nor that file's directory", DOWNLOAD = "no actions/download-artifact step", NO_PUBLISHER = "has no job publish-test-counts";
+  const cases: [string, string, string[]][] = [
+    ["two counts jobs, both needed", wf(counts("a"), counts("b"), publish("[a, b]")), []],
+    ["needs written as one name", wf(counts("a"), publish("a")), []],
+    ["a matrix job's name after the prefix", wf(counts("a", ENV, matrix), publish("[a]")), []],
+    ["the counts file uploaded by its own path", wf(counts("a", ENV, undefined, "/tmp/c/counts.jsonl"), publish("[a]")), []],
+    ["the counts directory among other paths", wf(counts("a", ENV, undefined, "|\n            /tmp/logs\n            /tmp/c"), publish("[a]")), []],
+    ["a job that runs no suites, left out", wf(counts("a"), lint, publish("[a]")), []],
+    ["another artifact from a job that sets no counts", wf(counts("a"), counts("b", "", "logs-b"), publish("[a]")), []],
+    ["a job that downloads one job's counts", wf(counts("a"), "  read:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n          name: test-counts-a\n", publish("[a]")), []],
+    ["a counts job left out of the needs", wf(counts("a"), counts("b"), publish("[a]")), [NOT_NEEDED]],
+    ["a matrix counts job left out of the needs", wf(counts("a", ENV, matrix), publish("[]")), [NOT_NEEDED]],
+    ["a counts job with no OB1_TEST_COUNTS", wf(counts("a", ""), publish("[a]")), [NO_ENV]],
+    ["a counts job whose OB1_TEST_COUNTS is empty", wf(counts("a", "    env:\n      OB1_TEST_COUNTS: \"\"\n"), publish("[a]")), [NO_ENV]],
+    ["a counts job with neither", wf(counts("a", ""), publish("[]")), [NOT_NEEDED, NO_ENV]],
+    ["OB1_TEST_COUNTS set, its artifact named otherwise", wf(counts("a", ENV, "counts-a"), publish("[]")), [NO_UPLOAD]],
+    ["a need that uploads no counts", wf(counts("a"), lint, publish("[a, lint]")), [EXTRA]],
+    ["an upload from another directory", wf(counts("a", ENV, undefined, "/tmp/other/"), publish("[a]")), [PATH]],
+    ["a download of another pattern", wf(counts("a"), publish("[a]", "counts-*")), [DOWNLOAD]],
+    ["no publish-test-counts job", wf(counts("a")), [NO_PUBLISHER]],
+  ];
+  const wrong = cases.map(([why, text, says]) => ({ why, says, got: testCountsProblems(text) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
+  if (wrong.length) fail(SELF, `check 50 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-3709)`);
+  for (const msg of testCountsProblems(readFileSync(join(ROOT, WORKFLOW), "utf8"))) fail(WORKFLOW, msg);
+}
+checkTestCountsPublished();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
