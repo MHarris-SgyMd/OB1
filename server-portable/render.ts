@@ -532,7 +532,7 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
   ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}),
-  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD } : {}) }) : o,
+  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
@@ -1805,7 +1805,9 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 /** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
-const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read (a brain before migration 115, or a server role without the claims grant): a result without a `⚠ Claimed` line may still be claimed — check the brain's list_claims before starting work.";
+const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result without a `⚠ Claimed` line may still be claimed — check the brain's list_claims before starting work.";
+/** The compat pair's note: their claims ride the title, not a line (review pass 3). */
+const CLAIMS_UNREAD_COMPAT = "The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result whose title has no `[claimed: …]` may still be claimed — check the brain's list_claims before starting work.";
 /** The compat pair's (search, fetch): a title marker on each result, as `[exact match …]` is, and the words in a top-level note (review pass 2: a failed read was invisible in a title). */
 const CLAIMS_UNREAD_TITLE = "[claims not read] ";
 /** How many claims a title names: the rest counted, the field keeping all (review pass 1: ten made a title of 2 KB). */
@@ -1833,18 +1835,20 @@ function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0
   };
   const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which ${title ? "the brain's " : ""}list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
   if (title) return words;
-  // AGENTS.md's readings, step 1's and 2's (review pass 2): another key's lapsed claim may be paused work unless its PR
-  // merged or closed; one of the caller's own key is this session's by its id in .work-claims/ — a lapsed one renewed,
-  // as step 4 says — and otherwise another session's, whose work is left alone.
-  const lapsed = all.some((c) => c.state === "lapsed" && !c.ownKey) ? " A lapsed claim never released may be work paused elsewhere, unless its PR (the branch in its label) merged or closed: ask the user before starting that piece." : "";
-  const own = all.some((c) => c.ownKey) ? " A claim by your own key is this session's when its id is in your worktree's .work-claims/ (renew a lapsed one with the token file's lease); otherwise it is another session's: leave that work alone and tell the user its label." : "";
+  // AGENTS.md's readings, steps 1, 2 and 4: a claim of the caller's own key is this session's — or its caller's, for a
+  // subagent the task names it to — by its id in .work-claims/, a lapsed one renewed; any other lapsed claim, the key's
+  // own another session's included, may be paused work unless its PR merged or closed (review pass 3: an own key's
+  // was told to be left alone, a merged PR's stale claim blocking its ticket on a one-key install); and another
+  // session's live claim holds its work.
+  const lapsed = all.some((c) => c.state === "lapsed") ? " A lapsed claim never released, unless it is yours as below, may be work paused elsewhere, unless its PR (the branch in its label) merged or closed: ask the user before starting that piece." : "";
+  const own = all.some((c) => c.ownKey) ? " A claim by your own key is this session's, or your caller's, when its id is in your worktree's .work-claims/ or your task names it (renew a lapsed one with the token file's lease); otherwise a live one is another session's: leave that work alone and tell the user its label or claim id." : "";
   return `${words}.${lapsed}${own}`;
 }
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);
   const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
-  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD } : {}) };
+  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}) };
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
