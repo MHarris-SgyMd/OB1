@@ -11,13 +11,14 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * OB1_PREFLIGHT_SHARD=first|rest runs one shard of the sections (SHARDS
- * below); unset, every section runs. CI runs the two side by side (SMD-3468):
+ * below); unset, every section runs. CI runs the two at once (SMD-3468):
  * the first beside db/test-upgrade.ts, each in its own database of one
  * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
- * while the data-layer job's other suites run (SMD-3195), and the rest on a
- * Postgres of its own. What the cluster shares — a role and its settings,
- * pg_locks, pg_stat_activity — is scoped here to the current database, or
- * named for this suite (pf_*, ob1_pf_capture, "pf reader's").
+ * while the data-layer job's other suites run (SMD-3195), and the rest in a
+ * job of its own, on a runner of its own (SMD-3691). What the cluster shares
+ * — a role and its settings, pg_locks, pg_stat_activity — is scoped here to
+ * the current database, or named for this suite (pf_*, ob1_pf_capture, "pf
+ * reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -61,7 +62,11 @@ const { assert } = sections;
  * a fresh one; first takes [5] and [9], whose local endpoints wait out
  * their timeouts, and the rest the others, [5b] and [12] the long ones among
  * them (80 s and 71 s side by side on a laptop with [10] in first, from 149 s
- * whole; [10] went to the rest to even them).
+ * whole; [10] went to the rest to even them). Since SMD-3691 the rest runs
+ * in a job of its own and ends well before the first (its job 103 s, against
+ * the data layer's 184 s, one run), so the split no longer evens two legs:
+ * [9], about 16 s of waits, could go to the rest and take that off the first
+ * (SMD-3710).
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -4490,7 +4495,7 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a live write pauses its passes, or ends a sleep whose pools are drained; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Asleep with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
