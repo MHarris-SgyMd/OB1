@@ -3024,7 +3024,9 @@ if (configFailed) {
             // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
               : tc.ungranted.includes("UPDATE") ? "claim_work, renew_claim and release_claim" : "claim_work";
-            add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table, and nothing else does`,
+            // SELECT is every read's too since SMD-3599: the claimed label says its claims could not be read (review pass 2).
+            const also = tc.ungranted.includes("SELECT") ? ", and every read's claimed label says its claims could not be read (SMD-3599)" : ", and nothing else does";
+            add("ticket claims", "warn", `the server's role holds no ${tc.ungranted.join(", ")} on work_claims: ${failing} ${failing === "claim_work" ? "fails" : "fail"} naming the table${also}`,
                 "Grant the claims group (SMD-3597): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups claims (db/README.md, Grants for a capturing role).");
           } else if (logging.length) {
             add("ticket claims", "warn", `${logging.join("; ")}: a renewal's or a release's token, a bind value, is logged`,
