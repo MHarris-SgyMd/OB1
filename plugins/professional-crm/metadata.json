@@ -1,0 +1,33 @@
+{
+  "name": "Professional CRM Plugin",
+  "description": "The people in a professional network, each touchpoint with them, the opportunities they bring and the brain's thoughts linked to them, in tables of the plugin's own: contacts searched word by word, interactions that move last_contacted on and never back, opportunities listed and moved on, follow-ups due, contacts going cold, a meeting briefing, and a thought linked through the brain as its caller. The learning path's Extension 5, ported from its standalone MCP server (SMD-2311).",
+  "category": "plugins",
+  "author": {
+    "name": "Nate B. Jones",
+    "github": "NateBJones"
+  },
+  "contributors": [
+    {
+      "name": "Cesar Pinto",
+      "github": "pintomatic",
+      "contribution": "Original proposal (#93), crm_ prefix convention, FTS search, meeting prep tool, stale contact detection"
+    }
+  ],
+  "version": "2.0.0",
+  "requires": {
+    "open_brain": true,
+    "services": [],
+    "tools": []
+  },
+  "tags": [
+    "plugin",
+    "crm",
+    "contacts",
+    "networking",
+    "professional"
+  ],
+  "difficulty": "intermediate",
+  "estimated_time": "15 minutes",
+  "created": "2026-11-03",
+  "updated": "2026-11-03"
+}

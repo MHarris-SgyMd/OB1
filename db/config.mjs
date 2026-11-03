@@ -2689,9 +2689,11 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
   // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): two of the six, professional-crm's and
-  // job-hunt's; the other four are plugins since SMD-2311, their tables in
-  // their own schemas under their own roles.
+  // README's Step 1 says (SMD-1810): two of the six files, job-hunt's and
+  // professional-crm's, whose tables job-hunt's link writes into until it is a
+  // plugin too (SMD-2311 PR 4b). The professional CRM and the other four are
+  // plugins since SMD-2311, their tables in their own schemas under their own
+  // roles.
   // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
   // granted nothing — Supabase's default privileges carried its service role;
   // the policies are gone, and this group is what a role other than the
