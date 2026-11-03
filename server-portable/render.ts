@@ -525,13 +525,14 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
     // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
     // SMD-3599: who holds a ticket it names, after the moved prefix; the holder's label never in a title.
     const held = claimedWords(r.claimed, r.claimedMore ?? 0, 0, true);
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : r.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
     return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }),
   // …and the whole answer says so beside the results, for a surface that
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
-  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}),
+  ...(o.value.results.some((r) => r.claimed === null) ? { claimsNote: CLAIMS_UNREAD } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
@@ -1804,7 +1805,9 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 /** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
-const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read: no `⚠ Claimed` line says nothing here — check list_claims before starting work.";
+const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read (a brain before migration 115, or a server role without the claims grant): a result without a `⚠ Claimed` line may still be claimed — check the brain's list_claims before starting work.";
+/** The compat pair's (search, fetch): a title marker on each result, as `[exact match …]` is, and the words in a top-level note (review pass 2: a failed read was invisible in a title). */
+const CLAIMS_UNREAD_TITLE = "[claims not read] ";
 /** How many claims a title names: the rest counted, the field keeping all (review pass 1: ten made a title of 2 KB). */
 const CLAIMED_IN_TITLE = 2;
 /**
@@ -1822,22 +1825,26 @@ function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0
   const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not checked: list_claims shows them` : "";
   if (!shown.length) return title || !unread ? null : `none on the tickets read; ${unread}.`;
   const one = (c: ClaimedOn) => {
+    // A title names no piece: the holder's words, as its label is, and a title reaches the model as the result's own (review pass 2).
+    if (title) return `${c.ticket}${c.piece ? " (a piece)" : ""} by ${holderText(c.holder, c.ownKey)}, ${c.state === "lapsed" ? `lapsed at ${c.expiresAt}` : `since ${c.claimedAt}`}`;
     const who = heldWho({ id: c.id, issue: c.ticket, piece: c.piece, holder: c.holder, holderKind: null, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey });
     const when = c.state === "lapsed" ? `lapsed at ${c.expiresAt}, never released` : `until ${c.expiresAt}`;
-    return title ? `${who}, ${c.state === "lapsed" ? `lapsed at ${c.expiresAt}` : `since ${c.claimedAt}`}` : `${who} since ${c.claimedAt}, ${when} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
+    return `${who} since ${c.claimedAt}, ${when} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
   };
-  const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
+  const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which ${title ? "the brain's " : ""}list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
   if (title) return words;
-  // AGENTS.md's readings, as the claim tools say them: a lapsed claim never released may be paused work; one of the caller's own key may be this session's, another's, or a lost token's.
-  const lapsed = all.some((c) => c.state === "lapsed") ? " A lapsed claim never released may be work paused elsewhere: ask the user before starting it." : "";
-  const own = all.some((c) => c.ownKey) ? " A claim by your own key may be this session's (its id in your worktree's .work-claims/), another session of yours, or one whose token was lost: list_claims shows each claim's label." : "";
+  // AGENTS.md's readings, step 1's and 2's (review pass 2): another key's lapsed claim may be paused work unless its PR
+  // merged or closed; one of the caller's own key is this session's by its id in .work-claims/ — a lapsed one renewed,
+  // as step 4 says — and otherwise another session's, whose work is left alone.
+  const lapsed = all.some((c) => c.state === "lapsed" && !c.ownKey) ? " A lapsed claim never released may be work paused elsewhere, unless its PR (the branch in its label) merged or closed: ask the user before starting that piece." : "";
+  const own = all.some((c) => c.ownKey) ? " A claim by your own key is this session's when its id is in your worktree's .work-claims/ (renew a lapsed one with the token file's lease); otherwise it is another session's: leave that work alone and tell the user its label." : "";
   return `${words}.${lapsed}${own}`;
 }
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);
   const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
-  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}) };
+  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD } : {}) };
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;

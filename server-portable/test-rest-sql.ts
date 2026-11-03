@@ -1335,9 +1335,9 @@ console.log("\n[11] The claimed label (SMD-3599): a live claim on a ticket a res
     && r.claimed[0].holder === "rival" && r.claimed[0].ownKey === false && r.claimed[0].label === label.replace("\n", " ") && r.claimed[0].state === "live" && typeof r.claimed[0].expiresAt === "string";
   assert(claim.status === 200 && held.rest.every(fieldOk),
     `each read's REST answer carries the claim — id, ticket, piece, holder, not the caller's own, its label as 115 cleaned it, its times (${JSON.stringify(held.rest.map((r) => r?.claimed?.length ?? r?.claimed))})`);
-  assert(/^\[claimed: SMD-9320 piece "PR 1" by rival, since \S+\] /.test(held.compatTitle) && /^\[claimed: SMD-9320 piece "PR 1" by rival, since \S+\] /.test(held.fetchTitle)
+  assert(/^\[claimed: SMD-9320 \(a piece\) by rival, since \S+\] /.test(held.compatTitle) && /^\[claimed: SMD-9320 \(a piece\) by rival, since \S+\] /.test(held.fetchTitle)
       && !held.compatTitle.includes("codex@laptop") && !held.fetchTitle.includes("codex@laptop") && !held.compatTitle.includes("until"),
-    `search's and fetch's titles say who holds what since when, no label and no lease end (${held.compatTitle.slice(0, 90)} | ${held.fetchTitle.slice(0, 90)})`);
+    `search's and fetch's titles say who holds what since when, no piece, no label and no lease end (${held.compatTitle.slice(0, 90)} | ${held.fetchTitle.slice(0, 90)})`);
   assert(held.texts.every((t) => line.test(t) && !t.includes("codex@laptop\n")),
     `search_thoughts', search_thoughts_keyword's and list_thoughts' text name the claim, its label quoted on one line (${held.texts.map((t) => (t.match(/⚠ Claimed: .*/) ?? ["none"])[0].slice(0, 120)).join(" | ")})`);
   assert(held.scClaimed.every((c) => Array.isArray(c) && c.length === 1 && c[0].id === claimId && c[0].holder === "rival" && c[0].ticket === "SMD-9320" && !("piece" in c[0]) && !("label" in c[0])),
