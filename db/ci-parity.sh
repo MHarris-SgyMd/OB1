@@ -242,6 +242,7 @@ free_rows() {
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
   nodb evals              eval-stated-status.ts --self-check
+  nodb evals              eval-priority.ts --self-check
   nodb deploy/orchestration   provision.ts --self-check
   nodb deploy/orchestration   runner.ts --self-check
   nodb evals              eval-orchestration.ts --self-check
@@ -379,11 +380,12 @@ main() {
   # does not list stay. A section broken by another's rows shows only in a
   # full run.
   OB1_LIVE_SHARD=rest run db test-live.ts
-  # The other two lanes start here, beside the rest of this one, and not
-  # before: the rest shard's [2] appends a line to the tracked
-  # db/migrations/002 for a moment, and the database-free lane's checker (17c
-  # hashes the frozen migrations), test-engines and test-schema read the file,
-  # as do test-upgrade and test-preflight (SMD-3639).
+  # The other two lanes start here, beside the rest of this one. Until
+  # SMD-3639 the rest shard's [2] appended a line to the tracked
+  # db/migrations/002 for a moment, which the database-free lane's checker
+  # (17c hashes the frozen migrations), test-engines and test-schema read, as
+  # do test-upgrade and test-preflight. It edits a copy now, so they could
+  # start first: SMD-3688 takes that up, with the shards side by side.
   start_lanes
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
@@ -395,11 +397,13 @@ main() {
   run server-portable    test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
   run server-portable    test-plugins-sql.ts
+  run server-portable    test-plugin-ports.ts
   run server-portable    test-local-provider.ts
   run evals              eval-write-path.ts --gate
   # The check drops the schema and refuses a database holding thoughts unless
   # told; this one is the throwaway with-postgres.sh started, as CI's is.
   OB1_FIXTURE_RESET=1 run evals eval-projection-replay.ts --fixture-check
+  OB1_FIXTURE_RESET=1 run evals eval-priority.ts --seeded
   run server-portable    test-egress.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts

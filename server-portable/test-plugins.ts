@@ -165,7 +165,7 @@ console.log("\n[2] OB1_PLUGINS: the enabled set, in the tree's order; a name tha
   assert(ex.operations.find((o) => o.key === "add_note")?.annotations.readOnlyHint === undefined, "a write operation carries no read-only hint");
   let thrown = "";
   try { loadPlugins("example,crm"); } catch (e) { thrown = (e as Error).message; }
-  assert(/OB1_PLUGINS names "crm", which is no plugin in this build \(known: example\)/.test(thrown), `a name that is no plugin throws, naming it and the known ones (${thrown})`);
+  assert(thrown === `OB1_PLUGINS names "crm", which is no plugin in this build (known: ${PLUGINS.map((p) => p.name).join(", ")})`, `a name that is no plugin throws, naming it and the known ones, the registry's (${thrown})`);
   thrown = "";
   try { loadPlugins("example,example"); } catch (e) { thrown = (e as Error).message; }
   assert(/names "example" twice/.test(thrown), `a name given twice throws (${thrown})`);
