@@ -135,17 +135,27 @@ keep_output() {
 # row of test-preflight's took the excerpt twice (SMD-3607). Not a closing
 # summary either, a bare "FAIL" or the checker's "FAIL — N violation(s):",
 # which name no failure. Else a crash's error, as Bun prints it from the
-# line's start ("error: …", "TypeError: …", "PostgresError: …"), else the
-# last three lines.
+# line's start ("error: …", "TypeError: …", "PostgresError: …", "ENOENT: …"),
+# the last ones, since Bun prints its own last; else the last three lines
+# but Bun's version trailer. A suite that printed no tally crashed, so CRASHED
+# set adds its last crash line under its failure lines (review pass 2: a
+# failed row then a throw showed the row alone). A line repeated, as a check
+# printed on stdout and again on stderr, counts once.
+# excerpt OUT [CRASHED]
 excerpt() {
-  local lines n
-  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$')
-  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|error): ')
-  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$' | tail -3)
-  [ -n "$lines" ] || return 0
-  printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
-  n=$(printf '%s\n' "$lines" | grep -c .)
-  [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
+  local lines crash n
+  crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
+  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$' | awk '!seen[$0]++')
+  if [ -n "$lines" ]; then
+    printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
+    n=$(printf '%s\n' "$lines" | grep -c .)
+    [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
+    [ -z "${2:-}" ] || [ -z "$crash" ] || printf '%s\n' "$crash" | tail -1 | sed 's/^/        /'
+  elif [ -n "$crash" ]; then
+    printf '%s\n' "$crash" | tail -3 | sed 's/^/        /'
+  else
+    printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$|^Bun v[0-9]' | tail -3 | sed 's/^/        /'
+  fi
 }
 
 # Each directory CI installs, once, from its lockfile. A lockfile out of step
@@ -187,7 +197,7 @@ suite() {
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
     row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
-    excerpt "$out"
+    excerpt "$out" "$([ -z "$res" ] && echo crashed)"
     keep_output "$name" "$out"
     FAILED=1
   else
