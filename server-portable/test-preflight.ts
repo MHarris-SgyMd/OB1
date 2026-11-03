@@ -4544,7 +4544,7 @@ else {
       const subjectsOtherHold = await run(LOG_ON);
       assert(/asleep, subjects waiting for the provider mid-pass/.test(row(subjectsWait.out, "sleep")) && /check it, and the model provider rows here \(--deep probes chat\)/.test(fix(subjectsWait.out, "sleep"))
              && /held out: subjects \(judge\)/.test(row(subjectsHeld.out, "sleep"))
-             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, .* \(cd db && bun extract-entities\.ts --url <the database's URL> --subjects --judge-checked --limit 1\), .* The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
+             && /The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, .* \(cd db && bun extract-entities\.ts --url <the database's URL> --subjects --judge-checked --limit 1\), with the stack's OB1_JUDGE_MODEL and OB1_SUBJECT_REASONING, from a checkout that reaches the database .* The other passes run on meanwhile\./.test(fix(subjectsHeld.out, "sleep"))
              && /at its last word, held out: subjects \(judge\)/.test(row(subjectsHeldDown.out, "sleep")) && /The subject sweep is held: .*--judge-checked --limit 1/.test(fix(subjectsHeldDown.out, "sleep"))
              && !/The other passes run on meanwhile/.test(fix(subjectsHeldDown.out, "sleep"))
              && /held out: subjects \(provider\)/.test(row(subjectsOtherHold.out, "sleep")) && !/The subject sweep is held/.test(fix(subjectsOtherHold.out, "sleep")),
@@ -4652,6 +4652,13 @@ else {
       const refusedOut = await run(LOG_ON);
       assert(/!\s+sleep\s+ended on a failure .*, refused at a pass's start \(key\);/.test(row(refusedOut.out, "sleep")) && /→ sleep ended 3\d s ago on a pass's start refusal \(key\): the extraction key is extract-entities\.ts's to switch \(bun db\/extract-entities\.ts --switch-key/.test(fix(refusedOut.out, "sleep")) && /started before that, it refuses again/.test(fix(refusedOut.out, "sleep")) && !/: start it again —/.test(fix(refusedOut.out, "sleep")),
         `a scheduler ended by a start refusal names the kind and its remedy, not "start it again" alone (${row(refusedOut.out, "sleep")} | ${fix(refusedOut.out, "sleep")})`);
+      // …the key's and the tables' remedies naming the subject sweep's causes beside extraction's, the row carrying the
+      // kind alone (SMD-3306 PR 6b-1's review pass 1, the consumer's prototype).
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "tables", slept: { from: await at(900), to: await at(700) } }), 30);
+      const tablesFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/a subject pool another run named is the sweep's to switch \(bun db\/extract-entities\.ts --subjects --switch-key/.test(fix(refusedOut.out, "sleep"))
+             && /apply the migrations as the tables' owner .*; or, the subject sweep's, grant the roles its log names what it names/.test(tablesFix),
+        `the key's and the tables' remedies name the subject sweep's causes too (${fix(refusedOut.out, "sleep")} | ${tablesFix})`);
       // A lookup that did not name the key may name it next time (too many
       // connections, a lock): not told it refuses again (review pass 3 of PR 3).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "lookup", slept: { from: await at(900), to: await at(700) } }), 30);

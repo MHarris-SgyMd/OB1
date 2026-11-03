@@ -14,19 +14,20 @@
  *   bun db/extract-entities.ts --url … --subjects --judge-checked # the alarm off, a trip's hold on its model lifted
  *   --timeout SECONDS (per model call: 900 with the judge model's reasoning on, 300 off)
  *   OB1_SUBJECT_REASONING=off                                    # the judge model without its reasoning (on unset)
- *   exits 0 clean · 1 claims failed (unanswered, failed by the provider a third time in the run while it answered
- *   others, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last attempt
- *   while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, or the
- *   provider or the database stopped answering · 2 usage, configuration, another pool named without --switch-key, or by
- *   another run while this one ran, a capturing role a pool would fail, a role without the door's or the pool's grants,
- *   or the provider's refusal, a following run's start probe of its judge model among them · 3 the judge model likely
- *   at fault: 10 of its last 48 answers, across runs, gave no subject, or another run's alarm tripped after this run
- *   began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the claim it let finish trips it), or a following
- *   run a trip holds (judgeHeld), or a --judge-checked run whose model a trip named after it began, before its lift ·
- *   130 a signal (the first after the call in hand, which can run to the limit a call; a second at once, the claim in
- *   hand handed back, unjudged, unless its finish holds the window's lock: that lands, judged, a trip it made said or
- *   not), or a caller's stop during the naming's waits or at the admit gate; a following run, a scheduler's, stopped by
- *   its first exits 0, unless the thought in hand it lets finish ends the run as 1, 2 or 3 do
+ *   exits 0 clean · 1 claims failed (unanswered, a following run's thought the provider erred on again right after
+ *   answering a probe, unread or refused, a write past a scheduler's statement_timeout, or a lease run out at its last
+ *   attempt while it claimed), its naming or pooling broke off, a poll lost to that timeout in a run not following, the
+ *   provider stopped answering a run by hand, or the database a run past its start · 2 usage, configuration, another
+ *   pool named without --switch-key, or by another run while this one ran, a capturing role a pool would fail, a role
+ *   without the door's or the pool's grants, or the provider's refusal, a following run's start probe of its judge
+ *   model among them · 3 the judge model likely at fault: 10 of its last 48 answers, across runs, gave no subject, or
+ *   another run's alarm tripped after this run began (JUDGE_ALARM; ahead of 1, and of a first signal's 130 when the
+ *   claim it let finish trips it), or a following run a trip holds (judgeHeld), or a --judge-checked run whose model a
+ *   trip named after it began, before its lift · 130 a signal (the first after the call in hand, which can run to the
+ *   limit a call; a second at once, the claim in hand handed back, unjudged, unless its finish holds the window's lock:
+ *   that lands, judged, a trip it made said or not), or a caller's stop during the naming's waits or at the admit gate;
+ *   a following run, a scheduler's, stopped by its first exits 0, unless the thought in hand it lets finish ends the
+ *   run as 1, 2 or 3 do
  *
  * The pool (113, PR 5). The sweep claims from thought_work_claims under its pool's key (subject.ts's subjectPoolKey:
  * the rules' versions and, when it asks the model, the question's with its reasoning), as the extraction pass claims
@@ -72,14 +73,13 @@
  * read stay failed. Each answer counts when it is asked again as when it was new, and a judge checked and found right
  * runs with --judge-checked, the alarm off. A rate limit, a server error or a lost connection is paused for, the
  * thought back in the pool where it stood and claimed again (TRANSIENT_PAUSES_MS, the pauses counting the provider's
- * errors since its last answer, across thoughts, a timeout or an egress refusal no answer), then ends the sweep. A
- * thought's second such error in a run sends it behind every one queued before it, so the next claim asks another; at
- * its third, the provider having answered another since its first, its claim fails as the thought's own, the run
- * unpaused (STRIKES, PR 6b-1: each run had asked the rest, then ended on it). Any other refusal of the request ends it,
- * exit 2, as it ends the pass. A dry run writes, pools and asks nothing, counts what a run would take (the pool's, or
- * every thought with no current subject when its pool is not named yet or its pooling broke off), reads on through a
- * signal as the pass's does, and names the refusals a run would meet. Its pages go in thought id order, so with --limit
- * it counts the first by id, which a run, taking the oldest pooled first, need not.
+ * errors since its last answer, across thoughts, a timeout or an egress refusal no answer), then ends the sweep; a
+ * following run, a scheduler's, waits the provider out past them instead, as a claim pass's follower does (PR 6b-1,
+ * below). Any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes, pools and asks
+ * nothing, counts what a run would take (the pool's, or every thought with no current subject when its pool is not
+ * named yet or its pooling broke off), reads on through a signal as the pass's does, and names the refusals a run would
+ * meet. Its pages go in thought id order, so with --limit it counts the first by id, which a run, taking the oldest
+ * pooled first, need not.
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or a session summary whose prompts name its header's ticket, has its subject once
@@ -100,14 +100,18 @@
  * following, an empty pool polled until its stop, a follower's end (0); the admit gate before the pool and each claim,
  * a thought a provider error put back claimed again through it; the call in hand's own abort beside the stop, its
  * thought set back unanswered; its word through the scheduler's row, and its waits for the provider, at its start and
- * from a transient error to the next answer; the scheduler's session settings on its connections, a statement past its
- * statement_timeout thrown at its start or its naming, the pooling exempt (PR 6b-1: a scan of every thought, it can
- * outlast the budget on a large brain, the pool never filled), and over a thought failing the thought on its own write,
- * else costing the run its poll, as a claim pass's; its start's lines left out; its start reported (onStart), each
- * refusal by its kind, and its start check (check), a following run probing its judge model first. Unlike a claim pass,
- * an outage of the provider or the database ends it (1), for the scheduler to start it again; and the stop and the
- * call's abort are its caller's from its first claim, the gate before the pool hearing the caller's signal (review
- * passes 1 and 2, cold read). No one is there to pass --judge-checked, so a trip holds the pool's following runs of
+ * through an outage past its pauses; the scheduler's session settings on its connections, a statement past its
+ * statement_timeout thrown at its start or its naming, the pooling exempt while watched (PR 6b-1: a scan of every
+ * thought, it can outlast the budget on a large brain, the pool never filled), and over a thought failing the thought
+ * on its own write, else costing the run its poll, as a claim pass's; its start's lines left out; its start reported
+ * (onStart), each refusal by its kind, and its start check (check), the pool's name read and the judge model probed.
+ * As a claim pass's follower does (PR 6b-1, the maintainer's choice), it waits out the provider's outage past its
+ * pauses, the thought in hand back in the pool, a thought that errs so again right after a probe answered failed as its
+ * own (ProviderOutage: a 5xx but 503, a 408, a lost connection; a 429 or 503 holds calls back and makes no suspect,
+ * nor does a model being pulled), and its start's reads wait out the database. Unlike a claim pass, the database lost
+ * past its start ends it (1), for the scheduler to start it again; and the stop and the call's abort are its caller's
+ * from its first claim, the gate before the pool hearing the caller's signal (review passes 1 and 2, cold read). No
+ * one is there to pass --judge-checked, so a trip holds the pool's following runs of
  * each judge model it names, beside an earlier trip's not lifted: one does not start while a trip's hold on its model
  * stands (judgeHeld), exit 3, until a run of that model with --judge-checked --limit 1, once it is checked, lifts the
  * hold it read as it began (heldSince, namedSince), or with --limit the count of the last trip's hand-back still
@@ -133,7 +137,7 @@ import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf, cleanForDisplay } from "../server-portable/consolidate.ts";
 import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectPoolKey, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
-import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, OUTAGE_MS, probeChat, probeRefusal, probeUntil, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, TRANSIENT_PAUSES_MS, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { admitted, AbortedInHand, inHandCalls, setBack, sleepUnless, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import type { PassStamper } from "./pass-stamp.ts";
 import { andList, consoleWriter, numberProblem, type Writer } from "./cli.ts";
@@ -290,13 +294,6 @@ const NIL_ID = "00000000-0000-0000-0000-000000000000";
 const MAX_ATTEMPTS = 3;
 
 /**
- * The provider's transient errors on one thought in one run at which its claim fails, the provider having answered
- * another thought since the first (PR 6b-1, the maintainer's choice): a text it fails whenever it is asked, while it
- * answers the rest, which each run asked last and ended on, exit 1, every period an outage to a scheduler.
- */
-export const STRIKES = 3;
-
-/**
  * How long a run's hand-back of its claims waits under a scheduler's session (releaseHeld), whatever the budget: past a
  * short one, within the stop's grace (review pass 3). Read as the run goes, so a test shortens it, as NAMING_WAIT is.
  */
@@ -391,8 +388,10 @@ export interface SubjectSweepOptions {
    * stop or its --limit, where a run without it ends at the empty pool. A following run is a scheduler's: it is stopped
    * as a follower is, exit 0 (130 at once on the second stop; the thought in hand a first stop lets finish can end it
    * as 1, 2 or 3 do), and it does not start while a trip's hold on its judge model stands (judgeHeld): exit 3. Neither
-   * a dry run's nor beside --judge-checked, which no scheduler passes. The provider's or the database's outage ends it
-   * as it ends a run, exit 1, for its caller to start it again.
+   * a dry run's nor beside --judge-checked, which no scheduler passes. It waits out the provider's outage past its
+   * pauses as a claim pass's follower does, a thought that errs so again right after a probe answered failed as its own
+   * (PR 6b-1), and its start's reads wait out the database; the database lost past its start ends it, exit 1, for its
+   * caller to start it again.
    */
   follow?: number;
   /**
@@ -411,8 +410,8 @@ export interface SubjectSweepOptions {
    * the provider or the database not answering, the judge's alarm, a throw — else `stopped`. It beats no row while it
    * works through a pool: a scheduler's row is the scheduler's to keep stamped. It hears the run's waits for the
    * provider too, as a claim pass's caller does (PR 6b-1): `startWait` while the run waits at its start for a judge
-   * model its probe found not answering, `providerWait` from a transient error until the provider's next answer or the
-   * run's end, the pauses between. Unused without `follow`.
+   * model its probe found not answering, `providerWait` while it waits out the provider's outage past its pauses, not
+   * through the pauses themselves (review pass 1, the consumer's prototype). Unused without `follow`.
    */
   stamper?: PassStamper | null;
   /**
@@ -422,17 +421,19 @@ export interface SubjectSweepOptions {
    * is, for the scheduler to read as its budget's: the naming's write too, whose wait has no end of its own but the
    * timeout, where the wait for writers polls and goes on, and one in the count of spent leases at the end of a run
    * that ends by itself, which a scheduler's follower does not reach. The pooling, a scan of every thought with no
-   * current subject, runs exempt (PR 6b-1, the maintainer's choice: on a large brain it outlasts the budget, the pool
-   * never filled and every sleep ended on it), its waits said and a stop cancelling it as before, the budget set back
-   * after it. One over a thought is the thought's or the poll's, as a claim pass's is, not the run's (review pass 6,
-   * run-it: thrown, it ended the scheduler's sleep on its budget): its own write's fails it (overBudget); its claim's,
-   * its read's, a put-back's or set-back's or the claim's state read after one, its release's or its answer's window's
-   * costs the run its poll (lostPoll). Only the budget's: another error there, an operator's cancel among them, is
-   * thrown as before. The run's hand-back of what it holds, at its end, a lost poll or a second stop, waits up to
-   * RELEASE_WAIT whatever the budget, so a row held past a short budget leaves no claim leased to its end, and one held
-   * longer holds the scheduler's stop no longer than RELEASE_WAIT, or twice it when the stop lands during a lost poll's
-   * hand-back. An answer judged after its claim's release (unread, or keyed) whose window write passes it is not in the
-   * window, the claim as released. Refused beside `sql`, a caller's client, which it would not reach.
+   * current subject, runs exempt while watched (PR 6b-1, the maintainer's choice: on a large brain it outlasts the
+   * budget, the pool never filled and every sleep ended on it), its waits said and a stop cancelling it as before, the
+   * budget set back after it; unwatched — no url, or its watching connection refused — it keeps the budget, nothing
+   * else bounding it (review pass 1, run-it). One over a thought is the thought's or the poll's, as a claim pass's is,
+   * not the run's (review pass 6, run-it: thrown, it ended the scheduler's sleep on its budget): its own write's fails
+   * it (overBudget); its claim's, its read's, a put-back's or set-back's or the claim's state read after one, its
+   * release's or its answer's window's costs the run its poll (lostPoll). Only the budget's: another error there, an
+   * operator's cancel among them, is thrown as before. The run's hand-back of what it holds, at its end, a lost poll or
+   * a second stop, waits up to RELEASE_WAIT whatever the budget, so a row held past a short budget leaves no claim
+   * leased to its end, and one held longer holds the scheduler's stop no longer than RELEASE_WAIT, or twice it when the
+   * stop lands during a lost poll's hand-back. An answer judged after its claim's release (unread, or keyed) whose
+   * window write passes it is not in the window, the claim as released. Refused beside `sql`, a caller's client, which
+   * it would not reach.
    */
   session?: SessionSettings;
   /**
@@ -443,19 +444,21 @@ export interface SubjectSweepOptions {
   banner?: boolean;
   /**
    * Hears the run's start, as a claim pass's caller does (db/worker-bootstrap.ts's StartResult, PR 6b-1): refused, and
-   * which way, at each refusal of its start — its options' (`usage`), the egress gate's, the tables' and the grants'
-   * (`tables`), the worker key's (`identity`, `lookup`), another pool named (`key`), a following run's judge model
-   * unserved or its endpoint refusing the probe (`model`, `provider`) — so a scheduler tells them apart; or through, as
-   * the thoughts begin, the provider having answered. A dry run's refusals are said, not heard: it reads on. A trip's
-   * hold is no start refusal, its 3 unheard: the scheduler reads the hold itself (judgeHeld).
+   * which way, at each refusal of its start — its options' (`usage`), the egress gate's (`egress`), the tables' and the
+   * grants' (`tables`), the worker key's (`identity`, `lookup`), another pool named (`key`), a following run's judge
+   * model unserved or its endpoint refusing the probe (`model`, `provider`) — so a scheduler tells them apart; or
+   * through, as the thoughts begin, unless a stop came first. A dry run's refusals are said, not heard: it reads on. A
+   * trip's hold is no start refusal, its 3 unheard: the scheduler reads the hold itself (judgeHeld).
    */
   onStart?: (r: StartResult) => void;
   /**
-   * A following run's start alone, the sleep scheduler's check at its own start, as the claim passes take it (PR
-   * 6b-1): the run's refusals, heard by onStart, and its probe of the judge model, a model unserved or an endpoint
-   * refusing it refused (`model`, `provider`), one not answering not waited for (`provider: "out"`), each pass waiting
-   * at its own start. It ends before the trip's hold is read and before the run's first write but the worker key's
-   * lookup's, 0. With `follow`, and not a dry run's.
+   * A following run's start alone, the sleep scheduler's check at its own start, as the claim passes take it (PR 6b-1):
+   * the run's refusals, heard by onStart — the pool's name read and refused as the run would refuse it (`key`,
+   * `tables`; review pass 1) — and its probe of the judge model, a model unserved or an endpoint refusing it refused
+   * (`model`, `provider`), one not answering not waited for (`provider: "out"`), each pass waiting at its own start;
+   * the database not answering waited out, as a following run's start does. It ends before the trip's hold is read and
+   * before the run's first write but the worker key's lookup's, 0; a stop ends it 130, as a claim pass's check. With
+   * `follow`, and not a dry run's.
    */
   check?: boolean;
 }
@@ -506,10 +509,13 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
 /** sweepSubjects, its row's word aside. */
 async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null, claimsEnd: { v: boolean }, waits: { provider: boolean }): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
-  /** A refusal of the run's start: said, heard by onStart as which it is (PR 6b-1, extract-entities.ts's way), 2. */
+  /**
+   * A refusal of the run's start: said, heard by onStart as which it is (PR 6b-1, extract-entities.ts's way), 2; a dry
+   * run's said alone (review pass 1, cold read and run-it: its usage refusals were heard).
+   */
   const refused = (kind: StartRefusal, line: string): number => {
     err(line);
-    opts.onStart?.({ ok: false, refused: kind });
+    if (opts.dryRun !== true) opts.onStart?.({ ok: false, refused: kind });
     return 2;
   };
   const env = opts.env ?? process.env;
@@ -552,8 +558,9 @@ async function sweepWith(opts: SubjectSweepOptions, stamper: PassStamper | null,
   }
   if (opts.signal?.aborted && !DRY_RUN) {
     err(STOPPED_EARLY);
-    // A following run's stop is its end, wherever it lands (review pass 1, cold read and run-it: before the pool, 130).
-    return FOLLOW_S > 0 ? 0 : 130;
+    // A following run's stop is its end, wherever it lands (review pass 1, cold read and run-it: before the pool, 130);
+    // a check's is a claim pass's check's, 130 (PR 6b-1's review pass 1).
+    return FOLLOW_S > 0 && opts.check !== true ? 0 : 130;
   }
   const cfg: EmbedConfig = { ...resolved, timeoutMs: TIMEOUT_S * 1000 };
   const sql = opts.sql ?? openSql(opts.url as string, { max: 2, session: opts.session });
@@ -604,29 +611,24 @@ async function sweep(
     if (blanket && !DRY_RUN) return refused("egress", `\n  ${blanket} Or run --subjects rules, which asks no model, from a pool of its own (with --switch-key while another is named).`);
     if (blanket) wouldRefuse.push("the egress gate refuses every row (the egress line above)");
   }
-  const [{ door, close }] = (await sql`SELECT to_regprocedure(${DOOR}) IS NOT NULL AS door, to_regprocedure(${CLOSE}) IS NOT NULL AS close`) as { door: boolean; close: boolean }[];
-  if (!door || !close) {
-    return refused("tables", `\n  ${door ? "close_thought_subject is missing: the subject pool is migration 113's" : "record_thought_subject is missing: a thought's own subject is migration 111's"}. Apply it first:\n    cd db && bun migrate.ts --url …`);
-  }
-  // The door's and the pool's grants, asked before any model call: a role that cannot write a subject is refused here,
-  // not at its first write with a question already spent (review pass 1). A dry run says it instead.
-  const [{ can, pools }] = (await sql`
-    SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
-       AND has_any_column_privilege('thoughts', 'UPDATE')
-       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can,
-           has_table_privilege('thought_work_claims', 'SELECT') AND has_table_privilege('thought_work_claims', 'INSERT')
-       AND has_table_privilege('thought_work_claims', 'UPDATE')
-       AND has_any_column_privilege('ob1_config', 'INSERT') AND has_any_column_privilege('ob1_config', 'UPDATE') AS pools`) as { can: boolean; pools: boolean }[];
-  if ((!can || !pools) && !DRY_RUN) {
-    return refused("tables", `\n  This role cannot ${can ? "claim from the subject pool: it needs" : "write a thought's subject: record_thought_subject needs"} ${can ? POOL_GRANTS : DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
-  }
-  if (!can) wouldRefuse.push("this role cannot write a thought's subject");
-  if (!pools) wouldRefuse.push("this role cannot claim from the subject pool");
-
+  /**
+   * A read of the start's, before the first claim: a following run's, and so `check`'s, outlasts the database going away
+   * (worker-bootstrap.ts's throughOutage), as a claim pass's start does (PR 6b-1, the maintainer's choice: sleep starts
+   * the sweep at every period and meets a restarting database there, and its start check would end the scheduler on a
+   * check ending otherwise). Null when the caller's stop ends the wait. A run by hand meets the error.
+   */
+  const startSaid = { down: false };
+  const atStart = <T,>(read: () => Promise<T>): Promise<T | null> =>
+    FOLLOW_S > 0 ? throughOutage(read, { wake: o.signal ?? new AbortController().signal, said: startSaid, out, err }) : read();
+  /** A stop in the start's waits, said: 130 under `check`, as a claim pass's check's, else a following run's end, 0. */
+  const startStopped = (): number => {
+    err(STOPPED_EARLY);
+    return o.check ? 130 : 0;
+  };
   // A following run's probe of its judge model, one token, before any claim (PR 6b-1, a claim pass's rule, SMD-2599): a
   // model the provider does not serve, or an endpoint refusing the call, refuses the start; one not answering is waited
-  // for at the run's start, below the trip's hold, or under `check` said and not waited for. A run by hand, a dry run
-  // and the rules alone probe nothing.
+  // for at the run's start, past the trip's hold (review pass 1, the consumer's prototype: a held run probed first), or
+  // under `check` said and not waited for. A run by hand, a dry run and the rules alone probe nothing.
   const probe = (wake?: AbortSignal) => probeChat(cfg.chat, cfg.judgeModel, Math.min(cfg.timeoutMs, 60_000), wake);
   /** The start's refusal of what a probe found — the judge model unserved, or the endpoint refusing the call — or null. */
   const probeRefused = (p: Probe): string | null => p.state === "missing"
@@ -636,30 +638,42 @@ async function sweep(
       ? `\n  ${cfg.chat.base} refuses a one-token call at start (${p.why.slice(0, 300)}).\n` +
         "  A following run refuses this before it claims anything: check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL)."
       : null;
-  /** Why the judge model did not answer the start's probe, when it did not. */
-  let startOut: string | null = null;
-  if (MODEL && FOLLOW_S > 0 && !DRY_RUN) {
-    const first = await probe(o.signal);
-    // A stop during the probe is the run's end, a following run's: nothing named, pooled or claimed.
-    if (o.signal?.aborted) {
-      err(STOPPED_EARLY);
-      return 0;
-    }
-    const own = probeRefused(first);
-    if (own) return refused(probeRefusal(first), own);
-    if (first.state === "out") startOut = first.why;
+  const doorRows = await atStart(() => sql`SELECT to_regprocedure(${DOOR}) IS NOT NULL AS door, to_regprocedure(${CLOSE}) IS NOT NULL AS close`);
+  if (doorRows === null) return startStopped();
+  const [{ door, close }] = doorRows as { door: boolean; close: boolean }[];
+  if (!door || !close) {
+    return refused("tables", `\n  ${door ? "close_thought_subject is missing: the subject pool is migration 113's" : "record_thought_subject is missing: a thought's own subject is migration 111's"}. Apply it first:\n    cd db && bun migrate.ts --url …`);
   }
+  // The door's and the pool's grants, asked before any model call: a role that cannot write a subject is refused here,
+  // not at its first write with a question already spent (review pass 1). A dry run says it instead.
+  const grantRows = await atStart(() => sql`
+    SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
+       AND has_any_column_privilege('thoughts', 'UPDATE')
+       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can,
+           has_table_privilege('thought_work_claims', 'SELECT') AND has_table_privilege('thought_work_claims', 'INSERT')
+       AND has_table_privilege('thought_work_claims', 'UPDATE')
+       AND has_any_column_privilege('ob1_config', 'INSERT') AND has_any_column_privilege('ob1_config', 'UPDATE') AS pools`);
+  if (grantRows === null) return startStopped();
+  const [{ can, pools }] = grantRows as { can: boolean; pools: boolean }[];
+  if ((!can || !pools) && !DRY_RUN) {
+    return refused("tables", `\n  This role cannot ${can ? "claim from the subject pool: it needs" : "write a thought's subject: record_thought_subject needs"} ${can ? POOL_GRANTS : DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
+  }
+  if (!can) wouldRefuse.push("this role cannot write a thought's subject");
+  if (!pools) wouldRefuse.push("this role cannot claim from the subject pool");
 
   let agentId: string | null = null;
   let actor: string | undefined;
   if (!DRY_RUN) {
     // The agent line and the no-key warning are the start's, left out with it; a key that could not resolve is warned
     // of whatever the banner (extract-entities.ts's rule).
-    const id = await workerIdentity(o.url, env, {
+    // The lookup's own outage thrown for a following run to wait out, as a claim pass's start does (lookupOutage).
+    const id = await atStart(() => workerIdentity(o.url, env, {
       noKeyWarning: o.banner ? "  ⚠  OB1_WORKER_KEY is not set: the subjects' lineage rows will carry no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS." : "",
       write: say,
       warn: (l) => { if (l) err(l); },
-    });
+      outage: FOLLOW_S > 0 ? lookupOutage : undefined,
+    }));
+    if (id === null) return startStopped();
     if (!id.ok) return refused("identity", id.message);
     agentId = id.identity.agentId;
     actor = id.identity.keyName;
@@ -669,12 +683,83 @@ async function sweep(
     }
   }
 
-  // The start check ends here (PR 6b-1, the claim passes' rule): before the trip's hold, which the scheduler reads
-  // itself (judgeHeld), and before the run's first write but the worker key's lookup's, without waiting for a judge
-  // model not answering, which a following run waits for at its own start.
+  /**
+   * The pool's name and its pooling's mark as `c` reads them, and the refusals they bring, a dry run's said as what a run
+   * would meet: a role that cannot read them (`tables`), another pool named without --switch-key (`key`), and while none
+   * is named, a capturing role the first naming would fail (`tables`). A run reads them under the pool's lock; `check`
+   * reads them plain (PR 6b-1's review pass 1, cold read and the consumer's prototype: the check ended before them, and
+   * a scheduler's start passed a run its first sleep refused for good). A number is the refusal's exit.
+   */
+  const readPool = async (c: SQL): Promise<{ named: string | null; filled: string | null } | number> => {
+    let named: string | null, filled: string | null;
+    try {
+      const keys = (await c`SELECT key, value FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`) as { key: string; value: string }[];
+      named = keys.find((k) => k.key === "subject_pool_key")?.value || null;
+      filled = keys.find((k) => k.key === "subject_pool_filled")?.value || null;
+    } catch (e) {
+      if (sqlState(e) !== "42501") throw e;
+      return refused("tables", `\n  This role cannot read the subject pool's name (${(e as Error).message}): the sweep reads ob1_config, thoughts, thought_facets and derivations.`);
+    }
+    // Another pool named: a run under this key would move the trigger's thoughts to it and pool every thought with no
+    // current subject again, and a run under the other after it would pool them all again — asked for, as the pass's own
+    // key change is (review pass 1: a rules run, or a trial with OB1_SUBJECT_REASONING off, renamed the pool unasked).
+    if (named !== null && named !== POOL && !SWITCH_KEY) {
+      const why = `the subject pool is ${named}; this run's is ${POOL} (another rule, question or reasoning, or --subjects rules)`;
+      if (!DRY_RUN) {
+        return refused("key", `\n  Refusing to sweep under a pool other than the one ob1_config names without --switch-key: ${why}.\n` +
+          `  A run under it would name it, so new and edited thoughts join it, and pool every thought with no current subject\n` +
+          `  again, those the model named nothing for among them, as a run under ${named} after it would. If that is the\n` +
+          `  intent, pass --switch-key; if OB1_SUBJECT_REASONING or --subjects rules is simply set otherwise here, fix that instead.`);
+      }
+      wouldRefuse.push(`${why}, and it needs --switch-key`);
+    }
+    // The first pool named: 113's trigger writes a work claim as the role that captures or edits, so a login role that
+    // can fire it — INSERT on thoughts, or UPDATE of their content or metadata — but cannot make that claim would fail
+    // its every capture (review pass 1). requeue_thought_work's upsert reads the conflict and sets seven columns: SELECT,
+    // INSERT and UPDATE on the table (review pass 2: INSERT and UPDATE alone failed too). Once a pool is named,
+    // preflight holds a capturing role to them. A role that cannot read ob1_config is not asked about: 016's trigger
+    // already refuses its every capture and text edit, and 113's its ticket edits, pool or no (review pass 4: the
+    // enrichment recipe's role, SELECT and UPDATE on thoughts alone, was refused for a failure it already has). Read by
+    // column, the two the triggers read, so a role granted those alone is asked about too (review pass 5). Nor is a
+    // role reached only through SET ROLE.
+    if (named === null) {
+      const [{ failing }] = (await c`
+        SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) AS failing
+          FROM pg_roles r
+         WHERE r.rolcanlogin AND has_column_privilege(r.oid, 'ob1_config', 'key', 'SELECT') AND has_column_privilege(r.oid, 'ob1_config', 'value', 'SELECT')
+           AND (has_any_column_privilege(r.oid, 'thoughts', 'INSERT')
+                OR has_column_privilege(r.oid, 'thoughts', 'content', 'UPDATE') OR has_column_privilege(r.oid, 'thoughts', 'metadata', 'UPDATE'))
+           AND NOT (has_table_privilege(r.oid, 'thought_work_claims', 'SELECT') AND has_table_privilege(r.oid, 'thought_work_claims', 'INSERT')
+                    AND has_table_privilege(r.oid, 'thought_work_claims', 'UPDATE'))`) as { failing: string | null }[];
+      if (failing !== null) {
+        const line = `naming the pool would fail the captures of ${failing}: 113's trigger writes a work claim as the role that captures, and they cannot SELECT, INSERT and UPDATE thought_work_claims`;
+        if (!DRY_RUN) {
+          return refused("tables", `\n  Refusing to name a subject pool: ${line}. Grant them that (GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO <role>, or the worker group: cd db && bun migrate.ts --url … --grant <role> --groups worker), then run again.`);
+        }
+        wouldRefuse.push(line);
+      }
+    }
+    return { named, filled };
+  };
+
+  // The start check ends here (PR 6b-1, the claim passes' rule): the pool's name read and refused as the run would
+  // refuse it, the judge model probed, before the trip's hold, which the scheduler reads itself (judgeHeld), and before
+  // the run's first write but the worker key's lookup's, a judge model not answering not waited for: a following run
+  // waits for it at its own start.
   if (o.check) {
-    if (startOut !== null) err(`  ${cfg.judgeModel} is not answering at start (${startOut.slice(0, 200)}) — a following run waits for it at its own start`);
-    o.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
+    const checked = await atStart(() => readPool(sql));
+    if (checked === null) return startStopped();
+    if (typeof checked === "number") return checked;
+    let checkOut: string | null = null;
+    if (MODEL) {
+      const first = await probe(o.signal);
+      if (o.signal?.aborted) return startStopped();
+      const own = probeRefused(first);
+      if (own) return refused(probeRefusal(first), own);
+      if (first.state === "out") checkOut = first.why;
+    }
+    if (checkOut !== null) err(`  ${cfg.judgeModel} is not answering at start (${checkOut.slice(0, 200)}) — a following run waits for it at its own start`);
+    o.onStart?.({ ok: true, provider: checkOut === null ? "up" : "out" });
     return 0;
   }
 
@@ -779,12 +864,14 @@ async function sweep(
   // --judge-checked; a hand run is told, and asks; --judge-checked lifts it once the pool is settled below; a run of a
   // model it does not hold is told whose it is, with its start's lines.
   if (MODEL) {
-    const w = await windowNow(sql);
+    const w = await atStart(() => windowNow(sql));
+    if (w === null) return startStopped();
     heldAtStart = heldSince(w, cfg.judgeModel);
     namedAtStart = namedSince(w, cfg.judgeModel);
     if (ALARM) tripBase = w.tripped;
     if (heldAtStart !== null) {
-      const left = await leftOf(w);
+      const left = await atStart(() => leftOf(w));
+      if (left === null) return startStopped();
       if (FOLLOW_S > 0) {
         err(`\n  ${heldLine(w, left)}; this run follows with ${cfg.judgeModel}, so it does not start (db/subject-sweep.ts, JUDGE_ALARM).` +
           `\n    Check OB1_JUDGE_MODEL (${cfg.judgeModel}), the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run with --judge-checked --limit 1 lifts its hold.`);
@@ -796,8 +883,20 @@ async function sweep(
     } else if (w.held.length > 0 && o.banner) {
       // Another model's hold: said, so a run of another judge model, one with --judge-checked among them, is not read
       // as lifting it (review pass 1, run-it: such a run said nothing, the hold standing).
-      say(`  ${heldLine(w, await leftOf(w))}; this run's judge model, ${cfg.judgeModel}, is not held${JUDGE_CHECKED && !DRY_RUN ? ", so --judge-checked lifts none of it" : ""}`);
+      const left = await atStart(() => leftOf(w));
+      if (left === null) return startStopped();
+      say(`  ${heldLine(w, left)}; this run's judge model, ${cfg.judgeModel}, is not held${JUDGE_CHECKED && !DRY_RUN ? ", so --judge-checked lifts none of it" : ""}`);
     }
+  }
+  /** Why the judge model did not answer the start's probe, when it did not. */
+  let startOut: string | null = null;
+  if (MODEL && FOLLOW_S > 0) {
+    const first = await probe(o.signal);
+    // A stop during the probe is the run's end, a following run's: nothing named, pooled or claimed.
+    if (o.signal?.aborted) return startStopped();
+    const own = probeRefused(first);
+    if (own) return refused(probeRefusal(first), own);
+    if (first.state === "out") startOut = first.why;
   }
   // A following run whose judge model did not answer the start's probe waits for it here, claiming nothing, before the
   // pool's gate, naming and pooling, said through the caller's row while it lasts (startWait, PR 6b-1: as a claim pass
@@ -809,10 +908,7 @@ async function sweep(
     err(`  ${cfg.judgeModel} is not answering at start (${startOut.slice(0, 200)}) — the run claims nothing until it does; it calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s, then doubling, every ${OUTAGE_MS.max / 60_000} min at most`);
     await o.stamper?.startWait?.(true);
     const answered = await probeUntil(() => probe(wake), wake, (p) => p.state !== "out").finally(() => o.stamper?.startWait?.(false));
-    if (answered === null) {
-      err(STOPPED_EARLY);
-      return stoppedCode;
-    }
+    if (answered === null) return startStopped();
     const own = probeRefused(answered);
     if (own) return refused(probeRefusal(answered), own);
     out(`  ${cfg.judgeModel} answers after ${Math.round((Date.now() - down) / 1000)} s`);
@@ -992,55 +1088,11 @@ async function sweep(
     // subject_pool_filled, the one whose pooling last finished. A sweep under another key names its own, with --switch-key
     // once another is named, and pools every thought with no current subject — requeued, since a pool used before keeps
     // its finished claims and a thought edited since must be asked again — once, at the change.
-    try {
-      const keys = (await db`SELECT key, value FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled')`) as { key: string; value: string }[];
-      named = keys.find((k) => k.key === "subject_pool_key")?.value || null;
-      filled = keys.find((k) => k.key === "subject_pool_filled")?.value || null;
-    } catch (e) {
-      if (sqlState(e) !== "42501") throw e;
-      return refused("tables", `\n  This role cannot read the subject pool's name (${(e as Error).message}): the sweep reads ob1_config, thoughts, thought_facets and derivations.`);
-    }
+    const pooledBy = await readPool(db);
+    if (typeof pooledBy === "number") return pooledBy;
+    ({ named, filled } = pooledBy);
     newPool = named !== POOL || filled !== POOL;
     const unnamed = named === null ? "none was named" : `${named} was`;
-    // Another pool named: a run under this key would move the trigger's thoughts to it and pool every thought with no
-    // current subject again, and a run under the other after it would pool them all again — asked for, as the pass's own
-    // key change is (review pass 1: a rules run, or a trial with OB1_SUBJECT_REASONING off, renamed the pool unasked).
-    if (named !== null && named !== POOL && !SWITCH_KEY) {
-      const why = `the subject pool is ${named}; this run's is ${POOL} (another rule, question or reasoning, or --subjects rules)`;
-      if (!DRY_RUN) {
-        return refused("key", `\n  Refusing to sweep under a pool other than the one ob1_config names without --switch-key: ${why}.\n` +
-          `  A run under it would name it, so new and edited thoughts join it, and pool every thought with no current subject\n` +
-          `  again, those the model named nothing for among them, as a run under ${named} after it would. If that is the\n` +
-          `  intent, pass --switch-key; if OB1_SUBJECT_REASONING or --subjects rules is simply set otherwise here, fix that instead.`);
-      }
-      wouldRefuse.push(`${why}, and it needs --switch-key`);
-    }
-    // The first pool named: 113's trigger writes a work claim as the role that captures or edits, so a login role that
-    // can fire it — INSERT on thoughts, or UPDATE of their content or metadata — but cannot make that claim would fail
-    // its every capture (review pass 1). requeue_thought_work's upsert reads the conflict and sets seven columns: SELECT,
-    // INSERT and UPDATE on the table (review pass 2: INSERT and UPDATE alone failed too). Once a pool is named,
-    // preflight holds a capturing role to them. A role that cannot read ob1_config is not asked about: 016's trigger
-    // already refuses its every capture and text edit, and 113's its ticket edits, pool or no (review pass 4: the
-    // enrichment recipe's role, SELECT and UPDATE on thoughts alone, was refused for a failure it already has). Read by
-    // column, the two the triggers read, so a role granted those alone is asked about too (review pass 5). Nor is a
-    // role reached only through SET ROLE.
-    if (named === null) {
-      const [{ failing }] = (await db`
-        SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) AS failing
-          FROM pg_roles r
-         WHERE r.rolcanlogin AND has_column_privilege(r.oid, 'ob1_config', 'key', 'SELECT') AND has_column_privilege(r.oid, 'ob1_config', 'value', 'SELECT')
-           AND (has_any_column_privilege(r.oid, 'thoughts', 'INSERT')
-                OR has_column_privilege(r.oid, 'thoughts', 'content', 'UPDATE') OR has_column_privilege(r.oid, 'thoughts', 'metadata', 'UPDATE'))
-           AND NOT (has_table_privilege(r.oid, 'thought_work_claims', 'SELECT') AND has_table_privilege(r.oid, 'thought_work_claims', 'INSERT')
-                    AND has_table_privilege(r.oid, 'thought_work_claims', 'UPDATE'))`) as { failing: string | null }[];
-      if (failing !== null) {
-        const line = `naming the pool would fail the captures of ${failing}: 113's trigger writes a work claim as the role that captures, and they cannot SELECT, INSERT and UPDATE thought_work_claims`;
-        if (!DRY_RUN) {
-          return refused("tables", `\n  Refusing to name a subject pool: ${line}. Grant them that (GRANT SELECT, INSERT, UPDATE ON thought_work_claims TO <role>, or the worker group: cd db && bun migrate.ts --url … --grant <role> --groups worker), then run again.`);
-        }
-        wouldRefuse.push(line);
-      }
-    }
     if (newPool && DRY_RUN) {
       const [{ n }] = (await db`SELECT count(*)::int AS n FROM thoughts t WHERE ${noCurrentSubject(db)}`) as { n: number }[];
       out(named === POOL
@@ -1093,7 +1145,10 @@ async function sweep(
       // subject, it can outlast the budget on a large brain, the pool then never filled and every sleep ended on it.
       // Its waits are said and a stop cancels it as before; the budget is set back as it ends, or as the pin goes back
       // when it ended the run, for the claims after it.
-      if (o.session?.statement_timeout !== undefined) {
+      // Only while watched: unwatched, nothing cancels it on a stop, and the budget is all that bounds it (review pass 1,
+      // run-it: a role at its connection limit left the exempt pooling deaf to its stop until its blocker let go).
+      const watching = second as SQL | "none" | null;
+      if (o.session?.statement_timeout !== undefined && watching !== null && watching !== "none") {
         const [{ v }] = (await db`SELECT current_setting('statement_timeout') AS v`) as { v: string }[];
         await db`SELECT set_config('statement_timeout', '0', false)`;
         budgetWas = v;
@@ -1248,14 +1303,14 @@ async function sweep(
    * subject elsewhere while the model was asked and handed back, is taken twice, so, and then its outcome, as --limit
    * counts it. `taken`, for --limit, counts that one too. `setBack`: those whose call the caller aborted (abortInHand),
    * put back unanswered, taken again when they come up. `overBudget`: those whose own write passed a scheduler's
-   * statement_timeout, failed. `struck`: those the provider failed STRIKES times, having answered others between,
+   * statement_timeout, failed. `ownError`: those the provider erred on again right after answering a probe, failed;
    * failed. `pollsLost`, no thoughts' count: the polls lost to it (lostPoll), a thought whose release one handed back
    * taken twice, as an edited one is. `replaced` and `newKey` count within the recorded ones, `closed` within those the
    * model named nothing for, `leftOutOfDate` within the rest, and `lost`, the claims no longer this worker's when it
    * released them, across them all: no bucket of their own; `lostFailed` the failed ones among the lost, and those
    * whose failure's release a lost poll handed back, which the failure count leaves out.
    */
-  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, pollsLost: 0, struck: 0 };
+  const n = { seen: 0, current: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, closed: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, rewritten: 0, gone: 0, refusedKey: 0, egress: 0, setBack: 0, lost: 0, lostFailed: 0, overBudget: 0, pollsLost: 0, ownError: 0 };
   let taken = 0;
   /**
    * The server's clock as the run first claims, null while it has not: its claims reap the pool's run-out leases, those
@@ -1271,13 +1326,20 @@ async function sweep(
    */
   let transients = 0, pauseMs = 0;
   /**
-   * The thoughts the provider's transient errors struck this run (STRIKES, PR 6b-1): how many times, and whether it has
-   * answered another thought since the first, which tells the thought's own error from the provider's.
+   * A following run's outage of the provider (worker-bootstrap.ts's ProviderOutage, PR 6b-1, the maintainer's choice:
+   * the claim passes' rule): past the pauses, or its model gone missing as it is pulled again, the thought goes back
+   * where it stood and the run waits for the provider (waitForProvider); the thought in hand at the outage, a suspect
+   * when the error could be its own — a 5xx but 503, a 408, a lost connection, not a 429 or 503, the provider holding
+   * calls back, nor a model being pulled (followClassify) — that errs so again right after a probe answered is its own.
    */
-  const strikes = new Map<string, { n: number; answered: boolean }>();
+  const outage = new ProviderOutage();
+  /** Why the provider is down, when a following run is to wait for it before its next claim; null else. */
+  let outageWhy: string | null = null;
   /**
-   * The run's wait for the provider, said through the caller's row as a claim pass's is (providerWait, PR 6b-1): from a
-   * transient error, the pauses between, until the provider's next answer, and unsaid as the run ends (sweepSubjects).
+   * The run's wait for the provider, said through the caller's row as a claim pass's is (providerWait, PR 6b-1): while a
+   * following run waits out an outage, not through the pauses before one (review pass 1, the consumer's prototype: said
+   * from the first error, a scheduler reading it as a claim pass's would set the sweep down on one 503), and unsaid as
+   * the run ends (sweepSubjects).
    */
   const waitOnProvider = async (on: boolean): Promise<void> => {
     if (o.waits.provider === on) return;
@@ -1292,7 +1354,7 @@ async function sweep(
    * cast keeps the declared type (SMD-1932's way, as extract-entities.ts's configError).
    */
   let endedBy = null as { code: number; line: string } | null;
-  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollsLost: false, struck: false };
+  const said = { unread: false, unanswered: false, refusedKey: false, egress: false, overBudget: false, pollsLost: false, ownError: false };
   /**
    * The judge's answer on the claim in hand, null until it answers (PR 5b): appended to the pool's window once the
    * claim is released (`judgedAlone`), or, for a claim this run finishes as named nothing, in the finish's own
@@ -1327,7 +1389,7 @@ async function sweep(
   };
 
   /** The claims this run failed, its leases spent while it ran aside: what --retry-failed would put back of its own. */
-  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.struck - n.lostFailed;
+  const failedHere = () => n.unanswered + n.unread + n.egress + n.refusedKey + n.overBudget + n.ownError - n.lostFailed;
   /** What to run once the model is right, the claims this run failed named. */
   const runAgain = (lead: string) => {
     const failed = failedHere();
@@ -1488,6 +1550,54 @@ async function sweep(
    * line's offer count what was asked (review pass 4, cold read: at the pool's tail, the offered lift asked a backlog
    * thought in its place, the alarm off, and --limit 1 sent up to four). False when the claim is no longer this worker's.
    */
+  /**
+   * The thought in hand back where it stood, its attempt and its place under --limit given back, for a pause or a
+   * following run's outage: counted by its claim when it is no longer this worker's (the one transient path's, review
+   * passes 3 and 4).
+   */
+  const backWhereItStood = async (row: Candidate): Promise<Done | false> => {
+    try {
+      if (await putBack(row.id)) {
+        taken--;
+        return { release: "none", again: true };
+      }
+      if (hardStop.signal.aborted) return false;
+      const [claim] = (await sql`
+        SELECT c.status FROM thoughts t LEFT JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${POOL}
+         WHERE t.id = ${row.id}::uuid`) as { status: string | null }[];
+      if (claim === undefined) n.gone++;
+      else if (claim.status !== "claimed" && claim.status !== "succeeded" && claim.status !== "failed") n.stale++;
+      else {
+        n.unanswered++;
+        n.lost++;
+        n.lostFailed++;
+      }
+    } catch (x) {
+      if (!databaseUnavailable(x)) throw x;
+      endedBy = { code: 1, line: databaseDown(x) };
+      return false;
+    }
+    return { release: "none" };
+  };
+  /**
+   * A following run's wait for the provider past its pauses (PR 6b-1, extract-entities.ts's waitForProvider): said
+   * through the caller's row while it lasts (providerWait), the judge model probed on outageWait's schedule until it
+   * answers, or refuses, which the next call meets; false when the run's stop ended it. No claim is held as it waits.
+   */
+  const waitForProvider = async (why: string): Promise<boolean> => {
+    const down = Date.now();
+    err(`  the provider is not answering (${why.slice(0, 200)}) — the thought in hand is back in the pool, recorded nothing; the run calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s, then doubling, every ${OUTAGE_MS.max / 60_000} min at most`);
+    await waitOnProvider(true);
+    try {
+      if ((await probeUntil(() => probe(stop.signal), stop.signal, (p) => !isOut(p))) === null) return false;
+      outage.end();
+      transients = 0;
+      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; the run claims again`);
+      return true;
+    } finally {
+      await waitOnProvider(false);
+    }
+  };
   const putBack = async (id: string): Promise<boolean> => ((await sql`
     UPDATE thought_work_claims SET status = 'pending', ttl_expires_at = NULL, attempt_count = GREATEST(attempt_count - 1, 0)
      WHERE thought_id = ${id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed'
@@ -1523,10 +1633,10 @@ async function sweep(
   const inCall = inHandCalls(() => stop.signal.aborted || ended);
   /**
    * The judge model's subject for a row, one call: the answer, an egress refusal, the thought left unanswered, or the
-   * provider's transient error with a pause left, its message, for one() to put the thought back or strike it; throws to
-   * end the sweep.
+   * provider's transient error with a pause left, for one() to put the thought back; throws to end the sweep, or past
+   * the pauses for a following run to wait the provider out.
    */
-  async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string } | { transient: string }> {
+  async function ask(row: Candidate): Promise<{ key: string | null; answer: string | null } | { egress: string } | { unanswered: string } | { transient: true }> {
     const side = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? {}, writer: actorKindOf(row.metadata) };
     const subject = { kind: "extraction" as const, actor, metadata: row.metadata ?? undefined, content: row.content };
     const call = inCall.get(workerId);
@@ -1562,7 +1672,7 @@ async function sweep(
       // The provider's transient error with a pause left: the thought goes back to the pool and the run pauses, holding
       // no claim and so no call (review pass 1, cold read: a pause counted as the call's was aborted by abortInHand);
       // past the last pause it ends the sweep.
-      if (kind === "transient" && transients < TRANSIENT_PAUSES_MS.length) return { transient: (e as Error).message };
+      if (kind === "transient" && transients < TRANSIENT_PAUSES_MS.length) return { transient: true };
       throw e;
     } finally {
       if (call) call.waiting = true;
@@ -1704,6 +1814,24 @@ async function sweep(
         }
         if (stop.signal.aborted) return false;
         const kind = classifyError(e);
+        // A following run waits the provider out as a claim pass's follower does (PR 6b-1, the maintainer's choice):
+        // past the pauses, or its model gone missing as it is pulled again, the thought goes back where it stood,
+        // unrecorded, and the run probes until the provider answers. A thought that errs so again right after a probe
+        // answered is its own (ProviderOutage, SUSPECT_WINDOW_MS) — a 5xx but 503, a 408, a lost connection; a 429 or
+        // 503 holds calls back, and a model being pulled, neither making a suspect — and its claim fails, seen, where
+        // each run had asked the rest and ended on it, every period an outage to a scheduler.
+        if (FOLLOW_S > 0 && (kind === "transient" || (kind === "fatal" && modelMissing(e)))) {
+          const msg = String((e as Error)?.message ?? e).slice(0, 300);
+          if (outage.begin(msg, followClassify(e) === "maybe-poison" ? row.id : undefined) === "thought") {
+            transients = 0;
+            n.ownError++;
+            if (row.standing_key !== null) n.leftOutOfDate++;
+            sayOnce("ownError", `  ${row.id}: the provider erred on it again right after answering a probe (${msg}): its claim fails as the thought's own; --retry-failed asks it again`);
+            return { release: "failed", error: `provider error again right after the provider answered a probe, so this thought's: ${msg}` };
+          }
+          outageWhy = msg;
+          return backWhereItStood(row);
+        }
         // Not answering: the thought goes back to the end of the pool, so a thought the provider fails on whenever it
         // is asked does not come first again and end every run (review pass 1). Its claim is handed back as the run ends.
         if (kind !== "fatal") await sql`UPDATE thought_work_claims SET enqueued_at = now() WHERE thought_id = ${row.id}::uuid AND work_type = ${POOL} AND worker_id = ${workerId} AND status = 'claimed'`.catch(() => {});
@@ -1721,47 +1849,8 @@ async function sweep(
       // hand, as edited mid-sweep; another run's, or ended by hand, as unanswered here and lost, no failure of this run's
       // (review pass 4, run-it: each read edited).
       if ("transient" in a) {
-        // Its strikes this run (STRIKES, PR 6b-1, the maintainer's choice): at the third, the provider having answered
-        // another thought since the first, the error is the thought's own — a text the provider fails whenever it is
-        // asked, while it answers the rest — and its claim fails, said once, the run unpaused, its pause count kept. At
-        // the first it keeps its place, the provider's error the likelier, so the claim after the pause takes it again
-        // and no answer comes between; at the second it goes behind every thought queued before it (setBack), so the
-        // next claim asks another and an answer there tells the two apart.
-        const strike = strikes.get(row.id) ?? { n: 0, answered: false };
-        strikes.set(row.id, strike);
-        strike.n++;
-        if (strike.n >= STRIKES && strike.answered) {
-          strikes.delete(row.id);
-          n.struck++;
-          if (row.standing_key !== null) n.leftOutOfDate++;
-          sayOnce("struck", `  ${row.id}: the provider failed it ${strike.n} times in this run while it answered others (${a.transient.slice(0, 300)}): its claim fails as the thought's own; --retry-failed asks it again`);
-          return { release: "failed", error: `the provider failed it ${strike.n} times in one run while it answered others: ${a.transient.slice(0, 400)}` };
-        }
-        const behind = strike.n >= 2;
         pauseMs = TRANSIENT_PAUSES_MS[transients++];
-        await waitOnProvider(true);
-        try {
-          if (await (behind ? setBack(sql, POOL, workerId, row.id) : putBack(row.id))) {
-            taken--;
-            return { release: "none", again: true };
-          }
-          if (hardStop.signal.aborted) return false;
-          const [claim] = (await sql`
-            SELECT c.status FROM thoughts t LEFT JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${POOL}
-             WHERE t.id = ${row.id}::uuid`) as { status: string | null }[];
-          if (claim === undefined) n.gone++;
-          else if (claim.status !== "claimed" && claim.status !== "succeeded" && claim.status !== "failed") n.stale++;
-          else {
-            n.unanswered++;
-            n.lost++;
-            n.lostFailed++;
-          }
-        } catch (x) {
-          if (!databaseUnavailable(x)) throw x;
-          endedBy = { code: 1, line: databaseDown(x) };
-          return false;
-        }
-        return { release: "none" };
+        return backWhereItStood(row);
       }
       // Each outcome below but a closed subject writes nothing: a subject out of date stands, counted.
       if ("egress" in a) {
@@ -1776,11 +1865,6 @@ async function sweep(
         sayOnce("unanswered", `  ${row.id}: no answer (${a.unanswered.slice(0, 300)}); --retry-failed asks it again`);
         return { release: "failed", error: a.unanswered.slice(0, 500) };
       }
-      // An answer (PR 6b-1): the run's wait for the provider, if said, is over, and each thought struck before counts it,
-      // its own error told from the provider's (STRIKES); this one's strikes go.
-      await waitOnProvider(false);
-      for (const [id, strike] of strikes) if (id !== row.id) strike.answered = true;
-      strikes.delete(row.id);
       // The judge's answer, for the alarm's window, whatever becomes of its claim (PR 5b).
       const answer: WindowAnswer = { g: a.answer === null ? "u" : a.key === null ? "n" : "k", t: row.id, m: cfg.judgeModel, f: false, c: false };
       answered = answer;
@@ -1958,7 +2042,7 @@ async function sweep(
   const progress = () => {
     if (DRY_RUN || Date.now() - reported < 10_000) return;
     reported = Date.now();
-    out(`  ${n.seen}${FOLLOW_S ? " taken" : `/${todo}`}  ${n.metadata + n.first_line + n.model} recorded, ${n.named} named nothing${n.unanswered + n.unread + n.struck ? `, ${n.unanswered + n.unread + n.struck} unanswered or unread` : ""}`);
+    out(`  ${n.seen}${FOLLOW_S ? " taken" : `/${todo}`}  ${n.metadata + n.first_line + n.model} recorded, ${n.named} named nothing${n.unanswered + n.unread + n.ownError ? `, ${n.unanswered + n.unread + n.ownError} unanswered or unread` : ""}`);
   };
 
   // The stop is handed out, and the caller's signal heard, while the thoughts are taken, then let go: a signal a
@@ -1967,8 +2051,9 @@ async function sweep(
   if (!DRY_RUN) {
     o.signal?.addEventListener("abort", () => passStop(), { once: true, signal: detach.signal });
     if (o.signal?.aborted) passStop();
-    // Through, as the thoughts begin (PR 6b-1, extract-entities.ts's word): the provider answered, its start waited out.
-    o.onStart?.({ ok: true, provider: "up" });
+    // Through, as the thoughts begin (PR 6b-1, extract-entities.ts's word), unless a stop came first (review pass 1,
+    // run-it: one during the pool-filled mark's write was heard through).
+    if (!stop.signal.aborted) o.onStart?.({ ok: true, provider: "up" });
     o.onPass?.(passStop, inCall.abortInHand);
   }
   try {
@@ -2012,6 +2097,13 @@ async function sweep(
     } else {
       for (;;) {
         if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break;
+        // A following run's wait for the provider past its pauses (waitForProvider), the thought in hand back in the
+        // pool: no claim held, a stop ending the run there.
+        if (outageWhy !== null) {
+          const why = outageWhy;
+          outageWhy = null;
+          if (!(await waitForProvider(why)) || stop.signal.aborted) break;
+        }
         // The pause after the provider's transient error (TRANSIENT_PAUSES_MS), the thought it failed back in the pool,
         // or after a poll lost to the statement_timeout (lostPoll): no claim held but one a failed hand-back left
         // leased, a stop heard at once.
@@ -2195,7 +2287,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.struck, `failed by the provider ${STRIKES} times while it answered others`], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
+  const rest = clauses([[n.current, "already current"], [n.kept, "kept, at the text read now"], [n.named, `the model named nothing for${n.closed ? ` (${n.closed} out-of-date subject(s) closed)` : ""}`], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.ownError, "failed by the provider again right after it answered a probe"], [n.stale, "edited mid-sweep"], [n.rewritten, "given a subject elsewhere mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.overBudget, "failed on a write past the statement_timeout"], [n.setBack, "set back unanswered, the call in hand aborted by the caller"]]);
   const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
   const pollsLost = n.pollsLost ? `; ${n.pollsLost} poll(s) lost to the scheduler's statement_timeout` : "";
   const lost = n.lost ? `; ${n.lost} claim(s) no longer this run's when released (the thought edited, deleted or pooled again, its lease run out and taken by another run, or handed back by hand)` : "";

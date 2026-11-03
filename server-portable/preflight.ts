@@ -5217,7 +5217,7 @@ if (configFailed) {
             // its runs of the judge model the trip named until a hand run checks it (db/subject-sweep.ts's judgeHeld).
             // The hold is the window's, not the process's: an ended row's last word stands for it until that run.
             if (h.holds?.some((x) => x.pass === "subjects" && x.why === "judge")) {
-              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run lifts the hold — (cd db && bun extract-entities.ts --url <the database's URL> --subjects --judge-checked --limit 1), or the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
+              fixes.push(`The subject sweep is held: the garbage-judge alarm tripped on the judge model's answers, and holds the scheduler's runs of that model until it is checked. Check OB1_JUDGE_MODEL, the chat endpoint and OB1_SUBJECT_REASONING; once the model is right, a hand run lifts the hold — (cd db && bun extract-entities.ts --url <the database's URL> --subjects --judge-checked --limit 1), with the stack's OB1_JUDGE_MODEL and OB1_SUBJECT_REASONING, from a checkout that reaches the database (deploy/compose.host-ports.yaml publishes it), or with the larger --limit the sweep's held line offers when answers naming nothing tripped it alone.${down ? "" : " The other passes run on meanwhile."}`);
             }
             if (stuck.length) {
               const one = stuck.length === 1;

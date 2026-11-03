@@ -1493,12 +1493,12 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && markOf("heartbeat:board-sync", { holds: okHolds })?.holds === undefined,
     `the scheduler's held passes are carried when of the shape — one to four, each pass once, a reason of the list, a time or null — kept on an ended row, never off another worker's (${JSON.stringify(holdRows)})`);
   // The subject sweep held by the alarm (SMD-3306 PR 6b-1): the fourth pass, `judge` its reason, all four passes held at
-  // once taken, five never.
+  // once taken; a fifth repeats a pass, which the each-pass-once rule refuses before the cap of four can.
   const fourHolds = [{ pass: "reembed", why: "outage", until }, { pass: "extract", why: "lookup", until: null }, { pass: "consolidate", why: "provider", until: null }, { pass: "subjects", why: "judge", until: null }];
   const subjectHolds = [fourHolds, [{ pass: "subjects", why: "judge", until: null }], [...fourHolds, { pass: "subjects", why: "judge", until: null }], [{ pass: "subject", why: "judge", until: null }], [{ pass: "subjects", why: "alarm", until: null }]]
     .map((holds) => markOf("heartbeat:sleep", { holds })?.holds ?? null);
   assert(JSON.stringify(subjectHolds) === JSON.stringify([fourHolds, [{ pass: "subjects", why: "judge", until: null }], null, null, null]),
-    `the subject sweep's judge hold is carried, all four passes held at once too, never five, nor a pass or a reason not of the lists (${JSON.stringify(subjectHolds)})`);
+    `the subject sweep's judge hold is carried, all four passes held at once too, a fifth not — a pass again, as any fifth must be — nor a pass or a reason not of the lists (${JSON.stringify(subjectHolds)})`);
   // Their words, beside the state: the pause's length and each re-arm by the row's own clock; an ended row's as its last word.
   const sleepWords = (extra: Record<string, unknown>) => heartbeatState(parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true, ...extra }), at, age_s: 30 }]).heartbeats[0]!);
   const pausedSays = sleepWords({ paused: { since: pausedAt } });
