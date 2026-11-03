@@ -19183,7 +19183,8 @@ async function sleepScaffold(sql: SQL) {
    * its pools drained, an operator's capture is the next one's work, begun
    * once the capture time has passed — true once the end is read and the
    * capture landed. Read first: a capture during the period joins it. Re-embed's
-   * backlog begins no period until a rescan, so work captured for it rides on this one.
+   * backlog begins no period until the next whole read — a rescan, a cleared
+   * set-aside or a retry's end — so work captured for it rides on this one.
    */
   let nextNotes = 0;
   const nextPeriod = async (note: string) => {
@@ -19240,7 +19241,7 @@ if (want("38")) {
     lines.length = 0;
     const dry = await sleepRun({ capture: 300, dryRun: true });
     const dryText = lines.join("\n");
-    assert(dry === 0 && /paused: a period would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
+    assert(dry === 0 && /paused: a period would begin in (29\d|300) s with no live write/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
       `--dry-run reads a period held back, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /paused|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
     // It reads no query log (SMD-3315): its start names none.
     // --poll past a minute is refused: the idle wait is at most a minute.
@@ -19251,7 +19252,7 @@ if (want("38")) {
     // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
     lines.length = 0;
     const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
-    assert(noDump === 2 && lines.some((l) => /--dump-dir \S+ is not a directory this process can write/.test(l)) && !lines.some((l) => /^ {2}(working|paused):/.test(l)),
+    assert(noDump === 2 && lines.some((l) => /--dump-dir \S+ is not a directory this process can write/.test(l)) && !lines.some((l) => /idle: no work|period would begin/.test(l)),
       `a --dump-dir naming no directory is refused with 2 before the brain is read (exit ${noDump}: ${lines.join(" | ").slice(0, 200)})`);
 
     // A claim follower stamping fresh outside the scheduler does not yield to a
@@ -19690,6 +19691,31 @@ if (want("38")) {
     await wakeRun;
     assert(sweptNext, `…and the next period, once the gate opens, sweeps the rest (${await rowsBy("zz-wake")} left)`);
 
+    // A sweep its limit cut, its orphans the only work left: the next idle poll reads the work whole, and the
+    // next period sweeps the rest — where they waited for the rescan, an hour on (review pass 2 of PR 1c-4b). A
+    // limit of one over two orphans, under --follow.
+    const limitOrphans: string[] = [];
+    for (const text of ["An orphan the limit leaves for the next period.", "An orphan the limit's first period takes."]) limitOrphans.push(await capture(text, "op-sleep", 0, 10));
+    const acLimitDrain = new AbortController();
+    await bounded(sleepRun({ signal: acLimitDrain.signal }), acLimitDrain);
+    for (const id of limitOrphans) {
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-limit");
+    }
+    lines.length = 0;
+    const acLimit = new AbortController();
+    const limitRun = sleepRun({ follow: true, minStampEveryS: 1, sweepLimit: 1, signal: acLimit.signal });
+    let limitSwept = false;
+    try {
+      limitSwept = await pollUntil(async () => (await rowsBy("zz-limit")) === 0, 20_000);
+    } finally {
+      acLimit.abort();
+      await limitRun;
+      await sql`DELETE FROM derivations WHERE produced_by = 'zz-limit'`;
+    }
+    assert(limitSwept && lines.some((l) => /the first 1 orphaned thought\(s\) of this window; the next period goes on/.test(l)) && lines.filter((l) => /^ {2}working:/.test(l)).length === 2,
+      `a sweep its limit cut is taken up by the next period at once, no capture beside it: the work read whole (swept ${limitSwept}; ${lines.filter((l) => /^ {2}working:/.test(l)).length} period(s))`);
+
     // A sweep a live write cut, its orphans the only work left: they show in
     // no claim row, so the next period's work is read whole at once, not at
     // the rescan an hour on (SMD-3379 PR 1c-4b). The captures' extraction
@@ -19913,6 +19939,17 @@ if (want("38")) {
       // first by a one-shot run, whose place in the table is its own process's.
       const acDeepDrain = new AbortController();
       await bounded(sleepRun({ signal: acDeepDrain.signal }), acDeepDrain);
+      await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
+      // A one-shot run walks every window, having no later read: it finds the orphan, and so does its dry run
+      // (review pass 2: both read the first window alone and said "no work").
+      lines.length = 0;
+      await sleepRun({ dryRun: true });
+      const deepDry = lines.some((l) => /a period would begin/.test(l)) && !lines.some((l) => /idle: no work/.test(l));
+      const acDeepOnce = new AbortController();
+      const deepOnceCode = await bounded(sleepRun({ signal: acDeepOnce.signal }), acDeepOnce);
+      assert(deepDry && deepOnceCode === 0 && (await rowsBy("zz-deep")) === 0,
+        `a one-shot run, and its dry run, find an orphan past the first window: it is swept (dry run ${deepDry}; exit ${deepOnceCode}; ${await rowsBy("zz-deep")} left)`);
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
       lines.length = 0;
@@ -20217,7 +20254,7 @@ if (want("38")) {
     assert(restartCode === 0 && !(await claims(EX)).pending, `…and the next run, a restart, takes the work the hold left (exit ${restartCode}; ${JSON.stringify(await claims(EX))})`);
 
     // A model not served is the configuration's: the scheduler's check of
-    // each pass's start meets it before the first quiet, and it ends with 2
+    // each pass's start meets it before the first period, and it ends with 2
     // at once, the row ended failed, no sleep begun (SMD-2752; before, the
     // first sleep's start met it).
     lines.length = 0;
@@ -20231,7 +20268,7 @@ if (want("38")) {
     sw.missing = false;
     const firstBeat = await beat();
     assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract's start is refused \(model\) — the scheduler does not start/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)),
-      `a model not served ends --follow with 2 at its start, before any sleep (a quiet of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+      `a model not served ends --follow with 2 at its start, before any period (a capture of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
     // The check's refusal is the scheduler's to name: no follower's row of its own is ended beside it (SMD-3214).
     const followerRows = (await sql`SELECT count(*)::int AS n FROM ob1_config WHERE (key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%') AND updated_at >= ${checkFrom}`)[0].n;
     assert(followerRows === 0, `the scheduler's check refused writes no follower's row of its own (${followerRows})`);
@@ -20363,7 +20400,7 @@ if (want("38")) {
     // aborts none of consolidation's calls: the judgement in hand answers.
     const abortAt = lines.findIndex((l) => /^  paused: 1 call\(s\) in hand past/.test(l));
     const resumedAt = await pollUntil(async () => lines.slice(abortAt).some((l) => /^  resumed: no live write/.test(l)), 15_000);
-    const capLines = () => lines.slice(abortAt).filter((l) => /^  paused: consolidation's calls aborted 1 times this period/.test(l)).length;
+    const capLines = () => lines.slice(abortAt).filter((l) => /^  paused: consolidation's calls aborted 1 times this period's hour/.test(l)).length;
     const capSaid = capLines() === 1;
     const heldAgain = resumedAt && await pollUntil(async () => sw.judgesHeld > 0, 20_000);
     const capAt = lines.length;
@@ -21183,17 +21220,18 @@ if (want("38r")) {
         // The scheduler's own re-embed key on its row, which preflight reads whose key it is from (SMD-2679 PR 4b-2).
         asideJob = (asideBeat as { reembedJob?: string } | null)?.reembedJob;
         asideOutcome = asideBeat?.outcome;
-        // Put right by deleting the record: none recorded is no switch, read within the sleep it is aside in — no
-        // wake, as a --switch-model run by hand wakes nothing (review pass 2) — and re-embed's first pool, at the
-        // next sleep, records this stack's model.
+        // Re-embed's backlog shows in no claim row: an old note, its extraction marked done, is its work alone, and
+        // the period after this one begins on it with no capture — the clear has the next idle poll read the work
+        // whole (SMD-3379 PR 1c-4b, review pass 1: it waited for the rescan). Written before the clear, so the
+        // period's end and the whole read cannot both come before it (review pass 2).
+        late = await reCapture("An old note re-embed takes up again.", 22);
+        await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${late}::uuid AND status = 'pending'`;
+        // Put right by deleting the record: none recorded is no switch, read within the period it is aside in — no
+        // live write, as a --switch-model run by hand writes none (review pass 2) — and re-embed's first pool, at
+        // the next period, records this stack's model.
         await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
         takenUpAsleep = await pollUntil(async () => lines.some((l) => /re-embed's set-aside cleared: the brain records no embedding model now — the next period with work re-embeds, and records stub-embed/.test(l)), 10_000)
           && !lines.some((l) => /paused: a live write/.test(l));
-        // Re-embed's backlog shows in no claim row: an old note, its extraction marked done, is its work alone, and
-        // the period after this one begins on it with no capture — the clear had the next idle poll read the work
-        // whole (SMD-3379 PR 1c-4b, review pass 1: it waited for the rescan).
-        late = await reCapture("An old note re-embed takes up again.", 22);
-        await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${late}::uuid AND status = 'pending'`;
         takenUp = await pollUntil(() => atEmbed(late), 20_000);
         recordAfter = ((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0]?.value as string | undefined) ?? "";
         const afterBeat = await sleepBeat();
@@ -21371,7 +21409,8 @@ if (want("38r")) {
     await sql.unsafe(`CREATE FUNCTION zz_reembed_pool_sleep() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN PERFORM pg_sleep(6); END IF; RETURN NULL; END $$;
       CREATE TRIGGER zz_reembed_pool_sleep AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_pool_sleep()`);
-    const timedOut = follow({ statementTimeout: 2 });
+    // A 3 s rescan: the hold stands through one, which re-arms a set-down but not a statement's (review pass 2).
+    const timedOut = follow({ statementTimeout: 2, rescanMs: 3000 });
     let stmtDown = false, stmtExtracted = false, stmtCode = -9, stmtKept = false, stmtRow = "";
     /** Re-embed held on the row: in holds, counted, and its set-down's word statement. */
     const heldOnRow = async () => {
@@ -21386,7 +21425,7 @@ if (want("38r")) {
       const periodsBefore = lines.filter((l) => /^ {2}working:/.test(l)).length;
       if (stmtExtracted && await nextPeriod("A note the period after re-embed's hold extracts")) {
         stmtKept = await pollUntil(async () => lines.filter((l) => /^ {2}working:/.test(l)).length > periodsBefore && lines.filter((l) => /the pools drained — the period ends/.test(l)).length >= 2, 20_000)
-          && lines.filter((l) => /re-embedding \d+ thought/.test(l)).length === 1 && await heldOnRow();
+          && lines.filter((l) => /re-embedding \d+ thought/.test(l)).length === 1 && (await Bun.sleep(4000), await heldOnRow());
       }
     } finally {
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_pool_sleep ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_pool_sleep()`);
@@ -21417,6 +21456,24 @@ if (want("38r")) {
     assert(deniedSaid && deniedExtracted && deniedOutcome === "failed" && deniedCode === 0,
       `re-embed throwing — a grant refused at its claim — is set down with its reason said, the row failed, extraction running on (said ${deniedSaid}; extracted ${deniedExtracted}; outcome ${deniedOutcome}; exit ${deniedCode})`);
     await sql`DELETE FROM thoughts WHERE id = ${deniedOld}::uuid`;
+
+    // Another process's live re-embed lease alone is no work: a one-shot run begins no period for it (review pass 2 of
+    // PR 1c-4b: the whole read counted it, and the period it began found nothing of its own).
+    // Drained first: an earlier case's work left in consolidation's pool would begin the period.
+    await oneSleep();
+    const leasedAlone = await reCapture("An old note another process holds, alone.", 33);
+    await sql`SELECT enqueue_thoughts(${EX}, ARRAY[${leasedAlone}::uuid])`;
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${leasedAlone}::uuid`;
+    await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ARRAY[${leasedAlone}::uuid])`;
+    await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'reembed-elsewhere-1-0-y', claimed_at = now(), ttl_expires_at = now() + interval '1 hour' WHERE work_type = ${EMBED_JOB} AND thought_id = ${leasedAlone}::uuid`;
+    let leasedAloneCode = -9;
+    try {
+      leasedAloneCode = await oneSleep();
+    } finally {
+      await sql`DELETE FROM thoughts WHERE id = ${leasedAlone}::uuid`;
+    }
+    assert(leasedAloneCode === 0 && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)),
+      `another process's live re-embed lease alone begins no period: a one-shot run says no work and exits 0 (exit ${leasedAloneCode}; ${lines.filter((l) => !/^\s*\[/.test(l)).slice(-12).map((l) => l.trim().slice(0, 120)).join(" | ")})`);
 
     // Another process's live re-embed lease is not this sleep's to wait for: no re-embed phase, extraction at once
     // (review pass 1: it waited out the lease, 900 s after a crashed run).
@@ -21489,7 +21546,9 @@ if (want("38r")) {
       await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
       await sql`DELETE FROM thoughts WHERE id = ${switchedOld}::uuid`;
     }
-    assert(switchedCode === 0 && /^idle: no work — a period begins once a pass has some$/.test(switchedDry) && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l)),
+    // The switch said all the same, as a period's start says it (review pass 2: idle, it went unsaid).
+    assert(switchedCode === 0 && /^idle: no work — a period begins once a pass has some$/.test(switchedDry) && lines.some((l) => /^ {2}idle: no work — nothing to do/.test(l)) && !lines.some((l) => /^ {2}working:/.test(l))
+        && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)),
       `a one-shot run whose only work is a backlog a model switch sets aside begins no period and exits 0, the dry run saying no work (exit ${switchedCode}; dry run ${switchedDry}; ${lines.filter((l) => /idle|working|aside/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
 
     // Vectors from before migration 021 carry no model: the dry run counts them among re-embed's backlog (review pass 1).

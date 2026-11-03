@@ -4609,6 +4609,22 @@ else {
       assert(/; re-embed set down for this period \(provider\)$/.test(row(setDown.out, "sleep"))
           && /Re-embed was set down for this period — the provider refused the embedding probe: check the embedding endpoint's key and base URL .*; extraction and consolidation run on, and the next period with work tries it again\./.test(fix(setDown.out, "sleep")),
         `re-embed set down for the period is said with its cause's remedy (${row(setDown.out, "sleep")} | ${fix(setDown.out, "sleep")})`);
+      // A statement holds re-embed until a restart (SMD-3379 PR 1c-4b, review pass 2): said as a hold, not a period's set-down.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "statement" } }, holds: [{ pass: "reembed", why: "statement", until: null }], slept: { from: await at(130), to: null } }), 10);
+      const reHeld = await run(LOG_ON);
+      assert(/; re-embed held until a restart \(statement\)$/.test(row(reHeld.out, "sleep"))
+          && /Re-embed is held until a restart — a statement passed its statement_timeout, which its log names: raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env, then .*; extraction and consolidation run on meanwhile\./.test(fix(reHeld.out, "sleep")) && !/next period/.test(fix(reHeld.out, "sleep")),
+        `re-embed a statement holds is said as held until a restart, with its remedy (${row(reHeld.out, "sleep")} | ${fix(reHeld.out, "sleep")})`);
+      // A held claim pass's fix stands beside a provider wait's (review pass 2: the wait's alone was said).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waiting: ["consolidate"], holds: [{ pass: "extract", why: "statement", until: null }], budget: { minutes: 0, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 1 }, slept: { from: await at(130), to: null } }), 10);
+      const heldWaiting = fix((await run(LOG_ON)).out, "sleep");
+      assert(/waiting for the provider at its start/i.test(heldWaiting) && /extract held until a restart: a statement passed its statement_timeout \(300 s\)/.test(heldWaiting),
+        `a held pass's fix is said beside a provider wait's (${heldWaiting})`);
+      // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out: said so, and its remedy ours set above theirs.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", holds: [{ pass: "consolidate", why: "statement", until: null }], budget: { minutes: 0, statementTimeoutS: 0, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 1 }, slept: { from: await at(130), to: null } }), 10);
+      const heldOwn = fix((await run(LOG_ON)).out, "sleep");
+      assert(/consolidate held until a restart: a statement passed its statement_timeout \(the role's or the database's own\), .* set OB1_SLEEP_STATEMENT_TIMEOUT above theirs \(a startup setting beats it\), or raise theirs in deploy\/\.env/.test(heldOwn),
+        `a hold under the role's or the database's own timeout names it, its remedy ours set above theirs (${heldOwn})`);
       // An outage's set-down adds no failed word: a failed outcome beside it is another pass's, said too (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", aside: { reembed: { kind: "outage" } }, slept: { from: await at(130), to: null } }), 10);
       const outageFailedFix = fix((await run(LOG_ON)).out, "sleep");
@@ -4634,7 +4650,7 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
       const endedDown = await run(LOG_ON);
       assert(/at its last word, re-embed set down for its last period \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))
-          && /Its last sleep set re-embed down \(provider\) — the provider refused the embedding probe: .*; mend that before it starts again, or its first sleep sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
+          && /Its last period set re-embed down \(provider\) — the provider refused the embedding probe: .*; mend that before it starts again, or its first period sets re-embed down again\..* start it again/.test(fix(endedDown.out, "sleep"))
           && !/for the embedding's\): /.test(fix(endedDown.out, "sleep")),
         `an ended row's set-down is its last word, its cause to mend before the restart, in that order (${row(endedDown.out, "sleep")} | ${fix(endedDown.out, "sleep")})`);
       // Not of the shape — a pass it does not run, a name twice — left off: the row reads as it did before.

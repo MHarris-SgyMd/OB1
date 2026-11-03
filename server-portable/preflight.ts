@@ -4462,7 +4462,7 @@ if (configFailed) {
                 const died = l.expired ? `; ${l.expired} left by a worker that died, which the scheduler reclaims when it next works this key${until}` : "";
                 const diedFix = l.expired ? reclaim(key).trim() : "";
                 if (runner.down) {
-                  add("re-embed pass", "warn", `${words}; re-embed set down for ${sleeping.running ? "this" : "its last"} period (${runner.down})${failedWords}${conflict}${died}`,
+                  add("re-embed pass", "warn", `${words}; re-embed ${runner.down === "statement" ? "held until a restart" : `set down for ${sleeping.running ? "this" : "its last"} period`} (${runner.down})${failedWords}${conflict}${died}`,
                       fixOf(`${reembedDownRemedy(runner.down).replace(/^./, (ch) => ch.toUpperCase())}. ${runner.down === "statement" ? "It is held until the scheduler restarts" : "The next period with work tries it again"}, with no second worker.`, c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
                 } else if (c.failed || conflict || died) {
                   add("re-embed pass", "warn", `${words}${made}${failedWords}${conflict}${died}`, fixOf(c.failed ? failedFix("its next period") : "", conflictFix, died ? besideFix(workersBeside) : "", diedFix));
@@ -5144,7 +5144,7 @@ if (configFailed) {
             const holds = sw?.holds ?? "";
             const madeWords = set?.kind === "model-switch" ? (!recorded.embedding_model ? "the record removed since" : `the switch to ${set.unprintable ? "this stack's model" : cfgModel} made since`) : "";
             const setDetail = !set ? ""
-              : `; ${down ? "at its last word, " : ""}re-embed ${set.kind === "model-switch" && sw?.made ? `set aside${down ? "" : " at its word"}, ${madeWords}` : set.kind === "model-switch" && set.unprintable ? "set aside for a model switch — its model names hold characters preflight does not print; its log names them" : set.kind === "model-switch" ? `set aside — the brain records ${holds}, this stack is configured for ${cfgModel}` : `set down for ${h.running && !down ? "this" : "its last"} period (${set.kind})`}`;
+              : `; ${down ? "at its last word, " : ""}re-embed ${set.kind === "model-switch" && sw?.made ? `set aside${down ? "" : " at its word"}, ${madeWords}` : set.kind === "model-switch" && set.unprintable ? "set aside for a model switch — its model names hold characters preflight does not print; its log names them" : set.kind === "model-switch" ? `set aside — the brain records ${holds}, this stack is configured for ${cfgModel}` : set.kind === "statement" ? `held until a restart (statement)` : `set down for ${h.running && !down ? "this" : "its last"} period (${set.kind})`}`;
             const otherPass = h.outcome === "failed" ? " Another pass's failure, if any, its log says." : "";
             const setFix = !set ? null
               : set.kind === "model-switch" && set.unprintable && !sw?.made
@@ -5153,8 +5153,10 @@ if (configFailed) {
                 ? `The brain records ${!recorded.embedding_model ? "no embedding model now, which is no switch" : `${set.unprintable ? "this stack's model" : cfgModel} now, as this stack is configured`}: the set-aside clears at the scheduler's ${down ? "next sleep once it is started again" : h.running ? "next poll" : "next sleep"}.`
               : set.kind === "model-switch"
                 ? `Re-embed is set aside while the brain records ${holds} and this stack is configured for ${cfgModel}: to keep ${cfgModel}, cd db && OB1_EMBEDDING_MODEL=${shellWord(cfgModel)} bun reembed.ts --url $DATABASE_URL --switch-model (a sleep reads the record again each poll); to keep ${holds}, set OB1_EMBEDDING_MODEL=${shellWord(holds)} (and OB1_EMBEDDING_DIM to its width) in deploy/.env and recreate api and sleep, which read it once.${down ? "" : " Extraction and consolidation run on meanwhile."}${otherPass}`
-                : down ? (set.kind === "outage" ? null : `Its last sleep set re-embed down (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first sleep sets re-embed down again.`)
-                : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and ${set.kind === "statement" ? "it is held until that restart" : "the next period with work tries it again"}.${set.kind === "outage" ? "" : otherPass}`;
+                : down ? (set.kind === "outage" ? null : `Its last period ${set.kind === "statement" ? "held re-embed" : "set re-embed down"} (${set.kind}) — ${reembedDownRemedy(set.kind, true)}; mend that before it starts again, or its first period ${set.kind === "statement" ? "holds it again" : "sets re-embed down again"}.`)
+                : set.kind === "statement"
+                  ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on meanwhile.${otherPass}`
+                  : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; extraction and consolidation run on, and the next period with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
             // Under a model name that forms no key its row carries, the
             // scheduler keeps re-embed out, as its start said, and the row
             // says so: a row with no key, or a stopped one, whose restart takes
@@ -5216,11 +5218,11 @@ if (configFailed) {
               // (SMD-2679); and once the setting passes the bound it stopped
               // at, the next sleep tells (review passes 1 and 2).
               fixes.push(`Its last sleep stopped when a pass's statement passed ${stmtWhat}: its log names the pass and Postgres's words. A scan the brain has outgrown needs longer — ${stmtHow} in deploy/.env (--statement-timeout from a checkout), then ${restartCommand("sleep", null)}; until then each sleep tries again and stops there.`);
-            } else if (stmtHeld.length) {
-              fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}; the other passes run on meanwhile.`);
-            } else if (h.outcome === "failed" && (setFix === null || set?.kind === "outage")) {
+            } else if (h.outcome === "failed" && !stmtHeld.length && (setFix === null || set?.kind === "outage")) {
               fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
             }
+            // A held claim pass's fix stands beside any other: a provider wait's said above does not mend it (review pass 2 of PR 1c-4b).
+            if (!down && stmtHeld.length) fixes.push(`${stmtHeld.join(" and ")} held until a restart: a statement passed its statement_timeout${heldTimeout ? ` (${heldTimeout})` : ""}, which its log names — a scan the brain has outgrown, most likely. ${heldHow} in deploy/.env (--statement-timeout from a checkout), then recreate the coordinator — ${restartCommand("sleep", null)}; the other passes run on meanwhile.`);
             if (setFix !== null && !(down && set && set.kind !== "model-switch")) fixes.push(setFix);
             // Running, it refuses beside a hand re-embed follower at its next
             // poll and ends, every pass with it (review pass 1: all three rows

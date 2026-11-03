@@ -4400,11 +4400,16 @@ after (`OB1_SLEEP_RESCAN`, 3600); between, each `--poll` reads one index
 lookup a claim pass: a claim pending or in hand, which a capture queues as it
 lands. So what no claim row shows — a vector come for a thought extracted
 already, a delete's orphans, re-embed's backlog — waits for the rescan, or
-goes with a period other work begins. A pass held begins none: one a
-statement held (**Its budget**, below), re-embed set aside or set down (a
-set-down is tried again at the next period's start, or by the next rescan).
-A one-shot run that finds no work exits 0 at once; `--dry-run` says whether a
-period would begin, and when.
+goes with a period other work begins; the next poll reads it whole after a
+live write cut the sweep, a retried start refusal's wait, or a re-embed
+set-aside cleared. The sweep's census reads one window of 10,001 lineage rows
+a whole read, an empty window moving it on, so on an idle brain an orphan
+far into a large table is found one rescan a window later — a one-shot run,
+and `--dry-run`, walk every window, having no later read. A pass held begins none: one a statement held
+(**Its budget**, below), re-embed set aside or set down (a set-down is tried
+again at the next period's start, or by the next rescan). A one-shot run
+exits 0 once a read finds no work — at once, or when what it found has been
+done elsewhere; `--dry-run` says whether a period would begin, and when.
 
 **What a live write is.** One the audit recorded through a key not
 classified `ingested`; the servers' vector mender's writes, marked background
@@ -4429,7 +4434,7 @@ and `resumed:`, and the row `paused { since }`. While paused, a model call in
 hand longer than `--abort-after` seconds (`OB1_SLEEP_ABORT_AFTER`, 60, at
 least the stall floor) is aborted and its thought set back in the queue,
 extraction keeping its answered windows and counting the stop (093);
-consolidation's at most three a period. As the passes go on, the thoughts
+consolidation's at most three an hour of a period. As the passes go on, the thoughts
 stopped that way are moved behind the newer work. A live write during the
 sweep ends the period, the passes not yet started; the next reads its work
 whole. A period ends once its pools drain — the log says `the pools drained —
@@ -4441,7 +4446,8 @@ delete or a replay took, deleted through `rebuild_derived`'s orphans-only mode,
 at most 500 thoughts a period, no model — on a connection of its own under the
 budget's session; the log says `re-derive: N orphaned lineage row(s) swept`.
 It reads 10,001 lineage rows in id order a period, the next window each period
-once the one before is swept whole, so a larger table is walked (said once;
+once the one before is swept whole — and each idle whole read that finds none
+in its window — so a larger table is walked (said once;
 the place is kept in the process, so a restart begins at the first window;
 and `--dry-run` counts the first window's orphans). A live write or a stop
 stops it between thoughts, its call in hand given 2 s before it is
