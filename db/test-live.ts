@@ -117,15 +117,15 @@ if (!URL_) {
  * 30bd9637 (sleep 218 s of sections, long 217, extract 303, rest 221). With
  * [38] alone the floor (SMD-3714, a ~276 s live step), [9f] went to the
  * rest, [10g] to long, and [5d] and [41] to extract, so the other three even
- * out under it:
- * projected from the section medians of main's runs 41683999107, 41689520872
- * and 41700508681, live steps of long 271 s, extract 274 and the rest 274,
- * against sleep's 276 measured and extract's 309 before. [5d] waits on the
- * CPU, so it left the rest, which took [9f]'s timers instead. The rest's
- * other sections wait on the CPU, so its time moves most with the runner's
- * speed: its slow runs are its median, its fast run ~50 s under. A cell's
- * job runs ~15-25 s past its live step, so a section added to a cell adds to
- * the run's length once that cell's job is the run's longest.
+ * out under it: projected from the section medians of main's runs
+ * 41683999107, 41689520872 and 41700508681, live steps of long 271 s,
+ * extract 274 and the rest 274, against sleep's 276 measured and extract's
+ * 309 before. [5d] waits on the CPU, so it left the rest, which took [9f]'s
+ * timers instead. The rest's other sections wait on the CPU, so its time
+ * moves most with the runner's speed: its slow runs are its median, its fast
+ * run ~50 s under. A cell's job runs ~15-25 s past its live step, so a
+ * section added to a cell adds to the run's length once that cell's job is
+ * the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
