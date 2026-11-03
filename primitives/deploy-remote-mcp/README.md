@@ -150,7 +150,6 @@ One `bun` process per extension, each answering on its own port with the extensi
 
 ## Extensions That Use This
 
-- [Meal Planning](../../extensions/meal-planning/) (Extension 4) — two servers, the shared one on its own port and keys ([Shared MCP Server](../shared-mcp/))
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)
 
