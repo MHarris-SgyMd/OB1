@@ -582,7 +582,8 @@
  *      every check this file cites (`check N`, `checks N, M, and K`, each
  *      number of `N to M`, `N through M` or `N–M`) is listed, a lettered one
  *      listed or headed; and every check a line's code names, its comments
- *      aside, is its section's, so a renumber that missed a line fails;
+ *      aside, is its section's, so a renumber that missed a line fails, as does
+ *      a code line the comment scan reads as all comment;
  *      CROSS_SECTION_MESSAGES names, by section and check, the lines that mean
  *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
  *      two took 47, within a day). Its probe pins what it refuses and passes
@@ -2094,9 +2095,10 @@ function blankedWithOpen(text: string, stringsToo: boolean): { out: string; open
 /**
  * The scanner behind `blanked`: from `from`; when `inExpression`, stops at the first `}` at depth 0 and says where;
  * `openAt` is where the text ends inside a template or `${`: the innermost `${` left open, else the template; -1 for
- * none.
+ * none. `regexesKept` keeps a regex literal's body, which check 49 reads for the checks it names
+ * (SMD-3658).
  */
-function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean): { out: string; end: number; openAt: number } {
+function scan(text: string, from: number, stringsToo: boolean, inExpression: boolean, regexesKept = false): { out: string; end: number; openAt: number } {
   let out = "";
   let openAt = -1;
   // The last code character that is not a space, the last identifier (kept across the spaces after it) and whether it
@@ -2145,7 +2147,7 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
       while (i < text.length && text[i] !== "`") {
         if (text[i] === "\\") { const esc = text.slice(i, i + 2); out += stringsToo ? blank(esc) : esc; i += esc.length; continue; }
         if (text[i] === "$" && text[i + 1] === "{") {
-          const inner = scan(text, i + 2, stringsToo, true);
+          const inner = scan(text, i + 2, stringsToo, true, regexesKept);
           if (openAt < 0) openAt = inner.openAt >= 0 ? inner.openAt : inner.end >= text.length ? i : -1;
           out += "${" + inner.out + (inner.end < text.length ? "}" : "");
           i = inner.end + 1;
@@ -2172,7 +2174,7 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
         else if (text[j] === "/" && !inClass) { closed = true; break; }
       }
       if (closed) {
-        out += "/" + " ".repeat(j - i - 1) + "/"; i = j + 1;
+        out += "/" + (regexesKept ? text.slice(i + 1, j) : " ".repeat(j - i - 1)) + "/"; i = j + 1;
         while (i < text.length && /[a-z]/.test(text[i])) { out += " "; i++; } // the flags
         last = "/"; word = "";
         continue;
@@ -10519,17 +10521,18 @@ checkJobTimeouts();
  * listed check has a header; one check's headers sit within HEADER_SITE lines of each other (a separator and the
  * docblock under it, five apart at the most today, for 16), so headers for one number further apart are two checks;
  * each number cited is listed, a lettered one by its own header or entry (17c by its docblock), each number in a
- * range and each letter in a lettered one (`17a–17e`). And every check a line's code names, its comments cut by a
- * lexer that reads strings, templates across lines and regex literals as JavaScript does (it agrees with the
- * TypeScript parser on every line of this file), is its section's — the section's own number, its base, or a
- * sub-check of it — so a renumber that moved the headers and missed a line fails, even where the old number is still
- * listed because another check took it: 316 names on 312 lines today, all in their own section but the eight pairs
- * CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and none outside every section; a line that
- * opens with no comment marker yet reads as all comment fails, so a misread that blanks code lines fails rather than
- * hiding them; a comment names none, being no message, and a name in other words (`check-50`, `check #50`, a number
- * built at runtime) is not read. It reads this file's own text, and not any other file that cites a check by number;
- * prose that reads as a citation or a header fails loudly and is reworded, as does a numbered docblock that is no
- * check's header. Its probe runs on small texts in the same shape.
+ * range and each letter in a lettered one (`17a–17e`). And every check a line's code names, its comments cut by the
+ * scanner `blanked` uses, regex literals kept (on each of the repo's .ts files it reads the names the TypeScript
+ * parser does; a regex after `)` it reads as a division, with the other limits its docblock gives), is its section's
+ * — the section's own number, its base, or a sub-check of it — so a renumber that moved the headers and missed a line
+ * fails, even where the old number is still listed because another check took it: 316 names on 312 lines today, all
+ * in their own section but the eight pairs CROSS_SECTION_MESSAGES names with why (an entry no line needs fails), and
+ * none outside every section; a line that opens with no comment marker yet reads as all comment fails, once for each
+ * run of them, so a misread that blanks code lines fails rather than hiding them; a comment names none, being no
+ * message, and a name in other words (`check-50`, `check #50`, a number built at runtime) is not read. It reads this
+ * file's own text, and not any other file that cites a check by number; prose that reads as a citation or a header
+ * fails loudly and is reworded, as does a numbered docblock that is no check's header. Its probe runs on small texts
+ * in the same shape.
  */
 const HEADER_SITE = 10;
 const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
@@ -10562,54 +10565,11 @@ function namedChecks(spec: string): string[] {
     return part.split(/ (?:to|through) | ?[–-] ?/).map((t) => t.trim()).filter((t) => CHECK_NUMBER_WORD.test(t));
   });
 }
-/** Each line's code, its comments cut. A template's text, across lines, and its `${ … }` nest as JavaScript reads
- * them; a `/` opens a regex where the code before it ends an expression's start (an operator, an opening bracket, a
- * keyword like `return`), and divides elsewhere; a string or regex holds its `//` and its quotes. */
-function codeOf(lines: string[]): string[] {
-  let block = false, tail = "";
-  const nest: string[] = []; // "`" in a template's text, "}" in a `${` or a brace opened inside one
-  return lines.map((line) => {
-    let code = "";
-    const keep = (text: string) => { code += text; };
-    const regexMayOpen = () => /(?:^|[(,=:[!&|?{};+\-*%<>~^]|\b(?:return|typeof|case|do|else|in|of|new|delete|void|throw|yield|await))\s*$/.test((tail + code).slice(-40));
-    for (let i = 0; i < line.length; ) {
-      const ch = line[i], next = line[i + 1];
-      if (block) { if (ch === "*" && next === "/") { block = false; i += 2; } else i++; continue; }
-      if (nest[nest.length - 1] === "`") {
-        if (ch === "\\") { keep(line.slice(i, i + 2)); i += 2; }
-        else if (ch === "`") { nest.pop(); keep(ch); i++; }
-        else if (ch === "$" && next === "{") { nest.push("}"); keep("${"); i += 2; }
-        else { keep(ch); i++; }
-        continue;
-      }
-      if (ch === "/" && next === "/") break;
-      if (ch === "/" && next === "*") { block = true; i += 2; continue; }
-      if (ch === '"' || ch === "'") {
-        let j = i + 1;
-        while (j < line.length && line[j] !== ch) j += line[j] === "\\" ? 2 : 1;
-        keep(line.slice(i, j + 1)); i = j + 1; continue;
-      }
-      if (ch === "`") { nest.push("`"); keep(ch); i++; continue; }
-      if (ch === "/" && regexMayOpen()) {
-        let j = i + 1, inClass = false;
-        while (j < line.length && (inClass || line[j] !== "/")) {
-          if (line[j] === "\\") j++;
-          else if (line[j] === "[") inClass = true;
-          else if (line[j] === "]") inClass = false;
-          j++;
-        }
-        keep(line.slice(i, j + 1)); i = j + 1; continue;
-      }
-      if (nest.length && ch === "{") nest.push("}");
-      else if (nest.length && ch === "}") nest.pop();
-      keep(ch); i++;
-    }
-    tail = (tail + code + "\n").slice(-40);
-    return code;
-  });
-}
+/** Each line's code: the text through `blanked`'s scanner, its comments cut and its strings, templates and regex
+ * literals kept, so a line is read for what it names as `blanked` reads it, with the limits its docblock gives. */
+const codeOf = (lines: string[]) => scan(lines.join("\n"), 0, false, false, true).out.split("\n");
 /** The checks a line's code names: a message, a const, a probe case. */
-function speakingAs(code: string): string[] {
+function checksNamed(code: string): string[] {
   return [...new Set([...code.matchAll(CHECK_CITATION)].flatMap((m) => namedChecks(m[1])))];
 }
 function checkNumberProblems(text: string, crossSection: [string, string, string][] = []): [number, string][] {
@@ -10630,7 +10590,7 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
   // A line in 17a's section is 17a's, or names 17, its base; one in 22's names 22 or a sub-check of it, 22b.
   const owns = (section: string[], n: string) => section.some((x) => x === n || checkBase(x) === n || x === checkBase(n));
   const code = codeOf(lines);
-  let section: string[] = [];
+  let section: string[] = [], blankedRun = false;
   lines.forEach((l, i) => {
     const separator = l.match(/^\/\/ (?:──|----)\s*(?:Check\s+)?(\d+[a-z]?(?:\s*(?:[+–-]|to)\s*\d+[a-z]?)*)\s*[:.]/);
     const docblock = i > 0 && /^\/\*\*\s*$/.test(lines[i - 1]) ? l.match(/^ \* (\d+[a-z]?(?:\s*[+–-]\s*\d+[a-z]?)*): /) : null;
@@ -10639,8 +10599,11 @@ function checkNumberProblems(text: string, crossSection: [string, string, string
       section = namedChecks(spec);
       for (const n of section) (sites.get(n) ?? sites.set(n, []).get(n)!).push(i + 1);
     } else if (/^\/\/ (?:──|----)/.test(l)) section = []; // a separator naming no check ends the section
-    if (l.trim() && !/^\s*(?:\/\/|\/\*|\*)/.test(l) && !code[i].trim()) problems.push([i + 1, "a line that opens with no comment marker reads as all comment — a block comment's later line wants a leading ` * `, or the comment scan misread the code above it, which would hide the lines after it from this check (SMD-3658)"]);
-    for (const speaks of speakingAs(code[i])) {
+    // A line that opens with no comment marker but has no code is reported once for each run of them.
+    const blankedLine = l.trim() !== "" && !/^\s*(?:\/\/|\/\*|\*)/.test(l) && !code[i].trim();
+    if (blankedLine && !blankedRun) problems.push([i + 1, "a line that opens with no comment marker reads as all comment, as may lines after it — a block comment's later line wants a leading ` * `, or the comment scan misread the code above it, which would hide those lines from this check (SMD-3658)"]);
+    if (l.trim()) blankedRun = blankedLine;
+    for (const speaks of checksNamed(code[i])) {
       if (!section.length) { problems.push([i + 1, `a line names check ${speaks} outside any check's section — move it under its check's header, give its section a check header, or reword it (SMD-3658)`]); continue; }
       if (owns(section, speaks)) continue;
       const allowed = crossSection.find(([s, c]) => owns(section, s) && speaks === c);
@@ -10746,6 +10709,11 @@ function checkCheckNumbers() {
     ["a division, then a comment", `${list("1", "2")}${section("1")}const r = a / b; // check ${2} reads it\n${section("2")}`, []],
     ["a regex class holding slashes, then a mention", `${list("1", "2")}${section("1")}const c = /[///]/; fail(rel, "check ${2} said it");\n${section("2")}`, [WRONG_SECTION]],
     ["a regex after return holding a quote, then single-quoted strings and a comment", `${list("1", "2")}${section("1")}function z() { return /'/.test(x) ? 'a' : 'b'; } // check ${2} reads it\n${section("2")}`, []],
+    ["a division after a non-null inside a ${, a template after it, then a mention", `${list("1", "2")}${section("1")}function g() {\n  const m = \`\${(hits.get(k)! / n).toFixed(2)} of docs\`;\n}\nconst a = \`x\`;\nfail(rel, \`see http://x — check ${2}\`);\n${section("2")}`, [WRONG_SECTION]],
+    ["a division after a postfix ++ or a member named like a keyword, then a string's //", `${list("1", "2")}${section("1")}const h = i++ / n; fail(rel, "a/b at http://x — check ${2}");\nconst y = x.in / n; fail(rel, "a/b http://x — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["a regex literal naming another check, and one inside a ${", `${list("1", "2")}${section("1")}const r = /check ${2} reads/;\nconst t = \`\${/check ${2} too/.source}\`;\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
+    ["two runs of lines reading as all comment, code between", `${list("1")}${section("1")}/* a note\n   that runs on ← here */\nconst x = 1;\n/* another\n   on ← here */\n`, [ALL_COMMENT, ALL_COMMENT]],
+    ["a run of lines reading as all comment, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n   and on */\n`, [ALL_COMMENT]],
     ["a template holding a // and an apostrophe in a double-quoted string, then mentions", `${list("1", "2")}${section("1")}fail(rel, \`a // b — check ${2}\`);\nfail(rel, "it's // a — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
   ];
   // A case whose text marks lines `← here` reports its problems at those lines, in order.
