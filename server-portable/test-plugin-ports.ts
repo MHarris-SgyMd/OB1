@@ -33,7 +33,7 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 /** The ported plugins, as each PR of SMD-2311 adds one: its section below drives it. */
-const PORTED = ["family-calendar"] as const;
+const PORTED = ["family-calendar", "home-maintenance", "household-knowledge"] as const;
 const PLUGIN_PW = "smd2311-plugin-secret";
 
 const { assert, report } = createAssert();
@@ -436,6 +436,221 @@ console.log("\n[family-calendar] its members, activities and dates");
   const leap = year.find((d) => d.title === "Leap day");
   assert(leap?.next_date === expected, `a yearly 29 February comes round on ${expected} (${JSON.stringify(leap)})`);
   assert(!year.some((d) => d.title === "Old deadline"), "…and a one-time date already past is in no window, a year's included: it does not come round");
+}
+
+// ── Shared by the plugins' sections ──────────────────────────────────────────
+
+/** Each operation's scope as `plugin`'s manifest declares it, for a section to pin: [2] reads the same manifest. */
+const scopesOf = (plugin: string) => Object.fromEntries(Object.entries(REGISTRY.find((p) => p.name === plugin)!.operations).map(([k, op]) => [k, op.scope]));
+/** Each of `plugin`'s tools' MCP hints, as a write key's tools/list shows them. */
+async function hintsOf(plugin: string): Promise<Record<string, string>> {
+  const prefix = `${plugin.replaceAll("-", "_")}_`;
+  return Object.fromEntries((await toolsFor(KEYS.writer)).filter((t) => t.name.startsWith(prefix)).map((t) => [t.name.slice(prefix.length), JSON.stringify(t.annotations)]));
+}
+const ADDS_HINT = JSON.stringify({ destructiveHint: false, openWorldHint: false });
+const READ_HINT = JSON.stringify({ readOnlyHint: true, openWorldHint: false });
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** Each input, sent to its operation, that is answered other than 400: the bounds a section holds. */
+async function outOfBounds(c: (key: string, input: Body) => Promise<Called>, cases: [string, string, Body][]): Promise<string[]> {
+  const missed: string[] = [];
+  for (const [label, key, input] of cases) {
+    const r = await c(key, input);
+    if (r.status !== 400) missed.push(`${label}: ${r.status}`);
+  }
+  return missed;
+}
+/** Each statement, run around the operations as the database owner, that a table does not refuse by the check named. */
+async function tableMisses(cases: [string, RegExp][]): Promise<string[]> {
+  const missed: string[] = [];
+  for (const [statement, constraint] of cases) {
+    try {
+      await sql.unsafe(statement);
+      missed.push(`${statement.slice(0, 60)}: stored`);
+    } catch (e) {
+      if (!constraint.test((e as Error).message)) missed.push(`${statement.slice(0, 60)}: ${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  return missed;
+}
+const [{ utcToday }] = (await sql`SELECT (now() AT TIME ZONE 'UTC')::date::text AS "utcToday"`) as { utcToday: string }[];
+/** A date `days` from today in UTC, the plugins' today, YYYY-MM-DD. */
+const dayFromToday = async (days: number) => ((await sql`SELECT (${utcToday}::date + ${days}::int)::text AS d`) as { d: string }[])[0].d;
+
+// ── plugins/home-maintenance ─────────────────────────────────────────────────
+
+console.log("\n[home-maintenance] its tasks and the log of work done");
+{
+  const P = "home-maintenance";
+  const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
+  const names = (r: Called, field = "tasks") => ((r.body[field] ?? []) as { name: string }[]).map((t) => t.name).join();
+  const scopes = scopesOf(P);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_maintenance_task: "write", list_maintenance_tasks: "read", log_maintenance: "write", get_upcoming_maintenance: "read", search_maintenance_history: "read" }),
+    `its five operations' scopes: the three reads read, the add and the log write (${JSON.stringify(scopes)})`);
+  const hints = await hintsOf(P);
+  assert(Object.keys(hints).length === 5 && Object.entries(hints).every(([k, h]) => h === (scopes[k] === "read" ? READ_HINT : ADDS_HINT)), `its hints, all five (${JSON.stringify(hints).slice(0, 200)})`);
+
+  // Tasks: recurring with a date, one-time undated, one-time years out, recurring with no date (due frequency_days on),
+  // one overdue, and an urgent one due the same day as the high one.
+  const hvac = await c("add_maintenance_task", { name: "HVAC filter replacement", category: "hvac", frequency_days: 90, next_due: await dayFromToday(20), priority: "high", notes: "16x25x1 pleated" });
+  const gutter = await c("add_maintenance_task", { name: "Gutter cleaning", category: "exterior" });
+  const roof = await c("add_maintenance_task", { name: "Roof inspection", category: "exterior", next_due: await dayFromToday(5 * 365) });
+  const filter = await c("add_maintenance_task", { name: "Water filter", category: "plumbing", frequency_days: 30 }, { door: "mcp" });
+  const smoke = await c("add_maintenance_task", { name: "Smoke alarm test", category: "safety", frequency_days: 365, next_due: await dayFromToday(-5) });
+  const salt = await c("add_maintenance_task", { name: "Softener salt", category: "plumbing", frequency_days: 60, next_due: await dayFromToday(20), priority: "urgent" });
+  const made = [hvac, gutter, roof, filter, smoke, salt];
+  assert(made.every((r) => r.status === 200 && UUID.test(r.body.task?.id)), `add_maintenance_task ×6 (${made.map((r) => (r.status === 200 ? "" : JSON.stringify(r.body))).join("").slice(0, 200)})`);
+  assert(hvac.body.task?.priority === "high" && hvac.body.task?.next_due === (await dayFromToday(20)) && hvac.body.task?.days_until === 20 && hvac.body.task?.done === false && ISO.test(String(hvac.body.task?.created_at)) && !("user_id" in hvac.body.task),
+    `…the task answered with its due date bare, days_until, done and created_at ISO, no user_id (${JSON.stringify(hvac.body.task).slice(0, 200)})`);
+  assert(gutter.body.task?.next_due === null && gutter.body.task?.frequency_days === null && gutter.body.task?.priority === "medium" && gutter.body.task?.days_until === null,
+    "…a one-time task with no date: no due date, priority medium unless given");
+  assert(filter.body.task?.next_due === (await dayFromToday(30)) && filter.body.task?.days_until === 30, `…a recurring task given no date falls due frequency_days from today (${filter.body.task?.next_due})`);
+  const ids = { hvac: String(hvac.body.task?.id), gutter: String(gutter.body.task?.id), filter: String(filter.body.task?.id) };
+
+  const listed = await c("list_maintenance_tasks", {});
+  assert(listed.status === 200 && names(listed) === "Smoke alarm test,Softener salt,HVAC filter replacement,Water filter,Roof inspection,Gutter cleaning",
+    `list_maintenance_tasks: every task with its id, soonest due first, urgent before high on one day, the undated last (${names(listed)})`);
+  assert(names(await c("list_maintenance_tasks", { query: "GUTTER" })) === "Gutter cleaning" && names(await c("list_maintenance_tasks", { category: "exter" })) === "Roof inspection,Gutter cleaning"
+         && names(await c("list_maintenance_tasks", { query: "pleated" })) === "HVAC filter replacement",
+    "…by name in any case, by category, and by the notes");
+  assert(((await c("list_maintenance_tasks", { limit: 2 })).body.tasks as unknown[]).length === 2, "…limit applies");
+
+  const upcoming = await c("get_upcoming_maintenance", { days_ahead: 30 });
+  const up = (upcoming.body.tasks ?? []) as { name: string; days_until: number }[];
+  assert(upcoming.status === 200 && upcoming.body.today === utcToday && up.map((t) => `${t.name}@${t.days_until}`).join() === "Smoke alarm test@-5,Softener salt@20,HVAC filter replacement@20,Water filter@30",
+    `get_upcoming_maintenance: the overdue one first at a negative days_until, then those due in the window by date and priority; not the roof years out or the undated gutter (${up.map((t) => `${t.name}@${t.days_until}`).join()})`);
+  assert(names(await c("get_upcoming_maintenance", { days_ahead: 0 })) === "Smoke alarm test", "…days_ahead 0: the overdue alone");
+  assert(names(await c("get_upcoming_maintenance", {})) === names(upcoming), "…thirty days unless given");
+  assert(names(await c("get_upcoming_maintenance", { days_ahead: 29 })) === "Smoke alarm test,Softener salt,HVAC filter replacement", "…the thirtieth day's task out of a 29-day window");
+
+  // Logging: a recurring task moves on from the day logged, an older log leaves it where it is, a one-time task is done.
+  const ten = await dayFromToday(-10);
+  const logged = await c("log_maintenance", { task_id: ids.hvac, completed_on: ten, performed_by: "self", cost: 45.5, notes: "changed the filter", next_action: "check the coil" });
+  assert(logged.status === 200 && UUID.test(logged.body.log?.id) && logged.body.log?.cost === 45.5 && logged.body.log?.completed_on === ten && JSON.stringify(logged.body.log?.task) === JSON.stringify({ id: ids.hvac, name: "HVAC filter replacement", category: "hvac" }),
+    `log_maintenance stores the log, its cost a number, its task folded in (${JSON.stringify(logged.body.log).slice(0, 200)})`);
+  assert(logged.body.task?.last_completed === ten && logged.body.task?.next_due === (await dayFromToday(80)) && logged.body.task?.days_until === 80,
+    `…and answers the task moved on: last_completed the day logged, next_due ninety days after it (${JSON.stringify(logged.body.task).slice(0, 160)})`);
+  const older = await c("log_maintenance", { task_id: ids.hvac, completed_on: await dayFromToday(-100), performed_by: "self" }, { door: "mcp" });
+  assert(older.status === 200 && older.body.task?.last_completed === ten && older.body.task?.next_due === (await dayFromToday(80)),
+    `…a log of older work is kept, and the task is not moved back (the old trigger moved it to the older day) (${JSON.stringify(older.body.task).slice(0, 160)})`);
+  const once = await c("log_maintenance", { task_id: ids.gutter, completed_on: await dayFromToday(-4), performed_by: "Ann the Plumber" });
+  assert(once.status === 200 && once.body.task?.done === true && once.body.task?.next_due === null && once.body.task?.last_completed === (await dayFromToday(-4)), "…a one-time task logged is done, with no due date");
+  const today = await c("log_maintenance", { task_id: ids.filter });
+  assert(today.status === 200 && today.body.log?.completed_on === utcToday && today.body.task?.next_due === (await dayFromToday(30)), "…completed_on is today in UTC unless given");
+  assert(!names(await c("list_maintenance_tasks", {})).includes("Gutter cleaning") && names(await c("list_maintenance_tasks", { include_done: true })).endsWith("Gutter cleaning")
+         && !names(await c("get_upcoming_maintenance", { days_ahead: 366 })).includes("Gutter cleaning"),
+    "…and a done task is listed only with include_done, last, and is never upcoming");
+  const orphan = await c("log_maintenance", { task_id: NO_ROW });
+  const orphanMcp = await c("log_maintenance", { task_id: NO_ROW }, { door: "mcp" });
+  assert(orphan.status === 404 && orphan.body.code === "NO_SUCH_TASK" && /list_maintenance_tasks/.test(String(orphan.body.message)) && orphanMcp.viaMcp.result?.isError === true && JSON.stringify(orphanMcp.viaMcp).includes("NO_SUCH_TASK"),
+    `a log for no task: 404 NO_SUCH_TASK over both doors, saying where the ids are (${JSON.stringify(orphan.body).slice(0, 160)})`);
+
+  const history = await c("search_maintenance_history", {});
+  const logs = (history.body.logs ?? []) as { task: { name: string }; completed_on: string }[];
+  assert(history.status === 200 && logs.map((l) => l.task.name).join() === "Water filter,Gutter cleaning,HVAC filter replacement,HVAC filter replacement" && logs[2].completed_on === ten,
+    `search_maintenance_history: every log, latest first, each with its task (${logs.map((l) => `${l.task.name}@${l.completed_on}`).join()})`);
+  const histNames = async (input: Body) => (((await c("search_maintenance_history", input)).body.logs ?? []) as { task: { name: string } }[]).map((l) => l.task.name).join();
+  assert((await histNames({ task_id: ids.hvac })) === "HVAC filter replacement,HVAC filter replacement" && (await histNames({ task_name: "hvac" })) === "HVAC filter replacement,HVAC filter replacement"
+         && (await histNames({ category: "EXTER" })) === "Gutter cleaning" && (await histNames({ task_name: "zzz" })) === "",
+    "…by task, by name, by category in any case, and a name no task has is an empty list");
+  assert((await histNames({ date_from: await dayFromToday(-7) })) === "Water filter,Gutter cleaning" && (await histNames({ date_to: ten })) === "HVAC filter replacement,HVAC filter replacement"
+         && (await histNames({ date_from: ten, date_to: ten })) === "HVAC filter replacement" && (await histNames({ limit: 1 })) === "Water filter",
+    "…from a day, to a day (both edge days in), and the limit");
+  const unknownTask = await c("search_maintenance_history", { task_id: NO_ROW });
+  const backwards = await c("search_maintenance_history", { date_from: ten, date_to: await dayFromToday(-20) });
+  assert(unknownTask.status === 404 && unknownTask.body.code === "NO_SUCH_TASK" && backwards.status === 422 && backwards.body.code === "BAD_DATES",
+    `…a task id that names no task: 404 NO_SUCH_TASK, not an empty history; a date_to before date_from: 422 BAD_DATES (${unknownTask.status}, ${backwards.status})`);
+
+  const missed = await outOfBounds(c, [
+    ["a frequency of 0 days", "add_maintenance_task", { name: "x", frequency_days: 0 }], ["a frequency of 3651 days", "add_maintenance_task", { name: "x", frequency_days: 3651 }],
+    ["a priority of critical", "add_maintenance_task", { name: "x", priority: "critical" }], ["an empty name", "add_maintenance_task", { name: " " }],
+    ["a NUL in the name", "add_maintenance_task", { name: "x\u0000" }], ["a due date in the year 0000", "add_maintenance_task", { name: "x", next_due: "0000-01-01" }],
+    ["a cost below 0", "log_maintenance", { task_id: ids.hvac, cost: -1 }], ["a task id that is no uuid", "log_maintenance", { task_id: "hvac" }],
+    ["days_ahead of 367", "get_upcoming_maintenance", { days_ahead: 367 }], ["a limit of 0", "search_maintenance_history", { limit: 0 }],
+    ["a limit of 501", "list_maintenance_tasks", { limit: 501 }],
+  ]);
+  assert(missed.length === 0, `each input out of its bounds is refused at 400, before the database (not: ${missed.join("; ") || "none"})`);
+  const strays = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM plugin_home_maintenance.maintenance_tasks WHERE name = 'x'`);
+  assert(strays.n === 0, "none of them stored a task");
+  const misses = await tableMisses([
+    ["INSERT INTO plugin_home_maintenance.maintenance_tasks (name, priority) VALUES ('t', 'critical')", /priority_check/],
+    ["INSERT INTO plugin_home_maintenance.maintenance_tasks (name, frequency_days) VALUES ('t', 0)", /frequency_days_check/],
+    ["INSERT INTO plugin_home_maintenance.maintenance_tasks (name) VALUES ('')", /name_check/],
+    ["INSERT INTO plugin_home_maintenance.maintenance_logs (task_id, completed_on) VALUES ('00000000-0000-4000-8000-00000000dead', '2026-01-01')", /foreign key/],
+    [`INSERT INTO plugin_home_maintenance.maintenance_logs (task_id, completed_on, cost) VALUES ('${ids.hvac}', '2026-01-01', -1)`, /cost_check/],
+  ]);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all five"})`);
+}
+
+// ── plugins/household-knowledge ──────────────────────────────────────────────
+
+console.log("\n[household-knowledge] its items and vendors");
+{
+  const P = "household-knowledge";
+  const c = (key: string, input: Body, opts?: { as?: string; door?: "rest" | "mcp" }) => call(P, key, input, opts);
+  const names = (r: Called, field = "items") => ((r.body[field] ?? []) as { name: string }[]).map((t) => t.name).join();
+  const scopes = scopesOf(P);
+  assert(JSON.stringify(scopes) === JSON.stringify({ add_household_item: "write", search_household_items: "read", get_item_details: "read", add_vendor: "write", list_vendors: "read" }),
+    `its five operations' scopes: the three reads read, the two adds write (${JSON.stringify(scopes)})`);
+  const hints = await hintsOf(P);
+  assert(Object.keys(hints).length === 5 && Object.entries(hints).every(([k, h]) => h === (scopes[k] === "read" ? READ_HINT : ADDS_HINT)), `its hints, all five (${JSON.stringify(hints).slice(0, 200)})`);
+
+  const paint = await c("add_household_item", { name: "Living Room Paint", category: "paint", location: "Living Room", details: { brand: "Sherwin Williams", color: "Sea Salt", code: "SW 6204" }, notes: "two gallons, March" });
+  assert(paint.status === 200 && UUID.test(paint.body.item?.id) && paint.body.item?.details?.brand === "Sherwin Williams" && ISO.test(String(paint.body.item?.created_at)) && !("user_id" in paint.body.item),
+    `add_household_item stores the row, details an object as given, created_at ISO, no user_id (${JSON.stringify(paint.body).slice(0, 200)})`);
+  const dishwasher = await c("add_household_item", { name: "Dishwasher", category: "appliance", location: "Kitchen" }, { door: "mcp" });
+  assert(dishwasher.status === 200 && JSON.stringify(dishwasher.body.item?.details) === "{}", "…over MCP too, details {} unless given");
+  const tap = await c("add_household_item", { name: 'Kitchen (main) 12" tap', category: "plumbing", location: "Kitchen" });
+  assert(tap.status === 200, "an item named with a parenthesis and a quote is stored");
+  const asString = await c("add_household_item", { name: "x", details: '{"brand":"Bosch"}' });
+  const bigDetails = await c("add_household_item", { name: "x", details: { blob: "y".repeat(10_001) } });
+  const nulDetails = await c("add_household_item", { name: "x", details: { model: "A\u0000B" } });
+  assert(asString.status === 400 && bigDetails.status === 400 && nulDetails.status === 400,
+    `details as a JSON string (the old tool's form), past 10,000 characters, or holding a NUL: 400, before the database (${asString.status}, ${bigDetails.status}, ${nulDetails.status})`);
+
+  const search = async (input: Body) => names(await c("search_household_items", input));
+  assert((await search({ query: "paint" })) === "Living Room Paint" && (await search({ query: "SEA SALT" })) === "Living Room Paint" && (await search({ query: "march" })) === "Living Room Paint",
+    "search_household_items by name, by a value in the details in any case, and by the notes");
+  assert((await search({ category: "appl", location: "kitch" })) === "Dishwasher" && (await search({ location: "kitchen" })) === 'Kitchen (main) 12" tap,Dishwasher',
+    "…by category and location, partial and any case, newest first");
+  assert((await search({ query: "Kitchen (main" })) === 'Kitchen (main) 12" tap' && (await search({ query: '12" tap' })) === 'Kitchen (main) 12" tap' && (await search({ query: "Sea, Salt" })) === "",
+    "…an unclosed parenthesis or a quote is plain text, and a comma no longer splits the query (the old server's PostgREST syntax)");
+  assert((await search({})) === 'Kitchen (main) 12" tap,Dishwasher,Living Room Paint' && (await search({ limit: 1 })) === 'Kitchen (main) 12" tap' && (await search({ query: "nothing-of-the-kind" })) === "",
+    "…no filter lists every item newest first, the limit applies, and no match is an empty list");
+
+  const details = await c("get_item_details", { item_id: paint.body.item?.id });
+  assert(details.status === 200 && JSON.stringify(details.body.item) === JSON.stringify(paint.body.item), "get_item_details answers the item as it was added");
+  const noItem = await c("get_item_details", { item_id: NO_ROW });
+  const badId = await c("get_item_details", { item_id: "paint" });
+  assert(noItem.status === 404 && noItem.body.code === "NO_SUCH_ITEM" && /search_household_items/.test(String(noItem.body.message)) && badId.status === 400,
+    `…an id that names no item: 404 NO_SUCH_ITEM saying where the ids are; one that is no uuid: 400 (${noItem.status}, ${badId.status})`);
+
+  const plumber = await c("add_vendor", { name: "Ann the Plumber", service_type: "plumber", phone: "555-0100", email: "ann@example.com", website: "https://ann.example.com", rating: 5, last_used: "2026-09-01" });
+  assert(plumber.status === 200 && UUID.test(plumber.body.vendor?.id) && plumber.body.vendor?.rating === 5 && plumber.body.vendor?.last_used === "2026-09-01" && plumber.body.vendor?.email === "ann@example.com",
+    `add_vendor stores the row, the rating a number and the day bare (${JSON.stringify(plumber.body).slice(0, 200)})`);
+  const sparks = await c("add_vendor", { name: "Bright Sparks", service_type: "Electrician", notes: "did the kitchen lights" }, { door: "mcp" });
+  assert(sparks.status === 200 && sparks.body.vendor?.rating === null, "…over MCP too, the optional fields null");
+  const vendors = async (input: Body) => names(await c("list_vendors", input), "vendors");
+  assert((await vendors({})) === "Ann the Plumber,Bright Sparks" && (await vendors({ service_type: "plumb" })) === "Ann the Plumber" && (await vendors({ service_type: "ELECTRIC" })) === "Bright Sparks"
+         && (await vendors({ query: "kitchen" })) === "Bright Sparks" && (await vendors({ limit: 1 })) === "Ann the Plumber",
+    "list_vendors: by name, by service type partial and any case, by the notes, and the limit");
+
+  const missed = await outOfBounds(c, [
+    ["an email that is no address", "add_vendor", { name: "x", email: "ann at example" }], ["a website that is ftp", "add_vendor", { name: "x", website: "ftp://x.example.com" }],
+    ["a rating of 6", "add_vendor", { name: "x", rating: 6 }], ["a rating of 0", "add_vendor", { name: "x", rating: 0 }],
+    ["a last_used in the year 0000", "add_vendor", { name: "x", last_used: "0000-01-01" }], ["an empty name", "add_household_item", { name: "" }],
+    ["a NUL in the name", "add_household_item", { name: "x\u0000" }], ["a limit of 201", "search_household_items", { limit: 201 }],
+    ["an empty query", "list_vendors", { query: "" }],
+  ]);
+  assert(missed.length === 0, `each input out of its bounds is refused at 400, before the database (not: ${missed.join("; ") || "none"})`);
+  const strays = await one<{ n: number }>(sql`SELECT (SELECT count(*) FROM plugin_household_knowledge.household_items WHERE name = 'x') + (SELECT count(*) FROM plugin_household_knowledge.household_vendors WHERE name = 'x') AS n`);
+  assert(Number(strays.n) === 0, "none of them stored a row");
+  const misses = await tableMisses([
+    ["INSERT INTO plugin_household_knowledge.household_items (name, details) VALUES ('t', '[]')", /details_check/],
+    ["INSERT INTO plugin_household_knowledge.household_items (name) VALUES ('')", /name_check/],
+    ["INSERT INTO plugin_household_knowledge.household_vendors (name, rating) VALUES ('t', 6)", /rating_check/],
+    ["INSERT INTO plugin_household_knowledge.household_vendors (name) VALUES ('')", /name_check/],
+  ]);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all four"})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──

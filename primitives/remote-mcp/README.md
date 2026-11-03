@@ -18,7 +18,7 @@ A guide to connecting your Open Brain extensions to any AI client. Run the serve
 
 1. Open Claude Desktop → **Settings** → **Connectors**
 2. Click **Add custom connector**
-3. Name: the extension name (e.g., `Household Knowledge`, `Home Maintenance`)
+3. Name: the extension name (e.g., `Meal Planning`, `Professional CRM`)
 4. Remote MCP server URL: paste your **MCP Connection URL** (the HTTPS form)
 5. Click **Add**
 
@@ -61,7 +61,7 @@ claude mcp add --transport http extension-name \
   --header "x-access-key: your-access-key"
 ```
 
-Replace `extension-name` with a short name (e.g., `household-knowledge`, `home-maintenance`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
+Replace `extension-name` with a short name (e.g., `meal-planning`, `professional-crm`), the URL with your MCP Server URL (without the `?key=` part — the HTTPS form when the server is on another machine), and `your-access-key` with your MCP Access Key. Add `--scope user` so every project sees it.
 
 ## Cursor
 
@@ -137,8 +137,6 @@ After following the steps for your client, your Open Brain extension should appe
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4)
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

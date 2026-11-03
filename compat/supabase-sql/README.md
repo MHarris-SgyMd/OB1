@@ -79,7 +79,7 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8787 bun --no-install extensions/home-maintenance/index.ts         # an extension
+PORT=8787 bun --no-install extensions/job-hunt/index.ts                 # an extension
 
 SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
 PORT=8787 bun --no-install integrations/agent-memory-api/index.ts       # a recipe or integration
