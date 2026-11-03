@@ -328,7 +328,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and sixteen (116) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and seventeen (117) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -369,7 +369,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2343,7 +2343,7 @@ Migration 116 adds priority assertions: a key states how much an item matters,
 by when and why, and every statement is kept (SMD-3663, docs/priority.md's
 decisions 1, 2, 4 and 10). An **item** is `(kind, key)`: a `thought` or an
 `entity` by its id, a `ticket` by its key (normalised as `work_claims.issue`
-is), or an `item`, an open item, refused until SMD-3665 adds its table.
+is), or an `item`, an open item (117).
 `assert_priority` checks the item exists (a ticket by its head row, 068). A
 **level** is 0 none to 5 critical, anything else raised (22023); unknown is no
 assertion at all, never low. An assertion may carry `due_at`, `not_before`, a
@@ -2418,6 +2418,48 @@ grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 068,
 082 and 115; a re-apply is a no-op. The REST and MCP operations are
 `set_priority`, `clear_priority` and `priority_history` (SMD-3664;
 server-portable/README.md, Priority assertions).
+
+Migration 117 adds open items: a to-do, a commitment or a plugin's task gets an
+id, a status and a history (SMD-3665 PR 1; docs/priority.md decision 1's fourth
+kind). An item has its text (at most 1000 characters, cleaned as 115 cleans a
+label), an optional owner (free text: who is to do it, not a key) and due time,
+and a **status**: `proposed`, `open`, `done` or `dropped`. `proposed` is a start
+state alone, the extractor's (SMD-3665 PR 3): it reads as not yet open until a
+key confirms it (`open`) or dismisses it (`dropped`). Where it came from is fixed
+at the open: the thought it was read from, and the plugin row it stands for
+(decision 8) — the plugin read from the envelope's `plugin`, which the server's
+`ctx.call` stamps, never from an argument. `noted_at` is its thought's capture
+time, so an item read from an old thought reads as old. `open_item_events` holds
+every change (opened, updated or status), each carrying the item's whole state
+after it, its maker stamped from the envelope as 116 stamps a priority's, and a
+reason; a trigger refuses every UPDATE, DELETE and TRUNCATE. `open_items` is its
+projection, kept current in the write's transaction, with
+`ob1_item_projection_drift()` and `ob1_rebuild_item_projection()` (068's
+pattern). The writers are `open_item`, `update_item` (text, owner and due time
+from a JSON object, a JSON null clearing owner or due time), `set_item_status`
+(open, done or dropped, never back to proposed; settling moots the item's
+pending proposals), `propose_item_close` and `decide_item_close`; each answers
+`{outcome, code, message, …}` and changes nothing it was not asked to (the same
+again is `unchanged`). The same thought and text, or the same plugin row, opened
+again is the item that is there, so a re-run opens nothing twice. A **proposed
+close** (`open_item_close_proposals`: the status, the evidence thought, a label
+such as `resolves`, a reason) never closes the item by itself: a key other than
+its proposer accepts it, which closes the item with an event naming it, or
+rejects it (`PROPOSAL_YOURS` for the proposer accepting its own); a row changes
+only to be decided, once. The scope rule fails closed as 116's. A
+**capture-only key** may open an item, from a thought only if it captured the
+thought, and change only an item it opened under its envelope's agent id that
+no other key has changed since — asked before any existence answer, and refused
+alike for an item that is not there (`ITEM_NOT_YOURS`). 117 replaces 116's
+`ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
+whose capture rule now admits an open item the key owns. `open_item_history`
+reads one item, every event and every proposal. Each writer raises (0A000) above
+READ COMMITTED and takes an advisory lock on its item, then its projection row.
+An item's text, owner and reasons may hold personal data: `forget_thought`
+(SMD-1723) has to reach the items read from a forgotten thought. The **items**
+grant group (below) is soft, as the claims group is. Needs 008, 046, 061, 115
+and 116; a re-apply is a no-op. test-schema [105], test-upgrade [20bi]. The operations over
+REST and MCP are SMD-3665's PR 2; node_state's open-item kind is SMD-3667's.
 test-schema [104] (the rules, the tiers, the refusals, the projection, the
 group, the re-apply), test-upgrade [20bh] (onto a populated brain at 115).
 
@@ -2544,6 +2586,10 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `priority_current` (116; the projection, replaced and removed) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `priority_sources` (116; `SELECT` alone, so a server role cannot declare a source — `declare_priority_source` is the operator's, as `set_agent_kind`) | `SELECT` |
 | | `ob1_entities` (016; an entity's existence, which only the **extraction** group grants otherwise) | `SELECT` |
+| | `open_items`, `open_item_events` (117; an open item's existence, and whether a capture-only key opened it) | `SELECT` |
+| **items** — open items (117, SMD-3665): a role whose clients open, change and close items through `open_item`, `update_item`, `set_item_status`, `propose_item_close` and `decide_item_close`, or read them through `open_item_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence and capturer are the **capture** group's `SELECT`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `open_item_events` (117; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; the identity `seq` needs no sequence grant) | `SELECT, INSERT` |
+| | `open_items` (117; the projection, replaced, and a row no event made removed by a rebuild) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `open_item_close_proposals` (117; UPDATE only to decide a pending row once, any other UPDATE, a DELETE and TRUNCATE refused by trigger) | `SELECT, INSERT, UPDATE` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `agent_memories`, `agent_memory_source_refs`, `agent_memory_artifacts`, `agent_memory_relations`, `agent_memory_review_actions`, `agent_memory_recall_traces`, `agent_memory_recall_items`, `agent_memory_audit_events` (schemas/agent-memory) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -2614,8 +2660,8 @@ ever runs the server needs the **capture** and **server** groups; add **worker**
 for the role your bulk passes connect as, **extraction** on top of that for
 entity extraction, **structure** as well for a structured pass, **pages**
 for a role that writes pages (064), **claims** for a role whose clients
-claim work (115), and **priority** for a role whose clients state priorities
-(116). The
+claim work (115), **priority** for a role whose clients state priorities
+(116), and **items** for a role whose clients open items (117). The
 **community**, **extensions** and **recipes** groups are issued for whichever
 schema files you have applied — the objects not yet present are skipped and
 named, so run `--grant` again after applying one; apply

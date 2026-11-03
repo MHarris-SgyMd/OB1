@@ -16461,7 +16461,7 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('claims-agent', 'claims-other', 'claims-op', 'claims-import')`);
 }
 
-console.log("\n[104] Migration 116: priority assertions — a key states how much an item matters, the maker, kind, trust and tier stamped from the envelope and the registry, never the call; the winner by tier (operator, source, agent, inferred), then newest; a maker's own statement replaced and its window closed, every statement kept; a capture-only key only on a thought it wrote, a read key never; items checked to exist, open items refused until SMD-3665; append-only but for closing; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the priority grant group, sources the operator's; a re-apply a no-op (SMD-3663)");
+console.log("\n[104] Migration 116: priority assertions — a key states how much an item matters, the maker, kind, trust and tier stamped from the envelope and the registry, never the call; the winner by tier (operator, source, agent, inferred), then newest; a maker's own statement replaced and its window closed, every statement kept; a capture-only key only on a thought it wrote, a read key never; items checked to exist, an open item among them (117); append-only but for closing; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the priority grant group, sources the operator's; a re-apply a no-op (SMD-3663)");
 {
   type Assertion = { id: string; item: { kind: string; key: string }; level: number; due_at: string | null; due_ref: { kind: string; key: string } | null; reason: string | null; inferred: boolean;
     maker: { name: string; agent_id: string | null; kind: string | null; trust: string | null; scope: string | null; source: boolean }; tier: number; tier_name: string; closed_at: string | null; close_reason: string | null; closed_by: string | null };
@@ -16645,15 +16645,15 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(readKey.code === "READ_ONLY_KEY" && readClear.code === "READ_ONLY_KEY" && unstated.code === "READ_ONLY_KEY" && unstatedClear.code === "READ_ONLY_KEY",
     `a read key may neither state nor clear a priority, and neither may an envelope stating no scope — the rule fails closed (${readKey.code}, ${readClear.code}, ${unstated.code}, ${unstatedClear.code})`);
 
-  // Items: a ticket's key normalised, an unknown one refused, an entity, an open item refused until SMD-3665.
+  // Items: a ticket's key normalised, an unknown one refused, an entity, an unknown open item refused (117's table: [105] states one on an open item).
   const ticket = await put("ticket", " smd-9301 ", 3, SYNC);
   const unknownTicket = await put("ticket", "SMD-9399", 3, OP);
   const ent = await put("entity", entity.toUpperCase(), 2, OP);
   const openItem = await put("item", "11111111-2222-4333-8444-555555555555", 2, OP);
   const ghost = await put("thought", "11111111-2222-4333-8444-555555555555", 2, OP);
   assert(ticket.outcome === "asserted" && ticket.assertion?.item.key === "SMD-9301" && ticket.assertion?.tier_name === "source" && unknownTicket.code === "ITEM_NOT_FOUND"
-         && ent.assertion?.item.key === entity && openItem.code === "ITEM_NOT_FOUND" && /SMD-3665/.test(openItem.message ?? "") && ghost.code === "ITEM_NOT_FOUND",
-    `a ticket's key upper-cased and trimmed, the source's statement at tier 2; an unknown ticket, an open item (until SMD-3665) and a missing thought refused ITEM_NOT_FOUND; an entity by its id lower-cased (${ticket.assertion?.item.key}, ${openItem.message})`);
+         && ent.assertion?.item.key === entity && openItem.code === "ITEM_NOT_FOUND" && /^no open item 11111111/.test(openItem.message ?? "") && ghost.code === "ITEM_NOT_FOUND",
+    `a ticket's key upper-cased and trimmed, the source's statement at tier 2; an unknown ticket, an unknown open item and a missing thought refused ITEM_NOT_FOUND; an entity by its id lower-cased (${ticket.assertion?.item.key}, ${openItem.message})`);
 
   // Arguments: off the scale, a malformed item, a half or self due reference, a reason too long — raised; a due reference kept; a reason cleaned.
   const bad = await Promise.all([put("thought", opThought, 6, OP), put("thought", opThought, -1, OP), put("thought", opThought, null, OP), put("folder", opThought, 2, OP),
@@ -16780,6 +16780,282 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(after === before && ones.every((n) => n === 1) && (await drift()) === 0, `116 applied again changes nothing: ${after} assertions stand, one of each call, the projection exact (${ones.join(",")})`);
 
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late', 'prio-late2', 'prio-fresh')`);
+}
+
+console.log("\n[105] Migration 117: open items — an item opened from a thought, noted at its capture time; proposed, open, done and dropped, never back to proposed; every change an event stamped from the envelope; the same thought and text, or plugin row, again the item that is there; a plugin row's plugin from the envelope alone; a proposed close accepted only by another key, settling mooting the rest; a capture-only key on its own items alone, one answer whether the item exists or not; a priority on an open item; append-only and decided once; the projection exact, its drift seen and rebuilt; READ COMMITTED alone; the items grant group; a re-apply a no-op (SMD-3665)");
+{
+  type Item = { id: string; status: string; text: string; owner: string | null; due_at: string | null; origin_thought_id: string | null; plugin: { name: string; row: string } | null;
+    noted_at: string; opened_at: string; opened_by: { name: string; agent_id: string | null; trust: string | null; scope: string | null }; changed_at: string; closed_at: string | null };
+  type Event = { id: string; event: string; status: string; text: string; owner: string | null; due_at: string | null; reason: string | null; proposal_id: string | null; maker: { name: string; kind: string | null; trust: string | null } };
+  type Proposal = { id: string; item_id: string; status: string; evidence_thought_id: string | null; label: string | null; decision: string | null; decider: { name: string } | null; proposer: { name: string } };
+  type Answer = { outcome: string; code: string | null; message: string | null; item?: Item | null; event?: Event | null; proposal?: Proposal | null; mooted?: number };
+  const file = files.find((f) => /^\d{3}_open_items\.sql$/.test(f)) ?? "no NNN_open_items.sql";
+  const src = readFileSync(join(MIGRATIONS, file), "utf8");
+  // [104] re-applied 116 last, which put back 116's assert_priority: 117 is applied again first, as a brain at 117 has it.
+  await reapply(file);
+  const W = { scope: "write" };
+  const OP = { name: "item-op", ...W }, BOT = { name: "item-bot", ...W };
+  const READ = { name: "item-read", scope: "read" };
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('item-op', 'operator'), ('item-bot', 'agent'), ('item-cap', 'agent'), ('item-cap2', 'agent'), ('item-read', 'agent')`);
+  const agentOf = async (label: string) => (await db.query<{ id: string | null }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).rows[0]?.id ?? null;
+  const CAP = { name: "item-cap", scope: "capture", agent_id: await agentOf("item-cap") };
+  const CAP2 = { name: "item-cap2", scope: "capture", agent_id: await agentOf("item-cap2") };
+  // A raise is an outcome here, named, so a broken rule fails its own row rather than ending the suite.
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: String((e as { code?: string }).code ?? "?"), message: null }; }
+  };
+  const j = (o: object | null) => (o === null ? null : JSON.stringify(o));
+  const open = (text: string, actor: object | null, o: { owner?: string; due_at?: string; thought?: string; row?: string; proposed?: boolean } = {}) =>
+    ans(`SELECT open_item($1, $2, $3::timestamptz, $4::uuid, $5, $6, $7::jsonb) AS r`, [text, o.owner ?? null, o.due_at ?? null, o.thought ?? null, o.row ?? null, o.proposed ?? false, j(actor)]);
+  const update = (item: string, changes: object, actor: object) => ans(`SELECT update_item($1, $2::jsonb, $3::jsonb) AS r`, [item, JSON.stringify(changes), j(actor)]);
+  const status = (item: string, s: string, actor: object, reason: string | null = null) => ans(`SELECT set_item_status($1, $2, $3, $4::jsonb) AS r`, [item, s, reason, j(actor)]);
+  const propose = (item: string, actor: object, o: { status?: string; evidence?: string; label?: string; reason?: string } = {}) =>
+    ans(`SELECT propose_item_close($1, $2, $3::uuid, $4, $5, $6::jsonb) AS r`, [item, o.status ?? "done", o.evidence ?? null, o.label ?? null, o.reason ?? null, j(actor)]);
+  const decide = (proposal: string, accept: boolean, actor: object, reason: string | null = null) => ans(`SELECT decide_item_close($1::uuid, $2, $3, $4::jsonb) AS r`, [proposal, accept, reason, j(actor)]);
+  const history = async (item: string) => (await db.query<{ r: { item: Item | null; events: Event[]; proposals: Proposal[] } }>(`SELECT open_item_history($1) AS r`, [item])).rows[0].r;
+  const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
+  const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_item_projection_drift()`)).rows[0].n;
+  const events = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM open_item_events`)).rows[0].n;
+  const thoughtBy = async (who: string, content: string) => {
+    let id = "";
+    const agent = await agentOf(who);
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_config('ob1.actor', $1, true)`, [JSON.stringify(agent ? { name: who, agent_id: agent } : { name: who })]);
+      id = (await tx.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ($1) RETURNING id`, [content])).rows[0].id;
+    });
+    return id;
+  };
+  const createdAt = async (id: string) => (await db.query<{ t: string }>(`SELECT to_jsonb(created_at) #>> '{}' AS t FROM thoughts WHERE id = $1::uuid`, [id])).rows[0].t;
+  const GHOST = "11111111-2222-4333-8444-555555555555";
+
+  // The shape: three tables and their comments, the unique indexes, the triggers, the sentinels.
+  const comments = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass(t), 'pg_class') AS c FROM unnest(ARRAY['open_item_events', 'open_items', 'open_item_close_proposals']) t`)).rows.map((r) => r.c ?? "");
+  const triggers = (await db.query<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE tgrelid IN ('open_item_events'::regclass, 'open_item_close_proposals'::regclass) AND NOT tgisinternal ORDER BY 1`)).rows.map((r) => r.t);
+  const origin = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_origin')) AS d`)).rows[0].d ?? "";
+  const pluginIdx = (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('open_items_one_per_plugin_row')) AS d`)).rows[0].d ?? "";
+  assert(comments.length === 3 && comments.every((c) => /Migration 117 \/ SMD-3665/.test(c))
+         && JSON.stringify(triggers) === JSON.stringify(["open_item_close_proposals_decided_once", "open_item_close_proposals_no_truncate", "open_item_events_append_only", "open_item_events_no_truncate"])
+         && /^CREATE UNIQUE INDEX open_items_one_per_origin ON public\.open_items USING btree \(origin_key\) WHERE \(origin_key IS NOT NULL\)$/.test(origin)
+         && /^CREATE UNIQUE INDEX open_items_one_per_plugin_row ON public\.open_items USING btree \(plugin, plugin_row\) WHERE \(plugin IS NOT NULL\)$/.test(pluginIdx)
+         && ["ob1:item-maker-from-the-envelope", "ob1:item-proposal-never-alone", "ob1:item-one-per-origin"].every((s) => src.includes(s)),
+    `three tables commented, four refusing triggers, one item per thought and text and per plugin row, the three sentinels (${triggers.join(",")})`);
+
+  // The ticket's first Verify, at the store: an item from a thought, open; a later thought proposes its close; the proposer cannot accept it; another key does, and it is done.
+  const dentist = await thoughtBy("item-op", "[105] remind me to call the dentist");
+  const opened = await open("call the dentist", OP, { thought: dentist, owner: "me" });
+  const item = opened.item?.id ?? GHOST;
+  const booked = await thoughtBy("item-op", "[105] called the dentist, booked for Tuesday");
+  const proposed = await propose(item, BOT, { evidence: booked, label: "Resolves", reason: "the later thought says it was done" });
+  const stillOpen = (await history(item)).item?.status;
+  const ownAccept = await decide(proposed.proposal?.id ?? GHOST, true, BOT);
+  const accepted = await decide(proposed.proposal?.id ?? GHOST, true, OP);
+  const h = await history(item);
+  assert(opened.outcome === "opened" && opened.item?.status === "open" && opened.item?.origin_thought_id === dentist && opened.item?.noted_at === (await createdAt(dentist))
+         && opened.event?.maker.kind === "operator" && opened.item?.opened_by.name === "item-op"
+         && proposed.outcome === "proposed" && proposed.proposal?.label === "resolves" && proposed.proposal?.evidence_thought_id === booked && stillOpen === "open"
+         && ownAccept.code === "PROPOSAL_YOURS" && accepted.outcome === "accepted" && accepted.item?.status === "done" && accepted.item?.closed_at !== null
+         && accepted.event?.proposal_id === proposed.proposal?.id && accepted.proposal?.decision === "accepted" && accepted.proposal?.decider?.name === "item-op"
+         && JSON.stringify(h.events.map((e) => `${e.event}:${e.status}`)) === JSON.stringify(["opened:open", "status:done"]) && h.proposals.length === 1,
+    `an item opened from a thought, noted at the thought's capture time, the maker stamped from the registry; a proposed close with the later thought as evidence leaves it open; its proposer may not accept it (PROPOSAL_YOURS); another key's accept closes it done with an event naming the proposal; the history holds both events and the proposal (${opened.outcome}, ${proposed.outcome}, ${stillOpen}, ${ownAccept.code}, ${accepted.outcome}, ${h.events.map((e) => e.event).join(",")})`);
+
+  // An item changed after it settled keeps the time it settled: closed_at is the settling event's, not the last event's.
+  const touched = await update(item, { owner: "the front desk" }, OP);
+  assert(touched.outcome === "updated" && touched.item?.status === "done" && touched.item?.closed_at === accepted.item?.closed_at && touched.item?.changed_at !== accepted.item?.changed_at,
+    `an item changed after it settled is still done, its closed_at the settling event's, its changed_at moved (${touched.item?.closed_at === accepted.item?.closed_at}, ${touched.item?.changed_at !== accepted.item?.changed_at})`);
+
+  // Statuses: proposed a start state alone; confirm, dismiss, reopen; the same status again unchanged; settling moots the pending proposals; a settled item takes none.
+  const prop = await open("water the ferns", OP, { proposed: true });
+  const pid = prop.item?.id ?? GHOST;
+  const backToProposed = await status(pid, "proposed", OP);
+  const confirmed = await status(pid, "open", BOT, "yes, this is mine");
+  const sameAgain = await status(pid, "open", BOT);
+  const p1 = await propose(pid, BOT, { status: "dropped" });
+  const p2 = await propose(pid, OP);
+  const p1Again = await propose(pid, BOT, { status: "dropped" });
+  const settled = await status(pid, "done", OP);
+  const afterSettle = await history(pid);
+  const onSettled = await propose(pid, BOT);
+  const decideMoot = await decide(p2.proposal?.id ?? GHOST, true, BOT);
+  const reopened = await status(pid, "open", OP);
+  const dismissed = await open("mow the lawn", OP, { proposed: true });
+  const dismissedNow = await status(dismissed.item?.id ?? GHOST, "dropped", OP, "not a real to-do");
+  assert(prop.item?.status === "proposed" && backToProposed.code === "22023" && confirmed.outcome === "changed" && confirmed.item?.status === "open" && confirmed.event?.reason === "yes, this is mine"
+         && sameAgain.outcome === "unchanged" && p1.outcome === "proposed" && p2.outcome === "proposed" && p1Again.outcome === "unchanged" && p1Again.proposal?.id === p1.proposal?.id
+         && settled.outcome === "changed" && settled.mooted === 2 && afterSettle.proposals.every((p) => p.decision === "moot" && p.decider === null)
+         && onSettled.code === "ITEM_SETTLED" && decideMoot.code === "PROPOSAL_DECIDED" && reopened.item?.status === "open" && reopened.item?.closed_at === null
+         && dismissedNow.item?.status === "dropped",
+    `an item may start proposed and never return there (raised); confirmed open, the same status again unchanged; the same proposer and evidence pending once; settling moots both pending proposals, deciding nothing; a settled item takes no proposal, a moot one no decision; a settled item reopened has no closed_at; a proposed one dismissed is dropped (${backToProposed.code}, ${settled.mooted}, ${onSettled.code}, ${decideMoot.code})`);
+
+  // The same item again: by thought and text (any case), or by plugin row — the item that is there, no event written. A plugin row's plugin from the envelope alone.
+  const before = await events();
+  const again = await open("Call The Dentist", OP, { thought: dentist });
+  const afterAgain = await events();
+  const HM = { ...OP, plugin: "home-maintenance" };
+  const task = await open("clean the gutters", HM, { row: "task-17", due_at: "2026-11-02T00:00:00Z" });
+  const taskAgain = await open("clean the gutters (renamed)", HM, { row: "task-17" });
+  const otherPlugin = await open("clean the gutters", { ...OP, plugin: "family-calendar" }, { row: "task-17" });
+  const noPlugin = await open("a row with no plugin", OP, { row: "task-18" });
+  const badPlugin = await open("a row", { ...OP, plugin: "Home Maintenance" }, { row: "task-19" });
+  const pluginNoRow = await open("from a plugin, no row", HM);
+  assert(again.outcome === "unchanged" && again.item?.id === item && afterAgain === before
+         && task.outcome === "opened" && task.item?.plugin?.name === "home-maintenance" && task.item?.plugin?.row === "task-17"
+         && taskAgain.outcome === "unchanged" && taskAgain.item?.id === task.item?.id && otherPlugin.outcome === "opened" && otherPlugin.item?.id !== task.item?.id
+         && noPlugin.code === "22023" && /needs the call to come through its plugin/.test(noPlugin.outcome) && badPlugin.code === "22023" && pluginNoRow.item?.plugin === null,
+    `the same thought and text again (another case) is the item there, no event written; a plugin row once per plugin, its plugin the envelope's; a row with no plugin in the envelope, or a malformed plugin, raises; a plugin's call with no row names no plugin (${again.outcome}, ${afterAgain - before}, ${taskAgain.outcome}, ${noPlugin.code}, ${badPlugin.code})`);
+
+  // update_item: text, owner and due time; a JSON null clears; the same values unchanged; anything else raised.
+  const tid = task.item?.id ?? GHOST;
+  const moved = await update(tid, { due_at: "2026-12-01T00:00:00Z", owner: "Sam" }, OP);
+  const cleared = await update(tid, { owner: null }, OP);
+  const same = await update(tid, { due_at: "2026-12-01T00:00:00Z" }, OP);
+  const badUpdates = await Promise.all([update(tid, {}, OP), update(tid, { status: "done" }, OP), update(tid, { text: null }, OP), update(tid, { text: "  " }, OP),
+    update(tid, { owner: 7 }, OP), update("not-a-uuid", { owner: "x" }, OP), ans(`SELECT update_item($1, '[]'::jsonb, $2::jsonb) AS r`, [tid, j(OP)])]);
+  const unknown = await update(GHOST, { owner: "x" }, OP);
+  assert(moved.outcome === "updated" && moved.item?.owner === "Sam" && moved.event?.event === "updated" && moved.event?.status === "open"
+         && cleared.item?.owner === null && cleared.item?.due_at === moved.item?.due_at && same.outcome === "unchanged"
+         && badUpdates.every((b) => b.code === "22023") && unknown.code === "ITEM_NOT_FOUND",
+    `update_item moves the due time and sets an owner, a JSON null clears the owner and keeps the rest, the same values are unchanged; no change, an unknown key, a cleared or blank text, a non-string owner, a malformed id and a non-object raise 22023; an unknown id is refused (${moved.outcome}, ${same.outcome}, ${badUpdates.map((b) => b.code).join(",")}, ${unknown.code})`);
+
+  // A capture-only key: opens items, from a thought only its own; changes only items it opened that no other key has changed since; one answer whether the item exists or not.
+  const capThought = await thoughtBy("item-cap", "[105] a capture key's to-do: book the vet");
+  const capOwn = await open("book the vet", CAP, { thought: capThought });
+  const capPlain = await open("buy dog food", CAP);
+  const capFromOther = await open("call the dentist", CAP, { thought: dentist });
+  const capFromGhost = await open("a ghost's to-do", CAP, { thought: GHOST });
+  const capUpdate = await update(capPlain.item?.id ?? GHOST, { due_at: "2026-11-10" }, CAP);
+  const capOnOther = await update(item, { owner: "x" }, CAP);
+  const capOnGhost = await update(GHOST, { owner: "x" }, CAP);
+  const capOnOtherCap = await status(capPlain.item?.id ?? GHOST, "done", CAP2);
+  const capNoId = await status(capPlain.item?.id ?? GHOST, "done", { name: "item-cap", scope: "capture" });
+  const capSeesOther = await open("Call the dentist", CAP, { thought: capThought });
+  const capAgainOther = await open("call the dentist", OP, { thought: capThought });
+  const capAgainShown = await open("call the dentist", CAP, { thought: capThought });
+  await status(capOwn.item?.id ?? GHOST, "open", OP);  // no change: the item is open already, so nothing is taken
+  const capStillOwns = await update(capOwn.item?.id ?? GHOST, { owner: "me" }, CAP);
+  await update(capOwn.item?.id ?? GHOST, { owner: "the operator" }, OP);  // taken
+  const capTaken = await update(capOwn.item?.id ?? GHOST, { owner: "me again" }, CAP);
+  const capProposeOther = await propose(item, CAP);
+  const capEvidenceOther = await propose(capPlain.item?.id ?? GHOST, CAP, { evidence: dentist });
+  assert(capOwn.outcome === "opened" && capOwn.item?.opened_by.scope === "capture" && capPlain.outcome === "opened"
+         && capFromOther.code === "ITEM_NOT_YOURS" && capFromGhost.code === "ITEM_NOT_YOURS" && capFromOther.message === capFromGhost.message
+         && capUpdate.outcome === "updated" && capOnOther.code === "ITEM_NOT_YOURS" && capOnGhost.code === "ITEM_NOT_YOURS" && capOnOther.message === capOnGhost.message
+         && capOnOtherCap.code === "ITEM_NOT_YOURS" && capNoId.code === "ITEM_NOT_YOURS" && capSeesOther.outcome === "opened"
+         && capAgainOther.outcome === "unchanged" && capAgainOther.item?.id === capSeesOther.item?.id
+         && capAgainShown.outcome === "unchanged" && capAgainShown.item?.id === capSeesOther.item?.id
+         && capStillOwns.outcome === "updated" && capTaken.code === "ITEM_NOT_YOURS" && capProposeOther.code === "ITEM_NOT_YOURS" && capEvidenceOther.code === "ITEM_NOT_YOURS",
+    `a capture key opens items, from its own thought but not another key's or one that is not there (one answer); it changes its own, but not another key's item or one that is not there (one answer), nor another capture key's, nor its own without its agent id; an item another key changed is no longer its own; it proposes no close on another's item, nor with another key's thought as evidence (${capFromOther.code}, ${capFromGhost.code}, ${capOnOther.code}, ${capOnGhost.code}, ${capNoId.code}, ${capStillOwns.outcome}, ${capTaken.code})`);
+  // An item a capture key opened without its envelope's agent id (the registry's for its name, read by name) is never proved its own.
+  const capUnproved = await open("an item opened by name alone", { name: "item-cap", scope: "capture" });
+  const capProvedLater = await update(capUnproved.item?.id ?? GHOST, { owner: "me" }, CAP);
+  assert(capUnproved.outcome === "opened" && capUnproved.item?.opened_by.agent_id === CAP.agent_id && capProvedLater.code === "ITEM_NOT_YOURS",
+    `an item a capture key opened without its envelope's agent id carries the registry's id for its name, and the key, its id in hand later, is not proved its owner (${capUnproved.item?.opened_by.agent_id === CAP.agent_id}, ${capProvedLater.code})`);
+  // A capture key opening what another key already opened from its thought is told it is open, and shown nothing of it.
+  const opFromCap = await open("feed the cat", OP, { thought: capThought });
+  const capSameAsOp = await open("feed the cat", CAP, { thought: capThought });
+  const capSameAsOpGhost = await decide(GHOST, true, CAP);
+  const opDecideGhost = await decide(GHOST, true, OP);
+  assert(opFromCap.outcome === "opened" && capSameAsOp.outcome === "unchanged" && capSameAsOp.item === null && /already open/.test(capSameAsOp.message ?? "")
+         && capSameAsOpGhost.code === "ITEM_NOT_YOURS" && opDecideGhost.code === "PROPOSAL_NOT_FOUND",
+    `a capture key opening an item another key opened from its thought is answered unchanged and shown none of it; a proposal that is not there is ITEM_NOT_YOURS to a capture key, PROPOSAL_NOT_FOUND to a write key (${capSameAsOp.outcome}, ${JSON.stringify(capSameAsOp.item)}, ${capSameAsOpGhost.code}, ${opDecideGhost.code})`);
+
+  // A read key, and an envelope stating no scope, change nothing.
+  const reads = await Promise.all([open("a read key's", READ), update(item, { owner: "x" }, READ), status(item, "open", READ), propose(item, READ),
+    decide(proposed.proposal?.id ?? GHOST, false, READ), open("no scope", { name: "item-bot" }), status(item, "open", { name: "item-bot" })]);
+  assert(reads.every((r) => r.code === "READ_ONLY_KEY"), `a read key may open, change, settle, propose and decide nothing, nor may an envelope stating no scope (${reads.map((r) => r.code).join(",")})`);
+
+  // A priority on an open item: a write key's on any; a capture key's on its own alone, one answer whether it exists or not; an unknown item refused.
+  const prio = (kind: string, key: string, actor: object, ref?: [string, string]) =>
+    ans(`SELECT assert_priority($1, $2, 3, NULL, NULL, $3, $4, NULL, false, $5::jsonb) AS r`, [kind, key, ref?.[0] ?? null, ref?.[1] ?? null, j(actor)]);
+  const opOnItem = await prio("item", tid.toUpperCase(), OP);
+  const opOnGhost = await prio("item", GHOST, OP);
+  const capOnOwnItem = await prio("item", capPlain.item?.id ?? GHOST, CAP);
+  const capOnOthersItem = await prio("item", tid, CAP);
+  const capOnGhostItem = await prio("item", GHOST, CAP);
+  const capRefOwnItem = await prio("thought", capThought, CAP, ["item", capPlain.item?.id ?? GHOST]);
+  const capRefOthersItem = await prio("thought", capThought, CAP, ["item", tid]);
+  assert(opOnItem.outcome === "asserted" && opOnGhost.code === "ITEM_NOT_FOUND" && /^no open item 11111111/.test(opOnGhost.message ?? "")
+         && capOnOwnItem.outcome === "asserted" && capOnOthersItem.code === "ITEM_NOT_YOURS" && capOnGhostItem.code === "ITEM_NOT_YOURS" && capOnOthersItem.message === capOnGhostItem.message
+         && capRefOwnItem.outcome === "asserted" && capRefOthersItem.code === "ITEM_NOT_YOURS",
+    `a write key states a priority on an open item (its id in any case), an unknown one refused naming it an open item; a capture key on its own open item, not another key's nor one that is not there (one answer), and a due time from its own open item alone (${opOnItem.outcome}, ${opOnGhost.message}, ${capOnOwnItem.outcome}, ${capOnOthersItem.code}, ${capOnGhostItem.code}, ${capRefOwnItem.outcome}, ${capRefOthersItem.code})`);
+
+  // Append-only events; proposals decided once — for the owner too.
+  const anyEvent = h.events[0].id;
+  const edits = await Promise.all([
+    raised(`UPDATE open_item_events SET text = 'edited' WHERE id = $1::uuid`, [anyEvent]),
+    raised(`DELETE FROM open_item_events WHERE id = $1::uuid`, [anyEvent]),
+    raised(`TRUNCATE open_item_events`)]);
+  const pending = await propose(tid, BOT, { reason: "the gutters are clean" });
+  const propEdits = await Promise.all([
+    raised(`UPDATE open_item_close_proposals SET reason = 'edited' WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`UPDATE open_item_close_proposals SET decision = 'rejected', decided_at = now(), decider_name = 'x', status = 'dropped' WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`UPDATE open_item_close_proposals SET decision = NULL, decided_at = NULL, decider_name = NULL, decider_agent_id = NULL WHERE id = $1::uuid`, [proposed.proposal?.id ?? GHOST]),
+    raised(`DELETE FROM open_item_close_proposals WHERE id = $1::uuid`, [pending.proposal?.id ?? GHOST]),
+    raised(`TRUNCATE open_item_close_proposals`)]);
+  const rejected = await decide(pending.proposal?.id ?? GHOST, false, BOT, "withdrawn: not yet");
+  assert(edits.every((e) => e.code === "23001" && /append-only/.test(e.message)) && propEdits.every((e) => e.code === "23001")
+         && rejected.outcome === "rejected" && rejected.proposal?.decision === "rejected" && rejected.item?.status === "open",
+    `open_item_events refuses an edit, a DELETE and a TRUNCATE, naming itself append-only; a proposal refuses an edit, a decision that edits as it decides, an undecision, a DELETE and a TRUNCATE; its proposer may withdraw it (rejected), the item untouched (${edits.map((e) => e.code).join(",")}; ${propEdits.map((e) => e.code).join(",")}; ${rejected.outcome})`);
+
+  // The projection: exact after every call; a raw event or a raw row seen by the drift check and repaired by the rebuild.
+  const exact = await drift();
+  await db.query(`INSERT INTO open_item_events (item_id, event, status, text, actor_name, actor_proved, at) VALUES ($1::uuid, 'status', 'done', 'clean the gutters', 'raw-writer', false, now())`, [tid]);
+  await db.query(`INSERT INTO open_items (item_id, status, text, noted_at, opened_at, opened_by_name, changed_at, last_seq) VALUES ($1::uuid, 'open', 'nobody opened me', now(), now(), 'raw-writer', now(), 0)`, [GHOST]);
+  const behind = await drift();
+  const rebuilt = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_item_projection()`)).rows[0];
+  const again2 = (await db.query<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_item_projection()`)).rows[0];
+  const repaired = (await history(tid)).item;
+  assert(exact === 0 && behind === 2 && rebuilt.written === 1 && rebuilt.deleted === 1 && again2.written === 0 && again2.deleted === 0 && (await drift()) === 0
+         && repaired?.status === "done" && repaired?.closed_at !== null && (await history(GHOST)).item === null,
+    `the projection is exact after every call; a raw event and a raw row with no event leave it wrong, the drift check names both, the rebuild writes one and removes the other, a second counting nothing (${exact}, ${behind}, ${JSON.stringify(rebuilt)}, ${JSON.stringify(again2)})`);
+
+  // No maker, and above READ COMMITTED: raised. A history of a malformed id raised; of an unknown one, empty.
+  const nobody = await open("nobody's", null);
+  let rr = { code: "" };
+  try { await db.transaction(async (tx) => { await tx.exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); await tx.query(`SELECT open_item('x', p_actor => $1::jsonb)`, [j(OP)]); }); }
+  catch (e) { rr = { code: String((e as { code?: string }).code ?? "?") }; }
+  const badHistory = await raised(`SELECT open_item_history('nope')`);
+  const ghostHistory = await history(GHOST);
+  const noText = await open("   ", OP);
+  assert(nobody.code === "42501" && rr.code === "0A000" && badHistory.code === "22023" && ghostHistory.item === null && ghostHistory.events.length === 0 && noText.code === "22023",
+    `no envelope naming a maker raises 42501; a transaction above READ COMMITTED raises 0A000; a malformed id's history raises, an unknown one's is empty; a blank text raises (${nobody.code}, ${rr.code}, ${badHistory.code}, ${noText.code})`);
+
+  // The items grant group: with it a role opens, changes, settles, proposes, decides and reads; it cannot delete an event; without it, refused naming the table.
+  const ROLE = "ob1_test_items";
+  await db.exec(`CREATE ROLE ${ROLE} NOLOGIN`);
+  for (const st of [`GRANT USAGE ON SCHEMA public TO ${ROLE}`, ...grantStatements(ROLE, { groups: ["capture", "server", "items"] })]) await db.exec(st);
+  const asRole = async (body: (tx: { query: typeof db.query }) => Promise<unknown>) => {
+    try { let r: unknown; await db.transaction(async (tx) => { await tx.exec(`SET LOCAL ROLE ${ROLE}`); r = await body(tx as never); }); return { code: "", r }; }
+    catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const roleUse = await asRole(async (tx) => {
+    const one = async (sql: string, params: unknown[]) => (await tx.query<{ r: Answer }>(sql, params)).rows[0].r;
+    const o = await one(`SELECT open_item('a role''s item', p_actor => $1::jsonb) AS r`, [j(BOT)]);
+    const id = o.item?.id ?? GHOST;
+    await one(`SELECT update_item($1, '{"owner": "Ada"}'::jsonb, $2::jsonb) AS r`, [id, j(BOT)]);
+    const p = await one(`SELECT propose_item_close($1, p_actor => $2::jsonb) AS r`, [id, j(BOT)]);
+    const d = await one(`SELECT decide_item_close($1::uuid, true, p_actor => $2::jsonb) AS r`, [p.proposal?.id ?? GHOST, j(OP)]);
+    const s = await one(`SELECT set_item_status($1, 'open', p_actor => $2::jsonb) AS r`, [id, j(OP)]);
+    await tx.query(`SELECT open_item_history($1)`, [id]);
+    return `${o.outcome},${d.outcome},${s.outcome}`;
+  });
+  const roleDelete = await asRole((tx) => tx.query(`DELETE FROM open_item_events WHERE false`));
+  await db.exec(`REVOKE ALL ON open_item_events FROM ${ROLE}`);
+  const roleWithout = await asRole((tx) => tx.query(`SELECT open_item('refused', p_actor => $1::jsonb)`, [j(BOT)]));
+  assert(roleUse.code === "" && roleUse.r === "opened,accepted,changed" && roleDelete.code === "42501"
+         && roleWithout.code === "42501" && /permission denied for table open_item_events/.test(roleWithout.message ?? ""),
+    `a role granted capture, server and items opens, changes, proposes, decides, reopens and reads an item; it cannot DELETE an event; without the group it is refused naming the table (${JSON.stringify(roleUse)}, ${roleDelete.code}, ${roleWithout.message?.slice(0, 60)})`);
+  await db.exec(`DROP OWNED BY ${ROLE}; DROP ROLE ${ROLE}`);
+
+  // Re-applied: the items, their events and proposals stand, one of each call, the projection exact.
+  const counts = async () => JSON.stringify((await db.query(`SELECT (SELECT count(*) FROM open_item_events) AS e, (SELECT count(*) FROM open_items) AS i, (SELECT count(*) FROM open_item_close_proposals) AS p`)).rows);
+  const beforeRe = await counts();
+  await reapply(file);
+  const afterRe = await counts();
+  const ones = await Promise.all(["open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close", "open_item_history", "assert_priority"].map(functionsNamed));
+  assert(afterRe === beforeRe && ones.every((n) => n === 1) && (await drift()) === 0, `117 applied again changes nothing: ${afterRe} stand, one of each call, the projection exact (${ones.join(",")})`);
+
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('item-op', 'item-bot', 'item-cap', 'item-cap2', 'item-read')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

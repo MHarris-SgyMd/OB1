@@ -1408,9 +1408,9 @@ console.log("\n[11] Priority assertions through both doors (migration 116, SMD-3
     const noHistoryMcp = await mcp("priority_history", { kind: "thought", key: nowhere });
     assert(noThought.status === 404 && noThought.body.code === "ITEM_NOT_FOUND" && same(noThought.body.item, { kind: "thought", key: nowhere }) && noThought.body.which === "item"
         && noTicket.status === 404 && same(noTicket.body.item, { kind: "ticket", key: "SMD-9401" }) && noRef.status === 404 && noRef.body.which === "due_ref"
-        && noOpen.isError && /^Refused: open items \(kind item\) arrive with SMD-3665/.test(noOpen.text) && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
+        && noOpen.isError && noOpen.text === `Refused: the brain holds no open item ${nowhere}.` && noHistory.status === 404 && noHistory.body.code === "ITEM_NOT_FOUND"
         && noHistoryMcp.isError && noHistoryMcp.text === `Refused: the brain holds no thought ${nowhere}.`,
-      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item until SMD-3665 — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
+      `an item the brain does not hold is refused 404 ITEM_NOT_FOUND naming it — a thought, a ticket as 116 keys it, the due reference, an open item — and so is its history (${noThought.status} ${JSON.stringify(noTicket.body.item)} ${noRef.body.which} | ${noOpen.text.slice(0, 60)} | ${noHistory.status} ${noHistoryMcp.text})`);
 
     // Review pass 1: the item a refusal names is 116's own keying, read from the brain — a zero-width space 116 strips
     // is stripped in the answer too; which argument is missing, or malformed, is told from the brain, not 116's words.
