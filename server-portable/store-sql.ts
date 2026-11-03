@@ -950,14 +950,26 @@ export class SqlStore implements ThoughtStore {
     return rows[0]?.mine === true;
   }
 
-  async listClaims(opts: { issue?: string; issues?: string[]; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]> {
-    const issues = opts.issues ?? (opts.issue === undefined ? undefined : [opts.issue]);
+  async listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]> {
     const rows = await this.sql`
       SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,
              released_at, released_by, released_by_kind, release_reason, state
-        FROM list_work_claims(${issues === undefined ? null : this.sql.array(issues, "TEXT")}::text[], ${opts.holder ?? null}::text,
+        FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
                               ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int)` as Record<string, unknown>[];
     return rows.map((r) => normaliseWorkClaim(r, "list_work_claims"));
+  }
+
+  async unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]> {
+    // SMD-3599: 115's partial index on the unreleased claims (work_claims_one_unreleased, issue and piece key) finds
+    // them; list_work_claims gives live ones, or every one, released included, which would spend the limit on history.
+    // The keys are a hit's text's, upper-case as 115 stores them; the server role's existing SELECT reads the table.
+    const rows = await this.sql`
+      SELECT ob1_work_claim_json(c, now()) AS j
+        FROM work_claims c
+       WHERE c.issue = ANY (${this.sql.array(issues, "TEXT")}::text[]) AND c.released_at IS NULL
+       ORDER BY c.issue, c.piece_key, c.claimed_at, c.id
+       LIMIT ${limit}::int` as { j: unknown }[];
+    return rows.map((r) => normaliseWorkClaim(r.j, "ob1_work_claim_json"));
   }
 
   // SMD-3654: the lease a renewal starts from, and what was claimed on the work while it had lapsed — two reads beside

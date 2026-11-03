@@ -1870,14 +1870,20 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
   }
 }
 
-console.log("\n[20b] listClaims reads one page's tickets at once (SMD-3599): `issues` names them, cleaned as claim_work cleans a key; only theirs come back");
+console.log("\n[20b] unreleasedClaimsOn reads one page's tickets at once (SMD-3599): their live claims and their lapsed, never-released ones, by ticket; not a released claim, nor another ticket's; at most `limit`");
 {
   const actor = { name: "smd-3599-store", via: "test" } as never;
-  for (const issue of ["SMD-9330", "SMD-9331", "SMD-9332"]) await store.claimWork({ issue, actor });
-  const two = await store.listClaims({ issues: ["SMD-9330", " smd-9332 "] });
-  const one = await store.listClaims({ issue: "SMD-9331" });
-  assert(JSON.stringify(two.map((c) => c.issue)) === '["SMD-9330","SMD-9332"]' && JSON.stringify(one.map((c) => c.issue)) === '["SMD-9331"]',
-    `the tickets \`issues\` names, cleaned as 115 cleans them, and \`issue\` as before (${JSON.stringify([two.map((c) => c.issue), one.map((c) => c.issue)])})`);
+  const made = [];
+  for (const issue of ["SMD-9330", "SMD-9331", "SMD-9332", "SMD-9333"]) made.push(await store.claimWork({ issue, actor }));
+  await store.releaseClaim({ id: String(made[3].claim?.id), token: String(made[3].token), reason: "done", actor });
+  const admin = new SQL({ url: URL_, max: 1 });
+  try {
+    await admin`UPDATE work_claims SET claimed_at = now() - interval '2 minutes', expires_at = now() - interval '1 minute' WHERE id = ${String(made[2].claim?.id)}::uuid`;
+  } finally { await admin.close(); }
+  const got = await store.unreleasedClaimsOn(["SMD-9330", "SMD-9332", "SMD-9333"], 100);
+  const one = await store.unreleasedClaimsOn(["SMD-9330", "SMD-9332"], 1);
+  assert(JSON.stringify(got.map((c) => [c.issue, c.state])) === '[["SMD-9330","live"],["SMD-9332","lapsed"]]' && one.length === 1 && one[0].issue === "SMD-9330",
+    `the tickets named, live and lapsed-unreleased, no released claim and no other ticket's, by ticket, at most the limit (${JSON.stringify([got.map((c) => [c.issue, c.state]), one.map((c) => c.issue)])})`);
 }
 
 console.log("\n[21] claimLease reads the lease a renewal starts from by its token, and renew_claim's form by the claim's id too: another claim's id with the token is no lease (SMD-3654)");

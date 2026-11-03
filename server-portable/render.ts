@@ -160,7 +160,7 @@ const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved
  * keeps them out. Null when the claims were not read, and from a REST core older than this MCP server.
  */
 const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
-  Array.isArray(claimed) ? claimed.map((c) => ({ id: c.id, ticket: c.ticket, holder: c.holder, ownKey: c.ownKey, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) : null;
+  Array.isArray(claimed) ? claimed.map((c) => ({ id: c.id, ticket: c.ticket, holder: c.holder, ownKey: c.ownKey, state: c.state, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) : null;
 const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 
@@ -678,6 +678,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
+    // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
+    if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -747,7 +749,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword);
 }
 
@@ -787,7 +789,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -1801,20 +1803,35 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 /** Another claim's work and holder, its piece quoted (another key's words): the start of heldLine and sinceLine. */
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+/** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
+const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read: no `⚠ Claimed` line says nothing here — check list_claims before starting work.";
+/** How many claims a title names: the rest counted, the field keeping all (review pass 1: ten made a title of 2 KB). */
+const CLAIMED_IN_TITLE = 2;
 /**
- * A result's claims in words (SMD-3599), each as heldLine says a claim in the way, with its label quoted and cut —
- * the holder's words, as its piece is. A title's (`title`) say only who holds what since when: no label, which every
- * ChatGPT surface hands the model as the result's own words. The rest past the shown counted; the keys a result
- * names past the first MOVED_READ, not read, counted. Null when none is held.
+ * A result's claims in words (SMD-3599), each as heldLine says a claim in the way — a lapsed one never released said
+ * so — with its label quoted and cut, the holder's words, as its piece is. A title's (`title`) say only who holds
+ * what since when, or that it lapsed: the first two, no label, which every ChatGPT surface hands the model as the
+ * result's own words. The text's add what the claim tools' words say of the caller's own key and of a lapsed claim.
+ * The rest past the shown counted; the tickets not read counted, with no claim shown too (review pass 1). Null when
+ * there is nothing to say.
  */
 function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
-  if (!claimed?.length) return null;
+  const all = claimed ?? [];
+  const shown = title ? all.slice(0, CLAIMED_IN_TITLE) : all;
+  const rest = all.length - shown.length + more;
+  const unread = notRead > 0 ? `${notRead} more ticket${notRead === 1 ? "" : "s"} it names not checked: list_claims shows them` : "";
+  if (!shown.length) return title || !unread ? null : `none on the tickets read; ${unread}.`;
   const one = (c: ClaimedOn) => {
     const who = heldWho({ id: c.id, issue: c.ticket, piece: c.piece, holder: c.holder, holderKind: null, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey });
-    return title ? `${who}, since ${c.claimedAt}` : `${who} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
+    const when = c.state === "lapsed" ? `lapsed at ${c.expiresAt}, never released` : `until ${c.expiresAt}`;
+    return title ? `${who}, ${c.state === "lapsed" ? `lapsed at ${c.expiresAt}` : `since ${c.claimedAt}`}` : `${who} since ${c.claimedAt}, ${when} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
   };
-  const words = `${claimed.map(one).join("; ")}${more > 0 ? `; and ${more} more, which list_claims shows` : ""}`;
-  return notRead > 0 ? `${words} (+${notRead} more named past the first ${MOVED_READ}, not checked)` : words;
+  const words = `${shown.map(one).join("; ")}${rest > 0 ? `; and ${rest} more, which list_claims shows` : ""}${unread ? ` (+${unread})` : ""}`;
+  if (title) return words;
+  // AGENTS.md's readings, as the claim tools say them: a lapsed claim never released may be paused work; one of the caller's own key may be this session's, another's, or a lost token's.
+  const lapsed = all.some((c) => c.state === "lapsed") ? " A lapsed claim never released may be work paused elsewhere: ask the user before starting it." : "";
+  const own = all.some((c) => c.ownKey) ? " A claim by your own key may be this session's (its id in your worktree's .work-claims/), another session of yours, or one whose token was lost: list_claims shows each claim's label." : "";
+  return `${words}.${lapsed}${own}`;
 }
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {

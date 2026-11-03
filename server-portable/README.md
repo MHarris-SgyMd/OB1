@@ -473,23 +473,32 @@ exists and moved.
 Every read that returns a thought — `search`, `search_thoughts`,
 `search_thoughts_keyword`, `list_thoughts` and `fetch` — says who holds a
 ticket it names (SMD-3599), so an answer to "what should we work on next"
-sees held work without calling `list_claims`. A result's `claimed` lists the
-live work claims on the tickets its metadata files it under (a ticket row's
-`issue`, a note's `ticket`) and the first 50 its text mentions (the rest
-counted in `claimedNotRead`): each claim's id, ticket, piece, holder, `ownKey`
-when the holder is the caller's own key, label and times, the first ten
+sees held work before it calls `list_claims`. It is a prompt, not the check:
+a released claim, a branch or PR with no claim, and a claim whose PR merged
+are still AGENTS.md's to find ("Claim your work", step 1).
+
+A result's `claimed` lists the unreleased work claims — live, and lapsed but
+never released, which AGENTS.md reads as work that may be paused — on the
+tickets its metadata files it under (a ticket row's `issue`, a note's
+`ticket`) and the first 50 others its text mentions (the rest counted in
+`claimedNotRead`): each claim's id, ticket, piece, holder, `ownKey` when the
+holder is the caller's own key, label, times and `state`, the first ten
 (`claimedMore` the rest). Over MCP `search_thoughts`, `search_thoughts_keyword`
 and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
-…, until … (claim …, label "…")`, the piece and label quoted on one line as
-the holder's own words, and keep the ids, tickets, holders and times in the
-structured value; `search` and `fetch` start the title `[claimed: SMD-3379
-piece "PR 1b-2" by codex, since …]` after any moved prefix — never the label —
-and carry the field only where a ticket is held. Unlike `moved`, a ticket row
-and a superseded thought are labelled too: who holds a ticket is a fact about
-now. The claims are one call to 115's `list_work_claims` per page, made only
-when a result names a ticket; a brain before 115, or a read that fails, labels
-nothing (`claimed: null`) and the read goes on. Like `moved`, it never moves a
-rank.
+…, until … (claim …, label "…")` — `lapsed at …, never released` for a lapsed
+one — the piece and label quoted on one line as the holder's own words, with
+the claim tools' sentences for a lapsed claim and the caller's own key; their
+structured values keep ids, tickets, holders, states and times. `search` and
+`fetch` start the title `[claimed: SMD-3379 piece "PR 1b-2" by codex, since …]`
+after any moved prefix — the first two, never the label — and their JSON, the
+ChatGPT shape, carries the fields only beside a claimed ticket (the tickets
+not read with them, as `movedNotRead` rides beside a move), label included,
+and `claimed: null` on every result when the read failed. Unlike `moved`, a ticket row and a superseded thought are labelled
+too: who holds a ticket is a fact about now. The claims are one read of
+`work_claims`' unreleased rows (115's partial index) per page, made only when a
+result names a ticket; a brain before 115, or a read that fails, gives
+`claimed: null`, which the text tools say in a line, and the read goes on.
+Like `moved`, it never moves a rank.
 
 ## Steps
 
