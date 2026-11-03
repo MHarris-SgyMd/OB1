@@ -121,7 +121,9 @@ cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT
 # in PARITY_TMP, outside the lanes' directory the exit removes, its path
 # printed under the row's excerpt, so a flake that does not come back can
 # still be read (SMD-3607). The files stay until the system clears its
-# temporary directory.
+# temporary directory; clear them by hand as ci-parity-failed.*, never
+# ci-parity-*, which takes a running run's limit markers too and stops every
+# row in hand.
 keep_output() {
   local slug file
   slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)
@@ -144,7 +146,8 @@ keep_output() {
 # under its failure lines (review pass 2: a failed row then a throw showed the
 # row alone). stopped, for a row limit cut off, reads no crash line: an error a
 # suite logged and lived through, as test-jev's "error: connection reset",
-# would pass for the cause, and the tail shows where it stopped.
+# would pass for the cause; its failure lines show, else its tail, where it
+# stopped.
 excerpt() {
   local lines crash= n
   [ "${2:-}" = stopped ] || crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
@@ -542,7 +545,7 @@ main() {
   wait_lane "$FREE_PID" free "The database-free lane"
   FREE_PID=''
   echo
-  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s), each row's full output in the file named under it"
+  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s), a failing row's full output in the file named under it"
   return "$FAILED"
 }
 
