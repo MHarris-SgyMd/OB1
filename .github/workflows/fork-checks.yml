@@ -5169,7 +5169,7 @@ jobs:
   # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
   # Its needs are exactly the jobs that upload a test-counts-* artifact, each
   # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
-  # job left out is published only if it ends first (SMD-3709).
+  # job left out is published only if its upload ends first (SMD-3709).
   # A pull request, the merge queue and a
   # push to another branch publish nothing. contents: write, on this job
   # alone, is what pushes to the wiki's repository; the token stays out of the

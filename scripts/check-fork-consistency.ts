@@ -588,13 +588,16 @@
  *      another check, and a stale entry fails (SMD-3658: two PRs took 45, then
  *      two took 47, within a day). Its probe pins what it refuses and passes
  *  50. fork-checks.yml's publish-test-counts downloads the `test-counts-*`
- *      artifacts and needs exactly the jobs that upload one, each of which
- *      sets OB1_TEST_COUNTS in its own env and uploads that file or its
- *      directory, and a job that sets OB1_TEST_COUNTS uploads one: a counts
- *      job left out reaches the wiki's Test-counts page only if it ends
- *      first, unnamed when it does not, and a need with no counts is named
- *      on every page as having none (SMD-3709). Its probe pins what it
- *      refuses and passes
+ *      artifacts, each into its own directory, and needs exactly the jobs
+ *      that upload one; each such job uploads one, `test-counts-<its key>`
+ *      (and an expression after it when it has a matrix), sets
+ *      OB1_TEST_COUNTS in its own env and uploads that file or its
+ *      directory, and a job that sets OB1_TEST_COUNTS uploads one, nothing
+ *      setting it elsewhere: a counts job left out reaches the wiki's
+ *      Test-counts page only if its upload ends first, unnamed when it does
+ *      not, a need with no counts is named on every page as having none, and
+ *      a name uploaded twice fails on main alone (SMD-3709). Its probe pins
+ *      what it refuses and passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48 and 50 parse YAML with Bun.YAML,
@@ -10744,86 +10747,136 @@ checkCheckNumbers();
 /**
  * 50: publish-test-counts (SMD-3614) downloads every `test-counts-*` artifact and writes the wiki's Test-counts page
  * once the jobs it needs have ended. A job that uploads counts but is not among its needs races it: its rows reach the
- * page only if it ends first, and the page, which names the needed jobs that reported nothing, does not name it. A need
- * that uploads no counts is named on every page as a job that reported none. And a job uploads no counts unless it
- * sets OB1_TEST_COUNTS, where report() in db/test-support.ts appends each suite run's line, and uploads that file or
- * its directory. So in fork-checks.yml publish-test-counts downloads `test-counts-*`, and its needs are exactly the
- * jobs with an actions/upload-artifact step whose `name` starts `test-counts-` (a matrix expression after it
- * included); each such job sets OB1_TEST_COUNTS in its own env and uploads it, and a job that sets OB1_TEST_COUNTS
- * uploads counts. Paths are compared as written. Its probe pins what it refuses and passes.
+ * page only if its upload ends before the download, and the page, which names the needed jobs that reported nothing,
+ * does not name it. A need that uploads no counts is named on every page as a job that reported none. A second upload
+ * of a name fails its step, and only on a push to main, the one run that uploads counts. And a job uploads no counts
+ * unless it sets OB1_TEST_COUNTS, where report() in db/test-support.ts appends each suite run's line, and uploads
+ * that file or its directory. So in fork-checks.yml:
+ * - publish-test-counts downloads `test-counts-*`, each artifact into its own directory (no merge-multiple, which
+ *   puts them in one, where files of one name overwrite each other);
+ * - its needs are exactly the jobs with an actions/upload-artifact step whose `name` starts `test-counts-`;
+ * - such a job has one such step, named `test-counts-<its key>`, or `test-counts-<its key>-` and an expression when it
+ *   has a matrix, so no two uploads share a name;
+ * - it sets OB1_TEST_COUNTS in its own env and uploads that file or its directory, the paths compared as written;
+ * - a job that sets OB1_TEST_COUNTS uploads counts, and nothing sets it in the workflow's env, a step's env or a run
+ *   (a `$GITHUB_ENV` line, a command's prefix), which this check does not read.
+ * A name built wholly by an expression is not read, nor an upload's `if:`: the page names a needed job that succeeded
+ * and sent no counts. Its probe pins what it refuses and passes.
  */
 const COUNTS_PUBLISHER = "publish-test-counts";
 const COUNTS_ENV = "OB1_TEST_COUNTS";
 const COUNTS_ARTIFACT = "test-counts-";
-type CountsJob = { needs?: unknown; env?: unknown; steps?: unknown };
+const COUNTS_MATRIX_NAME = "${{ matrix.<axis> }}";
+type CountsJob = { needs?: unknown; env?: unknown; steps?: unknown; strategy?: unknown };
+/** A YAML value read as a mapping, or null when it is not one. */
+const mapping = (v: unknown): Record<string, unknown> | null => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 /** A job's steps that use the action `action` (`actions/upload-artifact`, say), each with its `with:` map. */
 function stepsUsing(job: CountsJob, action: string): Record<string, unknown>[] {
   return (Array.isArray(job.steps) ? job.steps : []).flatMap((s) => {
     const step = s as { uses?: unknown; with?: unknown } | null;
-    const args = step?.with && typeof step.with === "object" && !Array.isArray(step.with) ? step.with as Record<string, unknown> : {};
-    return typeof step?.uses === "string" && step.uses.startsWith(`${action}@`) ? [args] : [];
+    return typeof step?.uses === "string" && step.uses.startsWith(`${action}@`) ? [mapping(step.with) ?? {}] : [];
   });
 }
 function testCountsProblems(text: string): string[] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch (e) { return [`does not parse: ${(e as Error).message} — check 50 cannot read which jobs upload suite counts (SMD-3709)`]; }
-  const jobs = doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as { jobs?: unknown }).jobs : null;
-  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return ["has no `jobs:` map check 50 can read (SMD-3709)"];
-  const all = Object.entries(jobs as Record<string, unknown>).filter((e): e is [string, CountsJob] => !!e[1] && typeof e[1] === "object" && !Array.isArray(e[1]));
+  const jobs = mapping(mapping(doc)?.jobs);
+  if (!jobs) return ["has no `jobs:` map check 50 can read (SMD-3709)"];
+  const all = Object.entries(jobs).filter((e): e is [string, CountsJob] => mapping(e[1]) !== null);
   const publisher = all.find(([key]) => key === COUNTS_PUBLISHER)?.[1];
   if (!publisher) return [`has no job ${COUNTS_PUBLISHER}, which gathers the ${COUNTS_ARTIFACT}* artifacts into the wiki's Test-counts page — check 50 holds its needs to the jobs that upload them (SMD-3709)`];
   const problems: string[] = [];
-  if (!stepsUsing(publisher, "actions/download-artifact").some((w) => w.pattern === `${COUNTS_ARTIFACT}*`)) problems.push(`job ${COUNTS_PUBLISHER} has no actions/download-artifact step with pattern ${COUNTS_ARTIFACT}*, so the counts the jobs upload never reach the page (check 50, SMD-3709)`);
+  const downloads = stepsUsing(publisher, "actions/download-artifact").filter((w) => w.pattern === `${COUNTS_ARTIFACT}*`);
+  if (!downloads.length) problems.push(`job ${COUNTS_PUBLISHER} has no actions/download-artifact step with pattern ${COUNTS_ARTIFACT}*, so the counts the jobs upload never reach the page (check 50, SMD-3709)`);
+  if (downloads.some((w) => w["merge-multiple"] === true || w["merge-multiple"] === "true")) problems.push(`job ${COUNTS_PUBLISHER} downloads the counts with merge-multiple, into one directory where the jobs' files of one name overwrite each other — leave it unset, since .github/ci/test-counts-page.ts reads each artifact's own directory (check 50, SMD-3709)`);
+  if (mapping(mapping(doc)?.env)?.[COUNTS_ENV] !== undefined) problems.push(`sets ${COUNTS_ENV} in the workflow's env, which this check does not read — set it in each counts job's own env:, beside the upload that takes it (check 50, SMD-3709)`);
   const needs = typeof publisher.needs === "string" ? [publisher.needs] : Array.isArray(publisher.needs) ? publisher.needs.filter((n): n is string => typeof n === "string") : [];
+  const setInRun = new RegExp(`\\b${COUNTS_ENV}=`);
   const uploaders = new Set<string>();
   for (const [key, job] of all) {
+    for (const s of Array.isArray(job.steps) ? job.steps : []) {
+      const step = mapping(s);
+      if (mapping(step?.env)?.[COUNTS_ENV] !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} in a step's env, which this check does not read, so its counts may go where the job's upload does not look — set it in the job's own env: alone (check 50, SMD-3709)`);
+      if (typeof step?.run === "string" && setInRun.test(step.run)) problems.push(`job ${key} sets ${COUNTS_ENV} in a step's run (a $GITHUB_ENV line or a command's prefix), which this check does not read — set it in the job's own env: alone (check 50, SMD-3709)`);
+    }
     const uploads = stepsUsing(job, "actions/upload-artifact").filter((w) => typeof w.name === "string" && w.name.startsWith(COUNTS_ARTIFACT));
-    const counts = job.env && typeof job.env === "object" && !Array.isArray(job.env) ? (job.env as Record<string, unknown>)[COUNTS_ENV] : undefined;
+    const counts = mapping(job.env)?.[COUNTS_ENV];
     if (!uploads.length) {
-      if (counts !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} but uploads no ${COUNTS_ARTIFACT}… artifact, so its suites' counts never reach the page — upload the file's directory, and add the job to ${COUNTS_PUBLISHER}'s needs (check 50, SMD-3709)`);
+      if (counts !== undefined) problems.push(`job ${key} sets ${COUNTS_ENV} but uploads no ${COUNTS_ARTIFACT}… artifact, so its suites' counts never reach the page — upload that file or its directory with actions/upload-artifact, named ${COUNTS_ARTIFACT}${key} (a name built wholly by an expression is not read), and add the job to ${COUNTS_PUBLISHER}' needs (check 50, SMD-3709)`);
       continue;
     }
     uploaders.add(key);
-    if (!needs.includes(key)) problems.push(`job ${key} uploads ${uploads[0].name} but ${COUNTS_PUBLISHER} does not need it, so its rows reach the page only if it happens to end first, and the page does not say they are missing — add it to ${COUNTS_PUBLISHER}'s needs (check 50, SMD-3709)`);
-    if (typeof counts !== "string" || !counts) { problems.push(`job ${key} uploads ${uploads[0].name} but sets no ${COUNTS_ENV} in its own env, so report() in db/test-support.ts writes no counts for it to upload (check 50, SMD-3709)`); continue; }
+    const name = uploads[0].name as string;
+    if (!needs.includes(key)) problems.push(`job ${key} uploads ${name} but ${COUNTS_PUBLISHER} does not need it, so its rows reach the page only if its upload ends before the download, and the page does not say they are missing — add it to ${COUNTS_PUBLISHER}' needs (check 50, SMD-3709)`);
+    if (uploads.length > 1) problems.push(`job ${key} uploads ${uploads.length} ${COUNTS_ARTIFACT}… artifacts, where one holds its counts — upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`);
+    if (mapping(job.strategy)?.matrix) {
+      if (!name.startsWith(`${COUNTS_ARTIFACT}${key}-`) || !name.includes("${{")) problems.push(`job ${key} uploads ${name} from each job of its matrix — name it ${COUNTS_ARTIFACT}${key}-${COUNTS_MATRIX_NAME}, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`);
+    } else if (name !== `${COUNTS_ARTIFACT}${key}`) problems.push(`job ${key} uploads ${name}, not ${COUNTS_ARTIFACT}${key} — name each job's counts after its key, since upload-artifact fails a second upload of one name, and only on a push to main (check 50, SMD-3709)`);
+    if (typeof counts !== "string" || !counts) { problems.push(`job ${key} uploads ${name} but sets no ${COUNTS_ENV} in its own env:, the file report() in db/test-support.ts appends its suites' counts to, which this check reads there alone — set it there, to a file in the directory the job uploads (check 50, SMD-3709)`); continue; }
     for (const w of uploads) {
       const paths = typeof w.path === "string" ? w.path.split("\n").map((p) => p.trim().replace(/\/+$/, "")).filter(Boolean) : [];
-      if (!paths.includes(counts) && !paths.includes(posix.dirname(counts))) problems.push(`job ${key} uploads ${w.name} from ${JSON.stringify(w.path ?? null)}, which is neither its ${COUNTS_ENV}, ${counts}, nor that file's directory, so the artifact holds no counts (check 50, SMD-3709)`);
+      if (!paths.includes(counts) && !paths.includes(posix.dirname(counts))) problems.push(`job ${key} uploads ${w.name} from ${JSON.stringify(w.path ?? null)}, which is neither its ${COUNTS_ENV}, ${counts}, nor that file's directory, so the artifact holds no counts — upload ${posix.dirname(counts)}/ (check 50, SMD-3709)`);
     }
   }
   for (const n of needs) if (!uploaders.has(n)) problems.push(`job ${COUNTS_PUBLISHER} needs ${n}, which uploads no ${COUNTS_ARTIFACT}… artifact, so every page names it as a job that reported no counts — its needs are the jobs that upload them (check 50, SMD-3709)`);
   return problems;
 }
 function checkTestCountsPublished() {
-  const ENV = "    env:\n      OB1_TEST_COUNTS: /tmp/c/counts.jsonl\n";
-  const counts = (key: string, env = ENV, name = `test-counts-${key}`, path = "/tmp/c/") =>
-    `  ${key}:\n    runs-on: ubuntu-24.04\n${env}    steps:\n      - run: bun test.ts\n      - uses: actions/upload-artifact@v7\n        with:\n          name: ${name}\n          path: ${path}\n`;
-  const publish = (needs: string, pattern = "test-counts-*") =>
-    `  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: ${needs}\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n          pattern: ${pattern}\n`;
-  const lint = "  lint:\n    runs-on: ubuntu-24.04\n    steps: [{ run: x }]\n";
+  const ENV = "    env:\n      OB1_TEST_COUNTS: /tmp/c/counts.jsonl\n", EMPTY = "    env:\n      OB1_TEST_COUNTS: \"\"\n";
+  const MATRIX = "    strategy:\n      matrix:\n        shard: [x, y]\n", SHARD = "${{ matrix.shard }}";
+  const UPLOAD = (name: string, path = "/tmp/c/") => `      - uses: actions/upload-artifact@v7\n        with:\n          name: ${name}\n          path: ${path}\n`;
+  // A job that runs suites: `env` and `job` (lines at its keys' indent), `steps` before its upload, the upload's name and path.
+  const counts = (key: string, o: { env?: string; job?: string; steps?: string; name?: string; path?: string } = {}) =>
+    `  ${key}:\n    runs-on: ubuntu-24.04\n${o.env ?? ENV}${o.job ?? ""}    steps:\n      - run: bun test.ts\n${o.steps ?? ""}${UPLOAD(o.name ?? `test-counts-${key}`, o.path)}`;
+  const publish = (needs: string, download = "          pattern: test-counts-*\n") =>
+    `  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: ${needs}\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n${download}`;
+  const plain = (key: string, steps: string) => `  ${key}:\n    runs-on: ubuntu-24.04\n    steps:\n${steps}`;
+  const lint = plain("lint", "      - run: x\n");
   const wf = (...jobs: string[]) => `name: probe\non: push\njobs:\n${jobs.join("")}`;
-  const matrix = "test-counts-a-" + "${{ matrix.shard }}";
+  // What each refusal says, naming its job, as a probe case expects it.
+  const notNeeded = (k: string, name = `test-counts-${k}`) => `job ${k} uploads ${name} but publish-test-counts does not need it`;
+  const noEnv = (k: string) => `job ${k} uploads test-counts-${k} but sets no OB1_TEST_COUNTS`;
+  const noUpload = (k: string) => `job ${k} sets OB1_TEST_COUNTS but uploads no`;
+  const extra = (n: string) => `needs ${n}, which uploads no`;
+  const DOWNLOAD = "no actions/download-artifact step with pattern test-counts-*";
   // [why, text, what each problem it reports says]: none for a pass, one phrase per problem, in order.
-  const NOT_NEEDED = "does not need it", NO_ENV = "sets no OB1_TEST_COUNTS", NO_UPLOAD = "but uploads no", EXTRA = "which uploads no", PATH = "nor that file's directory", DOWNLOAD = "no actions/download-artifact step", NO_PUBLISHER = "has no job publish-test-counts";
   const cases: [string, string, string[]][] = [
     ["two counts jobs, both needed", wf(counts("a"), counts("b"), publish("[a, b]")), []],
     ["needs written as one name", wf(counts("a"), publish("a")), []],
-    ["a matrix job's name after the prefix", wf(counts("a", ENV, matrix), publish("[a]")), []],
-    ["the counts file uploaded by its own path", wf(counts("a", ENV, undefined, "/tmp/c/counts.jsonl"), publish("[a]")), []],
-    ["the counts directory among other paths", wf(counts("a", ENV, undefined, "|\n            /tmp/logs\n            /tmp/c"), publish("[a]")), []],
+    ["a matrix job's name, its key and an expression", wf(counts("a", { job: MATRIX, name: `test-counts-a-${SHARD}` }), publish("[a]")), []],
+    ["the counts file uploaded by its own path", wf(counts("a", { path: "/tmp/c/counts.jsonl" }), publish("[a]")), []],
+    ["the counts directory among other paths", wf(counts("a", { path: "|\n            /tmp/logs\n            /tmp/c" }), publish("[a]")), []],
     ["a job that runs no suites, left out", wf(counts("a"), lint, publish("[a]")), []],
-    ["another artifact from a job that sets no counts", wf(counts("a"), counts("b", "", "logs-b"), publish("[a]")), []],
-    ["a job that downloads one job's counts", wf(counts("a"), "  read:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/download-artifact@v8\n        with:\n          name: test-counts-a\n", publish("[a]")), []],
-    ["a counts job left out of the needs", wf(counts("a"), counts("b"), publish("[a]")), [NOT_NEEDED]],
-    ["a matrix counts job left out of the needs", wf(counts("a", ENV, matrix), publish("[]")), [NOT_NEEDED]],
-    ["a counts job with no OB1_TEST_COUNTS", wf(counts("a", ""), publish("[a]")), [NO_ENV]],
-    ["a counts job whose OB1_TEST_COUNTS is empty", wf(counts("a", "    env:\n      OB1_TEST_COUNTS: \"\"\n"), publish("[a]")), [NO_ENV]],
-    ["a counts job with neither", wf(counts("a", ""), publish("[]")), [NOT_NEEDED, NO_ENV]],
-    ["OB1_TEST_COUNTS set, its artifact named otherwise", wf(counts("a", ENV, "counts-a"), publish("[]")), [NO_UPLOAD]],
-    ["a need that uploads no counts", wf(counts("a"), lint, publish("[a, lint]")), [EXTRA]],
-    ["an upload from another directory", wf(counts("a", ENV, undefined, "/tmp/other/"), publish("[a]")), [PATH]],
-    ["a download of another pattern", wf(counts("a"), publish("[a]", "counts-*")), [DOWNLOAD]],
-    ["no publish-test-counts job", wf(counts("a")), [NO_PUBLISHER]],
+    ["another artifact from a job that sets no counts", wf(counts("a"), counts("b", { env: "", name: "logs-b" }), publish("[a]")), []],
+    ["an artifact whose name holds the prefix after its start", wf(counts("a"), counts("b", { env: "", name: "old-test-counts-b" }), publish("[a]")), []],
+    ["a job that downloads one job's counts", wf(counts("a"), plain("read", "      - uses: actions/download-artifact@v8\n        with:\n          name: test-counts-a\n"), publish("[a]")), []],
+    ["the merge sub-action, which re-uploads lines the page reads once", wf(counts("a"), plain("merge", "      - uses: actions/upload-artifact/merge@v7\n        with:\n          name: test-counts-all\n          pattern: test-counts-*\n"), publish("[a]")), []],
+    ["a reusable-workflow job, left out", wf(counts("a"), "  reuse:\n    uses: ./.github/workflows/x.yml\n", publish("[a]")), []],
+    ["a counts job left out of the needs", wf(counts("a"), counts("b"), publish("[a]")), [notNeeded("b")]],
+    ["a matrix counts job left out of the needs", wf(counts("a", { job: MATRIX, name: `test-counts-a-${SHARD}` }), publish("[]")), [notNeeded("a", `test-counts-a-${SHARD}`)]],
+    ["a counts job with no OB1_TEST_COUNTS", wf(counts("a", { env: "" }), publish("[a]")), [noEnv("a")]],
+    ["a counts job whose OB1_TEST_COUNTS is empty", wf(counts("a", { env: EMPTY }), publish("[a]")), [noEnv("a")]],
+    ["a counts job with neither", wf(counts("a", { env: "" }), publish("[]")), [notNeeded("a"), noEnv("a")]],
+    ["a job with no OB1_TEST_COUNTS, then one left out, each read", wf(counts("a", { env: "" }), counts("b"), publish("[a]")), [noEnv("a"), notNeeded("b")]],
+    ["OB1_TEST_COUNTS set, its artifact named otherwise", wf(counts("a", { name: "counts-a" }), publish("[]")), [noUpload("a")]],
+    ["OB1_TEST_COUNTS set empty, no counts uploaded", wf(counts("a", { env: EMPTY, name: "logs-a" }), publish("[]")), [noUpload("a")]],
+    ["a need that uploads no counts", wf(counts("a"), lint, publish("[a, lint]")), [extra("lint")]],
+    ["an upload from another directory", wf(counts("a", { path: "/tmp/other/" }), publish("[a]")), ['job a uploads test-counts-a from "/tmp/other/"']],
+    ["two counts uploads in one job, each path read", wf(counts("a", { steps: UPLOAD("test-counts-a"), path: "/tmp/x/" }), publish("[a]")), ["job a uploads 2 test-counts-… artifacts", 'job a uploads test-counts-a from "/tmp/x/"']],
+    ["a copied job, its counts named for the other", wf(counts("a"), counts("b", { name: "test-counts-a" }), publish("[a, b]")), ["job b uploads test-counts-a, not test-counts-b"]],
+    ["a matrix job's one name for every shard", wf(counts("a", { job: MATRIX }), publish("[a]")), ["job a uploads test-counts-a from each job of its matrix"]],
+    ["a matrix job's name after its key, with no expression", wf(counts("a", { job: MATRIX, name: "test-counts-a-x" }), publish("[a]")), ["job a uploads test-counts-a-x from each job of its matrix"]],
+    ["a matrix job's name after another key", wf(counts("a", { job: MATRIX, name: `test-counts-b-${SHARD}` }), publish("[a]")), [`job a uploads test-counts-b-${SHARD} from each job of its matrix`]],
+    ["a download of another pattern", wf(counts("a"), publish("[a]", "          pattern: counts-*\n")), [DOWNLOAD]],
+    ["a download of one job's counts", wf(counts("a"), publish("[a]", "          pattern: test-counts-a\n")), [DOWNLOAD]],
+    ["a publisher with no download step", wf(counts("a"), "  publish-test-counts:\n    runs-on: ubuntu-24.04\n    needs: [a]\n    steps:\n      - run: x\n"), [DOWNLOAD]],
+    ["the downloads merged into one directory", wf(counts("a"), publish("[a]", "          pattern: test-counts-*\n          merge-multiple: true\n")), ["downloads the counts with merge-multiple"]],
+    ["OB1_TEST_COUNTS in the workflow's env", wf(counts("a"), publish("[a]")).replace("jobs:\n", "env:\n  OB1_TEST_COUNTS: /tmp/c/counts.jsonl\njobs:\n"), ["sets OB1_TEST_COUNTS in the workflow's env"]],
+    ["OB1_TEST_COUNTS in a step's env", wf(counts("a", { steps: "      - run: bun more.ts\n        env:\n          OB1_TEST_COUNTS: /tmp/d/counts.jsonl\n" }), publish("[a]")), ["job a sets OB1_TEST_COUNTS in a step's env"]],
+    ["OB1_TEST_COUNTS written to $GITHUB_ENV", wf(counts("a"), plain("b", "      - run: echo \"OB1_TEST_COUNTS=/tmp/d/counts.jsonl\" >> \"$GITHUB_ENV\"\n"), publish("[a]")), ["job b sets OB1_TEST_COUNTS in a step's run"]],
+    ["no publish-test-counts job", wf(counts("a")), ["has no job publish-test-counts"]],
+    ["a file that does not parse", "jobs: [", ["does not parse"]],
+    ["a file with no jobs", "name: probe\non: push\n", ["has no `jobs:` map"]],
   ];
   const wrong = cases.map(([why, text, says]) => ({ why, says, got: testCountsProblems(text) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
