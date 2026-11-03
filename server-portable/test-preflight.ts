@@ -2237,9 +2237,11 @@ else {
   // pause, with or without a pass running — not "its passes running" or "awake".
   // Preflight reads the stamp's age when it runs, so "2\d s ago": a run half
   // a second late read "21 s" and failed CI's data layer (SMD-3694). The
-  // hold's "4 min" holds until it starts 30 s late, past what "2\d" allows:
-  // its re-arm is on the database's clock, as the stamp is, so a test host's
-  // clock out of step with the database's moves neither.
+  // hold's "4 min" holds until the run starts 30 s late, past what "2\d"
+  // allows: its re-arm is on the database's clock, as the stamp is, so a
+  // test host's clock out of step with the database's moves neither. The
+  // paused rows' `since` stays on the host's: this row prints no pause's
+  // length.
   const rearmAt = new Date((await claims`SELECT now() + interval '240 seconds' AS t`)[0].t).toISOString();
   await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "ok", holds: [{ pass: "extract", why: "lookup", until: null }, { pass: "consolidate", why: "provider", until: rearmAt }] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
   const consHeld = row((await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" })).out, "consolidate pass");
