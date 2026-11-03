@@ -114,9 +114,15 @@ if (!URL_) {
  * PR 1c-3a), by the runs from 68ba1e13 to 6d613601 (SMD-3469 PR 2). [38]
  * grew ~125 s with the pause's cases (SMD-3379 PR 1c-3b), so it runs alone
  * and [10g], [17] and [41] (~39 s) went to the rest, by main's run at
- * 30bd9637 (sleep 218 s of sections, long 217, extract 303, rest 221). The
+ * 30bd9637 (sleep 218 s of sections, long 217, extract 303, rest 221). With
+ * [38] alone the floor (SMD-3714, ~269 s), [9f] went to the rest, [10g] to
+ * long, and [5d] and [41] to extract, so the other three even out under it,
+ * by main's runs 41683999107, 41689520872 and 41700508681 (live steps of
+ * sleep 276 s, long 271, extract 274 and the rest 274, from 308 for extract
+ * before). [5d] waits on the CPU, and the rest keeps the timers' [9f]. The
  * rest's sections wait on the CPU, not on timers, so its time moves most
- * with the runner's speed. A cell's job runs ~18 s past its sections (~25 s
+ * with the runner's speed: its slow runs are its median, its fast ones ~50 s
+ * under. A cell's job runs ~18 s past its sections (~25 s
  * for the rest's, with test-search-path.ts), so a section added to a cell
  * adds to the run's length once that cell's job is the run's longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
@@ -125,8 +131,8 @@ if (!URL_) {
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
-  long: ["9", "38r", "38b"],
-  extract: ["9f", "10", "10f", "10h", "37b", "39"],
+  long: ["9", "10g", "38r", "38b"],
+  extract: ["5d", "10", "10f", "10h", "37b", "39", "41"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
