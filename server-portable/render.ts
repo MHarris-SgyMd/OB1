@@ -1778,7 +1778,9 @@ const ownKey = (mine: string) => `A claim by your own key is this session's own 
 const OWN_KEY = ownKey("work under it, or release it and claim the piece");
 /** On a renewal the caller's claim lapsed and another covers its work: one of this session's own makes the lapsed one spare (review pass 1). */
 const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were renewing and delete its token file");
-const heldLine = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+/** Another claim's work and holder, its piece quoted (another key's words): the start of heldLine and sinceLine. */
+const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
+const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */
@@ -1794,7 +1796,7 @@ const endedText = (r: Extract<Refusal, { code: "CLAIM_RELEASED" }>) => r.takenOv
  * it is live, so one after it came in a lapse (review pass 2: "your previous lease ran out" was a time nothing kept).
  */
 const sinceLine = (c: NonNullable<ClaimLapse["claimedSince"]>[number]) =>
-  `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
+  `${heldWho(c)}, claimed at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (${c.state}, claim ${c.id})`;
 const lapseCheck = (after: string, id: string) =>
   `list the ticket's claims with list_claims and include_ended: a claim other than this one (claim ${id}) on its work, claimed or renewed after ${after}, means another agent may have built part of it, so stop, and tell the user; with none, carry on.`;
 const lapseText = (l: ClaimLapse | undefined, claim: WorkClaim) => {

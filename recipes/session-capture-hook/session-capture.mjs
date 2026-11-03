@@ -2963,6 +2963,9 @@ const TOOL_REFUSED_RE = /\bTool \S+ (?:not found|disabled)\b/;
 const REVIVED_COVERED_RE = /\b(?:It had lapsed at \S+, and (?:since then .* made or renewed on its work|the claims made or renewed on its work since could not be read)|Whether it had lapsed could not be read)\b/;
 /** A claim's ticket or piece as 115 compares it: control characters made spaces, soft hyphen and zero-width marks gone, runs of white space one, trimmed, case-folded. */
 const cleanWork = (v) => String(v ?? "").replace(/\p{Cc}/gu, " ").replace(/[\u00AD\u200B\u2060\uFEFF]/g, "").replace(/\s+/gu, " ").trim().toLowerCase();
+/** A renewal's log note for a lapse nothing was claimed or renewed in, from the reply or the hook's own check; renewOne looks for its head so it is said once. */
+const QUIET_LAPSE_HEAD = " (it had lapsed at ";
+const quietLapse = (at) => `${QUIET_LAPSE_HEAD}${at}; no other claim was made or renewed on its work meanwhile)`;
 /** A marker's words, cut where a marker is, saying so: a cut list of claims read as the whole one (review pass 2; WORK_CLAIMED's too, review pass 3). */
 const markerSaid = (s) => s.length <= 600 ? s : `${s.slice(0, 540)}… (cut here: list_claims with include_ended shows every claim)`;
 const toolRefused = (text) => (SDK_ERROR_RE.test(text) || /^JSON-RPC -3260[12]\b/.test(text)) && TOOL_REFUSED_RE.test(text);
@@ -2990,7 +2993,7 @@ export async function renewClaim(cfg, claim) {
   if (!result?.isError) {
     const at = result?.structuredContent?.claim?.expiresAt ?? /\buntil (\S+)/.exec(text)?.[1];
     const o = { ok: true, expiresAt: typeof at === "string" ? at : undefined, line: `renewed ${what}${typeof at === "string" ? ` until ${at}` : ""}` };
-    // Renewed, but it had lapsed and claims were made on its work meanwhile (or they couldn't be read) — the server
+    // Renewed, but it had lapsed and claims were made on its work meanwhile (or they, or whether it had lapsed, couldn't be read) — the server
     // says so since SMD-3654: renewed, and marked as a covered claim is, so the agent hears it before carrying on.
     const lapsed = result?.structuredContent?.lapsed;
     if (lapsed && (lapsed.at === null || lapsed.claimedSince === null || (Array.isArray(lapsed.claimedSince) && lapsed.claimedSince.length))) {
@@ -2999,7 +3002,7 @@ export async function renewClaim(cfg, claim) {
     }
     // A lapse with nothing since is said in the log too: the agent's own renewal after it sees a live claim, and the
     // rule's search after a lapse needs to know there was one (review pass 2).
-    if (lapsed && typeof lapsed.at === "string") o.line += ` (it had lapsed at ${lapsed.at}; no other claim was made or renewed on its work meanwhile)`;
+    if (lapsed && typeof lapsed.at === "string") o.line += quietLapse(lapsed.at);
     return o;
   }
   const code = typeof result?.structuredContent?.code === "string" ? result.structuredContent.code : undefined;
@@ -3110,7 +3113,7 @@ async function lapseCheck(cfg, claim, knownExpiry) {
   const lapsedAt = Date.parse(mine.expiresAt);
   const since = claims.filter((c) => String(c?.id).toLowerCase() !== claim.id && (Date.parse(c?.claimedAt) > lapsedAt || Date.parse(c?.renewedAt) > lapsedAt) && overlaps(c, mine));
   // Lapsed with nothing since: renewed, and the log says it had lapsed, as a brain since SMD-3654 says it (review pass 3: on an older brain it was a plain renewal).
-  if (!since.length) return { quiet: ` (it had lapsed at ${mine.expiresAt}; no other claim was made or renewed on its work meanwhile)` };
+  if (!since.length) return { quiet: quietLapse(mine.expiresAt) };
   // "not renewed" in the marker itself: the agent reads the file, not the log, to know it must renew after a carry-on (review pass 3).
   const said = markerSaid(scrubTokens(`CLAIMED_WHILE_LAPSED: not renewed; lapsed at ${mine.expiresAt}; since then ${since.map((c) => `${oneLine(String(c.holder ?? "?")).slice(0, 80)} claimed ${claim.ticket}${c.piece ? ` ${JSON.stringify(oneLine(String(c.piece)).slice(0, 100))}` : ""} at ${c.claimedAt}${c.renewedAt ? `, renewed at ${c.renewedAt}` : ""} (now ${c.state}, claim ${String(c.id).toLowerCase()})`).join("; ")}`));
   return { blocked: { code: "CLAIMED_WHILE_LAPSED", message: said }, line: `blocked: ${claimLabel(claim)} — ${said} (not renewed: another agent may have built part of the work; tell the user, and delete the .blocked.json beside its token file on their decision)` };
@@ -3133,7 +3136,7 @@ async function renewOne(b, path, claim) {
     else {
       o = await renewClaim(b.cfg, claim);
       if (check.note) o.line += check.note;
-      if (check.quiet && o.ok && !o.blocked && !o.line.includes(" (it had lapsed at ")) o.line += check.quiet;
+      if (check.quiet && o.ok && !o.blocked && !o.line.includes(QUIET_LAPSE_HEAD)) o.line += check.quiet;
     }
   } else o = await renewClaim(b.cfg, claim);
   if (o.blocked) o.line += ownPieceNote(o.whole ?? o.blocked.message, dirname(dirname(path)), claim.id);
@@ -3176,7 +3179,7 @@ function noteAgentClaimCall(hook, brains) {
   const renewed = new RegExp(`^Renewed your claim on .*? until (\\S+) \\(claim (${UUID})\\)\\.`, "i").exec(text);
   if (renewed && renewed[2].toLowerCase() === f.claim.id) {
     writeClaimState(f.claim.id, { ...readClaimState(f.claim.id), at: Date.now(), ok: Date.now(), expiresAt: renewed[1], last: `the agent renewed ${claimLabel(f.claim)} until ${renewed[1]}` });
-    // A renewal that revived a lapsed claim after claims were made or renewed on its work meanwhile (the server says so since SMD-3654): marked as a covered claim is.
+    // A renewal that revived a lapsed claim after claims were made or renewed on its work meanwhile, or couldn't read them or the lapse (the server says so since SMD-3654): marked as a covered claim is.
     if (REVIVED_COVERED_RE.test(text) && !existsSync(markerPath(f.path, "blocked"))) {
       const said = markerSaid(`CLAIMED_WHILE_LAPSED: ${scrubTokens(oneLine(text))}`);
       const wrote = writeMarker(f.path, f.claim, "blocked", { code: "CLAIMED_WHILE_LAPSED", message: said });

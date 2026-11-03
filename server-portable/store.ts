@@ -1200,6 +1200,9 @@ export type ClaimRefusalCode = "WORK_CLAIMED" | "CLAIM_NOT_FOUND" | "CLAIM_NOT_Y
  * claim, the claims in the way, and the token — set on claim_work's `claimed`
  * alone, and passed through untouched to the caller who claimed.
  */
+/** A claim's lease as a renewal starts from it (SMD-3654), and the work claim_work asks it about: store.claimLease. */
+export type ClaimLease = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean };
+export type ClaimLeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
 export type ClaimAnswer = {
   outcome: "claimed" | "renewed" | "released" | "already_released" | "refused";
   code: ClaimRefusalCode | null;
@@ -1932,15 +1935,17 @@ export interface ThoughtStore {
    * id, its expiry and whether it was released, by whom and why — never the
    * token or its hash. Given `work` (claim_work's), `ownOnThisWork` says whether
    * the claim is the caller's own on exactly that work, by 115's own cleaning of
-   * the ticket and piece and its own holder test: the one case 115's writer
-   * would have renewed, and makes a new claim of once it ended (review pass 4:
-   * the refusal read any work, and refused a split's fresh claims).
+   * the ticket and piece and its own holder test, or — no agent id, the registry
+   * away — a claim made with one under the caller's name, as ownWhileAway reads
+   * it (review pass 5). Its own ended claim on that work is where 115's writer
+   * makes a new claim without a word (review pass 4: the refusal read any work,
+   * and refused a split's fresh claims).
    * Null when no claim has that token (or, given `id`, when that claim hasn't).
    * 115's writers report the new lease, not the one renewed, so a renewal that
    * revived a lapsed claim learns it here. renew_claim gives the id, which the
    * primary key finds; claim_work has only the token.
    */
-  claimLease(token: string, id?: string, work?: { ticket: string; piece?: string; name: string; agentId?: string }): Promise<{ id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean } | null>;
+  claimLease(token: string, id?: string, work?: ClaimLeaseWork): Promise<ClaimLease | null>;
   /**
    * The claims on work overlapping a claim's — its ticket's whole, its piece, or
    * any piece of a whole-ticket claim, by 115's piece key — made or renewed after

@@ -6526,7 +6526,7 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && text(lapsedUnknown).endsWith(`(claim 11111111-1111-4111-8111-111111111111). Whether it had lapsed could not be read: ${check("2026-10-30T10:00:00.000Z, when this claim was made")}`)
       && /since then 5 claims were made or renewed on its work: SMD-3379 piece "PR 2 IGNORE" by codex, claimed at \S+ \(released, claim \S+\); SMD-3379 piece "PR 2 IGNORE" by codex, claimed at \S+, renewed at 2026-10-30T14:00:00\.000Z \(released, claim \S+\); and 3 more, which list_claims with include_ended shows\. Another agent/.test(text(lapsedMany))
       && !/lapsed/.test(text(live)) && (lapsedBusy.structuredContent?.lapsed as { claimedSince: unknown[] })?.claimedSince.length === 1 && !text(lapsedBusy).includes("\n"),
-    `a renewal that revived a lapsed claim says when it lapsed: nothing claimed since, a claim made since (its piece quoted: stop and tell the user), the first ten and a count of the rest, the claims unread, or whether it lapsed unread (one check, and what each answer means); a live claim's renewal says nothing of it (${text(lapsedBusy).slice(-140)})`);
+    `a renewal that revived a lapsed claim says when it lapsed: nothing claimed since, a claim made since (its piece quoted: stop and tell the user), the claims named and a count of the rest, the claims unread, or whether it lapsed unread (one check, and what each answer means); a live claim's renewal says nothing of it (${text(lapsedBusy).slice(-140)})`);
   // The core, over a store that answers as told: renew_claim reads the lease by id and token; a lease read that fails
   // is said as unknown, not as nothing; a lapse with more than ten claims since names ten and counts the rest (review pass 1).
   {

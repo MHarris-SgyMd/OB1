@@ -10,7 +10,7 @@
 // refusal, error message or log line carries it.
 
 import type { Principal } from "../auth.ts";
-import { ClaimRefused, UUID_RE, type ClaimAnswer, type WorkClaim } from "../store.ts";
+import { ClaimRefused, UUID_RE, type ClaimAnswer, type ClaimLease, type ClaimLeaseWork, type WorkClaim } from "../store.ts";
 import type { Ctx } from "./context.ts";
 import { ok, refuse, type HeldClaim, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -19,8 +19,9 @@ import { actorOf } from "./writes.ts";
 /**
  * A renewal that revived a lapsed claim (SMD-3654): when its lease had run out,
  * and the claims made or renewed on its work since — work another agent may
- * have built on while it was free, each with its `renewedAt`. `claimedSince` is null when they could not be read, and
- * holds the first SINCE_MAX, `moreSince` counting the rest. `at` is null when
+ * have built on while it was free, each with its `renewedAt`. `claimedSince`
+ * is null when they could not be read, and holds the first SINCE_MAX,
+ * `moreSince` counting the rest. `at` is null when
  * the lease before the renewal could not be read, so whether it had lapsed is
  * unknown (review pass 1: that was said as nothing at all). Absent on a renewal
  * of a live claim. 115 revives a lapsed claim nothing covers without a word;
@@ -99,9 +100,8 @@ const unattributedRefusal = (principal: Principal, id: string, forced: boolean) 
  * claim has the token (the writer will say so). "unread": the read failed, and a
  * renewal that then succeeds says it could not tell whether the claim had lapsed.
  */
-type LeaseBefore = { id: string; expiresAt: string; releasedAt: string | null; releasedBy: string | null; releaseReason: string | null; ownOnThisWork?: boolean } | null | "unread";
-type LeaseWork = { ticket: string; piece?: string; name: string; agentId?: string };
-async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string, work?: LeaseWork): Promise<LeaseBefore | undefined> {
+type LeaseBefore = ClaimLease | null | "unread";
+async function leaseBefore(ctx: Ctx, token: string | undefined, id?: string, work?: ClaimLeaseWork): Promise<LeaseBefore | undefined> {
   if (token === undefined) return undefined;
   try { return await (await ctx.store()).claimLease(token, id, work); } catch { return "unread"; }
 }
