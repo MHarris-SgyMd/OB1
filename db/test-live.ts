@@ -746,12 +746,11 @@ if (want("5d")) {
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   // In the rest or a whole run, [5b]'s 2,000 rows are dead after the DELETE
   // above (in extract, where [5d] runs first, there are none). Unvacuumed,
-  // their 28
-  // pages stay and the load goes in after them; the sample draws them and
-  // counts them as seen with no hit (041's LEFT join, on purpose): 49 misses
-  // in 5,000 draws at 15,000 rows, about one run in six. The page check after
-  // the load holds this. After the DROP INDEX, so it does not clean an index
-  // about to go.
+  // their 28 pages stay and the load goes in after them; the sample draws
+  // them and counts them as seen with no hit (041's LEFT join, on purpose): 49
+  // misses in 5,000 draws at 15,000 rows, about one run in six. The page check
+  // after the load holds this. After the DROP INDEX, so it does not clean an
+  // index about to go.
   await sql.unsafe(`VACUUM thoughts`);
   // User triggers off for the load, as the bench does: 008's audit trigger
   // would write a row per row (15,000 here, then 15,000 more for the DELETE)
