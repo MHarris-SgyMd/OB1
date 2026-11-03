@@ -10397,47 +10397,48 @@ if (want("10h")) {
         `a stop while a lost poll's hand-back waits ends the run there, said so, the claim back as the row is let go (waited ${handWaited}, exit ${handRun?.code ?? "still running at 20 s"}): ${handRun?.stdout.trim().slice(-200)} | ${handRun?.stderr.trim().slice(0, 300)}`);
       await drop([handT]);
 
-      // …and a first stop in before the lost poll's hand-back: the poll passes its own over for the stop, and the run's
-      // end hands back alone, its wait on the claim's row RELEASE_WAIT's whatever the budget (SMD-3737: bounded at the
-      // budget it lived, no row holding that hand-back to it alone). The stop is sent as the row is taken at the
-      // question, so the release waits past the budget with the stop already in; the row is let go BUDGET_MS + 500 after
-      // the end's hand-back is seen waiting on it, or as the run ends.
+      // …and a first stop in before the lost poll's hand-back: the poll passes its own over for the stop (its first
+      // check), and the run's end hand-back, in the loop's finally, is left the claim alone, its wait on the claim's row
+      // RELEASE_WAIT's whatever the budget (SMD-3737: bounded at the budget it lived, no row holding that hand-back to
+      // it alone). The stop is sent as the row is taken at the question, so the release waits past the budget with the
+      // stop already in. The poll's line, said before a hand-back is seen waiting, makes that hand-back the end's: a
+      // poll handing back before its stop check says it once its own lands (SMD-3737 review pass 1, mutant: that poll,
+      // beside an end's hand-back bounded at the budget, lived). The row is let go BUDGET_MS + 500 after the end's is
+      // seen waiting, the hold that fails one bounded at the budget, or as the run ends or the poll's 20 s do.
       const [endT] = await seedAll(["Budget note 18: sweep-pass-good work, its release and the run's end hand-back held as the run stops."]);
-      const endHolder = new SQL({ url: URL_!, max: 1 });
-      const ec = await endHolder.reserve();
+      const endLet = Promise.withResolvers<void>();
+      const endFree = holdClaimRow("Budget note 18", endT, endLet.promise);
+      const endHold = onOwn;
       const endStop = new AbortController();
-      let endHeld: Promise<void> | null = null;
+      onOwn = (t) => {
+        const held = endHold?.(t);
+        return t.includes("Budget note 18") ? Promise.resolve(held).then(() => endStop.abort()) : held;
+      };
+      /** The run's stderr lines as each is said, so its line's order beside the hand-back's wait can be read. */
+      const endSaid: string[] = [];
       let endRun: SweepRun | null = null;
       let endWaited = false;
-      onOwn = (t) => {
-        if (!t.includes("Budget note 18") || endHeld !== null) return;
-        endHeld = (async () => {
-          await ec`BEGIN`;
-          await ec`SELECT 1 FROM thought_work_claims WHERE thought_id = ${endT}::uuid AND work_type = ${POOL} FOR UPDATE`;
-          endStop.abort();
-        })();
-        return endHeld;
-      };
+      let endSaidFirst = false;
       try {
         let endDone = false;
-        const endRunning = settled(sweep({ follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([endStop.signal, backstop()]) })).finally(() => { endDone = true; });
+        const endRunning = settled(caught((w) => sweepSubjects({ url: URL_!, env, follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([endStop.signal, backstop()]),
+          writer: { out: w.out, err: (l) => { endSaid.push(l); w.err(l); } } }))).finally(() => { endDone = true; });
         endWaited = await pollUntil(async () => endDone || await waitingOnLock("release_claims_for_worker("), 20_000) && !endDone;
+        endSaidFirst = endSaid.some((l) => l.endsWith(": the run loses this poll, and its stop ends it there"));
         if (endWaited) await Bun.sleep(BUDGET_MS + 500);
-        await ec`COMMIT`;
+        endLet.resolve();
         endRun = await orHung(endRunning, 20_000);
       } finally {
-        onOwn = null;
         endStop.abort();
-        await (endHeld as Promise<void> | null)?.catch(() => {});
-        await ec`COMMIT`.catch(() => {});
-        ec.release();
-        await endHolder.close({ timeout: 5 });
+        endLet.resolve();
+        await endFree();
       }
       const endClaim = (await claimOf(endT))?.status;
-      assert(endWaited && endRun?.code === 0 && endClaim === "pending"
+      const endFailSaid = /the claims this run holds could not go back to the pool/.test(endRun?.stderr ?? "");
+      assert(endWaited && endSaidFirst && endRun?.code === 0 && endClaim === "pending" && !endFailSaid
           && new RegExp(`^ {2}${endT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`, "m").test(endRun.stderr)
-          && !/the claims this run holds could not go back to the pool/.test(endRun.stderr) && /stopped after 1 thought\(s\): what it held is back in the pool/.test(endRun.stderr),
-        `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
+          && /stopped after 1 thought\(s\): what it held is back in the pool/.test(endRun.stderr),
+        `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, the stop's line said first ${endSaidFirst}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}, the hand-back's failure said ${endFailSaid}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
       await drop([endT]);
 
       // …and a hard stop while a thought's own write waits past it: the thought unfinished, the stop's to hand back,
