@@ -117,6 +117,53 @@ at_row() {
 # cut_off RC: what a failing row's verdict adds when limit stopped it.
 cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
 
+# keep_output NAME OUT: a failing row's whole output, kept in a file of its own
+# in PARITY_TMP, outside the lanes' directory the exit removes, its path
+# printed under the row's excerpt, so a flake that does not come back can
+# still be read (SMD-3607). The files stay until the system clears its
+# temporary directory; clear them by hand as ci-parity-failed.*, never
+# ci-parity-*, which takes a running run's limit markers too and stops every
+# row in hand.
+keep_output() {
+  local slug file
+  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)
+  file=$(mktemp "$PARITY_TMP/ci-parity-failed.$slug.XXXXXX") && printf '%s\n' "$2" > "$file" && echo "        full output: $file"
+}
+# excerpt OUT [no-tally|stopped]: the lines that say what failed, at most
+# three, then how many more. A failed assertion as the suites print it — a ✗
+# or FAIL beginning the line after its indent, then a space or the line's end
+# (createAssert's "  ✗  label", the db/ suites' own "  ✗ label", the
+# self-checks' "FAIL name") — and not a line that only quotes one: a passing
+# "  ✓  … (✗ …)" row of test-preflight's took the excerpt twice (SMD-3607).
+# Not a closing summary either, a bare "FAIL" or the checker's "FAIL — N
+# violation(s):", which name no failure. A line repeated, as a check printed
+# on stdout and again on stderr, counts once. Else a crash's errors, as Bun
+# prints them from the line's start ("error: …", "TypeError: …",
+# "PostgresError: …", "ENOENT: …"), the last three, since Bun prints its own
+# last; else the last three lines that are not blank or Bun's version
+# trailer. no-tally, for a failing suite that printed no assertion tally
+# (a crash, or a script with a tally of its own), adds its last crash line
+# under its failure lines (SMD-3607 review pass 2: a failed row then a throw
+# showed the row alone). stopped, for a row its limit cut off, reads no crash
+# line: an error a suite logged and lived through, as test-jev's "error:
+# connection reset", would pass for the cause; its failure lines show, else
+# its tail, where it stopped.
+excerpt() {
+  local mode="${2:-}" lines crash= n
+  [ "$mode" = stopped ] || crash=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|E[A-Z]+|error): ')
+  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$' | awk '!seen[$0]++')
+  if [ -n "$lines" ]; then
+    printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
+    n=$(printf '%s\n' "$lines" | grep -c .)
+    [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
+    [ "$mode" != no-tally ] || [ -z "$crash" ] || printf '%s\n' "$crash" | tail -1 | sed 's/^/        /'
+  elif [ -n "$crash" ]; then
+    printf '%s\n' "$crash" | tail -3 | sed 's/^/        /'
+  else
+    printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$|^Bun v[0-9]' | tail -3 | sed 's/^/        /'
+  fi
+}
+
 # Each directory CI installs, once, from its lockfile. A lockfile out of step
 # with package.json is reported here, apart from anything that then fails.
 install() {
@@ -125,6 +172,7 @@ install() {
   if [ "$rc" -ne 0 ]; then
     row bad "$dir" "bun install --frozen-lockfile$(cut_off "$rc")"
     printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
+    keep_output "install $dir" "$out"
     FAILED=1
   fi
 }
@@ -155,11 +203,8 @@ suite() {
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
     row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
-    if printf '%s\n' "$out" | grep -qE '✗|error:'; then
-      printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
-    else
-      printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
-    fi
+    excerpt "$out" "$([ "$rc" -eq 124 ] && echo stopped || { [ -z "$res" ] && echo no-tally; })"
+    keep_output "$name" "$out"
     FAILED=1
   else
     row ok "$name" "${res:-exit 0} · $took"
@@ -196,6 +241,7 @@ typecheck() {
     else
       printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     fi
+    keep_output "typecheck $dir" "$out"
     FAILED=1
   fi
 }
@@ -441,7 +487,8 @@ main() {
   # sent to this script alone exits once the database lane's row in hand ends,
   # leaving the lanes to run on unreported, each row within its limit and each
   # container removed as its lane ends; their rows go with the lanes'
-  # directory, which the exit removes.
+  # directory, which the exit removes, and a row of theirs that fails keeps its
+  # output in PARITY_TMP all the same, its path printed only to that directory.
   trap 'exit 129' HUP
   trap 'stop_lanes; exit 130' INT QUIT TERM
   trap drop_lanes EXIT
@@ -498,7 +545,7 @@ main() {
   wait_lane "$FREE_PID" free "The database-free lane"
   FREE_PID=''
   echo
-  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s)"
+  [ "$FAILED" -eq 0 ] && echo "  all suites passed in $SECONDS s" || echo "  FAILURES above ($SECONDS s), a failing row's full output in the file named under it"
   return "$FAILED"
 }
 
