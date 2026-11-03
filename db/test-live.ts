@@ -7215,7 +7215,7 @@ if (want("10h")) {
   const BUDGET_SESSION = { statement_timeout: String(BUDGET_MS) };
   /**
    * The budget of a case that stops the run once it sees a statement wait, inside the wait: twice BUDGET_MS, as it was,
-   * since a poll every 250 ms sees the wait, and a slow poll let BUDGET_MS end first (SMD-3713 review pass 1, cold read).
+   * since a poll every 250 ms sees the wait, and a slow poll let BUDGET_MS end first (SMD-3713 review pass 1, walkthrough).
    */
   const WATCHED_MS = BUDGET_MS * 2;
   const WATCHED_SESSION = { statement_timeout: String(WATCHED_MS) };
@@ -7556,7 +7556,9 @@ if (want("10h")) {
     // their own, as [8]'s two claimers: a begin on the shared client waited without end while a connection of it was
     // reserved.
     const holder = new SQL({ url: URL_!, max: 1 }), closer = new SQL({ url: URL_!, max: 1 }), prober = new SQL({ url: URL_!, max: 1 });
-    let lockWait = "", facetFree = false;
+    // The probe counts only while the close waits: one after its lock_timeout ended it finds the facet free whatever the
+    // close took (SMD-3713 review pass 2, walkthrough: unchecked, and the timeout halved to 1.5 s).
+    let lockWait = "", facetFree = false, probedWaiting = false;
     try {
       await holder.begin(async (h: SQL) => {
         await h`SELECT pg_advisory_xact_lock(hashtextextended(${`ob1:subject:${filed}`}, 0))`;
@@ -7565,15 +7567,21 @@ if (want("10h")) {
           await tx`SELECT close_thought_subject(${filed}::uuid, ${filedNow.id}::uuid, ${filedNow.current})`;
           return "not held off";
         }).catch((e: { errno?: unknown; code?: unknown }) => String(e.errno ?? e.code ?? "an error"));
+        let closed = false, sawWait = false;
+        void closing.then(() => { closed = true; });
         for (let i = 0; i < 100; i++) {
           const [{ waiting }] = (await prober`SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`) as { waiting: number }[];
-          if (waiting > 0) break;
+          if (waiting > 0) {
+            sawWait = true;
+            break;
+          }
           await Bun.sleep(20);
         }
         facetFree = await prober.begin(async (tx: SQL) => {
           await tx`SELECT 1 FROM thought_facets WHERE id = ${filedNow.id}::uuid FOR UPDATE NOWAIT`;
           return true;
         }).catch(() => false);
+        probedWaiting = sawWait && !closed;
         lockWait = await closing;
       });
     } finally {
@@ -7581,8 +7589,8 @@ if (want("10h")) {
       await closer.close();
       await prober.close();
     }
-    assert(lockWait === "55P03" && facetFree && (await standingOf(filed))?.id === filedNow.id,
-      `a close while the door's lock is held waits for it, its facet free meanwhile, its subject standing (${lockWait}, facet ${facetFree ? "free" : "held"})`);
+    assert(lockWait === "55P03" && facetFree && probedWaiting && (await standingOf(filed))?.id === filedNow.id,
+      `a close while the door's lock is held waits for it, its facet free meanwhile, its subject standing (${lockWait}, facet ${facetFree ? "free" : "held"}${probedWaiting ? "" : ", probed with no close waiting"})`);
     // Another model's subject under the current question is current: a pooling leaves it out (review pass 1: [10h] held
     // only stub-judge's, so a query keyed to the configured model passed).
     const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2r");
@@ -10040,9 +10048,10 @@ if (want("10h")) {
       // abort ends the run's loop at once, so its end's hand-back starts beside the stop's, and either may wait on the row
       // first; the one behind finds nothing left, 0. Taken to be 1, the stop's count failed 4 of 30 local runs under load,
       // the unchanged test's among them, the row SMD-3712's flake failed; so either count is taken, the claim read back in
-      // the pool as the stop's hand-back lands, and that no sooner than the budget after the stop, which only a hold past
-      // the budget gives (SMD-3713 review pass 1, mutant: a hold under the budget, or a stop's hand-back handing back
-      // nothing, lived). Past, the row is held to the run's end, where a 4 s hold raced the two hand-backs' bounds.
+      // the pool as the stop's hand-back lands, and that 500 ms or more past the budget after the stop, which only a hold
+      // past the budget gives (SMD-3713 review pass 1, mutant: a hold under the budget, or a stop's hand-back handing back
+      // nothing, lived). Past, the row is held to the run's end, not 4 s, which a slow host could have spent before the
+      // two hand-backs' bounds ran out.
       const handBacks: Record<string, { code: number | null; claim: string | undefined; said: boolean; stopLine: string; hard: string; hardClaim: string | undefined; hardMs: number }> = {};
       for (const [what, holdMs, waitMs] of [["within", BUDGET_MS + 1500, 30_000], ["past", null, BUDGET_MS + 100]] as const) {
         const [handT] = await seedAll([`Hand-back note ${what}: sweep-pass-good work, its claim's row held as the run hands it back.`]);
@@ -10060,7 +10069,7 @@ if (want("10h")) {
             await hc`SELECT 1 FROM thought_work_claims WHERE thought_id = ${handT}::uuid AND work_type = ${POOL} FOR UPDATE`;
             (stopOf as PassStop | null)?.();
             const stoppedAt = Date.now();
-            hardOf = (stopOf as PassStop | null)?.()?.then(async (n) => ({ n, claim: (await claimOf(handT))?.status, ms: Date.now() - stoppedAt })) ?? null;
+            hardOf = (stopOf as PassStop | null)?.()?.then(async (n) => ({ n, claim: (await claimOf(handT).catch(() => undefined))?.status, ms: Date.now() - stoppedAt })) ?? null;
             await (holdMs === null ? ran.promise : Bun.sleep(holdMs));
             await hc`COMMIT`;
           })();
