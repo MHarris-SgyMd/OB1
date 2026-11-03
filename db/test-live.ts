@@ -10397,16 +10397,14 @@ if (want("10h")) {
         `a stop while a lost poll's hand-back waits ends the run there, said so, the claim back as the row is let go (waited ${handWaited}, exit ${handRun?.code ?? "still running at 20 s"}): ${handRun?.stdout.trim().slice(-200)} | ${handRun?.stderr.trim().slice(0, 300)}`);
       await drop([handT]);
 
-      // …and a first stop in before the lost poll's hand-back: the poll passes its own over for the stop (its first
-      // check), and the run's end hand-back, in the loop's finally, is left the claim alone, its wait on the claim's row
-      // RELEASE_WAIT's whatever the budget (SMD-3737: bounded at the budget it lived, no row holding that hand-back to
-      // it alone). The stop is sent as the row is taken at the question, so the release waits past the budget with the
-      // stop already in. The poll's line, said before a hand-back is seen waiting, makes that hand-back the end's, and
-      // holds the poll to its first check: a poll handing back before its stop check says it once its own lands (SMD-3737
-      // review pass 1, mutant: that poll, beside an end's hand-back bounded at the budget, lived). It is read as the
-      // wait is seen, not after the hold, where a poll's own hand-back bounded at the budget would have given up and
-      // said it (review pass 2, mutant). The row is let go BUDGET_MS + 500 after the end's is seen waiting, the hold
-      // that fails one bounded at the budget, or as the run ends or the poll's 20 s do.
+      // …and a first stop in before the lost poll's hand-back: the poll's first check passes its own hand-back over for
+      // the stop, so the run's end hand-back, in the loop's finally, returns the claim by itself, and must wait up to
+      // RELEASE_WAIT whatever the budget (SMD-3737: a mutant bounding that hand-back at the budget passed every other
+      // row). The stop is sent once the row is held at the question, so the release waits past the budget with the
+      // stop already in. The release's lost-poll line, read as a hand-back is first seen waiting, makes that hand-back
+      // the end's: a poll that handed back before its stop check has not said it yet, whether its hand-back then lands
+      // or gives up. The row is let go BUDGET_MS + 500 after the wait is seen, which fails a hand-back that gives up at
+      // the budget, or as the run ends or the poll's 20 s do.
       const [endT] = await seedAll(["Budget note 18: sweep-pass-good work, its release and the run's end hand-back held as the run stops."]);
       const endLet = Promise.withResolvers<void>();
       const endFree = holdClaimRow("Budget note 18", endT, endLet.promise);
@@ -10440,7 +10438,7 @@ if (want("10h")) {
       assert(endWaited && endSaidFirst && endRun?.code === 0 && endClaim === "pending" && !endFailSaid
           && new RegExp(`^ {2}${endT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`, "m").test(endRun.stderr)
           && /stopped after 1 thought\(s\): what it held is back in the pool/.test(endRun.stderr),
-        `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, the stop's line said first ${endSaidFirst}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}, the hand-back's failure said ${endFailSaid}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
+        `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, the release's lost-poll line said first ${endSaidFirst}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}, the hand-back's failure said ${endFailSaid}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
       await drop([endT]);
 
       // …and a hard stop while a thought's own write waits past it: the thought unfinished, the stop's to hand back,
