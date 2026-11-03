@@ -1516,8 +1516,8 @@ jobs:
       - name: The runner's CPU while the legs ran
         if: ${{ !cancelled() }}
         run: |
-          model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo)
-          echo "CPU: ${model:-no model name in /proc/cpuinfo}, $(nproc) of them"
+          model=$(awk -F': *' '/^model name/ && !m { print $2; m = 1 }' /proc/cpuinfo); cpus=$(nproc)
+          echo "CPU: ${model:-no model name in /proc/cpuinfo}, $cpus of them"
           [ -s "$RUNNER_TEMP/cpu.log" ] || { echo "no samples: the sampler did not run"; exit 0; }
           # The window says what it could read: the legs' start, else the
           # job's; the last leg's end, else this step's start.
@@ -1531,7 +1531,7 @@ jobs:
             done < "$RUNNER_TEMP/data-layer.legs"
           fi
           if [ -n "$from" ]; then span="from the legs' start to $ended"; else from=0; span="from the job's start to $ended, data-layer.started unread"; fi
-          awk -v from="$from" -v to="$to" -v cpus="$(nproc)" -v span="$span" '
+          awk -v from="$from" -v to="$to" -v cpus="$cpus" -v span="$span" '
             NF == 10 {
               busy = $2 + $3 + $4 + $7 + $8; total = busy + $5 + $6 + $9
               if (seen && $1 > from && $1 <= to && total > t0) {
