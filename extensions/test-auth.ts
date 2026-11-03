@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
  * test-auth.ts — every vendored server authenticates through the core server's
- * auth path: the extension servers (SMD-1252, FORK.md change 64; six of the
- * seven, family-calendar's a plugin since SMD-2311) and the
+ * auth path: the extension servers (SMD-1252, FORK.md change 64; four of the
+ * seven, family-calendar, home-maintenance and household-knowledge plugins
+ * since SMD-2311) and the
  * recipes and integrations that compared a key the same way — six more MCP
  * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
  * change 67).
@@ -153,11 +154,7 @@ const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o
 // REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
 // the classifier cannot see them.
 const SERVERS: Server[] = [
-  // The extension servers (change 64): six of the seven, family-calendar's a plugin since SMD-2311.
-  ext("home-maintenance/index.ts", ["get_upcoming_maintenance", "search_maintenance_history"],
-    ["add_maintenance_task", "log_maintenance"]),
-  ext("household-knowledge/index.ts", ["search_household_items", "get_item_details", "list_vendors"],
-    ["add_household_item", "add_vendor"]),
+  // The extension servers (change 64): four of the seven, family-calendar, home-maintenance and household-knowledge plugins since SMD-2311.
   ext("job-hunt/index.ts", ["get_pipeline_overview", "get_upcoming_interviews", "search_job_contacts"],
     ["add_company", "add_job_posting", "add_job_contact", "submit_application", "schedule_interview",
      "log_interview_notes", "link_contact_to_professional_crm"], { health: "/" }),

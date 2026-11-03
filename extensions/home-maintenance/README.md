@@ -19,97 +19,64 @@ The HVAC tech mentioned the pump was showing wear 18 months ago. The warranty on
 
 A maintenance scheduling and history system. Track recurring tasks, log completed work, and let your agent surface what needs attention before it becomes an emergency.
 
+On this fork the tracker is a **plugin**: [`plugins/home-maintenance`](../../plugins/home-maintenance/) (SMD-2311). It runs inside the brain's own servers, behind the brain's own keys, and its tools appear on the MCP connector you already have. There is no separate server, key list or connector to set up. Its tables live in a schema of its own, `plugin_home_maintenance`, which the brain's migrator makes when you turn the plugin on.
+
+**Tables:**
+- `maintenance_tasks` — One-time or recurring tasks, each with its next due date and priority
+- `maintenance_logs` — The work done: when, by whom, what it cost, what they recommended
+
+**Tools** (each also a REST route under `/v1/plugins/home-maintenance/`):
+- `home_maintenance_add_maintenance_task` — Add a one-time or recurring task
+- `home_maintenance_list_maintenance_tasks` — List every task, with its id
+- `home_maintenance_log_maintenance` — Log work done; the task's next due date moves on
+- `home_maintenance_get_upcoming_maintenance` — What is due soon, and what is overdue
+- `home_maintenance_search_maintenance_history` — Search the work done by task, category or dates
+
+The plugin's [README](../../plugins/home-maintenance/README.md) gives each one's input, output and refusals.
+
 ## What You'll Learn
 
 - Date handling and scheduling logic in PostgreSQL
 - One-to-many relationships (task → multiple log entries)
-- Automatic timestamp updates with triggers
-- Time-based queries (upcoming tasks, date ranges)
-- Computed fields (calculating next_due based on frequency)
+- Time-based queries (upcoming and overdue tasks, date ranges)
+- Computed fields (calculating next_due based on frequency, in the same transaction as the log)
 - Historical logging patterns
 
 ## Prerequisites
 
-- Working Open Brain setup
-- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
+- Working Open Brain setup: the compose stack ([`SETUP.md`](../../SETUP.md)) and an MCP client connected to it ([Getting Started](../../docs/01-getting-started.md), Steps 6 and 7)
 - Extension 1 recommended but not required
-
-## Credential Tracker
-
-You'll reference these values during setup. Copy this block into a text editor and fill it in as you go.
-
-> **Your brain's connection string** is the one value this server needs from your setup — with the compose stack, [Run a Remote MCP Server, Step 1](../../primitives/deploy-remote-mcp/README.md#step-1-apply-the-extensions-schema) says how the database reaches the host and what the URL looks like.
-
-```text
-HOME MAINTENANCE -- CREDENTIAL TRACKER
---------------------------------------
-
-DATABASE (from your Open Brain setup)
-  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
-
-GENERATED DURING SETUP
-  Default User ID:       ____________
-  MCP Access Key:        ____________  (same key for all extensions)
-  MCP Server URL:        ____________
-  MCP Connection URL:    ____________
-
---------------------------------------
-```
 
 ## Steps
 
-### 1. Set Up the Database Schema
+### 1. Turn on the Plugin
 
-Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with — `psql "$DATABASE_URL" -f extensions/home-maintenance/schema.sql`, or paste it into the SQL client you use. This creates two tables, `maintenance_tasks` and `maintenance_logs`, each with a `user_id` column the server fills from `DEFAULT_USER_ID`.
+Add the plugin to `deploy/.env`, with the secret the plugins' database logins are derived from (skip the second line if another plugin already set it):
 
-Nothing is needed first. Upstream's file enabled row-level security on Supabase's `auth.uid()`, and this README used to give two stub functions to create before it; this fork removed the policies (SMD-1810) — one operator's brain on plain Postgres, the server scoping rows itself (SMD-1716). The role that applies the file owns the tables and needs no grant; any other role is granted them by `bun db/migrate.ts --grant <role>` (`db/README.md`, "Grants for a capturing role", the **extensions** group).
+```
+OB1_PLUGINS=home-maintenance
+OB1_PLUGIN_DB_PASSWORD=<openssl rand -hex 32>
+```
 
-### 2. Generate Your User ID
-
-The extension needs a user ID to scope your data. Generate a UUID and save it in your credential tracker:
+Then recreate the migrator and the servers from `deploy/`, naming the stack's other `-f` files as you brought it up:
 
 ```bash
-# macOS / Linux
-uuidgen | tr '[:upper:]' '[:lower:]'
-
-# Or use any UUID generator — the value just needs to be unique to you
+docker compose up -d migrate api mcp
+docker compose up -d --force-recreate --no-deps app   # the operator GUI, so it reaches the recreated REST core; it signs everyone out
 ```
 
-Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
+The migrator makes the plugin's tables, and the servers start with its five tools.
 
-> If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
+### 2. Check Your AI Sees It
 
-### 3. Run the MCP Server
+Your MCP client lists the `home_maintenance_*` tools on the brain's own connector, once it refreshes its tool list. A read key sees the three that read. A write key sees all five.
 
-This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and is Bun-native — `process.env` for its environment, a default-exported `{ port, fetch }` that `bun` serves (SMD-1799) — one HTTP process, as every server here is ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/) walks it; FORK.md change 74). From a checkout of this repository:
+### 3. Test It
 
-```bash
-(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
-SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
-MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
-DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8787 bun extensions/home-maintenance/index.ts
-```
-
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Run a Remote MCP Server, Step 3](../../primitives/deploy-remote-mcp/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). Bun prints its start line, `Started development server: http://localhost:8787` (`Started server:` under `NODE_ENV=production`; `PORT` unset, it listens on 8000 — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the compose stack ([`SETUP.md`](../../SETUP.md)); with the proxy on this host, add `OB1_LISTEN_HOST=127.0.0.1` to the command, so the server listens on the loopback alone. `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
-
-> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all four against a real Postgres carrying this `schema.sql` in CI — the due-date window with `.not()`, the trigger that moves `next_due`, the task embedded on every history row (FORK.md change 77, SMD-1588; change 74's review had found two of the four failing on the shim).
-
-### 4. Connect to Your AI
-
-Follow the [Remote MCP Connection](../../primitives/remote-mcp/) guide to connect this extension to Claude Desktop, ChatGPT, Claude Code, or any other MCP client.
-
-| Setting | Value |
-|---------|-------|
-| Connector name | `Home Maintenance` |
-| URL | Your **MCP Connection URL** from the credential tracker |
-
-### 5. Test the Extension
-
-Try these commands with Claude:
+Try these prompts:
 
 ```
-Add a maintenance task: HVAC filter replacement, every 90 days, next due April 15th
+Add a maintenance task: HVAC filter replacement, every 90 days, next due in three weeks
 ```
 
 ```
@@ -117,7 +84,7 @@ Log maintenance: I just changed the HVAC filter, cost $45, did it myself
 ```
 
 ```
-What maintenance is coming up in the next 30 days?
+What maintenance is coming up in the next 30 days, and is anything overdue?
 ```
 
 ```
@@ -132,15 +99,15 @@ The maintenance tracker introduces patterns you'll see throughout the remaining 
   - Extension 5 (Professional CRM): contact → interaction logs
   - Extension 6 (Job Hunt Pipeline): application → interview logs
 
-- **Auto-calculated dates**: The `log_maintenance` tool automatically updates `last_completed` and calculates `next_due` based on `frequency_days`. This computed field pattern shows how your database can maintain derived state without manual updates.
+- **Auto-calculated dates**: Logging work updates the task's `last_completed` and calculates `next_due` from `frequency_days`, in the same transaction, so the task and its history never disagree.
 
-- **Time-based queries**: The `get_upcoming_maintenance` tool demonstrates how to query for records in a date range — essential for calendar systems (Extension 3) and deadline tracking (Extension 6).
+- **Time-based queries**: Upcoming maintenance shows how to query for records in a date range, and what is overdue — essential for calendar systems (Extension 3) and deadline tracking (Extension 6).
 
-- **Historical search**: The `search_maintenance_history` tool shows how to search across both parent and child tables with date filtering.
+- **Historical search**: Searching the history crosses both tables with date filtering.
 
 ### Connection to Extension 1
 
-If you built Extension 1 (Household Knowledge Base), you can reference your `household_vendors` when logging maintenance. The `performed_by` field in maintenance logs can store vendor names, creating an informal link between systems. In a production setup, you might add a foreign key to make this relationship explicit.
+If you built Extension 1 (Household Knowledge Base), you can name your vendors when logging maintenance. The `performed_by` field holds the vendor's name, an informal link between the two.
 
 ## Expected Outcome
 
@@ -148,8 +115,8 @@ After completing this extension, you should be able to:
 
 1. Create recurring and one-time maintenance tasks
 2. Log completed maintenance with cost and notes
-3. Automatically calculate next due dates based on frequency
-4. Query upcoming maintenance within a time window
+3. Have next due dates calculated from each task's frequency
+4. See upcoming and overdue maintenance
 5. Search maintenance history by task, category, or date range
 
 Your agent will be able to answer questions like:
@@ -160,22 +127,25 @@ Your agent will be able to answer questions like:
 
 ## Troubleshooting
 
-For common issues (connection errors, 401s, deployment problems), see [Common Troubleshooting](../../primitives/troubleshooting/).
+For common issues (connection errors, 401s), see [Common Troubleshooting](../../primitives/troubleshooting/). The plugin's own troubleshooting is in [its README](../../plugins/home-maintenance/README.md#troubleshooting).
 
 **Extension-specific issues:**
 
-**"next_due not updating after logging maintenance"**
-- Verify that the task has a `frequency_days` value set
-- Check that the `log_maintenance` tool completed successfully
-- For one-time tasks (frequency_days = null), next_due remains null
+**No `home_maintenance_*` tools**
+- Check that `OB1_PLUGINS` in `deploy/.env` names `home-maintenance`, and that the migrator and servers were recreated after it was set
+- Refresh your client's tool list
 
-**"Date parsing errors"**
-- Ensure dates are in ISO 8601 format: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SSZ`
+**"next_due not updating after logging maintenance"**
+- A one-time task (no `frequency_days`) is done once logged, with no next due date
+- A log of work older than the task's last completion keeps the task where it was
+
+**"Date errors"**
+- Dates are `YYYY-MM-DD`
 
 ## Next Steps
 
-**Extension 3: Family Calendar** — Build on your date-handling skills to create a shared calendar system with event reminders and conflict detection. The calendar extends the time-based query patterns you learned here and introduces more complex date logic (recurring events, all-day vs. timed events, timezone handling).
+**Extension 3: Family Calendar** — Build on your date-handling skills to create a shared calendar of the household's activities and the dates to remember. The calendar extends the time-based query patterns you learned here and introduces weekly activities and yearly dates.
 
 [Continue to Extension 3 →](../family-calendar/README.md)
 
-> **Tip:** You now have two MCP servers connected. As you add more, consider which ones to keep active per conversation. The [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) covers strategies for managing your tool surface area.
+> **Tip:** As you turn on more plugins, your AI sees more tools. The [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) covers strategies for managing your tool surface area.

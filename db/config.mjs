@@ -2670,8 +2670,9 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
   // The learning path's extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810): five of the six, family-calendar's a
-  // plugin since SMD-2311, its tables in its own schema under its own role.
+  // README's Step 1 says (SMD-1810): three of the six, family-calendar's,
+  // home-maintenance's and household-knowledge's plugins since SMD-2311, their
+  // tables in their own schemas under their own roles.
   // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
   // granted nothing — Supabase's default privileges carried its service role;
   // the policies are gone, and this group is what a role other than the
@@ -2679,10 +2680,6 @@ export const ROLE_GRANTS = Object.freeze({
   // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
   // both).
   extensions: Object.freeze([
-    Object.freeze({ table: "household_items",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "household_vendors",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "maintenance_tasks",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
-    Object.freeze({ table: "maintenance_logs",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
     Object.freeze({ table: "recipes",               privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "meal_plans",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "shopping_lists",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
