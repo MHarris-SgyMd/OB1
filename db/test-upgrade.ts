@@ -710,7 +710,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // ([20bg]); 116 adds priority assertions — three tables, two refusing
   // triggers and nineteen functions — refusing by name without 008, 046, 061,
   // 068, 082 or 115 ([20bh]); 117 adds open items — three tables, four
-  // refusing triggers and twenty-three functions, and redefines two of 116's
+  // refusing triggers and twenty-eight functions, and redefines three of 116's
   // — refusing by name without 115 or 116 ([20bi]) — all
   // recorded by the
   // planted ledger with their

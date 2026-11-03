@@ -2458,13 +2458,18 @@ thought, and change only an item it opened under its envelope's agent id that
 no other key has changed since, or one that stands for a row of the plugin its
 call came through (a plugin hook, `hook:<plugin>`, has no agent id) — asked
 before any existence answer, and refused alike for an item that is not there
-(`ITEM_NOT_YOURS`). A due time that is not one, or an infinite one, is refused
-(22023); text without an offset is read in the session's time zone, so the
+(`ITEM_NOT_YOURS`); one whose envelope carries no agent id of its own opens no
+item but a plugin row's (`ITEM_UNATTRIBUTED`), since it could never prove one its
+own. A missing origin thought is `ORIGIN_NOT_FOUND`. A due time that does not
+start with a digit (Postgres's `now`, `tomorrow`, `epoch`), is no time, or is
+infinite is refused (22023); text without an offset is read in the session's time zone, so the
 server passes instants. 117 replaces 116's
 `ob1_priority_item_exists`, which now answers kind `item`, and `assert_priority`,
 whose capture rule now admits an open item the key owns, and redefines
 `ob1_priority_actor` on `ob1_actor_maker`, the maker reader the item writers
-share (its answers as 116's). `open_item_history`
+share (its answers as 116's); `ob1_priority_item_exists` is PL/pgSQL now, so a
+role granted the priority group at 116 reaches `open_items` only for an item of
+kind `item`. `open_item_history`
 reads one item, every event and every proposal. Each writer raises (0A000) above
 READ COMMITTED and takes an advisory lock on its item, then its projection row.
 An item's text, owner and reasons may hold personal data: `forget_thought`

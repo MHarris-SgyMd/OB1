@@ -73,7 +73,9 @@
 --        that stands for a row of the plugin its call came through (a plugin
 --        hook's principal, hook:<plugin>, has no agent id by design: the row
 --        is the plugin's) — ob1_item_owns. Asked before any existence answer,
---        and refused alike for an item that is not there (ITEM_NOT_YOURS);
+--        and refused alike for an item that is not there (ITEM_NOT_YOURS). One
+--        whose envelope carries no agent id of its own opens no item but a
+--        plugin row's (ITEM_UNATTRIBUTED): it could never prove one its own;
 --      * a plugin row is the plugin's: the plugin is read from the envelope
 --        (`plugin`, which the server's ctx.call stamps, SMD-3665 PR 2), never
 --        from an argument, so no caller names a plugin's row by hand.
@@ -127,7 +129,8 @@
 --      transaction advisory lock on the item (ob1:item:<id>), then locks its
 --      projection row before it reads anything else, so a capture key's
 --      ownership check (assert_priority takes the same advisory lock) waits
---      for a take in flight. open_item locks the plugin-row or thought-and-text
+--      for a take in flight. An item's lock is taken before a thought's share
+--      lock, by the writers and assert_priority alike. open_item locks the plugin-row or thought-and-text
 --      key it would be unique by first. One item per transaction, or take items
 --      in id order: two transactions locking two items in opposite orders
 --      deadlock (40P01).
@@ -158,9 +161,9 @@
 --   calls them in SMD-3665's PR 2, whose preflight checks the group.
 --
 -- SAFETY
---   Three new tables, their indexes, four refusing triggers; twenty-six
+--   Three new tables, their indexes, four refusing triggers; twenty-eight
 --   new functions (six calls, a drift check, a rebuild, the two triggers'
---   functions and sixteen helpers), three of 116's replaced
+--   functions and eighteen helpers), three of 116's replaced
 --   (ob1_priority_item_exists and assert_priority, with one rule widened, and
 --   ob1_priority_actor, on the maker reader it now shares with the item
 --   writers, its rules as they were); no row is changed. MINOR under
@@ -419,6 +422,19 @@ CREATE TRIGGER open_item_close_proposals_no_truncate
 -- Helpers
 -- ---------------------------------------------------------------------------
 
+-- A capture-only key refused an item it may not change: one text wherever it
+-- is told, so no two refusals tell it apart what exists (review pass 2).
+CREATE OR REPLACE FUNCTION ob1_item_not_yours(p_name text, p_what text)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT jsonb_build_object('outcome', 'refused', 'code', 'ITEM_NOT_YOURS',
+    'message', format('%s is a capture-only key: it may %s only an item it opened, and nobody else has changed since, or one its plugin''s row stands for', p_name, p_what))
+$$;
+COMMENT ON FUNCTION ob1_item_not_yours(text, text) IS
+  'The ITEM_NOT_YOURS refusal a capture-only key gets on an item it may not change (p_what: what it asked to do), one text for an item that is not there too. Migration 117 / SMD-3665.';
+
 -- One item's projection row as the functions return it.
 CREATE OR REPLACE FUNCTION ob1_item_json(i open_items)
 RETURNS jsonb
@@ -599,6 +615,26 @@ $$;
 COMMENT ON FUNCTION ob1_priority_actor(jsonb, text) IS
   'Sets ob1.actor from p_actor when given, then returns the envelope''s maker (ob1_actor_maker: name, agent id, the envelope''s own id, the registry''s kind and its trust ceiling, the envelope''s scope) and whether a standing declaration names it a priority source (by its agent id alone). Raises naming p_what when the envelope names nobody or a name past 200 characters. Migration 116 / SMD-3663; on ob1_actor_maker, migration 117 / SMD-3665.';
 
+-- The plugin a call came through, from the envelope: the server's ctx.call
+-- stamps it (SMD-3665 PR 2), never an argument. NULL for none; a malformed one
+-- raises. One reader for the item writers and assert_priority (review pass 2).
+CREATE OR REPLACE FUNCTION ob1_envelope_plugin(p_what text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  v text := NULLIF(btrim(COALESCE(ob1_current_actor()->>'plugin', '')), '');
+BEGIN
+  IF v IS NOT NULL AND (v !~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' OR length(v) > 64) THEN
+    RAISE EXCEPTION USING MESSAGE = format('%s: the envelope''s plugin %L is not a plugin''s name', p_what, left(v, 80)), ERRCODE = 'invalid_parameter_value';
+  END IF;
+  RETURN v;
+END;
+$$;
+COMMENT ON FUNCTION ob1_envelope_plugin(text) IS
+  'The plugin the call came through, read from the envelope (ob1.actor''s plugin, which the server''s ctx.call stamps), never an argument: NULL for none; raises 22023 naming p_what for one that is no plugin''s name. Migration 117 / SMD-3665.';
+
 -- The writers' common start: READ COMMITTED, the maker from the envelope, the
 -- plugin the call came through, and the scope rule (116's, failing closed).
 -- ob1:item-maker-from-the-envelope
@@ -611,12 +647,7 @@ BEGIN
   SELECT m.name, m.agent_id, m.env_agent_id, m.kind, m.trust, m.scope
     INTO name, agent_id, env_agent_id, kind, trust, scope
     FROM ob1_actor_maker(p_actor, p_what) m;
-  -- The plugin a call came through: the server's ctx.call stamps it (SMD-3665
-  -- PR 2). Read here, never from an argument; a malformed one raises.
-  plugin := NULLIF(btrim(COALESCE(ob1_current_actor()->>'plugin', '')), '');
-  IF plugin IS NOT NULL AND (plugin !~ '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' OR length(plugin) > 64) THEN
-    RAISE EXCEPTION USING MESSAGE = format('%s: the envelope''s plugin %L is not a plugin''s name', p_what, left(plugin, 80)), ERRCODE = 'invalid_parameter_value';
-  END IF;
+  plugin := ob1_envelope_plugin(p_what);
   IF scope IS DISTINCT FROM 'write' AND scope IS DISTINCT FROM 'capture' THEN
     refusal := jsonb_build_object('outcome', 'refused', 'code', 'READ_ONLY_KEY',
       'message', format('%s states no write or capture scope, so it may not change an open item', name));
@@ -716,6 +747,11 @@ BEGIN
   IF p_due IS NULL THEN
     RETURN NULL;
   END IF;
+  -- A date and time, never one of Postgres's words for one ('now', 'tomorrow',
+  -- 'epoch', 'infinity'): a word is the session's moment or none (review pass 2).
+  IF p_due !~ '^[[:space:]]*[0-9]' THEN
+    RAISE EXCEPTION USING MESSAGE = format('not a due time: %L (a time with its offset)', left(p_due, 80)), ERRCODE = 'invalid_parameter_value';
+  END IF;
   BEGIN
     v := p_due::timestamptz;
   EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR invalid_time_zone_displacement_value THEN
@@ -728,7 +764,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_item_due(text) IS
-  'An open item''s due time from text: NULL for NULL; raises 22023 for text Postgres can''t read as a time, or an infinite one. Text without an offset is read in the session''s time zone. Migration 117 / SMD-3665.';
+  'An open item''s due time from text: NULL for NULL; raises 22023 for text that does not start with a digit (Postgres''s words now, tomorrow, epoch, infinity), text Postgres can''t read as a time, or an infinite one. Text without an offset is read in the session''s time zone. Migration 117 / SMD-3665.';
 
 CREATE OR REPLACE FUNCTION ob1_item_moot(p_item uuid, p_at timestamptz, p_except uuid DEFAULT NULL)
 RETURNS int
@@ -769,6 +805,7 @@ DECLARE
   v_id    uuid := gen_random_uuid();
   v_have  open_items;
   v_show  boolean;
+  v_other boolean;
   v_ev    open_item_events;
   v_item  open_items;
 BEGIN
@@ -787,6 +824,15 @@ BEGIN
       MESSAGE = 'open_item: a plugin row needs the call to come through its plugin (the envelope''s plugin), and this one names none',
       ERRCODE = 'invalid_parameter_value';
   END IF;
+  -- A capture-only key whose envelope carries no agent id of its own (the
+  -- registry away) would open an item it could never be proved to own, and so
+  -- never change: none is opened (review pass 2). A plugin row's item is the
+  -- plugin's, so a hook (no agent id by design) opens one.
+  IF v_who.scope = 'capture' AND v_who.env_agent_id IS NULL AND v_row IS NULL THEN
+    RETURN ob1_item_refused('ITEM_UNATTRIBUTED',
+      format('%s is a capture-only key whose agent id this call does not carry: an item it opened could never be proved its own, so none is opened', v_who.name))
+      || jsonb_build_object('item', NULL, 'event', NULL);
+  END IF;
 
   -- A capture-only key opens an item from a thought only if its agent captured
   -- the thought and nobody took it (116's rule, by the envelope's own id), asked
@@ -801,7 +847,7 @@ BEGIN
     END IF;
     SELECT t.created_at INTO v_noted FROM thoughts t WHERE t.id = p_origin_thought;
     IF NOT FOUND THEN
-      RETURN ob1_item_refused('ITEM_NOT_FOUND', format('no thought %s in this brain', p_origin_thought)) || jsonb_build_object('item', NULL, 'event', NULL);
+      RETURN ob1_item_refused('ORIGIN_NOT_FOUND', format('no thought %s in this brain', p_origin_thought)) || jsonb_build_object('item', NULL, 'event', NULL);
     END IF;
     -- A plugin row is its item's identity: the thought and text identify only
     -- an item that stands for no row (review pass 1: a row opened with a
@@ -825,8 +871,13 @@ BEGIN
     -- A capture key is shown it only if it is its own: another key's item
     -- would tell it that key's owner, due time and status.
     v_show := v_who.scope = 'write' OR ob1_item_owns(v_have.item_id, v_who.env_agent_id, v_who.plugin);
+    -- Nothing is written, so it is unchanged; but a call whose text, owner or
+    -- due time differ from the item's is told how to change it (review pass
+    -- 2: a plugin's re-sync of a renamed task read as done).
+    v_other := (v_have.text, v_have.owner, v_have.due_at) IS DISTINCT FROM (v_text, v_owner, p_due_at);
     RETURN jsonb_build_object('outcome', 'unchanged', 'code', NULL,
-      'message', CASE WHEN NOT v_show THEN 'an item for this is already open' END,
+      'message', CASE WHEN NOT v_show THEN 'an item for this is already open'
+                      WHEN v_other THEN 'the item stands as it was, not as this call says: update_item changes its text, owner or due time' END,
       'item', CASE WHEN v_show THEN ob1_item_json(v_have) END,
       'event', NULL);
   END IF;
@@ -842,7 +893,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION open_item(text, text, timestamptz, uuid, text, boolean, jsonb) IS
-  'Opens an item: p_text (at most 1000 characters), an optional p_owner (free text: who is to do it) and p_due_at, read from the thought p_origin_thought (its capture time the item''s noted_at), standing for the plugin row p_plugin_row of the plugin the envelope names (never an argument), and starting proposed (p_proposed: the extractor''s, not yet open until confirmed) or open. The maker is the key p_actor names. The same thought and text, or the same plugin row, again is unchanged: the item that is there, nothing written — shown to a capture key only if it is its own. Returns jsonb {outcome: opened | unchanged | refused, code, message, item, event}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_NOT_YOURS (a capture-only key opening from a thought it did not capture, or one taken since — asked before existence), ITEM_NOT_FOUND (no such thought). Raises for no text, no maker, a plugin row with no plugin in the envelope, a malformed argument, or a transaction above READ COMMITTED. Migration 117 / SMD-3665.';
+  'Opens an item: p_text (at most 1000 characters), an optional p_owner (free text: who is to do it) and p_due_at, read from the thought p_origin_thought (its capture time the item''s noted_at), standing for the plugin row p_plugin_row of the plugin the envelope names (never an argument), and starting proposed (p_proposed: the extractor''s, not yet open until confirmed) or open. The maker is the key p_actor names. The same thought and text, or the same plugin row, again is unchanged: the item that is there, nothing written — shown to a capture key only if it is its own. Returns jsonb {outcome: opened | unchanged | refused, code, message, item, event}: refused READ_ONLY_KEY (an envelope stating no write or capture scope), ITEM_UNATTRIBUTED (a capture-only key whose envelope carries no agent id, opening an item for no plugin row), ITEM_NOT_YOURS (a capture-only key opening from a thought it did not capture, or one taken since — asked before existence), ORIGIN_NOT_FOUND (no such thought). An unchanged reply whose item''s text, owner or due time differ from the call''s says so. Raises for no text, no maker, a plugin row with no plugin in the envelope, a malformed argument, or a transaction above READ COMMITTED. Migration 117 / SMD-3665.';
 
 -- ---------------------------------------------------------------------------
 -- The writers on an item that is there: their common gate
@@ -859,8 +910,7 @@ BEGIN
   SELECT * INTO item FROM open_items WHERE item_id = p_item FOR UPDATE;
   IF p_who.scope = 'capture' AND NOT ob1_item_owns(p_item, p_who.env_agent_id, p_who.plugin) THEN
     item := NULL;
-    refusal := ob1_item_refused('ITEM_NOT_YOURS',
-      format('%s is a capture-only key: it may %s only an item it opened, and nobody else has changed since, or one its plugin''s row stands for', p_who.name, p_what));
+    refusal := ob1_item_not_yours(p_who.name, p_what);
   ELSIF item.item_id IS NULL THEN
     refusal := ob1_item_refused('ITEM_NOT_FOUND', format('no open item %s in this brain', p_item));
   END IF;
@@ -1101,10 +1151,10 @@ BEGIN
   END IF;
   SELECT * INTO v_prop FROM open_item_close_proposals WHERE id = p_proposal;
   IF v_prop.id IS NULL THEN
-    -- A capture key is told the same as for a proposal on another key's item.
-    RETURN ob1_item_refused(CASE WHEN v_who.scope = 'capture' THEN 'ITEM_NOT_YOURS' ELSE 'PROPOSAL_NOT_FOUND' END,
-      CASE WHEN v_who.scope = 'capture' THEN format('%s is a capture-only key: it may decide only a proposal on an item it opened', v_who.name)
-           ELSE format('no proposed close %s in this brain', p_proposal) END)
+    -- A capture key is told what the gate tells it for a proposal on another
+    -- key's item, word for word (review pass 2).
+    RETURN CASE WHEN v_who.scope = 'capture' THEN ob1_item_not_yours(v_who.name, 'decide a proposal on')
+                ELSE ob1_item_refused('PROPOSAL_NOT_FOUND', format('no proposed close %s in this brain', p_proposal)) END
       || jsonb_build_object('proposal', NULL, 'item', NULL, 'event', NULL);
   END IF;
   SELECT * INTO v_gate FROM ob1_item_gate(v_prop.item_id, v_who, 'decide a proposal on');
@@ -1244,18 +1294,27 @@ COMMENT ON FUNCTION ob1_rebuild_item_projection() IS
 -- ---------------------------------------------------------------------------
 
 -- Whether an item exists, by its kind: an open item now by its projection row.
+-- PL/pgSQL, each kind's table read on its own branch alone (review pass 2: as
+-- a SQL function, every branch's table was checked for privilege on every
+-- call, so a role granted the priority group at 116, which holds nothing on
+-- open_items, lost every priority call until it was granted again).
 CREATE OR REPLACE FUNCTION ob1_priority_item_exists(p_kind text, p_key text)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
-  SELECT CASE p_kind
-    WHEN 'thought' THEN EXISTS (SELECT 1 FROM thoughts WHERE id = p_key::uuid)
-    WHEN 'ticket'  THEN EXISTS (SELECT 1 FROM ob1_ticket_head WHERE issue_key = md5(p_key)::uuid AND issue = p_key)
-    WHEN 'entity'  THEN EXISTS (SELECT 1 FROM ob1_entities WHERE id = p_key::uuid)
-    WHEN 'item'    THEN EXISTS (SELECT 1 FROM open_items WHERE item_id = p_key::uuid)
-    ELSE false
-  END
+BEGIN
+  IF p_kind = 'thought' THEN
+    RETURN EXISTS (SELECT 1 FROM thoughts WHERE id = p_key::uuid);
+  ELSIF p_kind = 'ticket' THEN
+    RETURN EXISTS (SELECT 1 FROM ob1_ticket_head WHERE issue_key = md5(p_key)::uuid AND issue = p_key);
+  ELSIF p_kind = 'entity' THEN
+    RETURN EXISTS (SELECT 1 FROM ob1_entities WHERE id = p_key::uuid);
+  ELSIF p_kind = 'item' THEN
+    RETURN EXISTS (SELECT 1 FROM open_items WHERE item_id = p_key::uuid);
+  END IF;
+  RETURN false;
+END;
 $$;
 COMMENT ON FUNCTION ob1_priority_item_exists(text, text) IS
   'Whether a normalised item exists: a thought or an entity by id, a ticket by its head row (068''s ob1_ticket_head), an open item by its open_items row (117), whatever its status. Migration 116 / SMD-3663; open items, migration 117 / SMD-3665.';
@@ -1263,16 +1322,21 @@ COMMENT ON FUNCTION ob1_priority_item_exists(text, text) IS
 -- Whether a capture-only call owns an item: a thought it captured (116), an
 -- open item it opened or its plugin's row stands for (117). Never a ticket or
 -- an entity. Never NULL.
+-- PL/pgSQL for the same reason as ob1_priority_item_exists: the open items'
+-- tables are read on the item branch alone.
 CREATE OR REPLACE FUNCTION ob1_priority_owns_item(p_kind text, p_key text, p_agent uuid, p_plugin text)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
-  SELECT CASE p_kind
-    WHEN 'thought' THEN ob1_priority_owns(p_key, p_agent)
-    WHEN 'item'    THEN ob1_item_owns(p_key::uuid, p_agent, p_plugin)
-    ELSE false
-  END
+BEGIN
+  IF p_kind = 'thought' THEN
+    RETURN ob1_priority_owns(p_key, p_agent);
+  ELSIF p_kind = 'item' THEN
+    RETURN ob1_item_owns(p_key::uuid, p_agent, p_plugin);
+  END IF;
+  RETURN false;
+END;
 $$;
 COMMENT ON FUNCTION ob1_priority_owns_item(text, text, uuid, text) IS
   'Whether a capture-only call owns a normalised item: a thought its agent p_agent captured and nobody took (116''s ob1_priority_owns), an open item it opened and nobody else changed or that stands for a row of the plugin p_plugin (117''s ob1_item_owns); false for a ticket, an entity or an item that is not there — never NULL. Migration 117 / SMD-3665.';
@@ -1354,15 +1418,17 @@ BEGIN
     IF v_item.kind NOT IN ('thought', 'item') OR (v_ref_kind IS NOT NULL AND v_ref_kind NOT IN ('thought', 'item')) THEN
       v_mine := false;
     ELSE
-      PERFORM 1 FROM thoughts t
-       WHERE t.id IN (CASE WHEN v_item.kind = 'thought' THEN v_item.key::uuid END, CASE WHEN v_ref_kind = 'thought' THEN v_ref_key::uuid END)
-       FOR SHARE;
-      -- In id order: two items' locks taken in one order everywhere.
+      -- The items' locks first, in id order, then the thoughts' share lock: the
+      -- order the item writers take them in (an item's lock, then its evidence
+      -- thought's), so no two calls wait on each other (review pass 2).
       PERFORM ob1_item_lock(k)
          FROM unnest(ARRAY[CASE WHEN v_item.kind = 'item' THEN v_item.key::uuid END, CASE WHEN v_ref_kind = 'item' THEN v_ref_key::uuid END]) AS k
         WHERE k IS NOT NULL
         ORDER BY k;
-      v_plugin := NULLIF(btrim(COALESCE(ob1_current_actor()->>'plugin', '')), '');
+      PERFORM 1 FROM thoughts t
+       WHERE t.id IN (CASE WHEN v_item.kind = 'thought' THEN v_item.key::uuid END, CASE WHEN v_ref_kind = 'thought' THEN v_ref_key::uuid END)
+       FOR SHARE;
+      v_plugin := ob1_envelope_plugin('assert_priority');
       v_mine := ob1_priority_owns_item(v_item.kind, v_item.key, v_who.env_agent_id, v_plugin)
                 AND (v_ref_kind IS NULL OR ob1_priority_owns_item(v_ref_kind, v_ref_key, v_who.env_agent_id, v_plugin));
     END IF;

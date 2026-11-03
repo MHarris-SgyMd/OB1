@@ -3066,8 +3066,12 @@ if (configFailed) {
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
             // A read (priority_history) needs SELECT on the assertions and on what keys an item (ob1_entities); the
-            // writers need every grant (review pass 3: the history was said to fail for a missing write).
-            const failing = pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
+            // writers need every grant (review pass 3: the history was said to fail for a missing write). 117's
+            // open-item reads are asked only of an item of kind item, by set_priority and priority_history alone
+            // (SMD-3665 review pass 2).
+            const itemOnly = pr.ungranted.every((g) => g.startsWith("open_items ") || g.startsWith("open_item_events "));
+            const failing = itemOnly ? "set_priority and priority_history on an open item (kind item)"
+              : pr.ungranted.some((g) => g === "priority_assertions SELECT" || g === "ob1_entities SELECT") ? "set_priority, clear_priority and priority_history" : "set_priority and clear_priority";
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${failing} fail naming the table, and nothing else does`,
                 "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
           } else {

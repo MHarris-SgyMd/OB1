@@ -445,6 +445,8 @@ const FUNCTIONS = [
   "ob1_item_owns(uuid, uuid, text)",
   "ob1_item_is_proposer(open_item_close_proposals, text, uuid)",
   "ob1_actor_maker(jsonb, text)",
+  "ob1_envelope_plugin(text)",
+  "ob1_item_not_yours(text, text)",
   "ob1_item_due(text)",
   "ob1_item_id(text)",
   "ob1_item_actor(jsonb, text)",
