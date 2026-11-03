@@ -961,7 +961,7 @@ calls does.
 | --- | --- | --- |
 | `WORK_CLAIMED` | 409 | A live claim covers the work. `heldBy` names each claim: id, holder, kind, times and `ownKey` (the caller's own key holds it: another session of it, or this one without its token), never its label. |
 | `CLAIM_NOT_YOURS` | 403 | Not this key with this token. `forced: true` means a force refused: the key is no operator by agent id. `ownKey: true`: the caller's own key holds it under a token this call did not give. |
-| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). |
+| `CLAIM_RELEASED` | 409 | A renewal of a claim that ended: released, or `takenOver` after it lapsed (stop work on it). `claim_work` with the caller's own ended claim's token, on that claim's work, answers it too, rather than making a new claim (SMD-3654); on other work the token is ignored and a new claim made. |
 | `CLAIM_NOT_FOUND` | 404 | No claim with that id. |
 | `REFUSED_CLAIM_INPUT` | 400 | An argument migration 115 refuses by its rule; `problem` names which (`ticket`, `piece`, `label`, `reason`, `token`, `lease`; `key_name`, a key named past 200 characters, is the deployment's to fix; `other`, a rule this server does not name). |
 | `REFUSED_CLAIM_KEY` | 403 | An ingested (importer's) key, which cannot claim. |
@@ -1260,8 +1260,8 @@ bun run test:e2e          # the whole server over MCP with no Supabase at all, O
 ../db/with-postgres.sh bun test-rest-sql.ts  # the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # a plugin's tables: the migrator's plugin ledger and its lock, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ../db/with-postgres.sh bun test-preflight.ts  # the deploy gate: each misconfiguration a subprocess run of preflight.ts refuses, with its real exit code (fewer assertions with no DATABASE_URL, which skips the database sections)
-OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest on a Postgres of its own: the sections SHARDS in test-preflight.ts lists (SMD-3468)
-OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # every section SHARDS does not list; an assertion outside every section would count in both, which [doc] fails on
+OB1_PREFLIGHT_SHARD=first ../db/with-postgres.sh bun test-preflight.ts  # one shard, as the data-layer job runs it, beside test-upgrade.ts on one Postgres, the rest in a job of its own (SMD-3691): the sections SHARDS in test-preflight.ts lists (SMD-3468)
+OB1_PREFLIGHT_SHARD=rest ../db/with-postgres.sh bun test-preflight.ts  # the other, as the preflight-rest job runs it: every section SHARDS does not list; an assertion outside every section would count in both, which [doc] fails on
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts`, `test-plugins-sql.ts` and `test-preflight.ts` (as run above) need podman or docker; they use `../db/with-postgres.sh`

@@ -19,7 +19,7 @@ The brain has priority data, in four shapes, and no read ranks by any of them:
 
 - **Linear's priority**, copied into `metadata.priority` as Linear's label by board-sync (`db/ingest-linear.ts:111`). Linear's due date isn't fetched (`ISSUE_FIELDS`, `:75`).
 - **Upstream's `importance`**, a native column that `schemas/enhanced-thoughts` adds (`SMALLINT DEFAULT 3`, 1–5) or a metadata key. Vendored code writes it: the consolidation workers' model on 0–6 (`integrations/consolidation-workers/_shared/config.ts:106-108`), smart-ingest's and thought-enrichment's models on 1–5, and constants in two importers (x-twitter's 2, grok's 3). In the fork, `db/weekly-digest.ts` reads it, from any row, whoever wrote it (SMD-2653). Vendored recipes read it too: lint-sweep (`recipes/lint-sweep/lint-sweep.js:427`, its views, and `db/config.mjs:2718`'s grant) and brain-health-monitoring (`ops-views.sql:41`). Nothing in the fork's core writes it.
-- **home-maintenance's own columns**, `priority` (low/medium/high/urgent) and `next_due` (`extensions/home-maintenance/schema.sql:13-14`). Nothing outside the extension reads them. family-calendar keeps its deadlines the same way.
+- **home-maintenance's own columns**, `priority` (low/medium/high/urgent) and `next_due` (`plugins/home-maintenance/migrations/001_home_maintenance.sql:29-30`). Nothing outside the plugin reads them. family-calendar keeps its deadlines the same way.
 - **Action items**, `metadata.action_items`, a list of strings the metadata extractor writes (`server-portable/metadata.ts`). An action item has no identity or status, so none of them ever closes.
 
 What the brain does rank by is lifecycle: `node_state` (058, 068) knows, per thought, whether it or the ticket it carries is open, blocked or superseded. SMD-2074 built it for ranking thoughts and left "which ticket do I start" to Linear: "partly duplicative of what Linear already does natively". That holds for one team's backlog. It doesn't hold for a brain's general case: a bill due Friday, a passport renewal, a commitment from a meeting, something the operator said matters. No tracker holds those items. Different makers at different trust state them, and they matter by date and by what depends on them.
@@ -49,7 +49,7 @@ So on the dogfood brain the only stated priorities are Linear's. `importance` is
 ### Defaults that look like statements
 
 - **The vendored workers** store the first value present: the caller's number, else 4 for a structured capture, else the model's 0–5, else the default 3 (`integrations/consolidation-workers/_shared/helpers.ts:679`; `config.ts:42`, `:62`). A stored 3 or 4 can't be told apart from a default.
-- **home-maintenance's** `priority` defaults to `medium` (`schema.sql:14`).
+- **home-maintenance's** `priority` defaults to `medium` (`001_home_maintenance.sql:30`).
 - **`schemas/enhanced-thoughts`'** `importance` column defaults to 3, and two importers write a constant (x-twitter 2, grok 3), so every row they write carries the same value whatever its content.
 
 A source's default says nothing about the item, so decision 3 treats it as unknown.

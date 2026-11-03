@@ -29,10 +29,11 @@
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
  * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169). From one checkout,
- * run them one at a time for now: [2] edits a copy of the migrations, no
- * longer the tracked tree (SMD-3639), but side by side has not been tried
- * (SMD-3688).
+ * every one on a database of its own (SMD-3048, SMD-3169), and so does
+ * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
+ * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
+ * tracked tree (SMD-3639). Never two in one Postgres: each drops the schema,
+ * and roles and backends are the cluster's.
  */
 
 import { SQL } from "bun";
@@ -70,7 +71,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, readTicketRows, rowColumns, syncIssue, triggerGate, triggerPasses, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { passDumpFile, run as runSleep } from "./sleep.ts";
+import { newestLive, passDumpFile, run as runSleep, usText } from "./sleep.ts";
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -14220,7 +14221,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 12 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 9 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -19138,7 +19139,7 @@ async function sleepScaffold(sql: SQL) {
   const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
-    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: unknown; paused?: { since: string } } : null;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: unknown; paused?: { since: string }; holds?: { pass: string; why: string; until: string | null }[] } : null;
   };
   const lines: string[] = [];
   // The passes look for new work every second, not every 15 s (SMD-3048);
@@ -19210,6 +19211,25 @@ if (want("38")) {
   // (SMD-3196; they read the real schedule before it).
   let restoreOutage = shortenOutage();
   try {
+    // The live reads at the database's full precision (SMD-3245, SMD-3379 PR
+    // 1c-4a): a live write at an instant with microseconds is outside a read
+    // bounded at that instant and inside one a microsecond earlier, where a
+    // Date's milliseconds put a bound up to 1 ms early, past the write. Dated
+    // 1.5 ms after the newest audit row, still in the past, so it is the
+    // newest live write when read, and no later read takes it for a new one.
+    const [probe] = await sql`
+      INSERT INTO thought_audit (thought_id, action, actor_name, diff, created_at)
+      SELECT gen_random_uuid(), 'update', 'op-sleep', '{"note": "a write at an instant with microseconds"}'::jsonb,
+             date_trunc('milliseconds', COALESCE(max(created_at), now() - interval '1 minute')) + interval '1 millisecond' + interval '500 microseconds'
+        FROM thought_audit
+      RETURNING (extract(epoch FROM created_at) * 1000000)::bigint::text AS us`;
+    const probeUs = Number(probe.us);
+    const atIt = await newestLive(sql, { us: probeUs });
+    const justBefore = await newestLive(sql, { us: probeUs - 1 });
+    // The control: a bound cut to its millisecond, as a Date's would be, reads the write that was outside it.
+    const cutToMs = await newestLive(sql, { us: Math.floor(probeUs / 1000) * 1000 });
+    assert(probeUs % 1000 !== 0 && atIt.write === null && justBefore.write?.us === probeUs && cutToMs.write?.us === probeUs && usText(probeUs).endsWith(`${String(probeUs % 1_000_000).padStart(6, "0")}Z`),
+      `the live reads keep the database's microseconds: a write at ${usText(probeUs)} is outside a read bounded there, inside one a microsecond earlier, and a millisecond's bound would read it (at it ${atIt.write?.us ?? "none"}; before ${justBefore.write?.us ?? "none"}; cut ${cutToMs.write?.us ?? "none"})`);
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
     // On the billing notes' axis, between them in time: judged against each (SMD-1873 PR 2).
@@ -19512,7 +19532,11 @@ if (want("38")) {
     // operator's capture ends the sleep: its extraction pending, the
     // followers' 30 s poll keeping it unclaimed at the read.
     // The backlog drained first, by a one-shot sleep: the note in hand is then the only work.
-    const drainedFirst = await sleepRun({ quiet: 1 });
+    // N12's bound from --abort-after, said at the start (SMD-3379 PR 1c-4a): the setting reaches the run, not the hook alone.
+    const abortFrom = lines.length;
+    const drainedFirst = await sleepRun({ quiet: 1, abortAfter: 90 });
+    assert(lines.slice(abortFrom).some((l) => /^  pause: .*, a call in hand past 90 s aborted meanwhile/.test(l)),
+      `--abort-after sets N12's bound, said at the start (${lines.slice(abortFrom).find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     lines.length = 0;
     const inHandNote = await capture("A note whose call is in hand when a live write touches it.", "sync-sleep", 0, 44);
     sw.slow = 5000;
@@ -20369,16 +20393,29 @@ if (want("38")) {
     sw.missing = true;
     const refusedLater = endedDrained && await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
     const laterBeat = await beat();
+    // Held until the retry, on the row: the pass, the refusal's kind, and when by the database's clock (SMD-3379 PR 1c-4a).
+    const [{ nowIso }] = await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "nowIso"`;
+    const retryHold = laterBeat?.holds?.find((h) => h.pass === "extract");
     // Still refused at the next try: the wait doubles (2.5 s, then 5 s).
     const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 30_000);
+    // The second wait's hold: written again, until 5 s on, not the first's nor half the wait (review pass 1).
+    const [{ nowIso: secondNow }] = await sql`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "nowIso"`;
+    const secondHold = (await beat())?.holds?.find((h) => h.pass === "extract");
+    const secondLeft = secondHold?.until ? Date.parse(secondHold.until) - Date.parse(secondNow) : NaN;
     // Three seconds into the 5 s wait the row is fresh — re-stamped through
     // the wait — not two of its 1 s intervals old (review pass 2).
     await Bun.sleep(3000);
     const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
+    // The hold carried by the wait's re-stamps, not the first write alone (review pass 2).
+    const carriedHold = (await beat())?.holds?.find((h) => h.pass === "extract");
     const stillRunning = !retryDone;
     sw.missing = false;
     const at = lines.length;
     const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
+    const holdsRecovered = (await beat())?.holds;
+    assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600
+        && secondHold?.why === "model" && secondLeft > 2600 && secondLeft <= 5100 && carriedHold?.until === secondHold.until && holdsRecovered === undefined,
+      `a refusal retried under --follow holds the pass on the row until each retry, by the database's clock, and holds none once a sleep runs (${JSON.stringify(laterBeat?.holds)} at ${nowIso}; the 5 s wait's ${JSON.stringify(secondHold)} ${secondLeft} ms on, 3 s in ${JSON.stringify(carriedHold)}; after ${JSON.stringify(holdsRecovered)})`);
     assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 2,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
     // A sleep that ran resets the schedule: the next refusal waits 2.5 s again.
@@ -20433,6 +20470,33 @@ if (want("38")) {
     assert(midPassCode === 2 && !lines.slice(atBad).some((l) => /tries it again/.test(l)),
       `a refusal mid-pass by a pass that has run ends --follow with 2, not a retry (exit ${midPassCode})`);
 
+    // Stopped during a refusal's retry wait, the row ends with the hold on
+    // it, its last word (SMD-3379 PR 1c-4a, review pass 2): cleared only by
+    // the wait's own end. The schedule at 2.5 s, so the stop lands inside it.
+    restoreOutage();
+    restoreOutage = shortenOutage(2500);
+    lines.length = 0;
+    await capture("A synced note before the model goes again.", "sync-sleep", 0, 11);
+    const acRetryHeld = new AbortController();
+    const retryHeldRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acRetryHeld.signal });
+    let heldWaited = false;
+    try {
+      await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+      sw.missing = true;
+      if (await endSleep("a live write that ends the sleep before the refusal")) {
+        heldWaited = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
+      }
+    } finally {
+      acRetryHeld.abort();
+      await retryHeldRun;
+      sw.missing = false;
+      restoreOutage();
+      restoreOutage = shortenOutage();
+    }
+    const heldEnded = await beat();
+    assert(heldWaited && heldEnded?.ended === true && heldEnded.holds?.some((h) => h.pass === "extract" && h.why === "model") === true,
+      `stopped during a refusal's retry wait, the row ends holding the pass, its last word (${JSON.stringify(heldEnded?.holds)}; ended ${heldEnded?.ended}; waited ${heldWaited})`);
+
     // The CLI, signalled twice while asleep with a call in hand: it exits 130
     // at once, and the row reads ended, not running until it goes stale — the
     // second stop ends it before stopOnSignals exits (review pass 2).
@@ -20440,7 +20504,8 @@ if (want("38")) {
     sw.slow = 8000;
     const cliEnv = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
     const cliAt = Date.now();
-    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
+    // --abort-after given too: the CLI hands it to the run, said at its start (SMD-3379 PR 1c-4a, review pass 1).
+    const cli = Bun.spawn(["bun", join(HERE, "sleep.ts"), "--url", URL_!, "--follow", "--quiet", "1", "--poll", "1", "--abort-after", "90"], { env: cliEnv, cwd: HERE, stdout: "pipe", stderr: "pipe" });
     try {
       // The call in hand at the stub, not the claim alone: a signal between the claim and the call let the soft stop
       // end within the 300 ms, exit 0 (seen once, SMD-2679 PR 4b's merge of main).
@@ -20452,6 +20517,9 @@ if (want("38")) {
       const cliBeat = await beat();
       assert(cliCode === 130 && cliBeat?.ended === true && cliBeat.outcome === "stopped" && !(await claims(EX)).claimed,
         `the CLI signalled twice while asleep exits 130 with its lease returned and heartbeat:sleep ended (exit ${cliCode}; ${JSON.stringify(cliBeat)})`);
+      const cliOut = cliCode === "hung" ? "" : await new Response(cli.stdout).text();
+      assert(/^  pause: .*, a call in hand past 90 s aborted meanwhile/m.test(cliOut),
+        `…and its --abort-after reaches the run, said at the start (${cliOut.split("\n").find((l) => /^  pause:/.test(l))?.trim() ?? "no pause line"})`);
     } finally {
       sw.slow = 0;
       cli.kill("SIGKILL");
@@ -21004,7 +21072,7 @@ if (want("38r")) {
     const atEmbed = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
     const exStatus = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
     const reClaimed = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EMBED_JOB} AND status = 'claimed'`)[0].c);
-    const sleepBeat = async () => (await beat()) as unknown as { running?: boolean; outcome?: string | null; waitingMidPass?: string[]; aside?: unknown; slept?: { budget?: string }; budget?: { stops: number } } | null;
+    const sleepBeat = async () => (await beat()) as unknown as { running?: boolean; outcome?: string | null; waitingMidPass?: string[]; aside?: unknown; holds?: unknown; slept?: { budget?: string }; budget?: { stops: number } } | null;
     const follow = (o: Partial<Parameters<typeof runSleep>[0]> = {}) => {
       lines.length = 0;
       const ac = new AbortController();
@@ -21124,7 +21192,7 @@ if (want("38r")) {
     // A model switch at the check: re-embed set aside, said by the dry run, the log and the row; extraction runs on.
     // Put right, the next sleep takes it up again.
     await sql`UPDATE ob1_config SET value = 'other-embed' WHERE key = 'embedding_model'`;
-    let asideJob: string | undefined, asideRow: unknown, dryAside = false, extracted = false, takenUp = false, takenUpAsleep = false, rowAfter: unknown = "unread", asideCode = -9, recordAfter = "unread", asideOutcome: string | null | undefined;
+    let asideJob: string | undefined, asideRow: unknown, asideHolds: unknown, holdsAfter: unknown = "unread", dryAside = false, extracted = false, takenUp = false, takenUpAsleep = false, rowAfter: unknown = "unread", asideCode = -9, recordAfter = "unread", asideOutcome: string | null | undefined;
     let late = "";
     try {
       lines.length = 0;
@@ -21137,6 +21205,7 @@ if (want("38r")) {
         extracted = await pollUntil(async () => (await exStatus(asideNote)) === "succeeded", 15_000);
         const asideBeat = await sleepBeat();
         asideRow = asideBeat?.aside;
+        asideHolds = asideBeat?.holds;
         // The scheduler's own re-embed key on its row, which preflight reads whose key it is from (SMD-2679 PR 4b-2).
         asideJob = (asideBeat as { reembedJob?: string } | null)?.reembedJob;
         asideOutcome = asideBeat?.outcome;
@@ -21152,7 +21221,9 @@ if (want("38r")) {
         late = await reCapture("An old note re-embed takes up again.", 22);
         takenUp = await pollUntil(() => atEmbed(late), 20_000);
         recordAfter = ((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0]?.value as string | undefined) ?? "";
-        rowAfter = (await sleepBeat())?.aside;
+        const afterBeat = await sleepBeat();
+        rowAfter = afterBeat?.aside;
+        holdsAfter = afterBeat?.holds;
       } finally {
         asideCode = await aside.stop();
       }
@@ -21161,6 +21232,9 @@ if (want("38r")) {
     }
     assert(dryAside && extracted && lines.some((l) => /re-embed set aside: the brain records other-embed/.test(l)) && JSON.stringify(asideRow) === JSON.stringify({ reembed: { kind: "model-switch", recorded: "other-embed", configured: "stub-embed" } }) && asideOutcome === "failed" && asideCode === 0 && asideJob === EMBED_JOB,
       `a model switch at a sleep's start sets re-embed aside — the dry run and the log say it, the row carries it and reads failed, a switch the operator mends — and the scheduler runs on, extracting (dry run ${dryAside}; extracted ${extracted}; its key ${asideJob}; row ${JSON.stringify(asideRow)}, outcome ${asideOutcome}; exit ${asideCode})`);
+    // The row's holds say it too, with no time: the switch is an event (SMD-3379 PR 1c-4a).
+    assert(JSON.stringify(asideHolds) === JSON.stringify([{ pass: "reembed", why: "model-switch", until: null }]) && holdsAfter === undefined,
+      `…and its holds name re-embed held for the model switch, until no time, then none once put right (${JSON.stringify(asideHolds)} → ${JSON.stringify(holdsAfter)})`);
     assert(takenUpAsleep && takenUp && rowAfter === undefined && recordAfter === "stub-embed", `…the record put right — deleted here — is read within the sleep, with no wake, and the next sleep re-embeds, its first pool recording this stack's model, the row's word gone (asleep ${takenUpAsleep}; re-embedded ${takenUp}; row ${JSON.stringify(rowAfter)}; record ${recordAfter})`);
 
     // Put right while the brain is awake, the record is read at the next sleep's start: re-embed runs in that sleep,
@@ -21235,24 +21309,27 @@ if (want("38r")) {
     const keyNote = await capture("A note extracted while the embedding key is refused.", "sync-sleep", 0, 27);
     sw.embedKeyRefused = true;
     const keyed = follow();
-    let keyDown = false, keyExtracted = false, keyWord: unknown, keyRetaken = false, keyedCode = -9, keyOutcome: string | null | undefined, keyCleared = false;
+    let keyDown = false, keyExtracted = false, keyWord: unknown, keyHolds: unknown, keyRetaken = false, keyedCode = -9, keyOutcome: string | null | undefined, keyCleared = false;
     try {
       keyDown = await pollUntil(async () => lines.some((l) => /re-embed set down for this sleep — the embedding provider refused it/.test(l)), 20_000);
       keyExtracted = await pollUntil(async () => (await exStatus(keyNote)) === "succeeded", 20_000);
       const keyBeat = await sleepBeat();
       keyWord = keyBeat?.aside;
+      keyHolds = keyBeat?.holds;
       keyOutcome = keyBeat?.outcome;
       sw.embedKeyRefused = false;
       await endSleep('a live write once the key is right');
       keyRetaken = await pollUntil(() => atEmbed(keyOld), 20_000);
       // The next sleep's word: set down no longer, so gone (review pass 2: no case held it).
-      keyCleared = await pollUntil(async () => (await sleepBeat())?.aside === undefined, 10_000);
+      keyCleared = await pollUntil(async () => { const b = await sleepBeat(); return b?.aside === undefined && b?.holds === undefined; }, 10_000);
     } finally {
       sw.embedKeyRefused = false;
       keyedCode = await keyed.stop();
     }
     assert(keyDown && keyExtracted && JSON.stringify(keyWord) === JSON.stringify({ reembed: { kind: "provider" } }) && keyOutcome === "failed" && keyRetaken && keyCleared && keyedCode === 0 && !lines.some((l) => /reembed ended by itself|reembed refused at its start/.test(l)),
       `re-embed refused at a sleep's start sets it down for the sleep — said, on the row, which reads failed, a cause the operator mends — extraction running on, and the next sleep re-embeds once the key is right, the word gone (down ${keyDown}; extracted ${keyExtracted}; row ${JSON.stringify(keyWord)}, outcome ${keyOutcome}; re-embedded ${keyRetaken}; cleared ${keyCleared}; exit ${keyedCode})`);
+    assert(JSON.stringify(keyHolds) === JSON.stringify([{ pass: "reembed", why: "provider", until: null }]),
+      `…and its holds name re-embed held for the provider's refusal until the next sleep, no time on it, gone with the set-down (SMD-3379 PR 1c-4a: ${JSON.stringify(keyHolds)})`);
 
     // Refused mid-pass — the provider refusing the request itself — sets it down too, where it ended the scheduler.
     const midKey = [await reCapture("A mid-pass refused note, one.", 28), await reCapture("A mid-pass refused note, two.", 29)];

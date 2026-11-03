@@ -118,7 +118,7 @@ git pull
 PORT=8787 … bun extensions/extension-name/index.ts
 ```
 
-The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Most schemas use `IF NOT EXISTS` and re-run cleanly; family-calendar's and meal-planning's do not, and every `CREATE POLICY` refuses a second run — apply the changed statements by hand there.
+The URL and access key stay the same — no need to reconfigure your AI clients. If the extension's `schema.sql` changed, the README's Step 1 says what to re-run. Every extension's schema re-runs cleanly: each table and index is `IF NOT EXISTS`, and each trigger is dropped before it is made. A column changed in place is applied by hand.
 
 ---
 
@@ -150,9 +150,6 @@ One `bun` process per extension, each answering on its own port with the extensi
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
-- [Family Calendar](../../extensions/family-calendar/) (Extension 3)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4) — two servers, the shared one on its own port and keys ([Shared MCP Server](../shared-mcp/))
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

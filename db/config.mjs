@@ -507,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -2687,28 +2687,23 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ function: "merge_thought_provenance_metadata(uuid, jsonb)", privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
     Object.freeze({ function: "merge_thought_eval_metadata(uuid, jsonb)",       privileges: Object.freeze(["EXECUTE"]), since: "schemas/provenance-chains" }),
   ]),
-  // The learning path's six extensions/*/schema.sql, applied by hand as each
-  // README's Step 1 says (SMD-1810). Upstream's five with policies ENABLEd RLS
-  // on `auth.uid() = user_id` and granted nothing — Supabase's default
-  // privileges carried its service role — and family-calendar's carried
-  // neither; the policies are gone, and this group is what a role other than
-  // the tables' owner needs. Every id is a uuid, so no sequence rows; no
-  // function is REVOKEd FROM PUBLIC, so no function rows (test-schema [50]
-  // measures both).
+  // The learning path's extensions/*/schema.sql, applied by hand as each
+  // README's Step 1 says (SMD-1810): three of the six, family-calendar's,
+  // home-maintenance's and household-knowledge's plugins since SMD-2311, their
+  // tables in their own schemas under their own roles.
+  // Upstream's five with policies ENABLEd RLS on `auth.uid() = user_id` and
+  // granted nothing — Supabase's default privileges carried its service role;
+  // the policies are gone, and this group is what a role other than the
+  // tables' owner needs. Every id is a uuid, so no sequence rows; no function
+  // is REVOKEd FROM PUBLIC, so no function rows (test-schema [50] measures
+  // both).
   extensions: Object.freeze([
-    Object.freeze({ table: "household_items",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "household_vendors",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/household-knowledge" }),
-    Object.freeze({ table: "maintenance_tasks",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
-    Object.freeze({ table: "maintenance_logs",      privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/home-maintenance" }),
     Object.freeze({ table: "recipes",               privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "meal_plans",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "shopping_lists",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/meal-planning" }),
     Object.freeze({ table: "professional_contacts", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "contact_interactions",  privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
     Object.freeze({ table: "opportunities",         privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/professional-crm" }),
-    Object.freeze({ table: "family_members",        privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
-    Object.freeze({ table: "activities",            privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
-    Object.freeze({ table: "important_dates",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/family-calendar" }),
     Object.freeze({ table: "companies",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
     Object.freeze({ table: "job_postings",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),
     Object.freeze({ table: "applications",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "extensions/job-hunt" }),

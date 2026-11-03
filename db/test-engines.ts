@@ -716,6 +716,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     // The pause's quiet (SMD-3379 PR 1c-3b): a second at least, a day at most.
     ["--capture 0", { url: AT, capture: 0 }, ["--url", AT, "--capture", "0"], "--capture must be a decimal integer >= 1 and <= 86400"],
     ["--capture past a day", { url: AT, capture: 86401 }, ["--url", AT, "--capture", "86401"], "--capture must be a decimal integer >= 1 and <= 86400"],
+    // N12's bound (SMD-3379 PR 1c-4a): at or above extraction's 60 s stall floor, a day at most.
+    ["--abort-after under the stall floor", { url: AT, abortAfter: 59 }, ["--url", AT, "--abort-after", "59"], "--abort-after must be a decimal integer >= 60 and <= 86400"],
+    ["--abort-after past a day", { url: AT, abortAfter: 86401 }, ["--url", AT, "--abort-after", "86401"], "--abort-after must be a decimal integer >= 60 and <= 86400"],
     ["--statement-timeout past a day", { url: AT, statementTimeout: 86401 }, ["--url", AT, "--statement-timeout", "86401"], "--statement-timeout must be a decimal integer >= 0 and <= 86400"],
     ["--work-mem 0", { url: AT, workMem: 0 }, ["--url", AT, "--work-mem", "0"], "--work-mem must be a decimal integer >= 1 and <= 2097151"],
     ["--maintenance-work-mem past Postgres's bound", { url: AT, maintenanceWorkMem: 2097152 }, ["--url", AT, "--maintenance-work-mem", "2097152"], "--maintenance-work-mem must be a decimal integer >= 1 and <= 2097151"],
@@ -1009,6 +1012,34 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const endedValue = JSON.parse(writes.at(-1) ?? "{}");
   ok(pausedValue.paused?.since === since && !("paused" in clearedValue) && !("paused" in endedValue) && endedValue.ended === true,
     `the stamper writes paused { since } while set, and leaves it out once cleared or the row ends (${JSON.stringify([pausedValue.paused, clearedValue.paused, endedValue.paused])})`);
+}
+
+// The scheduler's holds on its heartbeat (SMD-3379 PR 1c-4a): db/pass-stamp.ts'
+// holds(), `holds` while one is, left out once cleared or emptied, kept on the
+// row's end as its last word, and a copy, so a caller's later change is not written.
+{
+  const { passStamper } = await import("./pass-stamp.ts");
+  const writes: string[] = [];
+  const fake = ((_s: TemplateStringsArray, ...v: unknown[]) => { writes.push(String(v[1])); return Promise.resolve([]); }) as never;
+  const st = passStamper({ sql: fake, worker: "sleep", intervalS: 60 });
+  const list = [{ pass: "reembed" as const, why: "model-switch" as const, until: null }, { pass: "extract" as const, why: "lookup" as const, until: "2026-11-02T12:00:00.000Z" }];
+  st.holds?.(list);
+  list[0].why = "provider" as never;
+  await st.alive();
+  const heldValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.holds?.([]);
+  await st.alive();
+  const emptyValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.holds?.([{ pass: "reembed", why: "outage", until: null }]);
+  st.holds?.(null);
+  await st.alive();
+  const clearedValue = JSON.parse(writes.at(-1) ?? "{}");
+  st.holds?.([{ pass: "consolidate", why: "provider", until: null }]);
+  await st.end("stopped");
+  const endedValue = JSON.parse(writes.at(-1) ?? "{}");
+  ok(JSON.stringify(heldValue.holds) === JSON.stringify([{ pass: "reembed", why: "model-switch", until: null }, { pass: "extract", why: "lookup", until: "2026-11-02T12:00:00.000Z" }])
+      && !("holds" in emptyValue) && !("holds" in clearedValue) && JSON.stringify(endedValue.holds) === JSON.stringify([{ pass: "consolidate", why: "provider", until: null }]) && endedValue.ended === true,
+    `the stamper writes holds as given, a copy, leaves them out once emptied or cleared, and keeps them on the row's end (${JSON.stringify([heldValue.holds, emptyValue.holds, clearedValue.holds, endedValue.holds])})`);
 }
 
 listener.stop(true);
