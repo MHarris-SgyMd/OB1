@@ -80,31 +80,30 @@
 --        (046's rule for thought_audit). SMD-2011's pattern.
 --
 --   3. THE PROJECTION, priority_current: one row per item with an open
---      assertion — its winner (lowest tier, then newest within the tier, then
---      the later written), the winner's level, tier and maker, and the number of
---      open assertions. Kept current in the write's own transaction by the
---      write functions. ob1_priority_projection_drift() computes it fresh from
---      a formula of its own — not the rule function, which a verifier must not
---      share with the thing it verifies (068's rule) — and returns every row
---      that differs; ob1_rebuild_priority_projection() reconciles it. A raw
---      write to priority_assertions leaves the projection behind until a
---      rebuild: the functions are the write path.
+--      assertion — its winner (lowest tier, then the newest within it, the
+--      later written by seq), the winner's level, tier and maker, and the
+--      number of open assertions. Kept current in the write's own transaction
+--      by the write functions. ob1_priority_projection_drift() computes it
+--      fresh from a formula of its own — not the rule function, which a
+--      verifier must not share with the thing it verifies (068's rule) — and
+--      returns every row that differs; ob1_rebuild_priority_projection()
+--      reconciles it. A raw write to priority_assertions leaves the projection
+--      behind until a rebuild: the functions are the write path.
 --
 --   4. THE SOURCES, priority_sources: the keys the operator declared priority
---      sources, beside set_agent_kind — declare_priority_source(label,
---      declared). One row per declaration, never rewritten, always by the
---      key's agent id: a declaration makes the registry row for a label the
---      registry does not know yet, as set_agent_kind does, and a maker is
---      matched by that id alone. The priority group grants SELECT alone on
---      it, so the server's operations offer no way to declare one: it is the
---      operator's, by psql, beside set_agent_kind (decision 10). That is the
---      server's surface, not a wall: a role holding the server group can
---      classify a key (set_agent_kind, its ob1_agents UPDATE) and so raise a
---      key's trust, and a role holding the priority group can write the
---      tables directly, as with every core table its group writes (115's
---      note). The rules hold for callers of the functions. A withdrawn
---      declaration is kept with when; the assertions made under it keep
---      their tier.
+--      sources — declare_priority_source(label, declared). One row per
+--      declaration, never rewritten, always by the key's agent id: a
+--      declaration makes the registry row for a label the registry does not
+--      know yet, as set_agent_kind does, and a maker is matched by that id
+--      alone. The priority group grants SELECT alone on it, so the server's
+--      operations offer no way to declare one: it is the operator's, by psql,
+--      beside set_agent_kind (decision 10). That is the server's surface, not a
+--      wall: a role holding the server group can classify a key
+--      (set_agent_kind, its ob1_agents UPDATE) and so raise a key's trust, and
+--      a role holding the priority group can write the tables directly, as with
+--      every core table its group writes (115's note). The rules hold for
+--      callers of the functions. A withdrawn declaration is kept with when; the
+--      assertions made under it keep their tier.
 --
 --   5. WHO MAY ASSERT (decision 10), failing closed:
 --      * the envelope must state its scope: `write` for any item, `capture`
@@ -112,16 +111,16 @@
 --        all, is refused (READ_ONLY_KEY). The server's envelopes carry a
 --        scope only for a capture key today, so its operations (SMD-3664)
 --        state `write` for a write key;
---      * a capture-only key only on a thought its agent captured and nobody
---        has taken since (082's ob1_capturer_of and ob1_thought_taken, by the
---        agent id the envelope itself carries — never one read by name — and
---        asked again under a share lock on the thoughts), and a due time only from another such
---        thought — never a ticket, an entity or another key's thought
---        (SMD-2617: it may not state a ticket's status either). Asked before
---        any existence answer and refused alike for an item that is not there
---        (ITEM_NOT_YOURS), so the refusal tells it nothing about what exists.
---        Its assertion takes its own trust's tier. Only thoughts: SMD-3665's
---        open items extend ownership to their kind;
+--      * a capture-only key only on a thought its agent captured and nobody has
+--        taken since (082's ob1_capturer_of and ob1_thought_taken, by the agent
+--        id the envelope itself carries — never one read by name — and asked
+--        once, under the item's lock and a share lock on the thoughts), and a
+--        due time only from another such thought — never a ticket, an entity or
+--        another key's thought (SMD-2617: it may not state a ticket's status
+--        either). Asked before any existence answer and refused alike for an
+--        item that is not there (ITEM_NOT_YOURS), so the refusal tells it
+--        nothing about what exists. Its assertion takes its own trust's tier.
+--        Only thoughts: SMD-3665's open items extend ownership to their kind;
 --      * an ingested key at tier 4 unless declared a source.
 --      The refusals are outcomes, as an unknown item is (ITEM_NOT_FOUND); a
 --      malformed argument, an envelope naming nobody and a transaction above
@@ -173,34 +172,34 @@
 --      or take items in key order: two transactions locking two items in
 --      opposite orders deadlock (40P01).
 --
---   8. NOT THE EVENT LOG, DELETING AND FORGETTING. An item deleted (a
---      thought by delete_thought, an entity merged away) leaves its
---      assertions as they were, open ones included, and priority_of still
---      answers for it: closing them is SMD-3711, and removing a reason
---      SMD-1723's. An assertion is not a thought:
---      thought_audit is the thoughts' log. The table keeps its own history.
---      A reason is text and may hold personal data: forget_thought (SMD-1723)
---      has to reach the assertions on a forgotten item — they are the rows
---      WHERE (item_kind, item_key) = ('thought', <id>), and those whose
---      due_ref names it. The refusing trigger is what that ticket relaxes.
+--   8. NOT THE EVENT LOG, DELETING AND FORGETTING. An item deleted (a thought
+--      by delete_thought, an entity merged away) leaves its assertions as they
+--      were, open ones included, and priority_of still answers for it: closing
+--      them is SMD-3711's, and removing a reason SMD-1723's. An assertion is
+--      not a thought: thought_audit is the thoughts' log. The table keeps its
+--      own history. A reason is text and may hold personal data: forget_thought
+--      (SMD-1723) has to reach the assertions on a forgotten item — they are
+--      the rows WHERE (item_kind, item_key) = ('thought', <id>), and those
+--      whose due_ref names it. The refusing trigger is what that ticket
+--      relaxes.
 --
 --   ob1:priority-maker-from-the-envelope, ob1:priority-tier and
 --   ob1:priority-one-open-per-maker — CONTRACT SENTINELS, not prose (the 014
 --   convention).
 --
 -- PRIVILEGES
---   The `priority` group (db/config.mjs ROLE_GRANTS): SELECT, INSERT and
---   UPDATE on priority_assertions (UPDATE to close a window, the trigger
---   refusing any other); SELECT, INSERT, UPDATE and DELETE on
---   priority_current (a projection row is replaced and removed); SELECT on
---   priority_sources, and nothing more, so a server role cannot declare a
---   source; SELECT on ob1_entities (an entity's existence), which otherwise
---   only the extraction group grants. The maker's kind is read from
---   ob1_agents, and a thought's and a ticket's existence from thoughts and
---   ob1_ticket_head — the capture group's SELECT. Soft: a role without the group gets a
---   permission error (42501) naming the table on the priority calls, and
---   nothing else. The server first calls them in SMD-3664, whose preflight
---   will check the group, as 115 left its group's to SMD-3598.
+--   The `priority` group (db/config.mjs ROLE_GRANTS): SELECT, INSERT and UPDATE
+--   on priority_assertions (UPDATE to close a window, the trigger refusing any
+--   other); SELECT, INSERT, UPDATE and DELETE on priority_current (a projection
+--   row is replaced and removed); SELECT on priority_sources, and nothing more,
+--   so a server role cannot declare a source; SELECT on ob1_entities (an
+--   entity's existence), which otherwise only the extraction group grants. The
+--   maker's kind is read from ob1_agents, and a thought's and a ticket's
+--   existence from thoughts and ob1_ticket_head — the capture group's SELECT.
+--   Soft: a role without the group gets a permission error (42501) naming the
+--   table on the priority calls, and nothing else. The server first calls them
+--   in SMD-3664, whose preflight will check the group, as 115 left its group's
+--   to SMD-3598.
 --
 -- SAFETY
 --   Three new tables, their indexes, two refusing triggers on the first;
@@ -212,9 +211,9 @@
 -- Prerequisites
 --   008 (ob1_current_actor), 046 (ob1_registry_kind, ob1_trust_ceiling), 061
 --   (ob1_actor_agent_id), 068 (ob1_ticket_head), 082 (ob1_capturer_of,
---   ob1_thought_taken), 115 (ob1_work_claim_text, ob1_work_claim_issue). Applied by `bun db/migrate.ts`. Re-applied: the
---   tables and their rows are kept, and the functions and trigger are
---   replaced as they were.
+--   ob1_thought_taken), 115 (ob1_work_claim_text, ob1_work_claim_issue).
+--   Applied by `bun db/migrate.ts`. Re-applied: the tables and their rows are
+--   kept, and the functions and both triggers are replaced as they were.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not
@@ -330,7 +329,7 @@ CREATE TABLE IF NOT EXISTS priority_current (
   CONSTRAINT priority_current_open CHECK (open_count >= 1)
 );
 COMMENT ON TABLE priority_current IS
-  'The projection of priority_assertions: one row per item with an open assertion — its winner (lowest tier, then newest, then the later written), the winner''s level, tier and maker, and how many are open. Kept current by assert_priority and clear_priority in their own transaction; ob1_priority_projection_drift checks it and ob1_rebuild_priority_projection repairs it. Migration 116 / SMD-3663.';
+  'The projection of priority_assertions: one row per item with an open assertion — its winner (lowest tier, then the newest within it, the later written by seq), the winner''s level, tier and maker, and how many are open. Kept current by assert_priority and clear_priority in their own transaction; ob1_priority_projection_drift checks it and ob1_rebuild_priority_projection repairs it. Migration 116 / SMD-3663.';
 
 CREATE TABLE IF NOT EXISTS priority_sources (
   id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -651,6 +650,7 @@ DECLARE
   v_now      timestamptz;
   v_id       uuid   := gen_random_uuid();
   v_mine     boolean;
+  v_tier     smallint;
   v_own      int;
   v_old      priority_assertions;
   v_row      priority_assertions;
@@ -675,6 +675,7 @@ BEGIN
   END IF;
   PERFORM ob1_priority_isolation('assert_priority');
   SELECT * INTO v_who FROM ob1_priority_actor(p_actor, 'assert_priority');
+  v_tier := ob1_priority_tier(p_inferred, v_who.source, v_who.trust);
 
   -- Fail closed: the envelope states a scope that may write, write or capture
   -- (review pass 1: a scope read from its absence let an envelope without one
@@ -735,16 +736,15 @@ BEGIN
    FOR UPDATE;
 
   -- The same statement again — level, times, reference, reason, flag, tier and
-  -- the maker's stamp as the open one says — is no change: answered unchanged, nothing written,
-  -- so a source restating its priority every pass (board-sync) adds no row
-  -- and moves no "newest" (review pass 1).
-  -- The maker's stamp counts too: a key that has since gained an id, or
-  -- changed its scope, kind or declaration, states it afresh (review pass 4).
+  -- the maker's stamp as the open one says — is no change: answered unchanged,
+  -- nothing written, so a source restating its priority every pass
+  -- (board-sync) adds no row and moves no "newest", and a key that has since
+  -- gained an id, or changed its scope, kind or declaration, states it afresh
+  -- (review passes 1 and 4).
   IF v_own = 1
      AND (v_old.level, v_old.due_at, v_old.not_before, v_old.due_ref_kind, v_old.due_ref_key, v_old.reason, v_old.inferred, v_old.tier,
           v_old.maker_name, v_old.maker_agent_id, v_old.maker_kind, v_old.maker_trust, v_old.maker_scope, v_old.maker_source)
-         IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false),
-                               ob1_priority_tier(p_inferred, v_who.source, v_who.trust),
+         IS NOT DISTINCT FROM (p_level::smallint, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false), v_tier,
                                v_who.name, v_who.agent_id, v_who.kind, v_who.trust, v_who.scope, v_who.source) THEN
     -- The winner from the rule, as clear_priority reads it: never a stale or
     -- missing projection row's nulls (review pass 2).
@@ -765,8 +765,7 @@ BEGIN
   INSERT INTO priority_assertions (id, item_kind, item_key, level, due_at, not_before, due_ref_kind, due_ref_key, reason, inferred,
                                    maker_name, maker_agent_id, maker_kind, maker_trust, maker_scope, maker_source, tier, asserted_at)
   VALUES (v_id, v_item.kind, v_item.key, p_level, p_due_at, p_not_before, v_ref_kind, v_ref_key, v_reason, COALESCE(p_inferred, false),
-          v_who.name, v_who.agent_id, v_who.kind, v_who.trust, v_who.scope, v_who.source,
-          ob1_priority_tier(p_inferred, v_who.source, v_who.trust), v_now)
+          v_who.name, v_who.agent_id, v_who.kind, v_who.trust, v_who.scope, v_who.source, v_tier, v_now)
   RETURNING * INTO v_row;
 
   v_win := ob1_priority_project(v_item.kind, v_item.key);
@@ -853,11 +852,10 @@ BEGIN
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS e(v, ord)
       CROSS JOIN LATERAL ob1_priority_item(e.v->>'kind', e.v->>'key') AS n
      ORDER BY n.kind, n.key, e.ord)
-  -- The winner and its level from the rule, read with the open assertions in
-  -- one statement, so one reply never contradicts itself (review pass 4: the
-  -- projection's level beside a live list disagreed until a rebuild).
   -- One read: the open assertions in the rule's order (ob1_priority_winner's:
-  -- tier, then the later written), the winner their first (review pass 5).
+  -- tier, then the later written), the winner their first and the level the
+  -- winner's, so one reply never contradicts itself (review passes 4 and 5:
+  -- the projection's level beside a live list disagreed until a rebuild).
   SELECT q.kind, q.key, (l.list->0->>'level')::smallint, l.list->0, l.list
     FROM asked q
     CROSS JOIN LATERAL (
@@ -894,6 +892,7 @@ DECLARE
   v_agent    uuid;
   v_standing priority_sources;
   v_now      timestamptz := clock_timestamp();
+  v_declared boolean     := COALESCE(p_declared, true);
 BEGIN
   IF v_label = '' OR length(v_label) > 200 THEN
     RETURN jsonb_build_object('ok', false, 'error', 'BAD_LABEL');
@@ -904,7 +903,7 @@ BEGIN
   -- makers are matched by that alone (review pass 4: a by-label fallback for a
   -- key the registry did not know yet stayed bound to the name after the key
   -- registered, and a withdrawal could miss one of two standing rows).
-  IF COALESCE(p_declared, true) THEN
+  IF v_declared THEN
     INSERT INTO ob1_agents (label) VALUES (v_label) ON CONFLICT (label) DO NOTHING;
   END IF;
   v_agent := (SELECT a.canonical_agent_id FROM ob1_agents a WHERE a.label = v_label);
@@ -914,15 +913,16 @@ BEGIN
   SELECT * INTO v_standing FROM priority_sources s
    WHERE s.withdrawn_at IS NULL AND s.source_agent_id = v_agent
    FOR UPDATE;
-  IF COALESCE(p_declared, true) THEN
-    -- A new declaration is a new row: a withdrawn one keeps its window (review pass 2).
+  IF v_declared THEN
+    -- A new declaration is a new row: a withdrawn one keeps its window
+    -- (review pass 2).
     IF v_standing.id IS NULL THEN
       INSERT INTO priority_sources (label, source_agent_id, declared_at) VALUES (v_label, v_agent, v_now);
     END IF;
   ELSIF v_standing.id IS NOT NULL THEN
     UPDATE priority_sources SET withdrawn_at = v_now WHERE id = v_standing.id;
   END IF;
-  RETURN jsonb_build_object('ok', true, 'label', v_label, 'agent_id', v_agent, 'declared', COALESCE(p_declared, true),
+  RETURN jsonb_build_object('ok', true, 'label', v_label, 'agent_id', v_agent, 'declared', v_declared,
     'was_declared', v_standing.id IS NOT NULL);
 END;
 $$;

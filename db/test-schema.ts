@@ -16486,6 +16486,8 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const history = async (kind: string, key: string) => (await db.query<{ r: Assertion[] }>(`SELECT priority_history($1, $2) AS r`, [kind, key])).rows[0].r;
   const raised = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return { code: "", message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; } };
   const drift = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)).rows[0].n;
+  const openOn = async (key: string) => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [key])).rows[0].n;
+  const total = async () => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
   // A thought written by a key: a raw insert stamped from the envelope (050), with the key's agent id as the server sends it (the capture row's, 082).
   const agentOf = async (label: string) => (await db.query<{ id: string | null }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = $1`, [label])).rows[0]?.id ?? null;
   const thoughtBy = async (who: string, content: string, metadata: object | null = null) => {
@@ -16499,9 +16501,10 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   };
   // A capture key's envelope carries its agent id, as the server's does: what proves its thoughts are its own.
   const CAP = { name: "prio-cap", scope: "capture", agent_id: await agentOf("prio-cap") };
+  const BOT_ID = { ...BOT, agent_id: await agentOf("prio-bot") };
   const opThought = await thoughtBy("prio-op", "[104] the operator's note on the renewal");
   const capThought = await thoughtBy("prio-cap", "[104] a capture key's note on the gutters");
-  const ladder = await thoughtBy("prio-op", "[104] an item four makers state a priority on");
+  const ladder = await thoughtBy("prio-op", "[104] an item several makers state a priority on");
   await thoughtBy("prio-sync", "[104] SMD-9301 ticket row", { issue: "SMD-9301", status: "Backlog", status_type: "backlog", priority: "High" });
   const entity = (await db.query<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('project', 'Priority Eval', 'priority eval [104]') RETURNING id`)).rows[0].id;
   const headed = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_ticket_head WHERE issue = 'SMD-9301'`)).rows[0].n;
@@ -16545,14 +16548,14 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   // One key, one maker: seen once with its agent id and once without, its second statement replaces its first.
   const both = await thoughtBy("prio-op", "[104] one key, with and without its id");
   const byName = await put("thought", both, 2, BOT);
-  const byId = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
-  const openBoth = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [both])).rows[0].n;
+  const byId = await put("thought", both, 3, BOT_ID);
+  const openBoth = await openOn(both);
   // The same statement again: unchanged, no row written, "newest" not moved.
-  const rows0 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
-  const again = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
-  const rows1 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  const rows0 = await total();
+  const again = await put("thought", both, 3, BOT_ID);
+  const rows1 = await total();
   await db.query(`DELETE FROM priority_current WHERE item_key = $1`, [both]);
-  const againGone = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
+  const againGone = await put("thought", both, 3, BOT_ID);
   await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
   const changed = await put("thought", both, 3, BOT, { reason: "now with a reason" });
   assert(byId.replaced?.id === byName.assertion?.id && openBoth === 1 && byName.assertion?.maker.agent_id === byId.assertion?.maker.agent_id && byName.assertion?.maker.agent_id !== null
@@ -16565,9 +16568,9 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const beforeId = await put("thought", late, 2, { name: "prio-late", scope: "write" });
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('prio-late', 'agent')`);
   const afterId = await put("thought", late, 3, { name: "prio-late", scope: "write", agent_id: await agentOf("prio-late") });
-  const openLate = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [late])).rows[0].n;
+  const openLate = await openOn(late);
   const clearLate = await clear("thought", late, { name: "prio-late", scope: "write" });
-  const openAfterClear = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [late])).rows[0].n;
+  const openAfterClear = await openOn(late);
   assert(beforeId.assertion?.maker.agent_id === null && afterId.replaced?.id === beforeId.assertion?.id && openLate === 1 && clearLate.outcome === "cleared" && openAfterClear === 0,
     `a key that asserted by name before the registry knew it replaces that statement once it has an id, and clears it: one maker throughout (${afterId.replaced?.id === beforeId.assertion?.id}, ${openLate}, ${clearLate.outcome}, ${openAfterClear})`);
 
@@ -16759,7 +16762,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const freshSays = await put("ticket", "SMD-9301", 3, { name: "prio-fresh", scope: "write" });
   const standingFresh = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_sources WHERE source_agent_id = $1::uuid AND withdrawn_at IS NULL`, [freshRow])).rows[0].n;
   assert(fresh.ok && fresh.agent_id !== null && fresh.agent_id === freshRow && freshSays.assertion?.tier_name === "source" && standingFresh === 1,
-    `declaring a label the registry does not know makes its registry row and declares that agent; the key's statements take tier 2 by its id (${fresh.agent_id === freshRow}, ${freshSays.assertion?.tier_name})`);
+    `declaring a label the registry does not know makes its registry row and declares that agent; the key's statements take tier 2 by its id (${fresh.agent_id === freshRow}, ${freshSays.assertion?.tier_name}${"raised" in fresh ? `, raised: ${fresh.raised}` : ""})`);
   // A declaration only raises: an operator's key declared a source stays at tier 1.
   await db.query(`SELECT declare_priority_source('prio-op')`);
   const opDeclared = await put("thought", ladder, 4, OP);
@@ -16769,9 +16772,9 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
     `withdrawing by the renamed key's new name withdraws its declaration (its next statement at its trust's tier, ingested: 4); declaring a new key given the old name declares that key; an operator's key declared a source stays at tier 1 (${withdrawRenamed.was_declared}, ${renamedAfter.assertion?.tier_name}, ${declareNew.was_declared}, ${newSource.assertion?.tier_name}, ${opDeclared.assertion?.tier_name})`);
 
   // Re-applied: the assertions and the projection stand, one of each call.
-  const before = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  const before = await total();
   await reapply(file);
-  const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  const after = await total();
   const ones = await Promise.all(["assert_priority", "clear_priority", "priority_of", "priority_history", "declare_priority_source"].map(functionsNamed));
   assert(after === before && ones.every((n) => n === 1) && (await drift()) === 0, `116 applied again changes nothing: ${after} assertions stand, one of each call, the projection exact (${ones.join(",")})`);
 

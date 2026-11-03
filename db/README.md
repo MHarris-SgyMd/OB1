@@ -2342,75 +2342,73 @@ the re-apply), test-live [46] (two claims at once, held), test-upgrade [20bg]
 Migration 116 adds priority assertions: a key states how much an item matters,
 by when and why, and every statement is kept (SMD-3663, docs/priority.md's
 decisions 1, 2, 4 and 10). An **item** is `(kind, key)`: a `thought` or an
-`entity` by its id, a `ticket` by its key (normalised as `work_claims.issue` is),
-or an `item`, an open item, refused until SMD-3665 adds its table.
+`entity` by its id, a `ticket` by its key (normalised as `work_claims.issue`
+is), or an `item`, an open item, refused until SMD-3665 adds its table.
 `assert_priority` checks the item exists (a ticket by its head row, 068). A
 **level** is 0 none to 5 critical, anything else raised (22023); unknown is no
-assertion at all, never low. An assertion may carry `due_at`, `not_before`, a due
-reference (another item whose due time it takes, never itself), a reason (free
-text, at most 1000 characters, cleaned as 115 cleans a label) and `inferred`.
-The **maker** is stamped from the actor envelope (`p_actor`, which the server
-passes for the key) and the registry, never from an argument or from what the
-envelope says of its own kind or trust: the key's name and agent id, its kind,
-its trust (046's ceiling of the kind; an unclassified key has none), its scope,
-and whether the operator declared it a priority source. Those set its **tier**,
-which decides whose statement wins: 1 operator trust (declared a source or not:
-a declaration only raises), 2 a declared source, 3 agent trust, 4 inferred
-(flagged so by its maker, ingested trust from an undeclared key, or no trust); the lowest tier wins, then the newest within it —
-the later written (`seq`, the order the writers took the item's lock in; the
-clock's `asserted_at` is for display). A maker may lower its own tier, never
-raise it. The maker is the key: the envelope's agent id, else the registry's for
-its name, so a key seen with its id and without it is one maker, and a statement
-it made by name before the registry knew it is still its own to replace or clear
-(115's `is_holder` rule). A key's new
-statement on an item closes its open one as `replaced`, naming the new one; the
-same statement again (level, times, reference, reason, flag and tier) answers
-`unchanged` and writes nothing (a key that has since gained an id, or changed its
-scope, kind or declaration, states it afresh), so a source restating every pass
-adds no rows;
-`clear_priority` closes the caller's own as `cleared` and no other key's.
-`not_before` after `due_at` is refused. `priority_assertions` is append-only: a trigger refuses any UPDATE but an
-open row closing once (every other column as it was, compared as the whole
-row, so a column added later is held too), every DELETE and TRUNCATE, for the
-owner too. The
-scope rule **fails closed**: the envelope must state `write` (any item) or
-`capture`; a read key's scope, or none at all, is refused (`READ_ONLY_KEY`). The
-server's envelopes carry a scope only for a capture key today, so SMD-3664's
-operations state `write`. A **capture-only key** may state a priority only on a
-thought its agent captured and nobody has taken since (082's
-`ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope itself
-carries, never one read by name, and asked again under a share lock on the
-thought), and take a due time
-only from another such thought — never a ticket, an entity or another key's
-thought. That is asked before any existence answer and refused alike for an
-item that is not there (`ITEM_NOT_YOURS`), so the refusal tells it nothing about
-what exists; neither writer shows it the item's winner. `priority_of` and
-`priority_history` take no actor: who may read them is the operations layer's
-(SMD-3664's read tools, which a capture-only key is never given). With both
-`due_at` and a due reference, the item's own `due_at` is its due time. A
-deleted item's assertions stay as they were (SMD-3711, beside SMD-1723). The refusals are
-outcomes, as an unknown item is (`ITEM_NOT_FOUND`). `priority_of` reads a
-JSON array of items (at most 1000) in one query: each item's winning level, the
-winner and every open assertion, the winner first, all read by the rule in one
-statement so a reply never contradicts itself; `priority_history` reads
-every statement on one item, closed ones included, in the order written.
+assertion at all, never low. An assertion may carry `due_at`, `not_before`, a
+due reference (another item whose due time it takes, never itself), a reason
+(free text, at most 1000 characters, cleaned as 115 cleans a label) and
+`inferred`. The **maker** is stamped from the actor envelope (`p_actor`, which
+the server passes for the key) and the registry, never from an argument or from
+what the envelope says of its own kind or trust: the key's name and agent id,
+its kind, its trust (046's ceiling of the kind; an unclassified key has none),
+its scope, and whether the operator declared it a priority source. Those set its
+**tier**, which decides whose statement wins: 1 operator trust (declared a
+source or not: a declaration only raises), 2 a declared source, 3 agent trust, 4
+inferred (flagged so by its maker, ingested trust from an undeclared key, or no
+trust); the lowest tier wins, then the newest within it — the later written
+(`seq`, the order the writers took the item's lock in; the clock's `asserted_at`
+is for display). A maker may lower its own tier, never raise it. The maker is
+the key: the envelope's agent id, else the registry's for its name, so a key
+seen with its id and without it is one maker, and a statement it made by name
+before the registry knew it is still its own to replace or clear (115's
+`is_holder` rule). A key's new statement on an item closes its open one as
+`replaced`, naming the new one; the same statement again (level, times,
+reference, reason, flag and tier) answers `unchanged` and writes nothing (a key
+that has since gained an id, or changed its scope, kind or declaration, states
+it afresh), so a source restating every pass adds no rows; `clear_priority`
+closes the caller's own as `cleared` and no other key's. `not_before` after
+`due_at` is refused. `priority_assertions` is append-only: a trigger refuses any
+UPDATE but an open row closing once (every other column as it was, compared as
+the whole row, so a column added later is held too), every DELETE and TRUNCATE,
+for the owner too. The scope rule **fails closed**: the envelope must state
+`write` (any item) or `capture`; a read key's scope, or none at all, is refused
+(`READ_ONLY_KEY`). The server's envelopes carry a scope only for a capture key
+today, so SMD-3664's operations state `write`. A **capture-only key** may state
+a priority only on a thought its agent captured and nobody has taken since
+(082's `ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope
+itself carries, never one read by name, and asked once, under a share lock on
+the thought), and take a due time only from another such thought — never a
+ticket, an entity or another key's thought. That is asked before any existence
+answer and refused alike for an item that is not there (`ITEM_NOT_YOURS`), so
+the refusal tells it nothing about what exists; neither writer shows it the
+item's winner. `priority_of` and `priority_history` take no actor: who may read
+them is the operations layer's (SMD-3664's read tools, which a capture-only key
+is never given). With both `due_at` and a due reference, the item's own `due_at`
+is its due time. A deleted item's assertions stay as they were (SMD-3711, beside
+SMD-1723). The refusals are outcomes, as an unknown item is (`ITEM_NOT_FOUND`).
+`priority_of` reads a JSON array of items (at most 1000): each item's winning
+level, the winner and every open assertion, the winner first, all read by the
+rule in one statement so a reply never contradicts itself; `priority_history`
+reads every statement on one item, closed ones included, in the order written.
 `priority_current` is the projection, one row per item with an open assertion,
 kept current in the write's transaction; `ob1_priority_projection_drift()`
 checks it with its own copy of the winner's rule (068's) and
 `ob1_rebuild_priority_projection()` repairs it after a raw write.
 `declare_priority_source(label, declared)` is the operator's, beside
-`set_agent_kind`: the priority group grants only `SELECT` on
-`priority_sources`, so the server's operations cannot declare a source. That is
-the server's surface, not a wall — a role holding the server group can classify
-a key (`set_agent_kind`), and a role holding the priority group can write the
-tables directly; the rules hold for callers of the functions, as 115's do. Two
-declarations of one key at once wait on an advisory lock on it. Each
-declaration is a row of its own, closed by its withdrawal and never rewritten,
-and always names the key's agent id — a declaration makes the registry row for a
-label the registry does not know yet, as `set_agent_kind` does. Makers,
-declarations and withdrawals are matched by that id alone, so a renamed source
-stays one (and is withdrawn by its new name) and a new key given the old name is
-not one until declared itself. The statements made under a declaration keep their tier. Each
+`set_agent_kind`: the priority group grants only `SELECT` on `priority_sources`,
+so the server's operations cannot declare a source. That is the server's
+surface, not a wall — a role holding the server group can classify a key
+(`set_agent_kind`), and a role holding the priority group can write the tables
+directly; the rules hold for callers of the functions, as 115's do. Two
+declarations of one key at once wait on an advisory lock on it. Each declaration
+is a row of its own, closed by its withdrawal and never rewritten, and always
+names the key's agent id — a declaration makes the registry row for a label the
+registry does not know yet, as `set_agent_kind` does. Makers, declarations and
+withdrawals are matched by that id alone, so a renamed source stays one (and is
+withdrawn by its new name) and a new key given the old name is not one until
+declared itself. The statements made under a declaration keep their tier. Each
 writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
 lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach
