@@ -19429,7 +19429,12 @@ if (want("38")) {
     // asleep, and the passes go on once the capture has passed with no live write.
     lines.length = 0;
     for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
-    sw.slow = scaled(5000);
+    // The call in hand 3.6 s, scaled less than the rest: the write's lag before the pause (about 0.4 s of
+    // reads) doesn't scale, and a 3 s call left 0.5 s for the pause to meet it in hand. At 3.6 s it leaves
+    // about 1.1 s, as the unscaled case did, and ends about 1.2 s before the scaled capture's resume, so no
+    // claim follows while paused (SMD-3714 review pass 1: unscaled, 5 s outlasted the capture).
+    const inHandCall = 3600;
+    sw.slow = inHandCall;
     const ac = new AbortController();
     const callsBefore = modelCalls.length;
     // A 6 s capture in a 7 s quiet: the call in hand ends about 2.5 s into the pause, with time to see no claim follow (review pass 1: 5 s left 1.4 s).
@@ -19457,6 +19462,8 @@ if (want("38")) {
     await liveWrite(sql, "a live write");
     const pauseSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  paused: a live write at .* — the passes wait between thoughts, windows and pairs until no live write for ${capS(6000)} s$`).test(l)), 10_000);
     const pauseMs = Date.now() - pausedAt;
+    // The thought in hand still claimed as the pause is said: the pause met a call in hand (SMD-3714 review pass 1).
+    const [atPause] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
     let pausedBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (pausedBeat = await beat())?.paused !== undefined, 3_000);
     // The call in hand runs on and its thought is done; no claim follows while the gate is closed.
@@ -19465,9 +19472,9 @@ if (want("38")) {
     await Bun.sleep(scaled(800));
     const heldBack = (await claims(EX)).claimed ?? 0;
     const resumedEarly = lines.some((l) => /resumed:/.test(l));
-    assert(asleepBeat?.running === true && pauseSaid && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
+    assert(asleepBeat?.running === true && pauseSaid && atPause?.id === inHand?.id && pauseMs < scaled(3000) && pausedBeat?.running === true && typeof pausedBeat?.paused?.since === "string"
         && handDone && doneThought === "succeeded" && heldBack === 0 && !resumedEarly,
-      `a live write pauses a sleep with a 5 s call in hand: said within the poll, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
+      `a live write pauses a sleep with a ${inHandCall / 1000} s call in hand: said within the poll, the call still in hand, the row asleep and paused, the call finishing and nothing claimed while the brain is live (${pauseMs} ms; ${atPause?.id === inHand?.id ? "in hand" : "not in hand at the pause"}; ${doneThought}; ${heldBack} claimed; ${JSON.stringify(pausedBeat)})`);
     // The capture passed with no live write: the passes go on, the row paused no more.
     const resumedSaid = await pollUntil(async () => lines.some((l) => new RegExp(`^  resumed: no live write for ${capS(6000)} s — the passes go on \\(paused \\d+ s\\)$`).test(l)), 15_000);
     let resumedBeat = null as Awaited<ReturnType<typeof beat>>;
@@ -19600,8 +19607,10 @@ if (want("38")) {
       `…but a live write on a thought whose claim was queued before it pauses the sleep: that work is the sleep's (${earlierRan ? `paused ${earlierPaused}, ended ${earlierEnded}` : "not reached: the capture's end or the drain before it failed"})`);
 
     // Paused time is not the clock's (SMD-3379 PR 1c-3b, the maintainer's choice): a 4 s clock with a pause of
-    // about 3 s inside it is spent about 7 s after the sleep began, not at 4. The slack below stays 1.2 s
-    // unscaled, as it covers the pause's rounding to a whole second (SMD-3714).
+    // about 3 s inside it is spent about 7 s after the sleep began, not at 4. Scaled, the bound is the pause's
+    // floor, not its rounded seconds: the clock, plus the capture less a poll (the write may land just before
+    // one), less 0.4 s of the reads' lag. A pause rounded to 1 s let paused time on the clock pass (SMD-3714
+    // review pass 1: 1 run in 10; the right code spends 3.7-4.5 s, that mutant about 2.5).
     lines.length = 0;
     for (let i = 0; i < 4; i++) await capture(`A note under a paused clock, number ${i}.`, "sync-sleep", 0, 30 + i);
     sw.slow = scaled(1500);
@@ -19624,8 +19633,8 @@ if (want("38")) {
       await pausedClockRun;
     }
     const clockPaused = Number(lines.find((l) => /resumed: no live write/.test(l))?.match(/paused (\d+) s/)?.[1] ?? 0);
-    assert(clockSpentAt > 0 && clockPaused >= 1 && clockSpentAt - clockAsleepAt >= scaled(4000) + clockPaused * 1000 - 1200,
-      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its ${scaled(4000)} ms by the ${clockPaused} s paused`);
+    assert(clockSpentAt > 0 && clockPaused >= 1 && clockSpentAt - clockAsleepAt >= scaled(4000) + scaled(3000) - scaled(1000) - 400,
+      `a pause does not count against the sleep's clock: spent ${clockSpentAt - clockAsleepAt} ms after the sleep began, past its ${scaled(4000)} ms clock by its ${clockPaused} s paused, at least ${scaled(4000) + scaled(3000) - scaled(1000) - 400} ms`);
     assert(clockSpentAt > 0 && !sleptAgain, `…and the live write that paused it does not end the budget's rest: no sleep begins again without a newer one (${sleptAgain ? "slept again" : "resting"})`);
 
     // A live write in the clock's grace still ends the sleep as a wake did: the
@@ -20280,7 +20289,9 @@ if (want("38")) {
     sw.unavailable = true;
     const acProbe = new AbortController();
     const probeRun = sleepRun({ follow: true, signal: acProbe.signal, minStampEveryS: 1 });
-    await pollUntil(async () => lines.some((l) => /provider is not answering at start/.test(l)), 20_000);
+    // Asleep first: the start check says the provider is down before the first sleep, and a capture
+    // landing before it begins meets no sleep to pause or wake (SMD-3714 review pass 1, 1 run in 3 under load).
+    await pollUntil(async () => lines.some((l) => /provider is not answering at start/.test(l)) && lines.some((l) => /^  asleep:/.test(l)), 20_000);
     await capture("A note that wakes it while it waits at the start.", "op-sleep", 0, 9);
     const interrupted = await pollUntil(async () => lines.some((l) => /^  (paused|awake): a live write/.test(l)), 10_000);
     sw.unavailable = false;
