@@ -2360,7 +2360,9 @@ undeclared key, or no trust); the lowest tier wins, then the newest within it â€
 the later written (`seq`, the order the writers took the item's lock in; the
 clock's `asserted_at` is for display). A maker may lower its own tier, never
 raise it. The maker is the key: the envelope's agent id, else the registry's for
-its name, so a key seen with its id and without it is one maker. A key's new
+its name, so a key seen with its id and without it is one maker, and a statement
+it made by name before the registry knew it is still its own to replace or clear
+(115's `is_holder` rule). A key's new
 statement on an item closes its open one as `replaced`, naming the new one; the
 same statement again (level, times, reference, reason, flag and tier) answers
 `unchanged` and writes nothing, so a source restating every pass adds no rows;
@@ -2372,12 +2374,14 @@ scope rule **fails closed**: the envelope must state `write` (any item) or
 server's envelopes carry a scope only for a capture key today, so SMD-3664's
 operations state `write`. A **capture-only key** may state a priority only on a
 thought its agent captured and nobody has taken since (082's
-`ob1_capturer_of` and `ob1_thought_taken`, by agent id), and take a due time
+`ob1_capturer_of` and `ob1_thought_taken`, by the agent id its envelope itself
+carries, never one read by name, and asked again under a share lock on the
+thought), and take a due time
 only from another such thought â€” never a ticket, an entity or another key's
 thought. That is asked before any existence answer and refused alike for an
 item that is not there (`ITEM_NOT_YOURS`), so the refusal tells it nothing about
-what exists. The refusals are outcomes, as an unknown item is
-(`ITEM_NOT_FOUND`). `priority_of` reads a
+what exists; `clear_priority` never shows it the item's winner. The refusals are
+outcomes, as an unknown item is (`ITEM_NOT_FOUND`). `priority_of` reads a
 JSON array of items (at most 1000) in one query: each item's winning level, the
 winner, and every open assertion, the winner first; `priority_history` reads
 every statement on one item, closed ones included, in the order written.
@@ -2386,8 +2390,11 @@ kept current in the write's transaction; `ob1_priority_projection_drift()`
 checks it with its own copy of the winner's rule (068's) and
 `ob1_rebuild_priority_projection()` repairs it after a raw write.
 `declare_priority_source(label, declared)` is the operator's, beside
-`set_agent_kind`: server roles hold only `SELECT` on `priority_sources`. A
-withdrawn declaration keeps the tier of the statements made under it. Each
+`set_agent_kind`: server roles hold only `SELECT` on `priority_sources`. Each
+declaration is a row of its own, closed by its withdrawal and never rewritten,
+and names the key's agent id when the registry knows it: a maker is matched by
+that id, so a renamed source stays one and a new key given the old name does
+not. The statements made under a declaration keep their tier. Each
 writer raises (0A000) above READ COMMITTED before it reads and takes an advisory
 lock on its item; make one writer call per transaction, or take items in key
 order. A reason may hold personal data: `forget_thought` (SMD-1723) has to reach

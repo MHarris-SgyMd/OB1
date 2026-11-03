@@ -16470,7 +16470,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   // A writer's envelope states its scope (the rule fails closed on one that does not).
   const W = { scope: "write" };
   const OP = { name: "prio-op", ...W }, BOT = { name: "prio-bot", ...W }, BOT2 = { name: "prio-bot2", ...W }, SYNC = { name: "prio-sync", ...W }, IMPORT = { name: "prio-import", ...W }, ANON = { name: "prio-anon", ...W };
-  const CAP = { name: "prio-cap", scope: "capture" }, READ = { name: "prio-read", scope: "read" };
+  const READ = { name: "prio-read", scope: "read" };
   await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('prio-op', 'operator'), ('prio-bot', 'agent'), ('prio-bot2', 'agent'), ('prio-cap', 'agent'), ('prio-sync', 'ingested'), ('prio-import', 'ingested'), ('prio-read', 'agent')`);
   // A raise is an outcome here, named, so a broken rule fails its own row rather than ending the suite.
   const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
@@ -16497,6 +16497,8 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
     });
     return id;
   };
+  // A capture key's envelope carries its agent id, as the server's does: what proves its thoughts are its own.
+  const CAP = { name: "prio-cap", scope: "capture", agent_id: await agentOf("prio-cap") };
   const opThought = await thoughtBy("prio-op", "[104] the operator's note on the renewal");
   const capThought = await thoughtBy("prio-cap", "[104] a capture key's note on the gutters");
   const ladder = await thoughtBy("prio-op", "[104] an item four makers state a priority on");
@@ -16549,10 +16551,25 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const rows0 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
   const again = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
   const rows1 = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
+  await db.query(`DELETE FROM priority_current WHERE item_key = $1`, [both]);
+  const againGone = await put("thought", both, 3, { ...BOT, agent_id: await agentOf("prio-bot") });
+  await db.query(`SELECT * FROM ob1_rebuild_priority_projection()`);
   const changed = await put("thought", both, 3, BOT, { reason: "now with a reason" });
   assert(byId.replaced?.id === byName.assertion?.id && openBoth === 1 && byName.assertion?.maker.agent_id === byId.assertion?.maker.agent_id && byName.assertion?.maker.agent_id !== null
-         && again.outcome === "unchanged" && again.assertion?.id === byId.assertion?.id && rows1 === rows0 && changed.outcome === "asserted" && changed.replaced?.id === byId.assertion?.id,
-    `a key seen without its agent id (the registry's for its name) and with it is one maker — one open statement; the same statement again is unchanged and writes no row, a new reason a new statement (${openBoth}, ${again.outcome}, ${rows1 - rows0}, ${changed.outcome})`);
+         && again.outcome === "unchanged" && again.assertion?.id === byId.assertion?.id && rows1 === rows0 && changed.outcome === "asserted" && changed.replaced?.id === byId.assertion?.id
+         && againGone.outcome === "unchanged" && againGone.winner?.id === byId.assertion?.id,
+    `a key seen without its agent id (the registry's for its name) and with it is one maker — one open statement; the same statement again is unchanged and writes no row, its winner read fresh even with the projection row gone; a new reason a new statement (${openBoth}, ${again.outcome}, ${rows1 - rows0}, ${JSON.stringify(againGone.winner?.id === byId.assertion?.id)}, ${changed.outcome})`);
+
+  // A key that asserted by name before the registry knew it, then with an id: its first statement is still its own.
+  const late = await thoughtBy("prio-op", "[104] a key the registry learns late");
+  const beforeId = await put("thought", late, 2, { name: "prio-late", scope: "write" });
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('prio-late', 'agent')`);
+  const afterId = await put("thought", late, 3, { name: "prio-late", scope: "write", agent_id: await agentOf("prio-late") });
+  const openLate = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [late])).rows[0].n;
+  const clearLate = await clear("thought", late, { name: "prio-late", scope: "write" });
+  const openAfterClear = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions WHERE item_key = $1 AND closed_at IS NULL`, [late])).rows[0].n;
+  assert(beforeId.assertion?.maker.agent_id === null && afterId.replaced?.id === beforeId.assertion?.id && openLate === 1 && clearLate.outcome === "cleared" && openAfterClear === 0,
+    `a key that asserted by name before the registry knew it replaces that statement once it has an id, and clears it: one maker throughout (${afterId.replaced?.id === beforeId.assertion?.id}, ${openLate}, ${clearLate.outcome}, ${openAfterClear})`);
 
   // Newest within a tier.
   const twin = await thoughtBy("prio-op", "[104] two agents on one item");
@@ -16592,9 +16609,16 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
     await tx.query(`UPDATE thoughts SET content = content || ' (the operator rewrote it)' WHERE id = $1::uuid`, [capOwn2]);
   });
   const capTaken = await put("thought", capOwn2, 3, CAP);
+  const capNoId = await put("thought", capThought, 2, { name: "prio-cap", scope: "capture" });
+  // clear_priority shows a capture key no winner: not another key's reason or maker, not that an item exists.
+  const capClearOther = await clear("thought", opThought, CAP);
+  const capClearTicket = await clear("ticket", "SMD-9301", CAP);
+  const capClearOwn = await clear("thought", capThought, CAP);
   assert(capReal.code === "ITEM_NOT_YOURS" && capGhost.code === "ITEM_NOT_YOURS" && capNone.code === "ITEM_NOT_YOURS" && capReal.message === capGhost.message && capGhost.message === capNone.message
-         && capRefOther.code === "ITEM_NOT_YOURS" && capRefOwn.outcome === "asserted" && capRefOwn.assertion?.due_ref?.key === capOwn2 && capTaken.code === "ITEM_NOT_YOURS",
-    `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code})`);
+         && capRefOther.code === "ITEM_NOT_YOURS" && capRefOwn.outcome === "asserted" && capRefOwn.assertion?.due_ref?.key === capOwn2 && capTaken.code === "ITEM_NOT_YOURS"
+         && capNoId.code === "ITEM_NOT_YOURS" && capClearOther.outcome === "nothing_to_clear" && capClearOther.winner === null && capClearTicket.winner === null
+         && capClearOwn.outcome === "cleared" && capClearOwn.winner === null,
+    `a capture key's refusal is one answer for a ticket that exists, one that does not and a thought that does not, so it learns nothing of what exists; a due time from another key's thought refused, from its own kept; a thought the operator took from it no longer its own; an envelope without its agent id owns nothing (an id read by name proves nothing); clear_priority shows it no winner, on another's item or its own (${capReal.code}, ${capGhost.code}, ${capNone.code}, ${capRefOther.code}, ${capRefOwn.outcome}, ${capTaken.code}, ${capNoId.code}, ${JSON.stringify(capClearOther.winner)})`);
   const readKey = await put("thought", capThought, 1, READ);
   const readClear = await clear("thought", capThought, READ);
   const unstated = await put("thought", opThought, 1, { name: "prio-bot" });
@@ -16694,6 +16718,17 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   assert(withdrawn.was_declared && afterWithdraw.assertion?.tier_name === "inferred" && JSON.stringify(kept) === JSON.stringify(["source", "inferred"]),
     `a withdrawn source's next statement takes its trust's tier (ingested: 4); the one made while declared keeps tier 2 (${JSON.stringify(kept)})`);
 
+  // A source re-declared: a new row, the withdrawn one kept with its window. Matched by its agent id: renamed, still a source; a new key given the old name, not.
+  await db.query(`SELECT declare_priority_source('prio-sync')`);
+  const declarations = (await db.query<{ w: boolean }>(`SELECT withdrawn_at IS NOT NULL AS w FROM priority_sources WHERE label = 'prio-sync' ORDER BY declared_at, id`)).rows.map((r) => r.w);
+  const syncId = await agentOf("prio-sync");
+  await db.exec(`UPDATE ob1_agents SET label = 'prio-sync-renamed' WHERE label = 'prio-sync'`);
+  const renamed = await put("ticket", "SMD-9301", 1, { name: "prio-sync-renamed", scope: "write", agent_id: syncId });
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('prio-sync', 'agent')`);
+  const usurper = await put("ticket", "SMD-9301", 1, { name: "prio-sync", scope: "write", agent_id: await agentOf("prio-sync") });
+  assert(JSON.stringify(declarations) === JSON.stringify([true, false]) && renamed.assertion?.tier_name === "source" && usurper.assertion?.tier_name === "agent",
+    `re-declaring a withdrawn source writes a new row and keeps the old one's window; a declared source renamed keeps tier 2 by its agent id, and a new key given the old name is an agent, not a source (${JSON.stringify(declarations)}, ${renamed.assertion?.tier_name}, ${usurper.assertion?.tier_name})`);
+
   // Re-applied: the assertions and the projection stand, one of each call.
   const before = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM priority_assertions`)).rows[0].n;
   await reapply(file);
@@ -16701,7 +16736,7 @@ console.log("\n[104] Migration 116: priority assertions — a key states how muc
   const ones = await Promise.all(["assert_priority", "clear_priority", "priority_of", "priority_history", "declare_priority_source"].map(functionsNamed));
   assert(after === before && ones.every((n) => n === 1) && (await drift()) === 0, `116 applied again changes nothing: ${after} assertions stand, one of each call, the projection exact (${ones.join(",")})`);
 
-  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-import', 'prio-read')`);
+  await db.exec(`DELETE FROM ob1_agents WHERE label IN ('prio-op', 'prio-bot', 'prio-bot2', 'prio-cap', 'prio-sync', 'prio-sync-renamed', 'prio-import', 'prio-read', 'prio-late')`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

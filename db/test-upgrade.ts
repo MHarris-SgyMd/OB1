@@ -708,7 +708,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 029, 046 or 050 ([20bf]); 115 adds work claims — a table, its index
   // and fourteen functions — refusing by name without 008, 046 or 061
   // ([20bg]); 116 adds priority assertions — three tables, two refusing
-  // triggers and eighteen functions — refusing by name without 008, 046, 061,
+  // triggers and nineteen functions — refusing by name without 008, 046, 061,
   // 068, 082 or 115 ([20bh]) — all
   // recorded by the
   // planted ledger with their
