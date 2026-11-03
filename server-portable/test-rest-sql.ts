@@ -1304,7 +1304,7 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
     `the holder's own release over MCP with its token; releasing it again, from any key, already_released (${own.text.slice(0, 80)} | ${again.status} ${again.body.outcome})`);
 }
 
-console.log("\n[11] The claimed label (SMD-3599): a live claim on a ticket a result names is on search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch, through both doors — its holder, piece and times, its label quoted in text and never in a title; the caller's own said so; a lapsed one never released said as lapsed; gone once released; a result naming 60 tickets reads the first 50 and counts the rest");
+console.log("\n[11] The claimed label (SMD-3599): a live claim on a ticket a result names is on search, search_thoughts, search_thoughts_keyword, list_thoughts and fetch, through both doors — its holder and times, its piece and label quoted in text and never in a title; the caller's own said so; a lapsed one never released said as lapsed; gone once released; a result naming 60 tickets reads the first 50 and counts the rest");
 {
   type Claim = { id: string };
   type Row = Record<string, unknown> & { id: string; claimed?: Record<string, unknown>[] | null; claimedNotRead?: number };

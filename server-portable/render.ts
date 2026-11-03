@@ -18,7 +18,7 @@
 // everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
-import { MOVED_READ, movedWords, typesOf, type Moved } from "./stated-status.ts";
+import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
@@ -164,7 +164,7 @@ const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
 const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
   ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 
-/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
+/** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust, its moved tickets and its claims; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   preferCurrent: v.preferCurrent,
   // The marker word alone, as a capture's (SMD-2891): the words are in the text.
@@ -180,12 +180,12 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
     ...claimedFields(h),
   })),
 });
-/** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
+/** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
   hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h) })),
 });
-/** list_thoughts: per thought its id, date, the newer thought that supersedes it, and its trust; the page's sort and the next page's cursor (SMD-2995). */
+/** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
   thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t) })),
   sort: v.sort,
@@ -765,8 +765,8 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // An `ID:` line, the same label the two search tools print — it is what
         // update_thought and delete_thought take. This compact format has no
         // header group, so it trails the content. SMD-1248.
-        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         // SMD-3599: who holds a ticket it names, after the superseded mark.
+        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
         const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
@@ -1805,9 +1805,11 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
 /** A claims read that failed, said once per reply (SMD-3599, review pass 1: it read as nothing held). */
-const CLAIMS_UNREAD = "⚠ The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result without a `⚠ Claimed` line may still be claimed — check the brain's list_claims before starting work.";
+const CLAIMS_UNREAD_WHY = "The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result";
+const CLAIMS_UNREAD_CHECK = "may still be claimed — check the brain's list_claims before starting work.";
+const CLAIMS_UNREAD = `⚠ ${CLAIMS_UNREAD_WHY} without a \`⚠ Claimed\` line ${CLAIMS_UNREAD_CHECK}`;
 /** The compat pair's note: their claims ride the title, not a line (review pass 3). */
-const CLAIMS_UNREAD_COMPAT = "The work claims on the tickets these name could not be read (for one, a brain before migration 115, or a server role without the claims grant): a result whose title has no `[claimed: …]` may still be claimed — check the brain's list_claims before starting work.";
+const CLAIMS_UNREAD_COMPAT = `${CLAIMS_UNREAD_WHY} whose title has no \`[claimed: …]\` ${CLAIMS_UNREAD_CHECK}`;
 /** The compat pair's (search, fetch): a title marker on each result, as `[exact match …]` is, and the words in a top-level note (review pass 2: a failed read was invisible in a title). */
 const CLAIMS_UNREAD_TITLE = "[claims not read] ";
 /** How many claims a title names: the rest counted, the field keeping all (review pass 1: ten made a title of 2 KB). */
@@ -1816,7 +1818,7 @@ const CLAIMED_IN_TITLE = 2;
  * A result's claims in words (SMD-3599), each as heldLine says a claim in the way — a lapsed one never released said
  * so — with its label quoted and cut, the holder's words, as its piece is. A title's (`title`) say only who holds
  * what since when, or that it lapsed: the first two, no label, which every ChatGPT surface hands the model as the
- * result's own words. The text's add what the claim tools' words say of the caller's own key and of a lapsed claim.
+ * result's own words. The text's add AGENTS.md's readings of the caller's own key's claims and of a lapsed claim.
  * The rest past the shown counted; the tickets not read counted, with no claim shown too (review pass 1). Null when
  * there is nothing to say.
  */

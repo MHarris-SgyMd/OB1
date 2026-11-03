@@ -390,7 +390,7 @@ export type ClaimedOn = { id: string; ticket: string; piece: string | null; hold
 /** A result's claims: the first CLAIMED_SHOWN, how many more, and how many tickets it names that were not read. */
 export type ClaimedHit = { claimed: ClaimedOn[]; claimedMore: number; claimedNotRead: number };
 /** How many of a result's claims it names (a ticket's whole and its pieces each count). */
-export const CLAIMED_SHOWN = 10;
+const CLAIMED_SHOWN = 10;
 /** One call's reach. Past it the read stopped short, and the tickets it may not have reached are counted, not read. */
 const CLAIMS_READ = 1000;
 const TICKET_KEY = /^[A-Z][A-Z0-9]+-[0-9]+$/;

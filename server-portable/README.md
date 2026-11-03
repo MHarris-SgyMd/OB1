@@ -487,17 +487,20 @@ holder is the caller's own key, label, times and `state`, the first ten
 and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
 …, until … (claim …, label "…")` — `lapsed at …, never released` for a lapsed
 one — the piece and label quoted on one line as the holder's own words, with
-the claim tools' sentences for a lapsed claim and the caller's own key; their
+AGENTS.md's readings of a lapsed claim and of the caller's own key; their
 structured values keep ids, tickets, holders, states and times. `search` and
-`fetch` start the title `[claimed: SMD-3379 piece "PR 1b-2" by codex, since …]`
-after any moved prefix — the first two, never the label — and their JSON, the
-ChatGPT shape, carries the fields only beside a claimed ticket (the tickets
-not read with them, as `movedNotRead` rides beside a move), label included,
-and `claimed: null` on every result when the read failed. Unlike `moved`, a ticket row and a superseded thought are labelled
-too: who holds a ticket is a fact about now. The claims are one read of
-`work_claims`' unreleased rows (115's partial index) per page, made only when a
-result names a ticket; a brain before 115, or a read that fails, gives
-`claimed: null`, which the text tools say in a line, and the read goes on.
+`fetch` start the title `[claimed: SMD-3379 (a piece) by codex, since …]`
+after any moved prefix — the first two, never the piece or the label — and
+their JSON, the ChatGPT shape, carries the fields only beside a claimed ticket
+(the tickets not read with them, as `movedNotRead` rides beside a move), label
+included, and `claimed: null` on every result when the read failed. Unlike
+`moved`, a ticket row and a superseded thought are labelled too: who holds a
+ticket is a fact about now. The claims are one read of `work_claims`'
+unreleased rows (115's partial index) per page, made only when a result names
+a ticket; a brain before 115, a server role without the claims grant, or a
+read that fails, gives `claimed: null`, which the text tools say in a line and
+`search`'s and `fetch`'s titles mark `[claims not read]` beside a
+`claimsNote`, and the read goes on.
 Like `moved`, it never moves a rank.
 
 ## Steps

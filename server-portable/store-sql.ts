@@ -962,7 +962,7 @@ export class SqlStore implements ThoughtStore {
   async unreleasedClaimsOn(issues: string[], limit: number): Promise<WorkClaim[]> {
     // SMD-3599: 115's partial index on the unreleased claims (work_claims_one_unreleased, issue and piece key) finds
     // them; list_work_claims gives live ones, or every one, released included, which would spend the limit on history.
-    // The keys are a hit's text's, upper-case as 115 stores them; the server role's existing SELECT reads the table.
+    // The keys are the ones a hit is filed under and names, upper-case as 115 stores them; the server role's existing SELECT reads the table.
     const rows = await this.sql`
       SELECT ob1_work_claim_json(c, now()) AS j
         FROM work_claims c
