@@ -1884,6 +1884,8 @@ console.log("\n[20b] unreleasedClaimsOn reads one page's tickets at once (SMD-35
   const one = await store.unreleasedClaimsOn(["SMD-9330", "SMD-9332"], 1);
   assert(JSON.stringify(got.map((c) => [c.issue, c.state])) === '[["SMD-9330","live"],["SMD-9332","lapsed"]]' && one.length === 1 && one[0].issue === "SMD-9330",
     `the tickets named, live and lapsed-unreleased, no released claim and no other ticket's, by ticket, at most the limit (${JSON.stringify([got.map((c) => [c.issue, c.state]), one.map((c) => c.issue)])})`);
+  // Released after, so no later section meets them (whole-branch review).
+  for (const m of made.slice(0, 3)) await store.releaseClaim({ id: String(m.claim?.id), token: String(m.token), reason: "done", actor });
 }
 
 console.log("\n[21] claimLease reads the lease a renewal starts from by its token, and renew_claim's form by the claim's id too: another claim's id with the token is no lease (SMD-3654)");

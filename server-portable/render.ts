@@ -681,7 +681,6 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
-    if (data.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
@@ -694,7 +693,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
           : `The query is only literals and no thought contains them, so these results are by similarity alone${v.preferCurrent ? ", current ones first" : ""}.`);
     }
 
-    return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`;
+    return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), safeSearch);
 }
 
@@ -1846,7 +1845,7 @@ function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0
  * each combination left a case unsaid or misread (an own key's lapsed claim, another key's live one, a subagent's
  * caller's). AGENTS.md's "Claim your work" rules, in words a client without it can follow.
  */
-const CLAIMED_KEY = "How to read ⚠ Claimed: a claim whose id is in your worktree's .work-claims/, or that your task names, is yours — renew a lapsed one with the token file's lease and read the renewal's reply (a subagent tells its caller instead). Any other live claim holds its work, another session's of your own key included, or this one's if it lost its token: leave that work alone and tell the user its label or claim id. Any other lapsed claim, never released, may be work paused elsewhere unless its PR merged or closed (the branch in its label; with none, ask): ask the user before starting that work. A result without the line says nothing either way: check the brain's list_claims and the ticket's branches and PRs before starting work.";
+const CLAIMED_KEY = "How to read a `⚠ Claimed` line: a claim whose id is in your worktree's .work-claims/, or that your task names, is yours — renew a lapsed one with the token file's lease and read the renewal's reply, unless a .ended.json or .blocked.json sits beside its token file (a subagent tells its caller instead). Any other live claim holds its work, another session's of your own key included, or this one's if it lost its token: leave that work alone and tell the user its label or claim id. Any other lapsed claim, never released, may be work paused elsewhere unless its PR merged or closed (the branch in its label; with none, ask): ask the user before starting that work. A result without the line says nothing either way: check the brain's list_claims and the ticket's branches and PRs before starting work.";
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);

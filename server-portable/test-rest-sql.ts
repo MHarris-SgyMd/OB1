@@ -1319,7 +1319,8 @@ console.log("\n[11] The claimed label (SMD-3599): a live claim on a ticket a res
       rest("POST", "/v1/search/compat", { query: "SMD-9320" }), mcp("search", { query: "SMD-9320" }),
       rest("POST", "/v1/search", { query: "SMD-9320", limit: 10 }), mcp("search_thoughts", { query: "SMD-9320", limit: 10 }),
       rest("POST", "/v1/search/keyword", { query: "SMD-9320 PR 1 and" }), mcp("search_thoughts_keyword", { query: "SMD-9320 PR 1 and" }),
-      rest("GET", "/v1/thoughts?limit=3"), mcp("list_thoughts", { limit: 3 }),
+      // A page wide enough that this case's thought is on it whatever else the suite captured (whole-branch review).
+      rest("GET", "/v1/thoughts?limit=100"), mcp("list_thoughts", { limit: 100 }),
       rest("GET", `/v1/thoughts/${tid}`), mcp("fetch", { id: tid }),
     ]);
     return {

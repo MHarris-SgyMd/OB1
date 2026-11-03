@@ -423,7 +423,15 @@ export async function claimedOf(store: Pick<ThoughtStore, "unreleasedClaimsOn">,
     return out;
   }
   let claims;
-  try { claims = await store.unreleasedClaimsOn(tickets, CLAIMS_READ); } catch { return null; }
+  try {
+    claims = await store.unreleasedClaimsOn(tickets, CLAIMS_READ);
+  } catch (e) {
+    // The replies say the claims could not be read; the log says why — a missing grant (42501), a brain before 115
+    // (42P01), or a fault of this code — so an operator need not guess (whole-branch review). No token reaches it.
+    const err = e as { errno?: unknown; code?: unknown; message?: unknown };
+    console.error(`claimed: the work claims read failed (${String(err.errno ?? err.code ?? "no code")}): ${String(err.message ?? e).slice(0, 200)}; results carry claimed: null`);
+    return null;
+  }
   const byTicket = new Map<string, ClaimedOn[]>();
   for (const c of claims) {
     if (c.state !== "live" && c.state !== "lapsed") continue;
@@ -490,8 +498,9 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
   const store = await ctx.store();
-  const [superseded, claimed] = await Promise.all([store.supersededAmong(data.map((t) => t.id)), claimedOf(store, principal, data)]);
-  const moved = await movedOf(store, data, superseded);
+  const claims = claimedOf(store, principal, data);
+  const superseded = await store.supersededAmong(data.map((t) => t.id));
+  const [moved, claimed] = await Promise.all([movedOf(store, data, superseded), claims]);
   return ok({
     query,
     preferCurrent: prefer_current,
