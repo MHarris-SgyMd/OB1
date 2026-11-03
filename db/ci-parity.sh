@@ -120,10 +120,11 @@ cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT
 # keep_output NAME OUT: a failing row's whole output, kept in a file of its own
 # in PARITY_TMP, outside the lanes' directory the exit removes, its path
 # printed under the row's excerpt, so a flake that does not come back can
-# still be read (SMD-3607). The files stay until macOS clears TMPDIR.
+# still be read (SMD-3607). The files stay until the system clears its
+# temporary directory.
 keep_output() {
   local slug file
-  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-60)
+  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)
   file=$(mktemp "$PARITY_TMP/ci-parity-failed.$slug.XXXXXX") && printf '%s\n' "$2" > "$file" && echo "        full output: $file"
 }
 # excerpt OUT: the lines that say what failed, at most three, then how many
@@ -131,13 +132,17 @@ keep_output() {
 # line after its indent, then a space or the line's end (createAssert's
 # "  ✗  label", the db/ suites' own "  ✗ label", the self-checks' "FAIL
 # name") — and not a line that only quotes one: a passing "  ✓  … (✗ …)"
-# row of test-preflight's took the excerpt twice (SMD-3607). Else a crash's
-# error: lines, else the last three lines.
+# row of test-preflight's took the excerpt twice (SMD-3607). Not a closing
+# summary either, a bare "FAIL" or the checker's "FAIL — N violation(s):",
+# which name no failure. Else a crash's error, as Bun prints it from the
+# line's start ("error: …", "TypeError: …", "PostgresError: …"), else the
+# last three lines.
 excerpt() {
   local lines n
-  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)')
-  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -E 'error:')
+  lines=$(printf '%s\n' "$1" | grep -E '^[[:space:]]*(✗|FAIL)([[:space:]]|$)' | grep -Ev '^[[:space:]]*FAIL[[:space:]]*(—.*)?$')
+  [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -E '^([A-Z][A-Za-z]*Error|error): ')
   [ -n "$lines" ] || lines=$(printf '%s\n' "$1" | grep -Ev '^[[:space:]]*$' | tail -3)
+  [ -n "$lines" ] || return 0
   printf '%s\n' "$lines" | head -3 | sed 's/^/        /'
   n=$(printf '%s\n' "$lines" | grep -c .)
   [ "$n" -le 3 ] || echo "        … and $((n - 3)) more"
