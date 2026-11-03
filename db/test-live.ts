@@ -10401,10 +10401,12 @@ if (want("10h")) {
       // check), and the run's end hand-back, in the loop's finally, is left the claim alone, its wait on the claim's row
       // RELEASE_WAIT's whatever the budget (SMD-3737: bounded at the budget it lived, no row holding that hand-back to
       // it alone). The stop is sent as the row is taken at the question, so the release waits past the budget with the
-      // stop already in. The poll's line, said before a hand-back is seen waiting, makes that hand-back the end's: a
-      // poll handing back before its stop check says it once its own lands (SMD-3737 review pass 1, mutant: that poll,
-      // beside an end's hand-back bounded at the budget, lived). The row is let go BUDGET_MS + 500 after the end's is
-      // seen waiting, the hold that fails one bounded at the budget, or as the run ends or the poll's 20 s do.
+      // stop already in. The poll's line, said before a hand-back is seen waiting, makes that hand-back the end's, and
+      // holds the poll to its first check: a poll handing back before its stop check says it once its own lands (SMD-3737
+      // review pass 1, mutant: that poll, beside an end's hand-back bounded at the budget, lived). It is read as the
+      // wait is seen, not after the hold, where a poll's own hand-back bounded at the budget would have given up and
+      // said it (review pass 2, mutant). The row is let go BUDGET_MS + 500 after the end's is seen waiting, the hold
+      // that fails one bounded at the budget, or as the run ends or the poll's 20 s do.
       const [endT] = await seedAll(["Budget note 18: sweep-pass-good work, its release and the run's end hand-back held as the run stops."]);
       const endLet = Promise.withResolvers<void>();
       const endFree = holdClaimRow("Budget note 18", endT, endLet.promise);
@@ -10424,7 +10426,7 @@ if (want("10h")) {
         const endRunning = settled(caught((w) => sweepSubjects({ url: URL_!, env, follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([endStop.signal, backstop()]),
           writer: { out: w.out, err: (l) => { endSaid.push(l); w.err(l); } } }))).finally(() => { endDone = true; });
         endWaited = await pollUntil(async () => endDone || await waitingOnLock("release_claims_for_worker("), 20_000) && !endDone;
-        endSaidFirst = endSaid.some((l) => l.endsWith(": the run loses this poll, and its stop ends it there"));
+        endSaidFirst = endSaid.some((l) => l.includes(`${endT}'s release passed`) && l.endsWith(": the run loses this poll, and its stop ends it there"));
         if (endWaited) await Bun.sleep(BUDGET_MS + 500);
         endLet.resolve();
         endRun = await orHung(endRunning, 20_000);
