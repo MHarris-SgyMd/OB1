@@ -151,8 +151,8 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40, 44 and 48 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the edge proxy, and the checker's own check numbers
+      # 32 to 38, 40, 44, 48 and 50 parse YAML with Bun.YAML.
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, and the checker's own check numbers
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -5167,10 +5167,13 @@ jobs:
   # needs failed too (the page names the jobs that did not succeed), so it is
   # the second job MAY_SKIP always lets skip; its `!cancelled()` keeps a gated
   # need's skip from skipping it, and on a push nothing is gated (SMD-2435).
-  # A pull request, the merge queue and a
-  # push to another branch publish nothing. contents: write, on this job
-  # alone, is what pushes to the wiki's repository; the token stays out of the
-  # clone's config (an extraheader on each git call) and out of the checkout.
+  # Its needs are exactly the jobs that upload a test-counts-* artifact, each
+  # setting OB1_TEST_COUNTS: check-fork-consistency.ts 50 holds them, since a
+  # job left out is published only if its upload ends first (SMD-3709).
+  # A pull request, the merge queue and a push to another branch publish
+  # nothing. contents: write, on this job alone, is what pushes to the wiki's
+  # repository; the token stays out of the clone's config (an extraheader on
+  # each git call) and out of the checkout.
   publish-test-counts:
     name: Publish the suites' counts to the wiki
     runs-on: ubuntu-24.04
