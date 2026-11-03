@@ -116,7 +116,7 @@ CREATE POLICY "Household members update shared lists"
 
 ### Step 3: Build a Separate MCP Server
 
-Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; the real one is `extensions/meal-planning/shared-server.ts`. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Open Brain and all extensions.
+Create a second server file beside the extension's — `extensions/<name>/shared-server.ts`, where the relative imports below resolve; meal-planning's was this tree's one until it retired with SMD-2311. It is a Bun-native Hono + MCP SDK server (SMD-1799) — the same pattern as the core Open Brain and all extensions.
 
 ```typescript
 // extensions/<name>/shared-server.ts — a second, Bun-native server beside the extension's index.ts

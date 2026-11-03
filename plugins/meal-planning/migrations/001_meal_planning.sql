@@ -20,10 +20,17 @@ CREATE TABLE IF NOT EXISTS recipes (
   prep_time_minutes  integer CHECK (prep_time_minutes BETWEEN 0 AND 10080),
   cook_time_minutes  integer CHECK (cook_time_minutes BETWEEN 0 AND 10080),
   servings           integer CHECK (servings BETWEEN 1 AND 1000),
-  -- [{ name, quantity, unit }], quantity and unit as written ("1/2", "cup").
-  ingredients        jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(ingredients) = 'array'),
-  -- The steps, in order, as strings.
-  instructions       jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(instructions) = 'array'),
+  -- [{ name, quantity, unit }], quantity and unit as written ("1/2", "cup"):
+  -- each an object with a text name, its quantity and unit text or null. A
+  -- number or a list where text belongs would break every read of the recipe.
+  ingredients        jsonb NOT NULL DEFAULT '[]'
+                     CONSTRAINT recipes_ingredients_shape CHECK (jsonb_typeof(ingredients) = 'array' AND NOT jsonb_path_exists(ingredients,
+                       '$[*] ? (@.type() != "object" || !exists(@.name) || @.name.type() != "string"
+                                || (exists(@.quantity) && @.quantity.type() != "string" && @.quantity.type() != "null")
+                                || (exists(@.unit) && @.unit.type() != "string" && @.unit.type() != "null"))')),
+  -- The steps, in order, as text.
+  instructions       jsonb NOT NULL DEFAULT '[]'
+                     CONSTRAINT recipes_instructions_shape CHECK (jsonb_typeof(instructions) = 'array' AND NOT jsonb_path_exists(instructions, '$[*] ? (@.type() != "string")')),
   -- Lower-case, each once.
   tags               text[] NOT NULL DEFAULT '{}',
   rating             integer CHECK (rating BETWEEN 1 AND 5),

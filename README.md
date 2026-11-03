@@ -60,7 +60,7 @@ Build these in order. Each one teaches new concepts through something you'll act
 | 1 | [Household Knowledge Base](extensions/household-knowledge/) | Home facts your agent can recall instantly | Beginner |
 | 2 | [Home Maintenance Tracker](extensions/home-maintenance/) | Scheduling and history for home upkeep | Beginner |
 | 3 | [Family Calendar](extensions/family-calendar/) | Multi-person schedule coordination | Intermediate |
-| 4 | [Meal Planning](extensions/meal-planning/) | Recipes, meal plans, shared grocery lists | Intermediate |
+| 4 | [Meal Planning](extensions/meal-planning/) | Recipes, meal plans, grocery lists | Intermediate |
 | 5 | [Professional CRM](extensions/professional-crm/) | Contact tracking wired into your thoughts | Intermediate |
 | 6 | [Job Hunt Pipeline](extensions/job-hunt/) | Application tracking and interview pipeline | Advanced |
 
@@ -75,7 +75,7 @@ Some concepts show up in multiple extensions. Learn them once, apply them everyw
 | [Run a Remote MCP Server](primitives/deploy-remote-mcp/) | Running any extension server under Bun, behind HTTPS | All extensions |
 | [Remote MCP Connection](primitives/remote-mcp/) | Connecting to Claude Desktop, ChatGPT, Claude Code, Cursor, and other clients | All extensions |
 | [Common Troubleshooting](primitives/troubleshooting/) | Solutions for connection, deployment, and database issues | All extensions |
-| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Extensions 4, 5, 6, as background |
+| [Row Level Security](primitives/rls/) | PostgreSQL policies for multi-user data isolation — background; no fork schema ships them (SMD-1810) | Extensions 5 and 6, as background |
 | [Shared MCP Server](primitives/shared-mcp/) | Giving others scoped access to parts of your brain | Extension 4, until SMD-2311 |
 
 ## Community Contributions

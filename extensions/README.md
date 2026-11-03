@@ -9,7 +9,7 @@ Extensions are the curated learning path of Open Brain. Build them in order — 
 | 1 | [Household Knowledge Base](household-knowledge/) | Home facts your agent can recall instantly | Beginner |
 | 2 | [Home Maintenance Tracker](home-maintenance/) | Scheduling and history for home upkeep | Beginner |
 | 3 | [Family Calendar](family-calendar/) | Multi-person schedule coordination | Intermediate |
-| 4 | [Meal Planning](meal-planning/) | Recipes, meal plans, shared grocery lists | Intermediate |
+| 4 | [Meal Planning](meal-planning/) | Recipes, meal plans, grocery lists | Intermediate |
 | 5 | [Professional CRM](professional-crm/) | Contact tracking wired into your thoughts | Intermediate |
 | 6 | [Job Hunt Pipeline](job-hunt/) | Application tracking and interview pipeline | Advanced |
 
