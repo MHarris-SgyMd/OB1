@@ -18,7 +18,7 @@
 // everything, for the REST core (SMD-2284).
 
 import { displayDate } from "./thoughts.ts";
-import { movedWords, typesOf, type Moved } from "./stated-status.ts";
+import { MOVED_READ, movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, PASS_SETTLED_PREFIX, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, ListedReviewer, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, SupersessionProposal, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats, WorkClaim } from "./store.ts";
 import { TEXT_PAGE } from "./store.ts";
@@ -30,7 +30,7 @@ import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import { TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
-import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -154,6 +154,15 @@ const trustOf = (m: Record<string, unknown> | null | undefined): (typeof TRUST)[
  * MCP server rendering its answer.
  */
 const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved ?? []);
+/**
+ * A result's claims as a typed field (SMD-3599): each claim's id, ticket, holder, whether the holder is the caller's
+ * own key, and its times — the piece and label are the holder's words, which ride the text, as WORK_CLAIMED's value
+ * keeps them out. Null when the claims were not read, and from a REST core older than this MCP server.
+ */
+const claimedField = (claimed: readonly ClaimedOn[] | null | undefined) =>
+  Array.isArray(claimed) ? claimed.map((c) => ({ id: c.id, ticket: c.ticket, holder: c.holder, ownKey: c.ownKey, claimedAt: c.claimedAt, expiresAt: c.expiresAt })) : null;
+const claimedFields = (h: { claimed?: readonly ClaimedOn[] | null; claimedMore?: number; claimedNotRead?: number }) =>
+  ({ claimed: claimedField(h.claimed), claimedMore: h.claimedMore ?? 0, claimedNotRead: h.claimedNotRead ?? 0 });
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
@@ -168,16 +177,17 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
     supersededBy: h.supersededBy, demoted: h.demoted.map(demotionOf).filter((d) => d !== null),
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
+    ...claimedFields(h),
   })),
 });
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count and trust. */
 const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
-  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata) })),
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h) })),
 });
 /** list_thoughts: per thought its id, date, the newer thought that supersedes it, and its trust; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
-  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata) })),
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
 });
@@ -513,7 +523,9 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
     const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
     // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
+    // SMD-3599: who holds a ticket it names, after the moved prefix; the holder's label never in a title.
+    const held = claimedWords(r.claimed, r.claimedMore ?? 0, 0, true);
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${held ? `[claimed: ${held}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
     return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }),
   // …and the whole answer says so beside the results, for a surface that
@@ -556,7 +568,7 @@ function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched
 }
 
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
-  render(o.ok && ingestedNotice(o.value.metadata) ? ok({ ...o.value, title: `[ingested] ${o.value.title}`, text: `${INGESTED_NOTICE}\n\n${o.value.text}` }) : o,
+  render(o.ok ? ok(fetchedMarked(o.value)) : o,
     (v) => JSON.stringify(v), (r) => (r.code === "NOT_FOUND" ? `Fetch error: no thought with id ${r.id}` : unknownRefusal(r)), AS_JSON);
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
@@ -611,6 +623,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // label, so the rank above is unchanged.
         const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
         if (moved) parts.push(`⚠ Moved since written: ${moved}`);
+        // SMD-3599: who holds a ticket it names — a label, so the rank above is unchanged.
+        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+        if (held) parts.push(`⚠ Claimed: ${held}`);
         // SMD-1328: an undated row shows no Captured line rather than a
         // fabricated 1/1/1970; infinity/a no-ISO-form date shows its text.
         const captured = displayDate(t.created_at);
@@ -714,6 +729,9 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       if (by) parts.push(by);
       const notice = ingestedNotice(m);
       if (notice) parts.push(notice);
+      // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
+      const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+      if (held) parts.push(`⚠ Claimed: ${held}`);
       const topics = metaList(m.topics, TAG_MAX);
       if (topics.length) parts.push(`Topics: ${topics.join(", ")}`);
       parts.push(`\n${fenceText(t.content)}`);
@@ -744,7 +762,9 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         // An `ID:` line, the same label the two search tools print — it is what
         // update_thought and delete_thought take. This compact format has no
         // header group, so it trails the content. SMD-1248.
-        const mark = t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : "";
+        const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
+        // SMD-3599: who holds a ticket it names, after the superseded mark.
+        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
         // e2e suite ([8]) matched on and a client may too.
@@ -1781,6 +1801,27 @@ const OWN_KEY_RENEWING = ownKey("work under it, and release the claim you were r
 /** Another claim's work and holder, its piece quoted (another key's words): the start of heldLine and sinceLine. */
 const heldWho = (c: HeldClaim) => `${c.issue}${c.piece ? ` piece ${JSON.stringify(oneLine(snipText(c.piece, 100)))}` : ""} by ${holderText(c.holder, c.ownKey)}`;
 const heldLine = (c: HeldClaim) => `${heldWho(c)} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id})`;
+/**
+ * A result's claims in words (SMD-3599), each as heldLine says a claim in the way, with its label quoted and cut —
+ * the holder's words, as its piece is. A title's (`title`) say only who holds what since when: no label, which every
+ * ChatGPT surface hands the model as the result's own words. The rest past the shown counted; the keys a result
+ * names past the first MOVED_READ, not read, counted. Null when none is held.
+ */
+function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0, notRead = 0, title = false): string | null {
+  if (!claimed?.length) return null;
+  const one = (c: ClaimedOn) => {
+    const who = heldWho({ id: c.id, issue: c.ticket, piece: c.piece, holder: c.holder, holderKind: null, claimedAt: c.claimedAt, expiresAt: c.expiresAt, ownKey: c.ownKey });
+    return title ? `${who}, since ${c.claimedAt}` : `${who} since ${c.claimedAt}, until ${c.expiresAt} (claim ${c.id}${c.label ? `, label ${JSON.stringify(oneLine(snipText(c.label, 100)))}` : ""})`;
+  };
+  const words = `${claimed.map(one).join("; ")}${more > 0 ? `; and ${more} more, which list_claims shows` : ""}`;
+  return notRead > 0 ? `${words} (+${notRead} more named past the first ${MOVED_READ}, not checked)` : words;
+}
+/** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
+const fetchedMarked = (v: FetchedThought): FetchedThought => {
+  const ingested = ingestedNotice(v.metadata);
+  const held = claimedWords(v.claimed, v.claimedMore ?? 0, 0, true);
+  return { ...v, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}) };
+};
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;
 /** A claim that ended, as a renewal meets it: taken over — stop — or released, by whom and why. */

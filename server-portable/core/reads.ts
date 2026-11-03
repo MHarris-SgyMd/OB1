@@ -231,7 +231,7 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * an unknown field through, and then only the results it is about carry it.
  */
 export type SearchResult = {
-  results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[];
+  results: ({ id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number } & ReturnType<typeof claimedResult>)[];
   /** Present only when the provider did not answer for the query, and the results are its exact matches alone (SMD-2891); with none, the search is refused EMBEDDING_PROVIDER_UNAVAILABLE. */
   vectorFailed?: QueryVectorFailed;
 };
@@ -253,7 +253,8 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
     return refuse({ code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, reason: r.vectorFailed.reason, detail: r.vectorFailed.detail, base: r.vectorFailed.base, matched: r.vectorFailed.matched,
       needles: f.needles.filter((_, i) => f.needleCounts[i] === 0), commonNeedles: f.commonNeedles });
   }
-  const moved = await movedOf(await ctx.store(), r.rows, null);
+  const store = await ctx.store();
+  const [moved, claimed] = await Promise.all([movedOf(store, r.rows, null), claimedOf(store, principal, r.rows)]);
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
@@ -261,12 +262,13 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
       ...resultLabel(moved[t.id]),
+      ...claimedResult(claimed, t.id),
     })),
     ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}),
   });
 }
 
-export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown> };
+export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown> } & ReturnType<typeof claimedResult>;
 
 export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input<"fetch">): Promise<Outcome<FetchedThought>> {
   const thought = await (await ctx.store()).getThought(id);
@@ -274,6 +276,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
   await ctx.logActions(principal, [{ tool: "fetch", targetId: id }]);
+  const claimed = await claimedOf(await ctx.store(), principal, [thought]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),
@@ -284,6 +287,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
       created_at: thought.created_at,
       updated_at: thought.updated_at,
     },
+    ...claimedResult(claimed, thought.id),
   });
 }
 
@@ -302,7 +306,7 @@ export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "
  * under one, no written time, a brain before 095), empty when checked and none
  * moved or it names none; `movedNotRead` the keys past the first 50, not checked.
  */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number };
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number } & ReturnType<typeof claimedLabel>;
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -377,6 +381,71 @@ export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "tic
   return inputs ? movedAmong(naming, superseded, inputs) : {};
 }
 
+/**
+ * A live work claim on a ticket a result names (SMD-3599), as the result carries it: the claim's id, the ticket and
+ * piece, its holder's key and whether that is the caller's own, its label (the holder's words, quoted where printed),
+ * and when it was claimed and runs out. Never a token.
+ */
+export type ClaimedOn = { id: string; ticket: string; piece: string | null; holder: string; ownKey: boolean; label: string | null; claimedAt: string; expiresAt: string };
+/** A result's claims: the first CLAIMED_SHOWN, how many more, and how many keys it names past MOVED_READ, not read. */
+export type ClaimedHit = { claimed: ClaimedOn[]; claimedMore: number; claimedNotRead: number };
+/** How many of a result's claims it names (a ticket's whole and its pieces each count). */
+export const CLAIMED_SHOWN = 10;
+/** One call's reach: 115's own clamp on list_work_claims. Past it a page's later tickets go unread, and the hits naming them say so. */
+const CLAIMS_READ = 1000;
+const TICKET_KEY = /^[A-Z][A-Z0-9]+-[0-9]+$/;
+/** A key a row's metadata files it under (a ticket row's `issue`, a note's `ticket`), as 115 keys it, when it is one. */
+const filedUnder = (v: unknown) => (typeof v === "string" && TICKET_KEY.test(v.trim().toUpperCase()) ? v.trim().toUpperCase() : null);
+/** The tickets a result names: those its metadata files it under, then the first MOVED_READ its text mentions, each once. */
+function claimKeysOf(h: { content: string; metadata?: Record<string, unknown> | null }): { keys: string[]; notRead: number } {
+  const named = keysInOrder(h.content);
+  const filed = [filedUnder(h.metadata?.issue), filedUnder(h.metadata?.ticket)].filter((k): k is string => k !== null);
+  return { keys: [...new Set([...filed, ...named.slice(0, MOVED_READ)])], notRead: Math.max(0, named.length - MOVED_READ) };
+}
+
+/**
+ * The claimed label (SMD-3599): per result, the live claims on the tickets it names, so a "what next" answer read from
+ * any search or list sees held work without calling list_claims. One list_work_claims call for the whole page, and
+ * none when no result names a ticket. Unlike `moved`, a ticket's own row and a superseded thought are labelled too:
+ * who holds a ticket is a fact about now, not about when the thought was written. Best-effort, as movedOf: a brain
+ * before 115, or a read that fails, labels nothing and the read goes on — null, not checked; a result naming no
+ * ticket, or none held, `[]`. It labels and never ranks.
+ */
+export async function claimedOf(store: Pick<ThoughtStore, "listClaims">, principal: Principal, hits: readonly { id: string; content: string; metadata?: Record<string, unknown> | null }[]): Promise<Record<string, ClaimedHit> | null> {
+  const keyed = hits.map((h) => ({ id: h.id, ...claimKeysOf(h) }));
+  const tickets = [...new Set(keyed.flatMap((h) => h.keys))];
+  const out: Record<string, ClaimedHit> = {};
+  if (tickets.length === 0) {
+    for (const h of keyed) out[h.id] = { claimed: [], claimedMore: 0, claimedNotRead: h.notRead };
+    return out;
+  }
+  let claims;
+  try { claims = await store.listClaims({ issues: tickets, limit: CLAIMS_READ }); } catch { return null; }
+  const byTicket = new Map<string, ClaimedOn[]>();
+  for (const c of claims) {
+    if (c.state !== "live") continue;
+    const on: ClaimedOn = { id: c.id, ticket: c.issue, piece: c.piece, holder: c.holder, ownKey: c.holder === principal.name, label: c.label, claimedAt: c.claimedAt, expiresAt: c.expiresAt };
+    byTicket.set(c.issue, [...(byTicket.get(c.issue) ?? []), on]);
+  }
+  // A full read may have stopped short (115 orders by ticket): the tickets past its last are not read, and are counted.
+  const last = claims.length >= CLAIMS_READ ? claims[claims.length - 1].issue : null;
+  for (const h of keyed) {
+    const all = h.keys.flatMap((k) => byTicket.get(k) ?? []);
+    const cut = last === null ? 0 : h.keys.filter((k) => k > last).length;
+    out[h.id] = { claimed: all.slice(0, CLAIMED_SHOWN), claimedMore: Math.max(0, all.length - CLAIMED_SHOWN), claimedNotRead: h.notRead + cut };
+  }
+  return out;
+}
+
+/** A result's claimed fields where every read carries them: null when the read failed, else the claims and counts. */
+export const claimedLabel = (all: Record<string, ClaimedHit> | null, id: string): { claimed: ClaimedOn[] | null; claimedMore: number; claimedNotRead: number } =>
+  all === null ? { claimed: null, claimedMore: 0, claimedNotRead: 0 } : (all[id] ?? { claimed: [], claimedMore: 0, claimedNotRead: 0 });
+/** The compat shapes' claimed fields (search, fetch): only where a result names a held ticket, as `moved` is carried, so every other keeps ChatGPT's shape exactly. */
+export const claimedResult = (all: Record<string, ClaimedHit> | null, id: string): { claimed?: ClaimedOn[]; claimedMore?: number } => {
+  const c = all?.[id];
+  return c?.claimed.length ? { claimed: c.claimed, ...(c.claimedMore > 0 ? { claimedMore: c.claimedMore } : {}) } : {};
+};
+
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
   // parseFilter refuses a shape jsonb should not run.
@@ -411,14 +480,14 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // on the row rather than let it pass as current.
   const store = await ctx.store();
   const superseded = await store.supersededAmong(data.map((t) => t.id));
-  const moved = await movedOf(store, data, superseded);
+  const [moved, claimed] = await Promise.all([movedOf(store, data, superseded), claimedOf(store, principal, data)]);
   return ok({
     query,
     preferCurrent: prefer_current,
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]),
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id),
     })),
     // A text match has no literal-only reading: unknown, not false (review pass 6).
     facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
@@ -427,7 +496,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   });
 }
 
-export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences">;
+export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences"> & ReturnType<typeof claimedLabel>;
 export type KeywordResult = { query: string; offset: number; total: number | null; hits: KeywordHit[] };
 
 export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, input: Input<"search_thoughts_keyword">): Promise<Outcome<KeywordResult>> {
@@ -439,22 +508,23 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
   // the scan, and — new since SMD-1490 — a query_log row written with
   // arm='keyword' (034 logged only the semantic path).
   const { rows } = await runSearch(ctx, principal, { tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: f.filter, minTrust: min_trust });
+  const claimed = rows.length ? await claimedOf(await ctx.store(), principal, rows) : {};
   return ok({
     query,
     offset,
     // The whole match set, not the page: every row carries it. An empty first page is none; an empty later page (an offset past the end) says nothing of the set, so null (review pass 6).
     total: rows.length ? rows[0].totalCount : offset === 0 ? 0 : null,
-    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences })),
+    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences, ...claimedLabel(claimed, t.id) })),
   });
 }
 
 // ── list_thoughts and list_supersession_proposals ────────────────────────────
 
-export type ListedThought = ThoughtListItem & { supersededBy: string | null };
+export type ListedThought = ThoughtListItem & { supersededBy: string | null } & ReturnType<typeof claimedLabel>;
 /** A page (SMD-2995): the thoughts, the sort they are in, and the cursor for the next page — null when no more follow. */
 export type ListThoughtsResult = { thoughts: ListedThought[]; sort: ListSort; cursor: string | null };
 
-export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust, sort, after }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
+export async function listThoughts(ctx: Ctx, principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust, sort, after }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
   // SMD-2995: the cursor is decided here, before any call: a string that is no
   // cursor of this tool's, or one made under the other sort, is refused, the
   // sort it was made under named so the caller can pass it.
@@ -481,8 +551,9 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
   if (!page.thoughts.length) return ok({ thoughts: [], sort, cursor });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
   // and name the replacement — the same label search_thoughts prints.
-  const superseded = await (await ctx.store()).supersededAmong(page.thoughts.map((t) => t.id));
-  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null })), sort, cursor });
+  const store = await ctx.store();
+  const [superseded, claimed] = await Promise.all([store.supersededAmong(page.thoughts.map((t) => t.id)), claimedOf(store, principal, page.thoughts)]);
+  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null, ...claimedLabel(claimed, t.id) })), sort, cursor });
 }
 
 /**

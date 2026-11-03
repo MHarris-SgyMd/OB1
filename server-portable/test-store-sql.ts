@@ -1870,6 +1870,16 @@ console.log("\n[20] A running store's reads of a set-returning function survive 
   }
 }
 
+console.log("\n[20b] listClaims reads one page's tickets at once (SMD-3599): `issues` names them, cleaned as claim_work cleans a key; only theirs come back");
+{
+  const actor = { name: "smd-3599-store", via: "test" } as never;
+  for (const issue of ["SMD-9330", "SMD-9331", "SMD-9332"]) await store.claimWork({ issue, actor });
+  const two = await store.listClaims({ issues: ["SMD-9330", " smd-9332 "] });
+  const one = await store.listClaims({ issue: "SMD-9331" });
+  assert(JSON.stringify(two.map((c) => c.issue)) === '["SMD-9330","SMD-9332"]' && JSON.stringify(one.map((c) => c.issue)) === '["SMD-9331"]',
+    `the tickets \`issues\` names, cleaned as 115 cleans them, and \`issue\` as before (${JSON.stringify([two.map((c) => c.issue), one.map((c) => c.issue)])})`);
+}
+
 console.log("\n[21] claimLease reads the lease a renewal starts from by its token, and renew_claim's form by the claim's id too: another claim's id with the token is no lease (SMD-3654)");
 {
   const actor = { name: "smd-3654-store", via: "test" } as never;

@@ -468,6 +468,29 @@ head — and board-sync's own row is read again. A list step can read a count as
 (`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
 exists and moved.
 
+### Tickets someone holds (migration 115)
+
+Every read that returns a thought — `search`, `search_thoughts`,
+`search_thoughts_keyword`, `list_thoughts` and `fetch` — says who holds a
+ticket it names (SMD-3599), so an answer to "what should we work on next"
+sees held work without calling `list_claims`. A result's `claimed` lists the
+live work claims on the tickets its metadata files it under (a ticket row's
+`issue`, a note's `ticket`) and the first 50 its text mentions (the rest
+counted in `claimedNotRead`): each claim's id, ticket, piece, holder, `ownKey`
+when the holder is the caller's own key, label and times, the first ten
+(`claimedMore` the rest). Over MCP `search_thoughts`, `search_thoughts_keyword`
+and `list_thoughts` print `⚠ Claimed: SMD-3379 piece "PR 1b-2" by codex since
+…, until … (claim …, label "…")`, the piece and label quoted on one line as
+the holder's own words, and keep the ids, tickets, holders and times in the
+structured value; `search` and `fetch` start the title `[claimed: SMD-3379
+piece "PR 1b-2" by codex, since …]` after any moved prefix — never the label —
+and carry the field only where a ticket is held. Unlike `moved`, a ticket row
+and a superseded thought are labelled too: who holds a ticket is a fact about
+now. The claims are one call to 115's `list_work_claims` per page, made only
+when a result names a ticket; a brain before 115, or a read that fails, labels
+nothing (`claimed: null`) and the read goes on. Like `moved`, it never moves a
+rank.
+
 ## Steps
 
 ### 1. Install

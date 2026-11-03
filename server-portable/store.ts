@@ -1928,8 +1928,11 @@ export interface ThoughtStore {
   releaseClaim(opts: { id: string; token?: string; reason?: string; force?: boolean; actor?: Actor }): Promise<ClaimAnswer>;
   /** Whether a token is this claim's, by 115's hash (a token in its shape: the writer that refused it read it so); never the hash itself. */
   claimTokenIs(id: string, token: string): Promise<boolean>;
-  /** list_work_claims: the live claims (every claim with includeEnded) of one ticket or all, of one holder's key name or all. */
-  listClaims(opts: { issue?: string; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
+  /**
+   * list_work_claims: the live claims (every claim with includeEnded) of one ticket, of the tickets `issues` names
+   * (a read's whole page at once, SMD-3599), or all; of one holder's key name or all.
+   */
+  listClaims(opts: { issue?: string; issues?: string[]; holder?: string; includeEnded?: boolean; limit?: number }): Promise<WorkClaim[]>;
   /**
    * The lease of the claim a token proves, read before a renewal (SMD-3654): its
    * id, its expiry and whether it was released, by whom and why — never the
