@@ -1012,6 +1012,13 @@ naming `work_claims`, and nothing else. Preflight's `ticket claims` row checks t
 functions, the grant and the log setting. The `worker claims` row, named `work
 claims` before this ticket, is migration 015's: it keeps two workers off one thought.
 
+**A closed ticket keeps no claim** (migration 117, SMD-3600). After each pass,
+board-sync (`db/sync-linear.ts`) releases every unreleased claim, live or lapsed, on a
+ticket the brain records as Done, Canceled or a Duplicate, with the reason
+`<ticket> closed: <status> (<type>); <run>`. A renewal then answers `CLAIM_RELEASED`
+with that reason, and a release `already_released`. No tool reaches the release:
+a key's only way to end another key's claim stays an operator's `force`.
+
 ## Priority assertions (SMD-3664)
 
 A key states how much an item matters, and every statement is kept (migration 116,

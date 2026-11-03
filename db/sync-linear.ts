@@ -118,7 +118,7 @@ import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
 import { egressRefusal, type StartRefusal } from "./worker-bootstrap.ts";
 import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { captureLineage } from "../server-portable/lineage.ts";
-import type { Actor } from "../server-portable/store.ts";
+import { actorPayload, type Actor } from "../server-portable/store.ts";
 import { describeEnv, loadEnv } from "./env.ts";
 import { linearClient, strict, type Gql } from "./linear-api.ts";
 import { IDENTIFIER_PATTERN, ISSUE_FIELDS, issueFacets, LABELS_BOUND, labelNames, LINEAR_SYSTEM, linearAdapter, RELATIONS_BOUND, renderIssue, SAMPLE_ISSUE, stripAutolinks, type LinearIssue } from "./ingest-linear.ts";
@@ -1124,6 +1124,64 @@ export function formatReport(r: PassReport, dryRun: boolean): string {
 }
 
 // ---------------------------------------------------------------------------
+// A closed ticket's claims (SMD-3600, migration 117). After each pass, one
+// call ends every unreleased claim, live or lapsed, on a ticket whose head the
+// brain records as settled (Done, Canceled, Duplicate) — so an agent that
+// merged and never released no longer leaves its claim on every read naming
+// the ticket (SMD-3599's `claimed`). The database decides which tickets, from
+// the rows this tool writes (an importer's head, never a key's); this pass's
+// moves are among them. A dry run lists the claims and writes nothing; an
+// audit does not call it.
+// ---------------------------------------------------------------------------
+
+/** One claim the call ended (or, in a dry run, would end): 115's claim json and the ticket's status. */
+export type ClosedClaim = { id: string; issue: string; piece: string | null; holder: string; state: string; expires_at: string; released_at: string | null; ticket_status: string | null };
+export type ClosedClaimsStep = { run: (opts: { run: string; dryRun: boolean }) => Promise<ClosedClaim[]> };
+const RELEASE_FN = "release_closed_ticket_claims(text, boolean, jsonb)";
+
+/**
+ * The step, when this brain and role can take it — asked once at start, as
+ * 053 is: the function (117), EXECUTE on it and SELECT and UPDATE on
+ * work_claims (the closedclaims group). Otherwise why not, said once by the
+ * caller; the claims stay until their holders release them.
+ */
+export async function closedClaimsStep(sql: SQL, actor: Actor): Promise<{ step: ClosedClaimsStep } | { off: string }> {
+  const [r] = await sql`SELECT to_regprocedure(${RELEASE_FN}) IS NOT NULL AS ok`;
+  if (!(r as { ok: boolean }).ok) return { off: "migration 117 is not applied on this brain (cd db && bun migrate.ts --url …)" };
+  const [g] = await sql`SELECT has_function_privilege(${RELEASE_FN}, 'EXECUTE') AND has_table_privilege('work_claims', 'SELECT') AND has_table_privilege('work_claims', 'UPDATE') AS ok`;
+  if (!(g as { ok: boolean }).ok) return { off: "this role lacks the closedclaims grant group (cd db && bun migrate.ts --url … --grant <role> --groups closedclaims)" };
+  return {
+    step: {
+      run: async ({ run, dryRun }) => {
+        const [x] = await sql`SELECT release_closed_ticket_claims(${run}::text, ${dryRun}::boolean, ${actorPayload(actor)}::jsonb) AS r`;
+        return ((x as { r: { released: ClosedClaim[] } }).r.released) ?? [];
+      },
+    },
+  };
+}
+
+/** The step after a pass: its line said, a failure said and counted (1) so the pass fails; nothing when off or stopping. */
+export async function releaseClosedClaims(step: ClosedClaimsStep | null, o: { run: string; dryRun: boolean; stopping: boolean; log: (line: string) => void; warn: (line: string) => void }): Promise<number> {
+  if (!step || o.stopping) return 0;
+  try {
+    const line = formatClosedClaims(await step.run({ run: o.run, dryRun: o.dryRun }), o.dryRun);
+    if (line) o.log(line);
+    return 0;
+  } catch (e) {
+    o.warn(`  claims on closed tickets not released: ${(e as Error).message.split("\n")[0]}`);
+    return 1;
+  }
+}
+
+/** The pass's line for the claims it ended, ten named; null when none. A claim's state is what it was: lapsed when its lease ran out before the release. */
+export function formatClosedClaims(released: ClosedClaim[], dryRun: boolean): string | null {
+  if (!released.length) return null;
+  const was = (c: ClosedClaim) => (c.released_at === null ? c.state : Date.parse(c.expires_at) <= Date.parse(c.released_at) ? "lapsed" : "live");
+  const named = released.slice(0, 10).map((c) => `${c.issue}${c.piece === null ? "" : ` ${JSON.stringify(c.piece)}`} by ${c.holder} (${was(c)}${c.ticket_status ? `, ${c.ticket_status}` : ""})`);
+  return `  claims on closed tickets: ${dryRun ? "would release" : "released"} ${released.length} — ${named.join(", ")}${released.length > 10 ? ", …" : ""}`;
+}
+
+// ---------------------------------------------------------------------------
 // Self-check — the pure parts, and the write decisions against two fakes: a
 // recording store (which call each state gets) and a small brain that keeps
 // rows, judges DUPLICATE_CONTENT by fingerprint and refuses a cycle, so a
@@ -1672,6 +1730,44 @@ function selfCheck(): Promise<number> {
     try { await initiativeProjects(empty, "Open Brain"); } catch (e) { refusedEmpty = /no projects/.test((e as Error).message); }
     ok(refusedEmpty, "an initiative with no projects is refused by name, not an empty census");
 
+    // A closed ticket's claims (SMD-3600): the step against a fake connection — off before 117 and without the
+    // group, each said by name; on, one call carrying the run, the dry run and the writer's envelope.
+    {
+      const fakeSql = (answers: Record<string, unknown>[][], seen: unknown[][]) =>
+        (async (_s: TemplateStringsArray, ...values: unknown[]) => { seen.push(values); return answers.shift() ?? []; }) as unknown as SQL;
+      const before117 = await closedClaimsStep(fakeSql([[{ ok: false }]], []), { name: ACTOR_NAME });
+      const ungranted = await closedClaimsStep(fakeSql([[{ ok: true }], [{ ok: false }]], []), { name: ACTOR_NAME });
+      ok("off" in before117 && /^migration 117 is not applied/.test(before117.off) && "off" in ungranted && /lacks the closedclaims grant group .*--groups closedclaims/.test(ungranted.off),
+        `the step is off before 117 and for a role without the closedclaims group, each said by name (${"off" in before117 ? before117.off.slice(0, 40) : "on"}; ${"off" in ungranted ? ungranted.off.slice(0, 50) : "on"})`);
+      const seen: unknown[][] = [];
+      const claimRow = { id: "c1", issue: "SMD-1", piece: "PR 1", holder: "codex", state: "released", expires_at: "2026-11-03T01:00:00Z", released_at: "2026-11-03T02:00:00Z", ticket_status: "Done" };
+      const on = await closedClaimsStep(fakeSql([[{ ok: true }], [{ ok: true }], [{ r: { outcome: "released", released: [claimRow] } }]], seen), { name: ACTOR_NAME, via: SELF, session: "s" });
+      const got = "step" in on ? await on.step.run({ run: "sync-linear.ts@T", dryRun: true }) : [];
+      const call = seen.at(-1) ?? [];
+      ok("step" in on && got.length === 1 && call[0] === "sync-linear.ts@T" && call[1] === true && (call[2] as { name?: string } | null)?.name === ACTOR_NAME,
+        `on, the step makes one call with the run, the dry run and board-sync's envelope, and returns its claims (${JSON.stringify(call.slice(0, 2))})`);
+      const line = formatClosedClaims([claimRow, { ...claimRow, id: "c2", piece: null, holder: "claude", expires_at: "2026-11-04T00:00:00Z" }], false);
+      const dryLine = formatClosedClaims([{ ...claimRow, state: "live", released_at: null }], true);
+      const many = formatClosedClaims(Array.from({ length: 12 }, (_, i) => ({ ...claimRow, id: `c${i}` })), false);
+      ok(formatClosedClaims([], false) === null && line === `  claims on closed tickets: released 2 — SMD-1 "PR 1" by codex (lapsed, Done), SMD-1 by claude (live, Done)`
+         && dryLine === `  claims on closed tickets: would release 1 — SMD-1 "PR 1" by codex (live, Done)` && many !== null && many.endsWith(", …") && many.split(" by ").length === 11,
+        `the pass's line: none says nothing; each claim with its piece quoted, its holder, whether it had lapsed when released and the ticket's status; a dry run says would; ten named, then … (${line})`);
+      // After a pass: the dry run passed on, the line said; a failure said and counted; nothing when off or stopping.
+      const asked: boolean[] = [], logged: string[] = [], warned: string[] = [];
+      const o = { run: "r", log: (l: string) => logged.push(l), warn: (l: string) => warned.push(l) };
+      const fine: ClosedClaimsStep = { run: async ({ dryRun }) => { asked.push(dryRun); return [claimRow]; } };
+      const broken: ClosedClaimsStep = { run: async () => { throw new Error("permission denied for function release_closed_ticket_claims\nDETAIL"); } };
+      const codes = [
+        await releaseClosedClaims(fine, { ...o, dryRun: true, stopping: false }),
+        await releaseClosedClaims(broken, { ...o, dryRun: false, stopping: false }),
+        await releaseClosedClaims(null, { ...o, dryRun: false, stopping: false }),
+        await releaseClosedClaims(fine, { ...o, dryRun: false, stopping: true }),
+      ];
+      ok(JSON.stringify(codes) === "[0,1,0,0]" && JSON.stringify(asked) === "[true]" && logged.length === 1 && /would release 1/.test(logged[0])
+         && JSON.stringify(warned) === JSON.stringify(["  claims on closed tickets not released: permission denied for function release_closed_ticket_claims"]),
+        `after a pass the step is asked with the pass's dry run and its line said; a failure is said on one line and fails the pass; off or stopping, it is not asked (${JSON.stringify(codes)}, ${JSON.stringify(asked)})`);
+    }
+
     if (bad === 0) console.log("sync-linear.ts self-check PASS");
     return bad === 0 ? 0 : 1;
   })();
@@ -1857,6 +1953,15 @@ async function main(): Promise<void> {
     } : {}),
   };
 
+  // A closed ticket's claims (SMD-3600): asked once, as 053 is; off is said
+  // once and the passes go on. Not under --audit, which writes nothing.
+  let closed: ClosedClaimsStep | null = null;
+  if (!cli.has("audit")) {
+    const set = await closedClaimsStep(sql, writer.actor);
+    if ("off" in set) console.error(`  claims on closed tickets are not released: ${set.off}; they stay until their holders release them`);
+    else closed = set.step;
+  }
+
   let resolved: Board | undefined;
   const once = async (): Promise<number> => {
     const t0 = Date.now();
@@ -1878,6 +1983,9 @@ async function main(): Promise<void> {
     }
     const report = await runPass({ gql, readRows, writer, initiative, full: cli.has("full"), only, board });
     console.log(formatReport(report, dryRun));
+    // After the pass, so the statuses it just wrote are the ones read; a
+    // failed call fails the pass, so the heartbeat says so.
+    const unreleased = await releaseClosedClaims(closed, { run, dryRun, stopping, log: (l) => console.log(l), warn: (l) => console.error(l) });
     console.log(`  ${dryRun ? "dry run — nothing written" : "done"} (${Date.now() - t0} ms)`);
     // After the pass, so the links it just brought in are the ones read; a
     // failed post fails the pass, so the heartbeat says so.
@@ -1886,7 +1994,7 @@ async function main(): Promise<void> {
       try { told = await findings.run({ dryRun, stopped: () => stopping, board: boardOf(report.listed, report.errors.map((e) => e.identifier)) }); }
       catch (e) { told = 1; console.error(`  findings step failed: ${(e as Error).message.split("\n")[0]}`); }
     }
-    return passCode(report.errors.length, told);
+    return passCode(report.errors.length + unreleased, told);
   };
 
   // The initiative is configuration, resolved once before any pass: a name

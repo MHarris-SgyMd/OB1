@@ -418,6 +418,9 @@ const FUNCTIONS = [
   "ob1_priority_lock(text, text)",
   "ob1_priority_winner(text, text)",
   "ob1_priority_project(text, text)",
+  // 117 (SMD-3600): board-sync's release of a closed ticket's claims, and the head it reads.
+  "release_closed_ticket_claims(text, boolean, jsonb)",
+  "ob1_work_claim_closed_head(text)",
 ];
 
 /**

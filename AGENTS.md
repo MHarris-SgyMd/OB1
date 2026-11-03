@@ -57,7 +57,7 @@ If `open-brain` has no `claim_work` tool, say why:
      - So is an unmerged worktree, branch or open PR for the ticket, with a claim or without one.
      - A lapsed claim whose PR merged or closed is free, even if its branch is still there.
      - Once the user says such work is dead, they release the claim with the operator key and a reason. Or you claim exactly its ticket and piece, which takes the lapsed claim over.
-   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done or Canceled, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does.
+   - **A live claim can be stale.** Find its PR from the branch in its label (`gh pr list --head <branch> --state all`). If that PR merged or closed, or the ticket is Done or Canceled, the claim is stale: tell the user, naming its worktree if one is local. Its holder's next session there releases it, or an operator does. Once the ticket is Done, Canceled or a Duplicate, board-sync releases it at its next pass (SMD-3600).
 2. **Before you create the branch,** call `claim_work` with:
    - `ticket`;
    - `piece` for one PR of several, spelled as the ticket's plan names it (`PR 1b-2`) or as `list_claims` already shows it;
@@ -68,6 +68,8 @@ If `open-brain` has no `claim_work` tool, say why:
    - **its id is in your `.work-claims/`:** it is yours. Work under it, or release it and claim the piece. The reply's advice about a lost token is not for you.
    - **your key's, but not in your files:** another session of yours. Stop, and give the user its label from `list_claims`.
    - **another key's:** stop, and tell the user who holds it.
+
+   **A ticket that is Done, Canceled or a Duplicate** keeps no claim: board-sync releases every claim on it at its next pass (SMD-3600). Work on a closed ticket, such as its Verify or a follow-up, needs the ticket reopened or a ticket of its own.
 
    **When a ticket's work splits into several PRs,** release the whole-ticket claim and delete its token file and any marker beside it, with `rm -f`: the hook may have just made an `.ended.json` of it. Claim the open PR's piece with `lease_seconds: 604800`, and each later piece when you create its worktree.
 
@@ -110,6 +112,7 @@ If `open-brain` has no `claim_work` tool, say why:
    - **Before you ask for the merge,** renew. A refusal saying the claim was taken over means someone else may have built the work: tell the user instead of merging.
    - **After the merge, or the abandon,** call `release_claim` with the id, the token and a `reason` (the merged PR, or why the work was dropped). Then delete the token file and any marker beside it, with `rm -f`.
    - **If the merge happened after your session ended,** the next session in the worktree releases first (step 4).
+   - **Board-sync releases** every claim on a ticket once it is Done or Canceled, at its next pass (SMD-3600); `release_claim` then answers `already_released`. It sees tickets, not PRs: a piece's claim on a ticket still open is yours to release.
 7. **If you lose the token,** wait for the lease to lapse and claim the work again: your key takes over its own lapsed claim with a new token. A re-claim of work whose PR is open takes `lease_seconds: 604800`. Or ask the user to release it with an operator key, with a reason.
 
 **Keys.** A claim belongs to its key's agent id: the key that claimed it renews it, and no other. The operator key can force-release any claim, and it belongs to the person, so sessions should hold an agent-kind key.

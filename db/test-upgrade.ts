@@ -709,13 +709,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // and fourteen functions — refusing by name without 008, 046 or 061
   // ([20bg]); 116 adds priority assertions — three tables, two refusing
   // triggers and nineteen functions — refusing by name without 008, 046, 061,
-  // 068, 082 or 115 ([20bh]) — all
+  // 068, 082 or 115 ([20bh]); 117 adds board-sync's release of a closed
+  // ticket's claims — two functions, one held from PUBLIC — refusing by name
+  // without 058, 068 or 115 ([20bi]) — all
   // recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 87, `030 is among the last eighty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 88, `030 is among the last eighty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -5289,6 +5291,56 @@ console.log("\n[20bh] Migration 116: onto a populated brain at the file before i
   const kept = Number((await sql`SELECT count(*)::int AS n FROM priority_assertions`)[0].n);
   const drift = Number((await sql`SELECT count(*)::int AS n FROM ob1_priority_projection_drift()`)[0].n);
   assert((await rows()) === before && kept === 2 && drift === 0, `a re-apply is a no-op: the thoughts as they were, both assertions kept, the projection exact (${kept}, drift ${drift})`);
+  await sql.close();
+}
+
+console.log("\n[20bi] Migration 117: onto a populated brain at the file before it — thoughts, their audit and the claims standing as they were; refused by name without 115's ob1_work_claim_lock, nothing created; then applied: a closed ticket's claims released with the reason, an open ticket's kept; EXECUTE not PUBLIC's; the closedclaims group issued by --grant; a re-apply a no-op, the release still held from PUBLIC (SMD-3600)");
+{
+  const the117 = MIGRATIONS.find((f) => /^\d{3}_closed_ticket_claims\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the117 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const board = { name: "upgrade-board", via: "sync-linear.ts" };
+  const agent = { name: "upgrade-agent", via: "open-brain" };
+  await sql`INSERT INTO ob1_agents (label, kind) VALUES ('upgrade-board', 'ingested'), ('upgrade-agent', 'agent')`;
+  const ticket = (issue: string, status: string, type: string, axis: number) =>
+    sql`SELECT upsert_thought(${`${issue} — upgrade 117\nProject: P · Status: ${status}`}::text, ${{ metadata: { source: "linear", issue, status, status_type: type, linear_updated_at: "2026-11-03T00:00:00.000Z" }, actor: board, embedding_model: OPTS.model }}::jsonb, ${vec(axis)}::vector) AS r`;
+  await ticket("SMD-9701", "Done", "completed", 0);
+  await ticket("SMD-9702", "In Progress", "started", 1);
+  for (const issue of ["SMD-9701", "SMD-9702"]) await sql`SELECT claim_work(${issue}::text, NULL, NULL, 14400, NULL, ${agent}::jsonb)`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const claims = async () => JSON.stringify(await sql`SELECT issue, released_at IS NULL AS open, release_reason FROM work_claims ORDER BY issue`);
+  const fn = async () => String((await sql`SELECT to_regprocedure('release_closed_ticket_claims(text, boolean, jsonb)')::text AS t`)[0].t ?? "");
+
+  // Without 115's lock: refused by name, nothing created.
+  await sql`ALTER FUNCTION ob1_work_claim_lock(text) RENAME TO ob1_work_claim_lock_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_lock_away(text) RENAME TO ob1_work_claim_lock`;
+  assert(/^migration 117 needs 115 \(ob1_work_claim_lock\); this schema lacks it/.test(without) && (await fn()) === "",
+    `without 115's ob1_work_claim_lock: refused by name, no function created (${without.slice(0, 80)})`);
+
+  const before = await rows(), auditBefore = await audits(), claimsBefore = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 });
+  assert((await rows()) === before && (await audits()) === auditBefore && (await claims()) === claimsBefore,
+    `applied, the file moves no thought, audit row or claim (${claimsBefore})`);
+  type Released = { outcome: string; released: { issue: string; release_reason: string; released_by: string }[] };
+  const r = ((await sql`SELECT release_closed_ticket_claims('upgrade-run', false, ${board}::jsonb) AS r`)[0] as { r: Released }).r;
+  const left = JSON.parse(await claims()) as { issue: string; open: boolean }[];
+  assert(r.outcome === "released" && r.released.length === 1 && r.released[0].issue === "SMD-9701" && r.released[0].release_reason === "SMD-9701 closed: Done (completed); upgrade-run"
+         && r.released[0].released_by === "upgrade-board" && left.find((c) => c.issue === "SMD-9702")?.open === true,
+    `the Done ticket's claim released with the reason, by the caller's key; the open ticket's kept (${JSON.stringify(r.released.map((c) => c.release_reason))})`);
+  const publicExec = async () => Boolean((await sql`SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = 'release_closed_ticket_claims(text, boolean, jsonb)'::regprocedure AND a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS e`)[0].e);
+  assert(!(await publicExec()), "EXECUTE on release_closed_ticket_claims is not PUBLIC's");
+  const grants = grantStatements("ob1_upgrade_probe", { groups: ["closedclaims"] });
+  assert(grants.length === 2 && grants[0] === `GRANT EXECUTE ON FUNCTION release_closed_ticket_claims(text, boolean, jsonb) TO "ob1_upgrade_probe";`
+         && grants[1] === `GRANT SELECT, UPDATE ON work_claims TO "ob1_upgrade_probe";`,
+    `--grant's closedclaims group: EXECUTE on the release, SELECT and UPDATE on the claims (${grants.join("; ")})`);
+  const after = await claims();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the117 });
+  assert((await rows()) === before && (await claims()) === after && !(await publicExec()),
+    `a re-apply is a no-op: the thoughts and the claims as they were, EXECUTE still not PUBLIC's`);
   await sql.close();
 }
 
