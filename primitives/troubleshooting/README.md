@@ -97,8 +97,9 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 
 All extensions reference this guide for common issues:
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
+- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1, a plugin since SMD-2311)
+- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2, a plugin since SMD-2311)
+- [Family Calendar](../../extensions/family-calendar/) (Extension 3, a plugin since SMD-2311)
 - [Meal Planning](../../extensions/meal-planning/) (Extension 4)
 - [Professional CRM](../../extensions/professional-crm/) (Extension 5)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

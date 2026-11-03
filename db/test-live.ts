@@ -29,10 +29,11 @@
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
  * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169). From one checkout,
- * run them one at a time for now: [2] edits a copy of the migrations, no
- * longer the tracked tree (SMD-3639), but side by side has not been tried
- * (SMD-3688).
+ * every one on a database of its own (SMD-3048, SMD-3169), and so does
+ * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
+ * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
+ * tracked tree (SMD-3639). Never two in one Postgres: each drops the schema,
+ * and roles and backends are the cluster's.
  */
 
 import { SQL } from "bun";
@@ -14220,7 +14221,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 11 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 9 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
