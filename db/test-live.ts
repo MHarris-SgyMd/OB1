@@ -10416,6 +10416,7 @@ if (want("10h")) {
       };
       /** The run's stderr lines as each is said, so its line's order beside the hand-back's wait can be read. */
       const endSaid: string[] = [];
+      const endLine = new RegExp(`^ {2}${endT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`);
       let endRun: SweepRun | null = null;
       let endWaited = false;
       let endSaidFirst = false;
@@ -10424,7 +10425,7 @@ if (want("10h")) {
         const endRunning = settled(caught((w) => sweepSubjects({ url: URL_!, env, follow: 1, session: BUDGET_SESSION, signal: AbortSignal.any([endStop.signal, backstop()]),
           writer: { out: w.out, err: (l) => { endSaid.push(l); w.err(l); } } }))).finally(() => { endDone = true; });
         endWaited = await pollUntil(async () => endDone || await waitingOnLock("release_claims_for_worker("), 20_000) && !endDone;
-        endSaidFirst = endSaid.some((l) => l.includes(`${endT}'s release passed`) && l.endsWith(": the run loses this poll, and its stop ends it there"));
+        endSaidFirst = endSaid.some((l) => endLine.test(l));
         if (endWaited) await Bun.sleep(BUDGET_MS + 500);
         endLet.resolve();
         endRun = await orHung(endRunning, 20_000);
@@ -10436,7 +10437,6 @@ if (want("10h")) {
       const endClaim = (await claimOf(endT))?.status;
       const endFailSaid = /the claims this run holds could not go back to the pool/.test(endRun?.stderr ?? "");
       assert(endWaited && endSaidFirst && endRun?.code === 0 && endClaim === "pending" && !endFailSaid
-          && new RegExp(`^ {2}${endT}'s release passed the scheduler's statement_timeout \\(canceling statement due to statement timeout\\): the run loses this poll, and its stop ends it there$`, "m").test(endRun.stderr)
           && /stopped after 1 thought\(s\): what it held is back in the pool/.test(endRun.stderr),
         `a run's end hand-back, alone after a stop, waits out a short budget on the claim's held row, the claim back, nothing said (waited ${endWaited}, the release's lost-poll line said first ${endSaidFirst}, exit ${endRun?.code ?? "still running at 20 s"}, claim ${endClaim}, the hand-back's failure said ${endFailSaid}): ${endRun?.stdout.trim().slice(-200)} | ${endRun?.stderr.trim().slice(0, 300)}`);
       await drop([endT]);
