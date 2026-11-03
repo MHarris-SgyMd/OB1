@@ -56,6 +56,21 @@ async function dayIn(sql: PluginSql, tz: string): Promise<string> {
   const [{ d }] = await sql<{ d: string }>`SELECT (now() AT TIME ZONE ${tz}::text)::date::text AS d`;
   return d;
 }
+/**
+ * Whether Postgres knows a time zone by this name, in any case as AT TIME ZONE
+ * reads it: this runtime still takes some names Postgres's tz database has
+ * dropped ("US/Pacific-New"), which would answer a 500.
+ */
+async function postgresKnows(sql: PluginSql, tz: string): Promise<boolean> {
+  const [{ known }] = await sql<{ known: boolean }>`SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE lower(name) = lower(${tz}::text)) AS known`;
+  return known;
+}
+/** The refusal of a time zone Postgres does not know. */
+const unknownZone = (time_zone: string) =>
+  refuse(400, "UNKNOWN_TIME_ZONE", { time_zone, message: "the database knows no time zone by this name: give an IANA name, such as America/Los_Angeles or Europe/London" });
+/** Whether a time zone given is one Postgres knows; none given is UTC. */
+const zoneOk = (ctx: { db: { tx<T>(fn: (sql: PluginSql) => Promise<T>): Promise<T> } }, tz: string | undefined) =>
+  tz === undefined ? Promise.resolve(true) : ctx.db.tx((sql) => postgresKnows(sql, tz));
 /** A string's length in characters (code points), as the inputs' bounds count it: an emoji is one, not two. */
 const charCount = (s: string) => [...s].length;
 /**
@@ -270,7 +285,8 @@ export default definePlugin({
           // The contact moved on first, on its own row: greatest() reads the row it writes, so two logs at once keep the later.
           const moved = await sql<{ id: string }>`
             UPDATE professional_contacts SET last_contacted = greatest(last_contacted, ${at}::timestamptz),
-                   follow_up_date = CASE WHEN ${i.follow_up_date !== undefined} THEN ${i.follow_up_date ?? null}::date ELSE follow_up_date END
+                   follow_up_date = CASE WHEN ${i.follow_up_date !== undefined} THEN ${i.follow_up_date ?? null}::date ELSE follow_up_date END,
+                   updated_at = now()
              WHERE id = ${i.contact_id} RETURNING id`;
           if (moved.length === 0) return null;
           const needed = i.follow_up_needed ?? Boolean(i.follow_up_notes);
@@ -433,6 +449,7 @@ export default definePlugin({
         overdue_count: z.number().int(), upcoming_count: z.number().int(), promised_count: z.number().int(), truncated: z.boolean(),
       },
       async handler(ctx, { days_ahead, time_zone, limit }) {
+        if (!(await zoneOk(ctx, time_zone))) return unknownZone(time_zone!);
         const found = await ctx.db.tx(async (sql) => {
           const day = await dayIn(sql, zoneOf(time_zone));
           const due = await sql<{ answer: z.input<typeof FollowUp>; overdue: boolean }>`
@@ -460,7 +477,7 @@ export default definePlugin({
     }),
     link_thought: operation({
       title: "Link a thought to a contact",
-      description: "Links a thought of the brain's (thought_id, from search_thoughts) to a contact (contact_id, from search_contacts): the thought is read through the brain as the caller, and its text (at most 2,000 characters, cut with …) appended to the contact's notes on a line dated in the user's time zone and naming the thought. A thought captured from an outside source (trust ingested) is marked so in the line, in the brain's own words. A thought linked once, whose line is still in the notes, is not appended again (already_linked, answering that line); if the notes were rewritten without it, linking appends it again. Characters are counted as characters: an emoji is one. Refused: a contact that is not there (NO_SUCH_CONTACT), a thought the caller cannot read or that is not there (NO_SUCH_THOUGHT), and notes that would pass 100,000 characters (NOTES_FULL).",
+      description: "Links a thought of the brain's (thought_id, from search_thoughts) to a contact (contact_id, from search_contacts): the thought is read through the brain as the caller, and its text (at most 2,000 characters, cut with …) appended to the contact's notes on a line dated in the user's time zone and naming the thought. A thought captured from an outside source (trust ingested) is marked so in the line, in the brain's own words. A thought linked once, whose line is still in the notes, is not appended again (already_linked, answering that line); if the notes were rewritten without it, linking appends it again. Characters are counted as characters: an emoji is one. Refused: a contact that is not there (NO_SUCH_CONTACT), a thought the caller cannot read or that is not there (NO_SUCH_THOUGHT), notes that would pass 100,000 characters (NOTES_FULL), and a time zone the database does not know (UNKNOWN_TIME_ZONE).",
       scope: "write",
       annotations: ADDS,
       method: "POST",
@@ -472,6 +489,7 @@ export default definePlugin({
       },
       output: { contact: Contact, line: z.string(), ingested: z.boolean(), already_linked: z.boolean() },
       async handler(ctx, { contact_id, thought_id, time_zone }) {
+        if (!(await zoneOk(ctx, time_zone))) return unknownZone(time_zone!);
         if (!(await ctx.db.tx((sql) => contactExists(sql, contact_id)))) return noSuchContact(contact_id);
         const thought = await ctx.call("fetch", { id: thought_id });
         if (!thought.ok) return refuse(404, "NO_SUCH_THOUGHT", { thought_id, message: `the brain did not give this thought to the caller (${thought.refusal.code}): search_thoughts gives each thought's id` });
@@ -485,24 +503,20 @@ export default definePlugin({
           // statement keeps that statement's snapshot, and missed the link row: both appended).
           const locked = await sql<{ id: string }>`SELECT id FROM professional_contacts WHERE id = ${contact_id} FOR UPDATE`;
           if (locked.length === 0) return { missing: true as const };
-          const [held] = await sql<{ notes: string | null; link: { ingested: boolean } | null }>`
-            SELECT c.notes, (SELECT jsonb_build_object('ingested', t.ingested) FROM contact_thoughts t WHERE t.contact_id = c.id AND t.thought_id = ${thought_id}::uuid) AS link
+          const [held] = await sql<{ notes: string | null; link: { ingested: boolean; line: string } | null }>`
+            SELECT c.notes, (SELECT jsonb_build_object('ingested', t.ingested, 'line', t.line) FROM contact_thoughts t WHERE t.contact_id = c.id AND t.thought_id = ${thought_id}::uuid) AS link
               FROM professional_contacts c WHERE c.id = ${contact_id}`;
           // The thought's own line, by its head: other text naming the thought (another thought's, the user's) is not it.
           const head = `, thought ${thought_id}]: `;
           const at = (held.notes ?? "").indexOf(head);
-          if (held.link && at >= 0) {
-            const notes = held.notes!;
-            const start = notes.lastIndexOf("[Linked thought ", at);
-            const end = notes.indexOf("\n\n", at);
-            return { contact: (await contactOf(sql, contact_id))!, line: notes.slice(start, end < 0 ? undefined : end), ingested: held.link.ingested, already_linked: true };
-          }
+          // Already linked: the line as it was appended (kept with the link), however the thought reads now.
+          if (held.link && at >= 0) return { contact: (await contactOf(sql, contact_id))!, line: held.link.line, ingested: held.link.ingested, already_linked: true };
           const line = `[Linked thought ${await dayIn(sql, zoneOf(time_zone))}${head}${ingested ? `${INGESTED_NOTICE} ` : ""}${text}`;
           const notes = held.notes ? `${held.notes}\n\n${line}` : line;
           if (charCount(notes) > NOTES_MAX) return { full: charCount(notes) };
           await sql`
-            INSERT INTO contact_thoughts (contact_id, thought_id, ingested) VALUES (${contact_id}, ${thought_id}::uuid, ${ingested})
-            ON CONFLICT (contact_id, thought_id) DO UPDATE SET linked_at = now(), ingested = excluded.ingested`;
+            INSERT INTO contact_thoughts (contact_id, thought_id, ingested, line) VALUES (${contact_id}, ${thought_id}::uuid, ${ingested}, ${line})
+            ON CONFLICT (contact_id, thought_id) DO UPDATE SET linked_at = now(), ingested = excluded.ingested, line = excluded.line`;
           await sql`UPDATE professional_contacts SET notes = ${notes}, updated_at = now() WHERE id = ${contact_id}`;
           return { contact: (await contactOf(sql, contact_id))!, line, ingested, already_linked: false };
         });
@@ -534,6 +548,7 @@ export default definePlugin({
         linked_thoughts: z.array(LinkedThought),
       },
       async handler(ctx, { contact_id, interaction_limit, time_zone }) {
+        if (!(await zoneOk(ctx, time_zone))) return unknownZone(time_zone!);
         const zone = zoneOf(time_zone);
         const found = await ctx.db.tx(async (sql) => {
           const contact = await contactOf(sql, contact_id);
@@ -581,6 +596,7 @@ export default definePlugin({
       },
       output: { threshold_days: z.number().int(), contacts: z.array(ContactDays), truncated: z.boolean() },
       async handler(ctx, { days_threshold, time_zone, limit }) {
+        if (!(await zoneOk(ctx, time_zone))) return unknownZone(time_zone!);
         const zone = zoneOf(time_zone);
         const rows = await ctx.db.tx((sql) => sql<Answer<z.input<typeof ContactDays>>>`
           SELECT answer || jsonb_build_object('days_since_contact', CASE WHEN last_contacted IS NULL THEN NULL ELSE greatest(0, today - (last_contacted AT TIME ZONE ${zone}::text)::date) END) AS answer

@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS contact_thoughts (
   thought_id  uuid NOT NULL,
   linked_at   timestamptz NOT NULL DEFAULT now(),
   ingested    boolean NOT NULL DEFAULT false,
+  -- The line as it was appended, which a link already made answers.
+  line        text NOT NULL,
   PRIMARY KEY (contact_id, thought_id)
 );
 

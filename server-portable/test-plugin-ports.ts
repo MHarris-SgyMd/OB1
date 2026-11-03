@@ -1309,10 +1309,17 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const page = await c("search_contacts", { limit: 2 });
   assert((page.body.contacts as unknown[]).length === 2 && page.body.truncated === true && (await c("search_contacts", { limit: 4 })).body.truncated === false,
     "…limit applies, truncated when more matched and not when exactly limit did");
+  await c("add_contact", { name: "Lee Park", notes: "knows Ann from school" });
+  assert((await search({ query: "ann lee" })) === "Ann Lee,Aaron Bell,Lee Park" && (await search({ query: "Ann; Anthropic" })) === "Ann Lee" && (await search({ query: "lee\tanthropic" })) === "Ann Lee"
+         && (await search({ query: "ann@example" })) === "Ann Lee" && (await search({ query: "engineerann" })) === "",
+    "…a name holding only some of the words ranks with the rest; semicolons and tabs split words; the email is searched; no word runs across two fields");
 
   // Changing a contact: the fields given, null clearing, the rest kept.
-  const changed = await c("update_contact", { contact_id: ids.cara, title: "CTO", notes: null, tags: ["Hiring", "ENG", "hiring"], follow_up_date: await dayFromToday(-3) });
+  const changed = await c("update_contact", { contact_id: ids.cara, title: "CTO", notes: null, tags: ["Hiring", "ENG", "hiring"], follow_up_date: await dayFromToday(-3),
+    email: "cara@initech.example", phone: "555-0199", linkedin_url: "https://www.linkedin.com/in/cara", how_we_met: "Hiring panel" });
   assert(changed.status === 200 && changed.body.contact?.title === "CTO" && changed.body.contact?.notes === null && JSON.stringify(changed.body.contact?.tags) === '["hiring","eng"]'
+         && changed.body.contact?.email === "cara@initech.example" && changed.body.contact?.phone === "555-0199" && changed.body.contact?.linkedin_url === "https://www.linkedin.com/in/cara"
+         && changed.body.contact?.how_we_met === "Hiring panel"
          && changed.body.contact?.company === "Initech" && changed.body.contact?.name === "Cara Diaz" && String(changed.body.contact?.updated_at) > String(cara.body.contact?.updated_at),
     `update_contact changes the fields given, clears one given null, replaces the tags (lower-case, each once, in order), leaves the rest, and moves updated_at (${JSON.stringify(changed.body.contact).slice(0, 200)})`);
   const nameOnly = await c("update_contact", { contact_id: ids.ann, name: "Ann Lee-Park" });
@@ -1322,6 +1329,11 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const notesOnly = await c("update_contact", { contact_id: ids.ann, notes: "Interested in evals and interpretability" });
   assert(notesOnly.status === 200 && notesOnly.body.contact?.notes === "Interested in evals and interpretability" && JSON.stringify(notesOnly.body.contact?.tags) === '["ai","conference"]',
     "…notes alone are a change");
+  const bobAlone = async (input: Body) => (await c("update_contact", { contact_id: ids.bob, ...input })).body.contact;
+  const bobDated = await bobAlone({ follow_up_date: await dayFromToday(40) }), bobTagged = await bobAlone({ tags: ["Advisor"] }), bobMailed = await bobAlone({ email: "bob@acme.example" });
+  const bobUndated = await bobAlone({ follow_up_date: null });
+  assert(bobDated?.follow_up_date === (await dayFromToday(40)) && JSON.stringify(bobTagged?.tags) === '["advisor"]' && bobMailed?.email === "bob@acme.example" && bobUndated?.follow_up_date === null,
+    "…a follow-up date, the tags or the email alone is a change, and the date alone cleared");
   const nothing = await c("update_contact", { contact_id: ids.ann });
   const noContact = await c("update_contact", { contact_id: NO_ROW, name: "x" });
   const noContactMcp = await c("update_contact", { contact_id: NO_ROW, name: "x" }, { door: "mcp" });
@@ -1333,8 +1345,8 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const at = async (days: number) => `${await dayFromToday(days)}T12:00:00.000Z`;
   const coffee = await c("log_interaction", { contact_id: ids.ann, interaction_type: "coffee", occurred_at: await at(-10), summary: "Talked about evals", follow_up_needed: true, follow_up_notes: "send the paper" });
   assert(coffee.status === 200 && UUID.test(coffee.body.interaction?.id) && coffee.body.interaction?.occurred_at === (await at(-10)) && coffee.body.interaction?.follow_up_notes === "send the paper"
-         && coffee.body.contact?.last_contacted === (await at(-10)) && coffee.body.contact?.follow_up_date === followDay,
-    `log_interaction stores it and moves the contact's last_contacted to it, the follow-up date left as it was (${JSON.stringify(coffee.body).slice(0, 240)})`);
+         && coffee.body.contact?.last_contacted === (await at(-10)) && coffee.body.contact?.follow_up_date === followDay && String(coffee.body.contact?.updated_at) > String(notesOnly.body.contact?.updated_at),
+    `log_interaction stores it and moves the contact's last_contacted to it and its updated_at, the follow-up date left as it was (${JSON.stringify(coffee.body).slice(0, 240)})`);
   const older = await c("log_interaction", { contact_id: ids.ann, interaction_type: "email", occurred_at: await at(-20), summary: "Intro email" }, { door: "mcp" });
   assert(older.status === 200 && older.body.contact?.last_contacted === (await at(-10)), `…an older one logged later leaves the latest (the old trigger moved it back) (${older.body.contact?.last_contacted})`);
   const offset = await c("log_interaction", { contact_id: ids.ann, interaction_type: "call", occurred_at: `${await dayFromToday(-2)}T09:00:00-05:00`, summary: "Quick call", follow_up_needed: true });
@@ -1343,6 +1355,10 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const now = await c("log_interaction", { contact_id: ids.cara, interaction_type: "meeting", summary: "Hiring chat" });
   assert(now.status === 200 && Math.abs(Date.parse(String(now.body.interaction?.occurred_at)) - Date.now()) < 60_000 && now.body.interaction?.follow_up_needed === false, "…occurred_at now unless given, nothing promised unless said");
   const future = await c("log_interaction", { contact_id: ids.ann, interaction_type: "meeting", occurred_at: await at(3), summary: "planned" });
+  const dayAndHalf = await c("log_interaction", { contact_id: ids.ann, interaction_type: "meeting", occurred_at: new Date(Date.now() + 36 * 3_600_000).toISOString(), summary: "planned" });
+  assert(dayAndHalf.status === 422 && dayAndHalf.body.code === "FUTURE_DATE", `…a day and a half ahead is refused too (${dayAndHalf.status})`);
+  const longest = await c("log_interaction", { contact_id: ids.cara, interaction_type: "email", occurred_at: await at(-30), summary: "s".repeat(5000) });
+  assert(longest.status === 200 && String(longest.body.interaction?.summary).length === 5000, `…a summary of 5,000 characters is stored (${longest.status})`);
   const tomorrow = await c("log_interaction", { contact_id: ids.cara, interaction_type: "email", occurred_at: new Date(Date.now() + 3_600_000).toISOString(), summary: "east of here" });
   const noOne = await c("log_interaction", { contact_id: NO_ROW, interaction_type: "call", summary: "x" });
   assert(future.status === 422 && future.body.code === "FUTURE_DATE" && tomorrow.status === 200 && noOne.status === 404 && noOne.body.code === "NO_SUCH_CONTACT",
@@ -1355,7 +1371,7 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const { id: dealId, created_at: _d1, updated_at: dealUpdated, ...dealRest } = deal.body.opportunity ?? {};
   assert(deal.status === 200 && UUID.test(dealId) && canon(dealRest) === canon({ contact_id: ids.ann, contact: { id: ids.ann, name: "Ann Lee-Park" }, title: "Eval consulting", description: "Three months",
     stage: "identified", open: true, value: 25000.5, expected_close_date: await dayFromToday(30), notes: null }),
-    `create_opportunity stores it, identified unless given, with its contact's id and name (${JSON.stringify(deal.body.opportunity).slice(0, 260)})`);
+    `create_opportunity stores it, identified unless given, with its contact's id and name (${String(JSON.stringify(deal.body.opportunity)).slice(0, 260)})`);
   const talk = await c("create_opportunity", { title: "Conference talk", stage: "proposal", expected_close_date: await dayFromToday(10) }, { door: "mcp" });
   const won = await c("create_opportunity", { contact_id: ids.ann, title: "Workshop", stage: "won", value: 5000 });
   const side = await c("create_opportunity", { contact_id: ids.cara, title: "Advisory", value: 1000 });
@@ -1373,7 +1389,7 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   assert((firstDeal.body.opportunities as unknown[]).length === 1 && firstDeal.body.truncated === true && (await c("list_opportunities", { limit: 5 })).body.truncated === false, "…limit applies, truncated");
   const moved = await c("update_opportunity", { opportunity_id: String(talk.body.opportunity?.id), stage: "won", contact_id: ids.cara, value: 2000 });
   assert(moved.status === 200 && moved.body.opportunity?.stage === "won" && moved.body.opportunity?.open === false && moved.body.opportunity?.contact?.name === "Cara Diaz" && moved.body.opportunity?.value === 2000
-         && moved.body.opportunity?.title === "Conference talk" && String(moved.body.opportunity?.updated_at) > String(talk.body.opportunity?.updated_at),
+         && moved.body.opportunity?.title === "Conference talk" && moved.body.opportunity?.expected_close_date === (await dayFromToday(10)) && String(moved.body.opportunity?.updated_at) > String(talk.body.opportunity?.updated_at),
     `update_opportunity moves it on (won closes it), names a contact, leaves the rest, moves updated_at (${JSON.stringify(moved.body.opportunity).slice(0, 200)})`);
   const cleared = await c("update_opportunity", { opportunity_id: String(talk.body.opportunity?.id), contact_id: null, value: null, expected_close_date: null });
   assert(cleared.body.opportunity?.contact === null && cleared.body.opportunity?.value === null && cleared.body.opportunity?.expected_close_date === null && cleared.body.opportunity?.stage === "won",
@@ -1385,6 +1401,14 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   assert(noDeal.status === 404 && noDeal.body.code === "NO_SUCH_OPPORTUNITY" && /list_opportunities/.test(String(noDeal.body.message)) && noDealContact.status === 404 && noDealContact.body.code === "NO_SUCH_CONTACT"
          && noDealChange.status === 422 && noDealChange.body.code === "NOTHING_TO_CHANGE" && (dealAfter.body.opportunities as { contact_id: string; updated_at: string }[])[0]?.updated_at === dealUpdated,
     `…an opportunity that is not there: 404 NO_SUCH_OPPORTUNITY; a contact that is not there: 404 NO_SUCH_CONTACT, the opportunity unchanged; no field: 422 NOTHING_TO_CHANGE (${noDeal.status}, ${noDealContact.status}, ${noDealChange.status})`);
+  const sideId = String(side.body.opportunity?.id);
+  const described = await c("update_opportunity", { opportunity_id: sideId, description: "Monthly calls", notes: "Paid quarterly" });
+  const valued = await c("update_opportunity", { opportunity_id: sideId, value: 1500 });
+  const negotiating = await c("update_opportunity", { opportunity_id: sideId, stage: "negotiation" });
+  const blankDeal = await c("create_opportunity", { title: "Blank notes", notes: "  " });
+  assert(described.body.opportunity?.description === "Monthly calls" && described.body.opportunity?.notes === "Paid quarterly" && valued.body.opportunity?.value === 1500
+         && valued.body.opportunity?.description === "Monthly calls" && negotiating.body.opportunity?.stage === "negotiation" && negotiating.body.opportunity?.open === true && blankDeal.body.opportunity?.notes === null,
+    "…the description and notes change, the value alone is a change, negotiation is open; blank notes on an add are none");
 
   // A thought linked: read through the core as the caller, its text appended to the notes once, on a line naming it.
   const captured = await rest("POST", "/v1/thoughts", { content: "Ann mentioned her team is hiring for interpretability" }, KEYS.writer);
@@ -1403,6 +1427,9 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const relinked = await c("link_thought", { contact_id: ids.cara, thought_id: thoughtId });
   assert(rewritten.status === 200 && relinked.body.already_linked === false && String(relinked.body.contact?.notes).startsWith("Rewritten by hand\n\n[Linked thought ") && String(relinked.body.contact?.notes).includes(thoughtId),
     `…once the notes were rewritten without its line, linked again it is appended again (${JSON.stringify(relinked.body.contact?.notes).slice(0, 160)})`);
+  const caraLinks = (await c("get_contact_history", { contact_id: ids.cara })).body.linked_thoughts as { thought_id: string; linked_at: string }[];
+  assert(String(relinked.body.contact?.updated_at) > String(rewritten.body.contact?.updated_at) && String(caraLinks.find((l) => l.thought_id === thoughtId)?.linked_at) > String(rewritten.body.contact?.updated_at),
+    "…a link moves the contact's updated_at, and a link made again its linked_at");
   const sameAgain = await c("link_thought", { contact_id: ids.ann, thought_id: thoughtId, time_zone: farZone });
   assert(sameAgain.body.already_linked === true && sameAgain.body.line === line,
     `…already linked, it answers the line in the notes, not one made afresh in another zone (${JSON.stringify(sameAgain.body.line).slice(0, 120)})`);
@@ -1436,6 +1463,22 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const intoWide = await c("link_thought", { contact_id: ids.aaron, thought_id: String(twin.body.id) });
   assert(wideNotes.status === 200 && intoWide.status === 200 && intoWide.body.already_linked === false,
     `…notes of 60,000 emoji, which a change takes, take a link: 60,000 characters, not 120,000 units (${wideNotes.status}, ${intoWide.status} ${String(intoWide.body.code ?? "")})`);
+  await c("update_contact", { contact_id: ids.aaron, notes: `[Linked thought ${utcToday}, thought ${thoughtId}]: pasted from elsewhere` });
+  const pasted = await c("link_thought", { contact_id: ids.aaron, thought_id: thoughtId });
+  assert(pasted.body.already_linked === false && String(pasted.body.contact?.notes).endsWith(line),
+    "…a line pasted in by hand, with no link made, is no link: the thought is linked and appended");
+  const paras = await rest("POST", "/v1/thoughts", { content: "First paragraph.\n\nSecond paragraph." }, KEYS.writer);
+  const parasLine = String((await c("link_thought", { contact_id: hanaId, thought_id: String(paras.body.id) })).body.line);
+  const parasAgain = await c("link_thought", { contact_id: hanaId, thought_id: String(paras.body.id) });
+  assert(parasLine.endsWith("First paragraph.\n\nSecond paragraph.") && parasAgain.body.already_linked === true && parasAgain.body.line === parasLine,
+    "…already linked, a thought of two paragraphs answers its whole line");
+  const exact = await rest("POST", "/v1/thoughts", { content: "x".repeat(2000) }, KEYS.writer);
+  const exactText = String((await c("link_thought", { contact_id: hanaId, thought_id: String(exact.body.id) })).body.line).split("]: ")[1] ?? "";
+  assert(exactText === "x".repeat(2000), `…a thought of exactly 2,000 characters is whole, no … (${exactText.length})`);
+  const edgeLine = `[Linked thought ${utcToday}, thought ${String(paras.body.id)}]: First paragraph.\n\nSecond paragraph.`;
+  await c("update_contact", { contact_id: ids.aaron, notes: "n".repeat(100_000 - 2 - [...edgeLine].length) });
+  const atEdge = await c("link_thought", { contact_id: ids.aaron, thought_id: String(paras.body.id) });
+  assert(atEdge.status === 200 && [...String(atEdge.body.contact?.notes)].length === 100_000, `…notes of exactly 100,000 characters with the link are taken (${atEdge.status})`);
   const blank = await c("update_contact", { contact_id: ids.aaron, notes: "   " });
   assert(blank.body.contact?.notes === null, `…blank notes are none, not empty text (${JSON.stringify(blank.body.contact?.notes)})`);
   // A thought from outside keeps the brain's notice in the notes, in the brain's own words.
@@ -1452,7 +1495,8 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   await c("update_contact", { contact_id: ids.bob, notes: "n".repeat(99_000) });
   const full = await c("link_thought", { contact_id: ids.bob, thought_id: String(long.body.id) });
   const bobAfter = await c("get_contact_history", { contact_id: ids.bob });
-  assert(full.status === 422 && full.body.code === "NOTES_FULL" && String(bobAfter.body.contact?.notes).length === 99_000 && JSON.stringify(bobAfter.body.linked_thoughts) === "[]",
+  const fullLine = `[Linked thought ${utcToday}, thought ${String(long.body.id)}]: ${"evals ".repeat(500).slice(0, 2000)}…`;
+  assert(full.status === 422 && full.body.code === "NOTES_FULL" && full.body.length === 99_000 + 2 + [...fullLine].length && String(bobAfter.body.contact?.notes).length === 99_000 && JSON.stringify(bobAfter.body.linked_thoughts) === "[]",
     `…a link that would take the notes past 100,000 characters is refused (422 NOTES_FULL), nothing written (${full.status})`);
   await c("update_contact", { contact_id: ids.bob, notes: null });
   const noThought = await c("link_thought", { contact_id: ids.ann, thought_id: NO_ROW });
@@ -1515,10 +1559,21 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const promisedNow = ((followAll.body.promised ?? []) as { contact: { name: string }; interaction: { summary: string } }[]).map((p) => `${p.contact.name}:${p.interaction.summary}`).join();
   assert(promisedNow === "Ann Lee-Park:Quick call" && followAll.body.promised_count === 1,
     `…and promised: each follow-up promised with no interaction of a later time after it, across the contacts, whatever their date (${promisedNow})`);
+  const ivy = await c("add_contact", { name: "Ivy Chen", follow_up_date: await dayFromToday(7) });
+  const withIvy = await follow({});
+  await c("update_contact", { contact_id: String(ivy.body.contact?.id), follow_up_date: null });
+  assert(withIvy === "Cara Diaz:-3 | Dave Park:0,Ann Lee-Park:5,Ivy Chen:7 | 1/3" && (await follow({})) === (await follow({ time_zone: "UTC" })),
+    `…the seventh day ahead is upcoming by default; no time zone is UTC (${withIvy})`);
   const followPage = await c("get_follow_ups", { limit: 1 });
   assert(followPage.body.truncated === true && (followPage.body.upcoming as unknown[]).length === 1 && followPage.body.upcoming_count === 2 && followPage.body.overdue_count === 1
          && (await c("get_follow_ups", { limit: 2 })).body.truncated === false,
     "…limit cuts each list, the counts count them all, truncated says a list was cut");
+
+  await c("create_opportunity", { contact_id: ids.ann, title: "Follow-on" });
+  const annDeals = ((await c("get_contact_history", { contact_id: ids.ann })).body.opportunities as { title: string }[]).map((o) => o.title).join();
+  assert(annDeals === "Eval consulting,Follow-on,Workshop", `…a contact's opportunities open first, an open one with no close date after one with a date (${annDeals})`);
+  const blankContact = await c("add_contact", { name: "Blank Note", notes: " ", tags: ["Zeta", "alpha"] });
+  assert(blankContact.body.contact?.notes === null && JSON.stringify(blankContact.body.contact?.tags) === '["zeta","alpha"]', "…blank notes on an add are none; tags in the order given");
 
   // Contacts going cold: by the last contact, or when added for one never spoken to.
   await c("log_interaction", { contact_id: ids.bob, interaction_type: "linkedin", occurred_at: await at(-30), summary: "Congrats on the new role" });
@@ -1532,6 +1587,10 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const coldPage = await c("stale_contacts", { days_threshold: 2, limit: 2 });
   assert(coldPage.body.threshold_days === 2 && (coldPage.body.contacts as unknown[]).length === 2 && coldPage.body.truncated === true && (await c("stale_contacts", { days_threshold: 2, limit: 3 })).body.truncated === false,
     "…the threshold answered; limit applies, truncated");
+  assert((await c("stale_contacts", { days_threshold: 30, limit: 2 })).body.threshold_days === 30, "…the threshold answered is the one asked, not the limit");
+  const dropped = await Promise.all([c("prep_context", { contact_id: ids.ann, time_zone: "US/Pacific-New" }), c("stale_contacts", { time_zone: "US/Pacific-New" }),
+    c("get_follow_ups", { time_zone: "Canada/East-Saskatchewan" }), c("link_thought", { contact_id: ids.ann, thought_id: thoughtId, time_zone: "US/Pacific-New" })]);
+  assert(dropped.every((r) => r.status === 400), `…a zone the runtime still knows but the database dropped is refused at 400, not a 500 (${dropped.map((r) => `${r.status} ${String(r.body.code ?? "")}`).join(", ")})`);
 
   // A day counted in the user's zone at both ends: logged at half past midnight in UTC+14, it is that day there, though the
   // day before in UTC. Counting the stored moment's day in UTC answered 1, and the contact read as going cold.
@@ -1552,6 +1611,13 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   assert(halLog.status === 200 && dayInZone(noonZone, new Date(Date.now() + 20 * 3_600_000)) !== dayInZone(noonZone) && halPrep.body.relationship?.days_since_last_contact === 0,
     `…an interaction logged a little ahead, on tomorrow's date in the user's zone, is 0 days since, not -1 (${halPrep.body.relationship?.days_since_last_contact} in ${noonZone})`);
 
+  // Each list's truncated: two overdue cut at one, the others whole.
+  await c("update_contact", { contact_id: String(erin.body.contact?.id), follow_up_date: await dayFromToday(-1) });
+  const overdueCut = await c("get_follow_ups", { days_ahead: 0, limit: 1 });
+  assert((overdueCut.body.overdue as unknown[]).length === 1 && overdueCut.body.overdue_count === 2 && overdueCut.body.upcoming_count === 1 && overdueCut.body.promised_count === 1 && overdueCut.body.truncated === true,
+    `…the overdue list cut alone says truncated (${overdueCut.body.overdue_count}/${overdueCut.body.upcoming_count}/${overdueCut.body.promised_count})`);
+  await c("update_contact", { contact_id: String(erin.body.contact?.id), follow_up_date: await dayFromToday(20) });
+
   // What was promised, and what clears it.
   const daveId = String(dave.body.contact?.id);
   const promise = await c("log_interaction", { contact_id: daveId, interaction_type: "call", occurred_at: await at(-1), summary: "Asked for a proposal", follow_up_notes: "send the proposal" });
@@ -1563,9 +1629,18 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
   const sameTime = await c("log_interaction", { contact_id: daveId, interaction_type: "email", occurred_at: await at(-1), summary: "Sent the proposal", follow_up_date: null });
   assert(sameTime.body.contact?.follow_up_date === null && (await pendingOf()) === "" && !(await promisedOf()).includes("Asked for a proposal"),
     `…one at the same time, logged after it, follows it up; follow_up_date null clears the contact's date, the follow-up done (${sameTime.body.contact?.follow_up_date})`);
-  const notPromised = await c("log_interaction", { contact_id: daveId, interaction_type: "meeting", summary: "Kickoff", follow_up_needed: false, follow_up_notes: "nothing owed", follow_up_date: await dayFromToday(14) });
+  const notPromised = await c("log_interaction", { contact_id: daveId, interaction_type: "other", summary: "Kickoff", follow_up_needed: false, follow_up_notes: "nothing owed", follow_up_date: await dayFromToday(14) });
   assert(notPromised.body.interaction?.follow_up_needed === false && notPromised.body.contact?.follow_up_date === (await dayFromToday(14)) && (await pendingOf()) === "",
     "…follow_up_needed false with notes is no promise; a follow_up_date sets the contact's");
+  const daveHistory = ((await c("get_contact_history", { contact_id: daveId })).body.interactions as { summary: string }[]).map((i) => i.summary).join();
+  assert(daveHistory === "Kickoff,Sent the proposal,Asked for a proposal,An old email, logged late", `…a history's interactions at one time come the later logged first (${daveHistory})`);
+  // Promised across contacts, the latest first, and the list cut alone says truncated.
+  await c("log_interaction", { contact_id: String(gus.body.contact?.id), interaction_type: "call", occurred_at: new Date(Date.now() + 23 * 3_600_000).toISOString(), summary: "Gus asked for slides", follow_up_needed: true });
+  await c("log_interaction", { contact_id: hanaId, interaction_type: "email", occurred_at: await at(-5), summary: "Hana asked for numbers", follow_up_notes: "send Q3" });
+  const promisedAll = await c("get_follow_ups", { days_ahead: 0, limit: 2 });
+  const promisedOrder = ((promisedAll.body.promised ?? []) as { interaction: { summary: string } }[]).map((p) => p.interaction.summary).join();
+  assert(promisedOrder === "Gus asked for slides,Quick call" && promisedAll.body.promised_count === 3 && promisedAll.body.overdue_count === 1 && promisedAll.body.truncated === true,
+    `…promised the latest first, and a promised list cut alone says truncated (${promisedOrder}, ${promisedAll.body.promised_count})`);
 
   const missed = await outOfBounds(c, [
     ["a name of 201 characters", "add_contact", { name: "x".repeat(201) }], ["an empty name", "add_contact", { name: " " }], ["a NUL in the name", "add_contact", { name: "x\u0000" }],
@@ -1578,7 +1653,12 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
     ["a value past the table's", "create_opportunity", { title: "x", value: 1e10 }], ["an empty title", "create_opportunity", { title: "" }],
     ["a limit of 0", "search_contacts", { limit: 0 }], ["a limit of 201", "search_contacts", { limit: 201 }], ["an empty query", "search_contacts", { query: "" }],
     ["a history limit of 501", "get_contact_history", { contact_id: NO_ROW, limit: 501 }], ["days ahead of 366", "get_follow_ups", { days_ahead: 366 }],
-    ["a time zone that is none", "get_follow_ups", { time_zone: "Mars/Olympus_Mons" }], ["an offset as a time zone", "prep_context", { contact_id: NO_ROW, time_zone: "+05:30" }],
+    ["a time zone that is none", "get_follow_ups", { time_zone: "Mars/Olympus_Mons" }], ["changed notes of 100001 characters", "update_contact", { contact_id: NO_ROW, notes: "n".repeat(100_001) }],
+    ["an email of 321 characters", "add_contact", { name: "x", email: `a@${`${"d".repeat(60)}.`.repeat(5)}${"d".repeat(10)}.com` }], ["a profile URL of 2001 characters", "add_contact", { name: "x", linkedin_url: `https://x.example/${"p".repeat(1983)}` }],
+    ["a javascript: profile URL", "add_contact", { name: "x", linkedin_url: "javascript:alert(1)" }], ["a phone of 51 characters", "add_contact", { name: "x", phone: "1".repeat(51) }],
+    ["a tag of 51 characters", "add_contact", { name: "x", tags: ["t".repeat(51)] }], ["31 changed tags", "update_contact", { contact_id: NO_ROW, tags: Array.from({ length: 31 }, (_, i) => `t${i}`) }],
+    ["a follow-ups limit of 501", "get_follow_ups", { limit: 501 }], ["a threshold of 3651", "stale_contacts", { days_threshold: 3651 }],
+    ["a follow-up on 30 February", "add_contact", { name: "x", follow_up_date: "2026-02-30" }], ["an offset as a time zone", "prep_context", { contact_id: NO_ROW, time_zone: "+05:30" }],
     ["an offset after UTC as a time zone", "stale_contacts", { time_zone: "UTC+5" }], ["a bare offset as a time zone", "stale_contacts", { time_zone: "+0530" }],
     ["a time east of UTC in the year 1 BC", "log_interaction", { contact_id: NO_ROW, interaction_type: "call", summary: "x", occurred_at: "0001-01-01T05:00:00+14:00" }], ["a threshold of 0", "stale_contacts", { days_threshold: 0 }],
     ["an interaction limit of 101", "prep_context", { contact_id: NO_ROW, interaction_limit: 101 }], ["a thought id that is no uuid", "link_thought", { contact_id: NO_ROW, thought_id: "t" }],
@@ -1596,10 +1676,11 @@ console.log("\n[professional-crm] its contacts, their interactions and opportuni
     ["INSERT INTO plugin_professional_crm.opportunities (title, value) VALUES ('t', -1)", /value_check/],
     [`INSERT INTO plugin_professional_crm.opportunities (title, contact_id) VALUES ('t', '${NO_ROW}')`, /foreign key/],
     ["INSERT INTO plugin_professional_crm.opportunities (title) VALUES ('')", /title_check/],
-    [`INSERT INTO plugin_professional_crm.contact_thoughts (contact_id, thought_id) VALUES ('${ids.ann}', '${thoughtId}')`, /contact_thoughts_pkey/],
-    [`INSERT INTO plugin_professional_crm.contact_thoughts (contact_id, thought_id) VALUES ('${NO_ROW}', '${thoughtId}')`, /foreign key/],
+    [`INSERT INTO plugin_professional_crm.contact_thoughts (contact_id, thought_id, line) VALUES ('${ids.ann}', '${thoughtId}', 'x')`, /contact_thoughts_pkey/],
+    [`INSERT INTO plugin_professional_crm.contact_thoughts (contact_id, thought_id, line) VALUES ('${NO_ROW}', '${thoughtId}', 'x')`, /foreign key/],
+    [`INSERT INTO plugin_professional_crm.contact_interactions (contact_id, interaction_type, occurred_at, summary) VALUES ('${ids.ann}', 'call', now(), repeat('s', 5001))`, /summary_check/],
   ]);
-  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all ten"})`);
+  assert(misses.length === 0, `…and the tables hold the rules themselves, each by name (${misses.join("; ") || "all eleven"})`);
 }
 
 // ── The drift guard: every ported plugin's tool is driven, and nothing else ──
