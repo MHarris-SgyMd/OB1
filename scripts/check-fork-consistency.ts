@@ -10541,7 +10541,8 @@ checkJobTimeouts();
 const HEADER_SITE = 10;
 const CHECK_NUMBER_WORD = /^\d+[a-z]?$/;
 const checkBase = (n: string) => n.replace(/[a-z]$/, "");
-/** A check cited, alone or as a list or range: `check N`, `checks N, M, and K`, `N to M`, `N through M`, `N–M`. */
+/** A check cited, alone or as a list or range: `check N`, `checks N, M, and K` (or `or K`), `N to M`, `N through M`,
+ * `N–M`, `N – M`, `N-M`. */
 const CHECK_CITATION = /\bchecks? (\d+[a-z]?(?:(?:, and |, or |, | and | or | to | through | – |–|-)\d+[a-z]?)*)\b/gi;
 /** [the section, the check a line in it names, why]: code lines that name a check other than their section's. A why
  * names no check by `check N`, which would read as a line naming it. */
@@ -10558,12 +10559,14 @@ const CROSS_SECTION_MESSAGES: [string, string, string][] = [
 /** The checks a range or list names: `16–17` and `6 to 8` each number from one end to the other, `17a–17e` each letter
  * of one number, `1 + 2` each named. */
 function namedChecks(spec: string): string[] {
-  return spec.replace(/\s+/g, " ").split(/ ?[,+] ?(?:(?:and|or) )?| (?:and|or) /).flatMap((part) => {
-    const letters = part.trim().match(/^(\d+)([a-z]) ?(?:to|through|–|-) ?(\d+)([a-z])$/);
+  return spec.replace(/\s+/g, " ").split(/ ?[,+] ?(?:(?:and|or) )?| (?:and|or) /).flatMap((untrimmed) => {
+    const part = untrimmed.trim();
+    const letters = part.match(/^(\d+)([a-z]) ?(?:to|through|–|-) ?(\d+)([a-z])$/);
     if (letters && letters[1] === letters[3] && letters[4] >= letters[2]) {
-      return Array.from({ length: letters[4].charCodeAt(0) - letters[2].charCodeAt(0) + 1 }, (_, k) => letters[1] + String.fromCharCode(letters[2].charCodeAt(0) + k));
+      const first = letters[2].charCodeAt(0);
+      return Array.from({ length: letters[4].charCodeAt(0) - first + 1 }, (_, k) => letters[1] + String.fromCharCode(first + k));
     }
-    const range = part.trim().match(/^(\d+) ?(?:to|through|–|-) ?(\d+)$/);
+    const range = part.match(/^(\d+) ?(?:to|through|–|-) ?(\d+)$/);
     const from = range ? Number(range[1]) : NaN, to = range ? Number(range[2]) : NaN;
     if (range && to >= from && to - from <= 100) return Array.from({ length: to - from + 1 }, (_, k) => String(from + k));
     return part.split(/ (?:to|through) | ?[–-] ?/).map((t) => t.trim()).filter((t) => CHECK_NUMBER_WORD.test(t));
@@ -10715,7 +10718,6 @@ function checkCheckNumbers() {
     ["headers each within 10 lines of the last but 18 from the first, two sites", `${list("1")}// ── 1: a ──\n${"\n".repeat(7)}/**\n * 1: b\n */\n${"\n".repeat(6)}/**\n * 1: c ← here\n */\n`, [SITES]],
     ["a run of lines reading as all comment with a blank line in it, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n\n   and on */\n`, [ALL_COMMENT]],
     ["two runs of lines reading as all comment, code between", `${list("1")}${section("1")}/* a note\n   that runs on ← here */\nconst x = 1;\n/* another\n   on ← here */\n`, [ALL_COMMENT, ALL_COMMENT]],
-    ["a run of lines reading as all comment, reported once", `${list("1")}${section("1")}/* a note\n   that runs on ← here\n   and on */\n`, [ALL_COMMENT]],
     ["a template holding a // and an apostrophe in a double-quoted string, then mentions", `${list("1", "2")}${section("1")}fail(rel, \`a // b — check ${2}\`);\nfail(rel, "it's // a — check ${2}");\n${section("2")}`, [WRONG_SECTION, WRONG_SECTION]],
   ];
   // A case whose text marks lines `← here` reports its problems at those lines, in order.
