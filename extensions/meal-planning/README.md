@@ -49,7 +49,7 @@ A complete meal planning system with recipes, weekly meal plans, and auto-genera
 ## Prerequisites
 
 - Working Open Brain setup
-- Extensions 1-3 recommended (Extension 3's family_members table is referenced for cross-extension integration)
+- Extensions 1-3 recommended (Extension 3's family calendar, a plugin, is read for cross-extension integration)
 - [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun ([Run a Remote MCP Server](../../primitives/deploy-remote-mcp/); FORK.md change 74)
 - **Background reading:** [Row Level Security](../../primitives/rls/) primitive — the per-user policies upstream's `schema.sql` carried; this fork's carries none (SMD-1810), the server scopes rows by `DEFAULT_USER_ID`
 - **Required reading:** [Shared MCP Server](../../primitives/shared-mcp/) primitive
@@ -199,7 +199,7 @@ Search recipes tagged "quick".
 ## Cross-Extension Integration
 
 **With Family Calendar (Extension 3):**
-Your agent can check who's home this week via the `family_members` and `activities` tables to adjust serving sizes. Example prompt:
+Your agent can check who's home this week through the family calendar plugin's `family_calendar_get_week_schedule` to adjust serving sizes. Example prompt:
 
 ```
 Who's home for dinner this week? Adjust the meal plan servings accordingly.

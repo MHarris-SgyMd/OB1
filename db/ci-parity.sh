@@ -397,6 +397,7 @@ main() {
   run server-portable    test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
   run server-portable    test-plugins-sql.ts
+  run server-portable    test-plugin-ports.ts
   run server-portable    test-local-provider.ts
   run evals              eval-write-path.ts --gate
   # The check drops the schema and refuses a database holding thoughts unless

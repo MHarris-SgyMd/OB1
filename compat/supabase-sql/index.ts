@@ -951,7 +951,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * since SMD-1798, grouping: `and(…)`, `or(…)`, `not.and(…)`, `not.or(…)`,
    * nested to any depth, each holding a list of its own —
    * `and(start_date.lte.X,or(end_date.gte.Y,end_date.is.null)),day_of_week.not.is.null`
-   * is family-calendar's, two `and(…)` terms metadata-norm's — and
+   * was family-calendar's (its server became a plugin with SMD-2311), two
+   * `and(…)` terms metadata-norm's — and
    * `col.in.(a,b)`, job-hunt's. The flat form was the only one served, and an
    * expression that began with grouping threw.
    *

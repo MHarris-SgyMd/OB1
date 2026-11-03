@@ -5,6 +5,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 | Plugin | What it does |
 | --- | --- |
 | [example](example/) | The template: a read operation over the core, and notes pinned to thoughts in a table of its own |
+| [family-calendar](family-calendar/) | The household's members, their weekly and dated activities, and the dates to remember: the learning path's Extension 3 (SMD-2311) |
 
 ## Turning plugins on
 
